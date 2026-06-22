@@ -1,4 +1,6 @@
 out/
 node_modules/
+native/capture-helper/build/
+native/capture-helper/bin/
 *.vsix
 .vscode-test/
