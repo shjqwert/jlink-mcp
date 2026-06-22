@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "preStartMs": 500,
+  "postStopMs": 1000,
+  "commands": {
+    "start": {
+      "selector": "gstMotorCtrl.bRunEnable",
+      "type": "int8",
+      "value": 1,
+      "verify": {
+        "selector": "gstMotorCtrl.bRunEnable",
+        "type": "int8",
+        "operator": "eq",
+        "value": 1
+      },
+      "timeoutMs": 1000
+    },
+    "stop": {
+      "selector": "gstMotorCtrl.bRunEnable",
+      "type": "int8",
+      "value": 0,
+      "verify": {
+        "selector": "gstMotorCtrl.bRunEnable",
+        "type": "int8",
+        "operator": "eq",
+        "value": 0
+      },
+      "timeoutMs": 500
+    }
+  }
+}

@@ -110,8 +110,9 @@ async function main() {
     env("GDB_PATH") || "arm-none-eabi-gdb"
   );
 
-  process.on("SIGINT", () => { server.dispose(); process.exit(0); });
-  process.on("SIGTERM", () => { server.dispose(); process.exit(0); });
+  const shutdown = async () => { await server.dispose(); process.exit(0); };
+  process.on("SIGINT", () => { void shutdown(); });
+  process.on("SIGTERM", () => { void shutdown(); });
 
   await server.startStdio();
 }

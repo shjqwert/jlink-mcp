@@ -32,15 +32,19 @@ export class GDBClient {
   /** Minimum delay between commands to avoid overwhelming slow adapters */
   private lastCommandTime = 0;
   private commandThrottleMs = 50;
+  private hardwareGuard?: () => string | null;
 
-  constructor(gdbPath: string = "arm-none-eabi-gdb") {
+  constructor(gdbPath: string = "arm-none-eabi-gdb", hardwareGuard?: () => string | null) {
     this.gdbPath = gdbPath;
+    this.hardwareGuard = hardwareGuard;
   }
 
   /**
    * Start GDB and connect to a remote target (GDB server).
    */
   async connect(host: string = "localhost", port: number = 2331, elfFile?: string): Promise<GDBResponse> {
+    const blocked = this.hardwareGuard?.();
+    if (blocked) return { success: false, output: "", error: blocked };
     if (this.connected && this.proc) {
       return { success: true, output: "GDB already connected" };
     }
@@ -118,6 +122,8 @@ export class GDBClient {
    * If the target doesn't stop in time, returns with a "target running" message.
    */
   async command(cmd: string, timeout: number = 15000): Promise<GDBResponse> {
+    const blocked = this.hardwareGuard?.();
+    if (blocked) return { success: false, output: "", error: blocked };
     // Auto-reconnect if connection dropped
     if ((!this.proc || !this.connected) && this.lastConnectParams) {
       log("[GDB] Connection lost, attempting auto-reconnect...");
@@ -186,6 +192,8 @@ export class GDBClient {
    * Call this to poll after gdb_command returned "target running".
    */
   async wait(timeout: number = 30000): Promise<GDBResponse> {
+    const blocked = this.hardwareGuard?.();
+    if (blocked) return { success: false, output: "", error: blocked };
     if (!this.proc || !this.connected) {
       return { success: false, output: "", error: "GDB not connected" };
     }

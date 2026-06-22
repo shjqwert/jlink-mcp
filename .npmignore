@@ -12,3 +12,7 @@ CLAUDE.md
 **/*.ts
 !out/**/*.d.ts
 *.vsix
+native/capture-helper/build/
+native/capture-helper/*.cpp
+native/capture-helper/CMakeLists.txt
+scripts/

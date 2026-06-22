@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo } from "./backend";
+import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig } from "./backend";
 import { ProcessManager } from "../utils/process-manager";
 import { log, logError } from "../utils/logger";
 import * as path from "path";
@@ -50,7 +50,7 @@ function findJLinkInstallDir(): string {
   for (const dir of candidates) {
     if (fs.existsSync(dir)) return dir;
   }
-  for (const base of ["/opt/SEGGER", "/Applications/SEGGER", "/usr/local/SEGGER"]) {
+  for (const base of ["/opt/SEGGER", "/Applications/SEGGER", "/usr/local/SEGGER", "C:\\Program Files\\SEGGER", "C:\\Program Files (x86)\\SEGGER"]) {
     if (fs.existsSync(base)) {
       try {
         const entries = fs.readdirSync(base).filter((e) => e.startsWith("JLink"));
@@ -272,45 +272,51 @@ export class JLinkBackend extends ProbeBackend {
   // ── GDB Server ───────────────────────────────────────────────────
 
   async startGDBServer(): Promise<{ success: boolean; message: string }> {
-    if (this.processManager.get(GDB_SERVER_PROCESS)) {
-      return { success: true, message: "GDB Server is already running" };
-    }
-
-    const args = [
-      "-device", this.config.device,
-      "-if", this.config.interface,
-      "-speed", String(this.config.speed),
-      "-port", String(this.config.gdbPort),
-      "-RTTTelnetPort", String(this.config.rttTelnetPort),
-      "-SWOPort", String(this.config.swoTelnetPort),
-      "-vd", "-noir", "-LocalhostOnly", "1", "-singlerun", "-NoGui", "1",
-    ];
-    if (this.config.serialNumber) args.push("-select", `USB=${this.config.serialNumber}`);
-
+    if (!this.beginHardwareOperation()) return { success: false, message: `Probe is exclusively owned by ${this.getExclusiveOwner()}` };
     try {
-      const managed = this.processManager.spawn(GDB_SERVER_PROCESS, this.gdbServerExe, args);
-      managed.process.stdout?.on("data", (d: Buffer) => {
-        for (const line of d.toString().split("\n").filter(Boolean)) {
-          log(`[GDB Server] ${line}`);
-          this.gdbOutputBuffer.push(line);
-          if (this.gdbOutputBuffer.length > 1000) this.gdbOutputBuffer.shift();
-        }
-      });
-      managed.process.stderr?.on("data", (d: Buffer) => {
-        for (const line of d.toString().split("\n").filter(Boolean)) {
-          logError(`[GDB Server] ${line}`);
-          this.gdbOutputBuffer.push(`[ERR] ${line}`);
-        }
-      });
-      this.setState(ProbeState.GDB_RUNNING);
-      return { success: true, message: `GDB Server started on port ${this.config.gdbPort}, RTT telnet on port ${this.config.rttTelnetPort}` };
-    } catch (err) {
-      logError("Failed to start GDB Server", err);
-      return { success: false, message: `Failed to start GDB Server: ${err instanceof Error ? err.message : String(err)}` };
+      if (this.processManager.get(GDB_SERVER_PROCESS)) {
+        return { success: true, message: "GDB Server is already running" };
+      }
+
+      const args = [
+        "-device", this.config.device,
+        "-if", this.config.interface,
+        "-speed", String(this.config.speed),
+        "-port", String(this.config.gdbPort),
+        "-RTTTelnetPort", String(this.config.rttTelnetPort),
+        "-SWOPort", String(this.config.swoTelnetPort),
+        "-vd", "-noir", "-LocalhostOnly", "1", "-singlerun", "-NoGui", "1",
+      ];
+      if (this.config.serialNumber) args.push("-select", `USB=${this.config.serialNumber}`);
+
+      try {
+        const managed = this.processManager.spawn(GDB_SERVER_PROCESS, this.gdbServerExe, args);
+        managed.process.stdout?.on("data", (d: Buffer) => {
+          for (const line of d.toString().split("\n").filter(Boolean)) {
+            log(`[GDB Server] ${line}`);
+            this.gdbOutputBuffer.push(line);
+            if (this.gdbOutputBuffer.length > 1000) this.gdbOutputBuffer.shift();
+          }
+        });
+        managed.process.stderr?.on("data", (d: Buffer) => {
+          for (const line of d.toString().split("\n").filter(Boolean)) {
+            logError(`[GDB Server] ${line}`);
+            this.gdbOutputBuffer.push(`[ERR] ${line}`);
+          }
+        });
+        this.setState(ProbeState.GDB_RUNNING);
+        return { success: true, message: `GDB Server started on port ${this.config.gdbPort}, RTT telnet on port ${this.config.rttTelnetPort}` };
+      } catch (err) {
+        logError("Failed to start GDB Server", err);
+        return { success: false, message: `Failed to start GDB Server: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    } finally {
+      this.endHardwareOperation();
     }
   }
 
   stopGDBServer(): { success: boolean; message: string } {
+    if (this.getExclusiveOwner()) return { success: false, message: `Probe is exclusively owned by ${this.getExclusiveOwner()}` };
     const killed = this.processManager.kill(GDB_SERVER_PROCESS);
     this.gdbOutputBuffer = [];
     this.rttConnected = false;
@@ -340,6 +346,9 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   async listDevices(): Promise<CommandResult> {
+    if (!this.beginHardwareOperation()) {
+      return { success: false, rawOutput: "", output: "Probe is exclusively owned by capture", error: "Capture owns the probe", errorCode: ProbeErrorCode.PROBE_BUSY };
+    }
     // Run ShowEmuList without specifying a device to see connected probes
     const args = ["-NoGui", "1"];
     return new Promise<CommandResult>((resolve) => {
@@ -356,13 +365,25 @@ export class JLinkBackend extends ProbeBackend {
         resolve({ success: code === 0, rawOutput: stdout, output: stripBoilerplate(stdout), error: stderr || undefined });
       });
       setTimeout(() => { proc.kill("SIGTERM"); resolve({ success: false, rawOutput: stdout, output: stdout, error: "Timed out" }); }, 10000);
-    });
+    }).finally(() => this.endHardwareOperation());
   }
 
   // ── RTT ──────────────────────────────────────────────────────────
 
   supportsRTT(): boolean { return true; }
   getRTTPort(): number { return this.config.rttTelnetPort; }
+
+  getCaptureConfig(): CaptureProbeConfig {
+    return {
+      gdbServerPath: this.gdbServerExe,
+      jlinkExePath: this.jlinkExe,
+      device: this.config.device,
+      interface: this.config.interface,
+      speed: this.config.speed,
+      serialNumber: this.config.serialNumber,
+      gdbPort: this.config.gdbPort,
+    };
+  }
 
   // ── Lifecycle ────────────────────────────────────────────────────
 

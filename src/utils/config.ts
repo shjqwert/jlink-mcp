@@ -65,7 +65,7 @@ function findJLinkInstallDir(): string {
     if (fs.existsSync(dir)) return dir;
   }
   // Also check with version suffix
-  for (const base of ["/opt/SEGGER", "/Applications/SEGGER", "/usr/local/SEGGER"]) {
+  for (const base of ["/opt/SEGGER", "/Applications/SEGGER", "/usr/local/SEGGER", "C:\\Program Files\\SEGGER", "C:\\Program Files (x86)\\SEGGER"]) {
     if (fs.existsSync(base)) {
       try {
         const entries = fs.readdirSync(base).filter((e) => e.startsWith("JLink"));

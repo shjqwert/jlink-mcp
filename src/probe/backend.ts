@@ -66,6 +66,16 @@ export interface ProbeStatus {
   rttConnected: boolean;
 }
 
+export interface CaptureProbeConfig {
+  gdbServerPath: string;
+  jlinkExePath: string;
+  device: string;
+  interface: "SWD" | "JTAG";
+  speed: number;
+  serialNumber?: string;
+  gdbPort: number;
+}
+
 export type ProbeType = "jlink" | "openocd" | "blackmagic" | "probe-rs";
 
 /**
@@ -83,8 +93,34 @@ export abstract class ProbeBackend {
   protected _state: ProbeState = ProbeState.DISCONNECTED;
   private _rttConnected = false;
   private _lock: Promise<void> = Promise.resolve();
+  private _exclusiveOwner: string | null = null;
+  private _activeOperations = 0;
 
   get state(): ProbeState { return this._state; }
+
+  acquireExclusive(owner: string): boolean {
+    if (!owner || this._exclusiveOwner || this._activeOperations > 0) return false;
+    this._exclusiveOwner = owner;
+    return true;
+  }
+
+  releaseExclusive(owner: string): void {
+    if (this._exclusiveOwner === owner) this._exclusiveOwner = null;
+  }
+
+  getExclusiveOwner(): string | null { return this._exclusiveOwner; }
+
+  getCaptureConfig(): CaptureProbeConfig | null { return null; }
+
+  protected beginHardwareOperation(): boolean {
+    if (this._exclusiveOwner) return false;
+    this._activeOperations += 1;
+    return true;
+  }
+
+  protected endHardwareOperation(): void {
+    this._activeOperations = Math.max(0, this._activeOperations - 1);
+  }
 
   get rttConnected(): boolean { return this._rttConnected; }
   set rttConnected(v: boolean) {
@@ -164,45 +200,58 @@ export abstract class ProbeBackend {
     fn: () => Promise<CommandResult>,
     skipPreflight = false
   ): Promise<CommandResult> {
-    return this.acquireLock(async () => {
-      if (!skipPreflight && this.isDeviceConfigured()) {
-        const check = await this.preflight();
-        if (check) {
-          // Try recovery once
-          const recovered = await this.recover();
-          if (!recovered) {
-            return {
-              ...check,
-              lastSuccessfulStage: "recovery_attempted",
-              suggestedAction: `Recovery failed. Try: 1) reset with halt, 2) power cycle the target, 3) check SWD wiring. Operation was: ${operation}`,
-            };
+    if (!this.beginHardwareOperation()) {
+      return {
+        success: false,
+        rawOutput: "",
+        output: `Probe is exclusively owned by ${this._exclusiveOwner}`,
+        error: "Capture owns the probe",
+        errorCode: ProbeErrorCode.PROBE_BUSY,
+      };
+    }
+    try {
+      return await this.acquireLock(async () => {
+        if (!skipPreflight && this.isDeviceConfigured()) {
+          const check = await this.preflight();
+          if (check) {
+            // Try recovery once
+            const recovered = await this.recover();
+            if (!recovered) {
+              return {
+                ...check,
+                lastSuccessfulStage: "recovery_attempted",
+                suggestedAction: `Recovery failed. Try: 1) reset with halt, 2) power cycle the target, 3) check SWD wiring. Operation was: ${operation}`,
+              };
+            }
           }
         }
-      }
 
-      const result = await fn();
+        const result = await fn();
 
-      // Update state based on result
-      if (result.success && this._state === ProbeState.DISCONNECTED) {
-        this.setState(ProbeState.TARGET_ATTACHED);
-      }
-      if (!result.success && result.rawOutput) {
-        // Detect common failure patterns and classify
-        const raw = result.rawOutput.toLowerCase();
-        if (raw.includes("cannot connect") || raw.includes("inittarget() returned error") || raw.includes("could not connect")) {
-          result.errorCode = result.errorCode || ProbeErrorCode.TARGET_UNREACHABLE;
-          result.suggestedAction = result.suggestedAction || "Target unreachable. Try: reset with halt, reduce SWD speed, or power cycle.";
-          this.setState(ProbeState.PROBE_CONNECTED);
+        // Update state based on result
+        if (result.success && this._state === ProbeState.DISCONNECTED) {
+          this.setState(ProbeState.TARGET_ATTACHED);
         }
-        if (raw.includes("failed to open dll") || raw.includes("no j-link found") || raw.includes("could not find")) {
-          result.errorCode = result.errorCode || ProbeErrorCode.PROBE_NOT_FOUND;
-          result.suggestedAction = result.suggestedAction || "No probe found. Check USB connection.";
-          this.setState(ProbeState.DISCONNECTED);
+        if (!result.success && result.rawOutput) {
+          // Detect common failure patterns and classify
+          const raw = result.rawOutput.toLowerCase();
+          if (raw.includes("cannot connect") || raw.includes("inittarget() returned error") || raw.includes("could not connect")) {
+            result.errorCode = result.errorCode || ProbeErrorCode.TARGET_UNREACHABLE;
+            result.suggestedAction = result.suggestedAction || "Target unreachable. Try: reset with halt, reduce SWD speed, or power cycle.";
+            this.setState(ProbeState.PROBE_CONNECTED);
+          }
+          if (raw.includes("failed to open dll") || raw.includes("no j-link found") || raw.includes("could not find")) {
+            result.errorCode = result.errorCode || ProbeErrorCode.PROBE_NOT_FOUND;
+            result.suggestedAction = result.suggestedAction || "No probe found. Check USB connection.";
+            this.setState(ProbeState.DISCONNECTED);
+          }
         }
-      }
 
-      return result;
-    });
+        return result;
+      });
+    } finally {
+      this.endHardwareOperation();
+    }
   }
 
   /**

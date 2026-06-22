@@ -271,7 +271,7 @@ export function activate(context: vscode.ExtensionContext) {
       rttClient?.disconnect();
       telnetProxy?.stop();
       processManager?.killAll();
-      mcpServer?.dispose();
+      void mcpServer?.dispose();
     },
   });
 
@@ -290,10 +290,10 @@ function updateStatusBar(gdbRunning: boolean) {
   }
 }
 
-export function deactivate() {
+export async function deactivate() {
   log("J-Link MCP Extension deactivating...");
   rttClient?.disconnect();
   telnetProxy?.stop();
   processManager?.killAll();
-  mcpServer?.dispose();
+  await mcpServer?.dispose();
 }

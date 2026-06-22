@@ -8,6 +8,7 @@ import { RTTClient, ParsedLogLine } from "../rtt/rtt-client";
 import { TelnetProxy } from "../telnet/telnet-proxy";
 import { ProcessManager } from "../utils/process-manager";
 import { log } from "../utils/logger";
+import { CaptureService } from "./capture";
 
 export class JLinkMcpServer {
   private server: McpServer;
@@ -16,6 +17,7 @@ export class JLinkMcpServer {
   private gdb: GDBClient;
   private rttClient: RTTClient;
   private telnetProxy: TelnetProxy;
+  private capture: CaptureService;
 
   constructor(probeConfig?: ProbeFactoryConfig, rttPort?: number, telnetConfig?: { listenPort?: number; sourceHost?: string; sourcePort?: number }, gdbPath?: string) {
     this.processManager = new ProcessManager();
@@ -24,7 +26,9 @@ export class JLinkMcpServer {
       this.processManager
     );
 
-    this.gdb = new GDBClient(gdbPath || "arm-none-eabi-gdb");
+    const effectiveGdbPath = gdbPath || "arm-none-eabi-gdb";
+    this.gdb = new GDBClient(effectiveGdbPath, () => this.probe.getExclusiveOwner() ? `Probe is exclusively owned by ${this.probe.getExclusiveOwner()}` : null);
+    this.capture = new CaptureService(this.probe, this.processManager, effectiveGdbPath);
     const effectiveRttPort = rttPort ?? this.probe.getRTTPort();
     this.rttClient = new RTTClient("localhost", effectiveRttPort > 0 ? effectiveRttPort : 19021);
     this.telnetProxy = new TelnetProxy(
@@ -48,6 +52,10 @@ export class JLinkMcpServer {
    * Call at the top of any tool handler that talks to hardware.
    */
   private requireDevice(): { content: [{ type: "text"; text: string }] } | null {
+    const owner = this.probe.getExclusiveOwner();
+    if (owner) {
+      return { content: [{ type: "text", text: `ERROR: Probe is exclusively owned by ${owner}. Only capture status/stop/control and non-hardware queries are available.` }] };
+    }
     if (!this.probe.isDeviceConfigured()) {
       return {
         content: [{
@@ -425,7 +433,7 @@ export class JLinkMcpServer {
     );
 
     this.server.tool("gdb_server_stop", `Stop ${probe.displayName} GDB server and disconnect RTT`, {},
-      async () => { this.rttClient.disconnect(); probe.rttConnected = false; const r = probe.stopGDBServer(); return { content: [{ type: "text", text: r.message }] }; }
+      async () => { const g = this.requireDevice(); if (g) return g; this.rttClient.disconnect(); probe.rttConnected = false; const r = probe.stopGDBServer(); return { content: [{ type: "text", text: r.message }] }; }
     );
 
     this.server.tool("gdb_server_status", "Get GDB server, RTT, and telnet proxy status", {},
@@ -534,12 +542,15 @@ export class JLinkMcpServer {
       }
     );
 
+    this.registerCaptureTools();
+
     // ═══════════════════════════════════════════════════════════════
     // RTT
     // ═══════════════════════════════════════════════════════════════
 
     this.server.tool("rtt_connect", `Connect to RTT${probe.supportsRTT() ? "" : " (not supported by " + probe.displayName + ")"}`, {},
       async () => {
+        const guard = this.requireDevice(); if (guard) return guard;
         if (!probe.supportsRTT()) return { content: [{ type: "text", text: `RTT is not supported by ${probe.displayName}` }] };
         if (!probe.isGDBServerRunning()) return { content: [{ type: "text", text: "GDB server must be running for RTT. Use start_debug_session or gdb_server_start first." }] };
         try {
@@ -582,6 +593,7 @@ export class JLinkMcpServer {
     this.server.tool("rtt_send", "Send data to device via RTT down-channel",
       { data: z.string().describe("Data to send") },
       async ({ data }) => {
+        const guard = this.requireDevice(); if (guard) return guard;
         const sent = this.rttClient.send(data);
         return { content: [{ type: "text", text: sent ? `Sent ${data.length} bytes` : "Failed: RTT not connected" }] };
       }
@@ -632,6 +644,67 @@ export class JLinkMcpServer {
     );
   }
 
+  private registerCaptureTools(): void {
+    const result = async (operation: () => Promise<unknown>) => {
+      try {
+        return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: "text" as const, text: `ERROR: ${error instanceof Error ? error.message : String(error)}` }] };
+      }
+    };
+
+    this.server.tool(
+      "capture_prepare",
+      "Resolve reviewed ELF scalars, verify target Flash/running-state/background RSP reads, calibrate at the configured SWD rate, and arm one capture. Never starts the motor or resets on preparation failure.",
+      {
+        elfFile: z.string().describe("Absolute path to the exact target ELF"),
+        configFile: z.string().describe("Absolute path to the user-confirmed, Git-tracked .jlink-mcp.json"),
+        symbols: z.array(z.object({
+          name: z.string().min(1).max(255).describe("Global/static scalar or fixed member selector"),
+          alias: z.string().min(1).max(127).optional(),
+          unit: z.string().max(63).optional(),
+        }).strict()).min(1).max(32),
+        rateHz: z.number().int().min(1).max(1000).optional(),
+        durationSec: z.number().int().min(1).max(600).optional(),
+        resetOnFailure: z.boolean().optional().describe("Defaults false; permits one hardware reset only after capture begins and verified stop fails"),
+        outputDir: z.string().optional().describe("Optional writable absolute output directory"),
+      },
+      async (input) => result(() => this.capture.prepare(input)),
+    );
+
+    const sessionSchema = { sessionId: z.string().uuid().describe("Exact capture session ID") };
+    this.server.tool("capture_start", "Start sampling for an armed session. This does not start the motor.", sessionSchema,
+      async ({ sessionId }) => result(() => this.capture.start(sessionId)));
+    this.server.tool("capture_status", "Read capture state and metrics without touching another probe session.", sessionSchema,
+      async ({ sessionId }) => result(() => this.capture.status(sessionId)));
+    this.server.tool("capture_stop", "Safely stop a session; if the motor is verified running, write and verify the reviewed stop mapping before post-stop capture.", sessionSchema,
+      async ({ sessionId }) => result(() => this.capture.stop(sessionId)));
+    this.server.tool(
+      "capture_control",
+      "Send only the reviewed start/stop command. Invoke start only after the user explicitly requested motor operation in this current session; sampling must already be running. No address or replacement value is accepted.",
+      { sessionId: z.string().uuid(), command: z.enum(["start", "stop"]) },
+      async ({ sessionId, command }) => result(() => this.capture.control(sessionId, command)),
+    );
+    this.server.tool(
+      "capture_query",
+      "Return at most 2000 ordered min/max/average time buckets from a terminal capture.",
+      {
+        sessionId: z.string().uuid(),
+        variables: z.array(z.string()).min(1).max(32).optional(),
+        startSec: z.number().nonnegative().optional(),
+        endSec: z.number().nonnegative().optional(),
+        buckets: z.number().int().min(1).max(2000).optional(),
+      },
+      async (input) => result(() => this.capture.query(input)),
+    );
+    this.server.tool("capture_export", "Export one terminal capture to non-overwriting CSV plus same-name JSON metadata.", sessionSchema,
+      async ({ sessionId }) => result(() => this.capture.export(sessionId)));
+    this.server.tool("capture_list", "List persisted captures in the default or explicitly selected absolute output directory.",
+      { outputDir: z.string().optional() }, async ({ outputDir }) => result(() => this.capture.list(outputDir)));
+    this.server.tool("capture_delete", "Delete exactly one terminal session; wildcards, bulk deletion, active sessions, and path escape are rejected.", sessionSchema,
+      async ({ sessionId }) => result(() => this.capture.delete(sessionId)));
+  }
+
   private registerResources(): void {
     this.server.resource("rtt-output", "rtt://output",
       { description: "Clean RTT output (ANSI stripped, Zephyr logs parsed)", mimeType: "text/plain" },
@@ -679,6 +752,15 @@ Then call **start_debug_session** to begin.
 - halt/resume/reset/step - CPU control
 - flash/erase - Firmware programming
 
+## Variable capture and motor safety
+For continuous variables, never loop **gdb_command**. Use this exact sequence:
+1. **capture_prepare** with the exact ELF and user-confirmed, Git-tracked .jlink-mcp.json
+2. Confirm **armed**, then call **capture_start**
+3. Call **capture_control start** only when the user explicitly requested motor operation in this current session
+4. Use **capture_control stop** or **capture_stop** and verify the stopped state
+5. Use **capture_query** and **capture_export** for results
+Never infer control addresses/values or alter SWD speed, rate, variables, or backend after calibration failure.
+
 ## ARM Cortex-M memory map:
 - 0x00000000: Vector table
 - 0x20000000: SRAM
@@ -721,7 +803,8 @@ Start by checking list_devices, then set_device, then start_debug_session.` }}],
     log("MCP Server started on stdio");
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    await this.capture.dispose();
     this.gdb.disconnect();
     this.rttClient.disconnect();
     this.telnetProxy.stop();
