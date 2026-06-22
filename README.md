@@ -278,6 +278,10 @@ This server was built by having an AI use it against real hardware, then fixing 
 - **Fault decoding** is automatic — reads CFSR/HFSR/MMFAR/BFAR and explains each bit.
 - **`rtt_search`** lets you find errors without reading the entire log.
 
+## Continuous variable capture
+
+Windows x64 builds can capture ELF-resolved RAM scalars through the official J-Link GDB Server and one persistent RSP connection. See [docs/jlink-variable-capture.md](docs/jlink-variable-capture.md) for prerequisites, the reviewed motor-control allowlist, safety sequence, outputs, and acceptance limits.
+
 ## Environment Variables
 
 ### J-Link
