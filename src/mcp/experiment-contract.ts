@@ -125,6 +125,7 @@ export const experimentRecordSchema = z.object({
   }).strict().optional(),
   signals: z.array(signalDefinitionSchema).min(1),
   events: z.array(experimentEventSchema).default([]),
+  timeWindowMs: z.tuple([z.number().finite().nonnegative(), z.number().finite().nonnegative()]).optional(),
   samples: z.array(experimentSampleSchema).optional(),
   artifacts: z.record(z.string(), z.string()).optional(),
   metadata: metadataSchema.optional(),

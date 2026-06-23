@@ -1,0 +1,18 @@
+{
+  "experimentId": "fixture_generic_fault_transition",
+  "createdAt": "2026-06-24T00:00:00.000Z",
+  "source": "fixture",
+  "timeWindowMs": [0, 30],
+  "signals": [
+    { "name": "active_state", "selector": "state.c::g_activeState", "type": "uint32", "role": "state" },
+    { "name": "fault_code", "selector": "fault.c::g_faultCode", "type": "uint32", "role": "fault" }
+  ],
+  "events": [{ "timeMs": 20, "type": "fault", "signal": "fault_code", "value": 3 }],
+  "samples": [
+    { "timeMs": 0, "values": { "active_state": 1, "fault_code": 0 } },
+    { "timeMs": 10, "values": { "active_state": 2, "fault_code": 0 } },
+    { "timeMs": 20, "values": { "active_state": 3, "fault_code": 3 } },
+    { "timeMs": 30, "values": { "active_state": 3, "fault_code": 3 } }
+  ],
+  "metadata": { "fixture": "fault_transition" }
+}

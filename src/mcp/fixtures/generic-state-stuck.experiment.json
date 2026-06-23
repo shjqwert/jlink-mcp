@@ -1,0 +1,18 @@
+{
+  "experimentId": "fixture_generic_state_stuck",
+  "createdAt": "2026-06-24T00:00:00.000Z",
+  "source": "fixture",
+  "timeWindowMs": [0, 30],
+  "signals": [
+    { "name": "requested_mode", "selector": "app.c::g_requestedMode", "type": "uint32", "role": "command" },
+    { "name": "active_state", "selector": "state.c::g_activeState", "type": "uint32", "role": "state" }
+  ],
+  "events": [{ "timeMs": 10, "type": "command_step", "signal": "requested_mode", "value": 2 }],
+  "samples": [
+    { "timeMs": 0, "values": { "requested_mode": 0, "active_state": 1 } },
+    { "timeMs": 10, "values": { "requested_mode": 2, "active_state": 1 } },
+    { "timeMs": 20, "values": { "requested_mode": 2, "active_state": 1 } },
+    { "timeMs": 30, "values": { "requested_mode": 2, "active_state": 1 } }
+  ],
+  "metadata": { "fixture": "stuck_signal" }
+}

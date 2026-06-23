@@ -1,0 +1,17 @@
+{
+  "experimentId": "fixture_generic_counter_stall",
+  "createdAt": "2026-06-24T00:00:00.000Z",
+  "source": "fixture",
+  "timeWindowMs": [0, 30],
+  "signals": [
+    { "name": "loop_count", "selector": "runtime.c::g_loopCount", "type": "uint32", "role": "counter" }
+  ],
+  "events": [],
+  "samples": [
+    { "timeMs": 0, "values": { "loop_count": 7 } },
+    { "timeMs": 10, "values": { "loop_count": 7 } },
+    { "timeMs": 20, "values": { "loop_count": 7 } },
+    { "timeMs": 30, "values": { "loop_count": 7 } }
+  ],
+  "metadata": { "fixture": "counter_stall" }
+}

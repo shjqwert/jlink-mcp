@@ -44,23 +44,23 @@
 
 ## 4. Generic analysis engine
 
-- [ ] 4.1 Add `analysis_profiles` registry with at least:
+- [x] 4.1 Add `analysis_profiles` registry with at least:
   - `generic_control`
   - `generic_state_machine`
-- [ ] 4.2 Implement `generic_control` MVP:
+- [x] 4.2 Implement `generic_control` MVP:
   - step response detection
   - overshoot
   - settling time
   - steady-state error
   - saturation
-- [ ] 4.3 Implement `generic_state_machine` MVP:
+- [x] 4.3 Implement `generic_state_machine` MVP:
   - state transition
   - fault transition
   - stuck signal
   - counter stall
   - counter wrap
-- [ ] 4.4 Add deterministic fixtures and golden assertions for each MVP pattern.
-- [ ] 4.5 Add quality warnings when sample rate, missing data, or backend quality limits the conclusion.
+- [x] 4.4 Add deterministic fixtures and golden assertions for each MVP pattern.
+- [x] 4.5 Add quality warnings when sample rate, missing data, or backend quality limits the conclusion.
 
 ## 5. MCP tools
 

@@ -1,0 +1,20 @@
+{
+  "experimentId": "fixture_generic_control_ideal",
+  "createdAt": "2026-06-24T00:00:00.000Z",
+  "source": "fixture",
+  "timeWindowMs": [0, 40],
+  "capture": { "requestedRateHz": 100, "actualRateHz": 100, "durationMs": 40, "quality": { "synthetic": true } },
+  "signals": [
+    { "name": "setpoint", "selector": "control.c::g_setpoint", "type": "float32", "unit": "V", "role": "command" },
+    { "name": "measured", "selector": "sense.c::g_measured", "type": "float32", "unit": "V", "role": "feedback" }
+  ],
+  "events": [{ "timeMs": 10, "type": "command_step", "signal": "setpoint", "value": 10 }],
+  "samples": [
+    { "timeMs": 0, "values": { "setpoint": 0, "measured": 0 } },
+    { "timeMs": 10, "values": { "setpoint": 10, "measured": 6 } },
+    { "timeMs": 20, "values": { "setpoint": 10, "measured": 9.9 } },
+    { "timeMs": 30, "values": { "setpoint": 10, "measured": 10 } },
+    { "timeMs": 40, "values": { "setpoint": 10, "measured": 10 } }
+  ],
+  "metadata": { "fixture": "ideal_step_response" }
+}

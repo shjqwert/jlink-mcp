@@ -1,0 +1,22 @@
+{
+  "experimentId": "fixture_generic_control_overshoot",
+  "createdAt": "2026-06-24T00:00:00.000Z",
+  "source": "fixture",
+  "timeWindowMs": [0, 50],
+  "capture": { "requestedRateHz": 100, "actualRateHz": 100, "durationMs": 50, "quality": { "synthetic": true } },
+  "signals": [
+    { "name": "command", "selector": "control.c::g_command", "type": "float32", "role": "command" },
+    { "name": "feedback", "selector": "sense.c::g_feedback", "type": "float32", "role": "feedback" },
+    { "name": "clipped", "selector": "limit.c::g_clipped", "type": "uint32", "role": "limit" }
+  ],
+  "events": [{ "timeMs": 10, "type": "command_step", "signal": "command", "value": 10 }],
+  "samples": [
+    { "timeMs": 0, "values": { "command": 0, "feedback": 0, "clipped": 0 } },
+    { "timeMs": 10, "values": { "command": 10, "feedback": 7, "clipped": 0 } },
+    { "timeMs": 20, "values": { "command": 10, "feedback": 12, "clipped": 1 } },
+    { "timeMs": 30, "values": { "command": 10, "feedback": 10.8, "clipped": 0 } },
+    { "timeMs": 40, "values": { "command": 10, "feedback": 10.1, "clipped": 0 } },
+    { "timeMs": 50, "values": { "command": 10, "feedback": 10, "clipped": 0 } }
+  ],
+  "metadata": { "fixture": "overshoot_response" }
+}
