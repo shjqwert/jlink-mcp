@@ -201,7 +201,7 @@
     "vscode:prepublish": "npm run build",
     "package": "npm run build && npm run build:capture && vsce package",
     "lint": "tsc --noEmit",
-    "test": "npm run compile && node --test out/mcp/capture.test.js out/mcp/experiment-contract.test.js out/mcp/analysis/profiles.test.js",
+    "test": "npm run compile && node --test out/mcp/capture.test.js out/mcp/experiment-contract.test.js out/mcp/analysis/profiles.test.js out/mcp/analysis/tools.test.js",
     "test:capture-ipc": "npm run build:capture && npm run compile && node --test out/mcp/capture-native.test.js",
     "test:elf": "npm run compile && node scripts/test-elf.mjs"
   },

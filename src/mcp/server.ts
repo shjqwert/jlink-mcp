@@ -8,6 +8,7 @@ import { RTTClient, ParsedLogLine } from "../rtt/rtt-client";
 import { TelnetProxy } from "../telnet/telnet-proxy";
 import { ProcessManager } from "../utils/process-manager";
 import { log } from "../utils/logger";
+import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } from "./analysis/tools";
 import { CaptureService } from "./capture";
 
 export class JLinkMcpServer {
@@ -542,6 +543,7 @@ export class JLinkMcpServer {
       }
     );
 
+    this.registerAnalysisTools();
     this.registerCaptureTools();
 
     // ═══════════════════════════════════════════════════════════════
@@ -641,6 +643,39 @@ export class JLinkMcpServer {
       async () => {
         return { content: [{ type: "text", text: JSON.stringify({ probe: probe.type, displayName: probe.displayName, supportsRTT: probe.supportsRTT(), gdbServer: probe.getGDBServerStatus() }, null, 2) }] };
       }
+    );
+  }
+
+  private registerAnalysisTools(): void {
+    const result = async (operation: () => Promise<unknown> | unknown) => {
+      return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
+    };
+
+    this.server.tool("analysis_profiles", "List offline experiment analysis profiles.", {},
+      async () => result(() => analysisProfilesTool()));
+    this.server.tool(
+      "experiment_analyze",
+      "Analyze a saved experiment fixture with a read-only generic profile.",
+      {
+        experimentId: z.string().optional(),
+        fixturePath: z.string().optional(),
+        analysisProfile: z.string(),
+        signals: z.array(z.string()).optional(),
+        windowMs: z.tuple([z.number(), z.number()]).optional(),
+      },
+      async (input) => result(() => experimentAnalyzeTool(input)),
+    );
+    this.server.tool(
+      "experiment_compare",
+      "Compare two saved experiment fixtures with the same read-only generic profile.",
+      {
+        baselineExperimentId: z.string(),
+        candidateExperimentId: z.string(),
+        analysisProfile: z.string(),
+        metrics: z.array(z.string()).optional(),
+        windowMs: z.tuple([z.number(), z.number()]).optional(),
+      },
+      async (input) => result(() => experimentCompareTool(input)),
     );
   }
 

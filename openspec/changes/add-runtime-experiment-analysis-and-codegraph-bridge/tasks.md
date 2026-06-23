@@ -64,12 +64,16 @@
 
 ## 5. MCP tools
 
-- [ ] 5.1 Add `analysis_profiles`.
-- [ ] 5.2 Add `experiment_analyze`.
-- [ ] 5.3 Add `experiment_compare`.
+- [x] 5.1 Add `analysis_profiles`.
+- [x] 5.2 Add `experiment_analyze`.
+- [x] 5.3 Add `experiment_compare`.
 - [ ] 5.4 Add `evidence_for_codegraph`.
 - [ ] 5.5 Ensure all analysis and bridge tools are read-only and do not start/stop/connect/reset/flash/halt/resume hardware.
+  - [x] Phase 3A `analysis_profiles`, `experiment_analyze`, and `experiment_compare` are fixture-only/read-only.
+  - [ ] Bridge tool read-only proof remains with `evidence_for_codegraph`.
 - [ ] 5.6 Add MCP-level tests for input validation and outputs.
+  - [x] Phase 3A analysis tool input/output tests.
+  - [ ] Bridge tool MCP-level tests remain with `evidence_for_codegraph`.
 
 ## 6. Runtime Evidence and CodeGraph bridge
 
