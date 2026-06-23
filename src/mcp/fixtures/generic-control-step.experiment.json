@@ -1,0 +1,62 @@
+{
+  "experimentId": "fixture_generic_control_step",
+  "createdAt": "2026-06-24T00:00:00.000Z",
+  "source": "fixture",
+  "target": {
+    "device": "synthetic-power-supply"
+  },
+  "capture": {
+    "requestedRateHz": 100,
+    "actualRateHz": 100,
+    "durationMs": 40,
+    "quality": {
+      "synthetic": true
+    }
+  },
+  "signals": [
+    {
+      "name": "voltage_ref",
+      "selector": "control.c::g_voltageRef",
+      "type": "float32",
+      "unit": "V",
+      "role": "command",
+      "domain": "power"
+    },
+    {
+      "name": "vout",
+      "selector": "adc.c::g_vout",
+      "type": "float32",
+      "unit": "V",
+      "role": "feedback",
+      "domain": "power"
+    },
+    {
+      "name": "fault_code",
+      "selector": "fault.c::g_faultCode",
+      "type": "uint32",
+      "role": "fault"
+    }
+  ],
+  "events": [
+    {
+      "timeMs": 10,
+      "type": "command_step",
+      "signal": "voltage_ref",
+      "value": 12,
+      "detail": "synthetic command step"
+    }
+  ],
+  "samples": [
+    { "timeMs": 0, "values": { "voltage_ref": 0, "vout": 0, "fault_code": 0 } },
+    { "timeMs": 10, "values": { "voltage_ref": 12, "vout": 8.5, "fault_code": 0 } },
+    { "timeMs": 20, "values": { "voltage_ref": 12, "vout": 12.8, "fault_code": 0 } },
+    { "timeMs": 30, "values": { "voltage_ref": 12, "vout": 12.1, "fault_code": 0 } },
+    { "timeMs": 40, "values": { "voltage_ref": 12, "vout": 12, "fault_code": 0 } }
+  ],
+  "artifacts": {
+    "raw": "fixture://generic-control-step"
+  },
+  "metadata": {
+    "fixture": "generic_control_step"
+  }
+}
