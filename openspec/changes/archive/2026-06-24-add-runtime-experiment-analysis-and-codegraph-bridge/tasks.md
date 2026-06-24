@@ -84,7 +84,7 @@
 
 ## 7. Optional experiment orchestration
 
-- Phase 5B note: 7.x remains intentionally deferred as optional orchestration; current analysis continues to use existing capture artifacts and does not add `experiment_run`.
+- Phase 5C closure note: Section 7 remains intentionally deferred. Future implementation should use a separate OpenSpec change: `add-safe-experiment-run-orchestration`. This archived change only covers read-only offline experiment analysis, Runtime Evidence, CodeGraph query suggestions, and capture artifact conversion.
 
 - [ ] 7.1 Add `experiment_run` only after tasks 1-6 are complete.
 - [ ] 7.2 Use existing capture lifecycle and control allowlist; do not duplicate unsafe write logic.
