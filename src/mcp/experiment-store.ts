@@ -1,5 +1,5 @@
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { CaptureMetadata, CaptureSymbol } from "./capture-contract";
 import {
   ExperimentRecord,
@@ -67,7 +67,7 @@ export async function loadExperimentForAnalysis(input: LoadExperimentInput): Pro
 
 export async function captureMetadataToExperimentRecord(metadata: CaptureMetadata, options: CaptureConversionOptions = {}): Promise<ExperimentRecord> {
   const metadataFile = options.metadataFile ? await requireExplicitFile(options.metadataFile, ".metadata.json") : undefined;
-  const binaryFile = await requireCaptureBinary(metadata.binaryFile, metadataFile);
+  const binaryFile = await requireCaptureBinary(metadata.binaryFile, metadataFile, metadata.sessionId);
   const samples = await readCaptureSamples(binaryFile, {
     variables: options.variables,
     startSec: options.startSec,
@@ -131,7 +131,7 @@ export async function captureMetadataToExperimentRecord(metadata: CaptureMetadat
 }
 
 async function readExperimentFile(filePath: string): Promise<ExperimentRecord> {
-  const real = filePath.includes(sep) || isAbsolute(filePath) ? await requireExplicitFile(filePath, ".experiment.json") : filePath;
+  const real = await requireExplicitFile(filePath, ".experiment.json");
   return experimentRecordSchema.parse(JSON.parse(await readFile(real, "utf8")));
 }
 
@@ -176,9 +176,11 @@ async function requireExplicitFile(filePath: string, suffix: string): Promise<st
   return real;
 }
 
-async function requireCaptureBinary(filePath: string, metadataFile?: string): Promise<string> {
+async function requireCaptureBinary(filePath: string, metadataFile: string | undefined, sessionId: string): Promise<string> {
   const real = await requireExplicitFile(filePath, ".jlcp");
   if (metadataFile && dirname(real).toLowerCase() !== dirname(metadataFile).toLowerCase()) throw new Error("Capture metadata binaryFile escapes its metadata directory");
+  const fileName = basename(real);
+  if (!selectSessionArtifacts([fileName], sessionId).includes(fileName)) throw new Error("Capture metadata binaryFile does not match its sessionId");
   return real;
 }
 

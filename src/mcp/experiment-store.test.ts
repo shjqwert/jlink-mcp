@@ -13,6 +13,8 @@ test("ExperimentStore loads fixture id and rejects fixture path escape", async (
   const fixture = await loadExperimentForAnalysis({ experimentId: "generic-control-ideal" });
   assert.equal(fixture.record.source, "fixture");
   assert.equal(fixture.record.experimentId, "fixture_generic_control_ideal");
+  const byPath = await loadExperimentForAnalysis({ fixturePath: "generic-control-ideal.experiment.json" });
+  assert.equal(byPath.record.experimentId, "fixture_generic_control_ideal");
   await assert.rejects(() => loadExperimentForAnalysis({ fixturePath: "../capture.test.ts" }), /escapes fixture directory/);
 });
 
@@ -24,6 +26,7 @@ test("ExperimentStore loads saved .experiment.json", async () => {
     await writeFile(experimentPath, source);
     const loaded = await loadExperimentForAnalysis({ experimentPath });
     assert.equal(loaded.record.experimentId, "fixture_generic_control_ideal");
+    await assert.rejects(() => loadExperimentForAnalysis({ experimentPath: "saved.experiment.json" }), /absolute file path/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -56,6 +59,30 @@ test("ExperimentStore converts capture metadata and samples", async () => {
     assert.equal(loaded.record.samples?.[2].values.fault_code, 3);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("ExperimentStore rejects capture metadata binaryFile identity mismatches", async () => {
+  const { directory, metadataFile, metadata } = await writeSyntheticCapture();
+  const otherDirectory = await mkdtemp(join(tmpdir(), "jlink-mcp-other-capture-"));
+  try {
+    const otherBinary = join(otherDirectory, `2026-06-21T12-34-56-789Z-${metadata.sessionId}.jlcp`);
+    await writeFile(otherBinary, syntheticCapture());
+    await assert.rejects(
+      () => captureMetadataToExperimentRecord({ ...metadata, binaryFile: otherBinary }, { metadataFile }),
+      /escapes its metadata directory/,
+    );
+
+    const wrongSessionId = "223e4567-e89b-42d3-a456-426614174000";
+    const wrongSessionBinary = join(directory, `2026-06-21T12-34-56-789Z-${wrongSessionId}.jlcp`);
+    await writeFile(wrongSessionBinary, syntheticCapture());
+    await assert.rejects(
+      () => captureMetadataToExperimentRecord({ ...metadata, binaryFile: wrongSessionBinary }, { metadataFile }),
+      /does not match its sessionId/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(otherDirectory, { recursive: true, force: true });
   }
 });
 

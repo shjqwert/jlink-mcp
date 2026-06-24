@@ -282,6 +282,8 @@ This server was built by having an AI use it against real hardware, then fixing 
 
 Windows x64 builds can capture ELF-resolved RAM scalars through the official J-Link GDB Server and one persistent RSP connection. See [docs/jlink-variable-capture.md](docs/jlink-variable-capture.md) for prerequisites, the reviewed motor-control allowlist, safety sequence, outputs, and acceptance limits.
 
+Saved fixtures and terminal capture artifacts can also be analyzed offline with generic experiment profiles and Runtime Evidence. See [docs/runtime-experiment-analysis.md](docs/runtime-experiment-analysis.md).
+
 ## Environment Variables
 
 ### J-Link

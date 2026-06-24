@@ -656,7 +656,7 @@ export class JLinkMcpServer {
       async () => result(() => analysisProfilesTool()));
     this.server.tool(
       "experiment_analyze",
-      "Analyze a saved experiment fixture with a read-only generic profile.",
+      "Analyze a saved experiment, fixture, capture metadata file, or captureId/outputDir with a read-only generic profile.",
       {
         experimentId: z.string().optional(),
         fixturePath: z.string().optional(),
@@ -674,7 +674,7 @@ export class JLinkMcpServer {
     );
     this.server.tool(
       "experiment_compare",
-      "Compare two saved experiment fixtures with the same read-only generic profile.",
+      "Compare two saved experiments, fixtures, or capture metadata files with the same read-only generic profile.",
       {
         baselineExperimentId: z.string().optional(),
         baselineExperimentPath: z.string().optional(),
@@ -692,7 +692,7 @@ export class JLinkMcpServer {
     );
     this.server.tool(
       "evidence_for_codegraph",
-      "Convert offline analysis output into Runtime Evidence and CodeGraph query suggestions without calling CodeGraph.",
+      "Generate Runtime Evidence and CodeGraph query suggestions from offline experiment or capture-backed analysis without calling CodeGraph.",
       {
         experimentId: z.string().optional(),
         fixturePath: z.string().optional(),

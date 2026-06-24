@@ -84,6 +84,8 @@
 
 ## 7. Optional experiment orchestration
 
+- Phase 5B note: 7.x remains intentionally deferred as optional orchestration; current analysis continues to use existing capture artifacts and does not add `experiment_run`.
+
 - [ ] 7.1 Add `experiment_run` only after tasks 1-6 are complete.
 - [ ] 7.2 Use existing capture lifecycle and control allowlist; do not duplicate unsafe write logic.
 - [ ] 7.3 Require explicit `allowControls=true` for any control action.
@@ -93,23 +95,23 @@
 
 ## 8. Documentation
 
-- [ ] 8.1 Document generic signal roles and experiment records.
-- [ ] 8.2 Document how motor projects use profiles without making the core motor-specific.
-- [ ] 8.3 Document the Agent + Jlink-MCP + CodeGraph workflow.
-- [ ] 8.4 Add example `.jlink-mcp.json` snippets for:
+- [x] 8.1 Document generic signal roles and experiment records.
+- [x] 8.2 Document how motor projects use profiles without making the core motor-specific.
+- [x] 8.3 Document the Agent + Jlink-MCP + CodeGraph workflow.
+- [x] 8.4 Add example `.jlink-mcp.json` snippets for:
   - generic control loop
   - generic state machine
   - BLDC motor profile
 
 ## 9. Final validation
 
-- [ ] 9.1 Run `npm run lint`.
-- [ ] 9.2 Run `npm run build`.
-- [ ] 9.3 Run `npm run test`.
-- [ ] 9.4 Run `npm run test:capture-ipc`.
-- [ ] 9.5 Run `npm run test:elf`.
-- [ ] 9.6 Run `openspec validate add-runtime-experiment-analysis-and-codegraph-bridge --type change --strict`.
-- [ ] 9.7 Produce a final report containing:
+- [x] 9.1 Run `npm run lint`.
+- [x] 9.2 Run `npm run build`.
+- [x] 9.3 Run `npm run test`.
+- [x] 9.4 Run `npm run test:capture-ipc`.
+- [x] 9.5 Run `npm run test:elf`.
+- [x] 9.6 Run `openspec validate add-runtime-experiment-analysis-and-codegraph-bridge --type change --strict`.
+- [x] 9.7 Produce a final report containing:
   - changed files
   - implemented tools
   - tests run
