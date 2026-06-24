@@ -1,5 +1,3 @@
-import { access } from "node:fs/promises";
-import { basename, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   AnalysisProfileName,
@@ -7,9 +5,10 @@ import {
   ExperimentSample,
   MetricName,
   PatternFinding,
-  loadExperimentFixture,
   metricNameSchema,
+  signalRoleSchema,
 } from "../experiment-contract";
+import { LoadedExperiment, LoadExperimentInput, loadExperimentForAnalysis } from "../experiment-store";
 import { AnalysisResult, analyzeExperiment, listAnalysisProfiles } from "./profiles";
 
 interface ToolError {
@@ -53,12 +52,21 @@ export interface ExperimentCompareOutput {
 const analysisInputSchema = z.object({
   experimentId: z.string().min(1).max(128).optional(),
   fixturePath: z.string().min(1).max(1024).optional(),
+  experimentPath: z.string().min(1).max(1024).optional(),
+  metadataFile: z.string().min(1).max(1024).optional(),
+  captureId: z.string().min(1).max(64).optional(),
+  outputDir: z.string().min(1).max(1024).optional(),
   analysisProfile: z.string().min(1).max(128),
   signals: z.array(z.string().min(1).max(128)).optional(),
+  signalRoles: z.record(z.string(), signalRoleSchema).optional(),
   windowMs: z.tuple([z.number().finite().nonnegative(), z.number().finite().nonnegative()]).optional(),
+  maxSamples: z.number().int().min(1).max(100000).optional(),
 }).strict().superRefine((input, context) => {
-  if (!input.experimentId && !input.fixturePath) {
-    context.addIssue({ code: "custom", path: ["experimentId"], message: "experimentId or fixturePath is required" });
+  if (!input.experimentId && !input.fixturePath && !input.experimentPath && !input.metadataFile && !input.captureId) {
+    context.addIssue({ code: "custom", path: ["experimentId"], message: "experimentId, fixturePath, experimentPath, metadataFile, or captureId is required" });
+  }
+  if (input.captureId && !input.outputDir) {
+    context.addIssue({ code: "custom", path: ["outputDir"], message: "outputDir is required with captureId" });
   }
   if (input.windowMs && input.windowMs[1] < input.windowMs[0]) {
     context.addIssue({ code: "custom", path: ["windowMs"], message: "windowMs end must be greater than or equal to start" });
@@ -66,12 +74,25 @@ const analysisInputSchema = z.object({
 });
 
 const compareInputSchema = z.object({
-  baselineExperimentId: z.string().min(1).max(128),
-  candidateExperimentId: z.string().min(1).max(128),
+  baselineExperimentId: z.string().min(1).max(128).optional(),
+  baselineExperimentPath: z.string().min(1).max(1024).optional(),
+  baselineMetadataFile: z.string().min(1).max(1024).optional(),
+  candidateExperimentId: z.string().min(1).max(128).optional(),
+  candidateExperimentPath: z.string().min(1).max(1024).optional(),
+  candidateMetadataFile: z.string().min(1).max(1024).optional(),
   analysisProfile: z.string().min(1).max(128),
   metrics: z.array(metricNameSchema).min(1).optional(),
+  signalRoles: z.record(z.string(), signalRoleSchema).optional(),
   windowMs: z.tuple([z.number().finite().nonnegative(), z.number().finite().nonnegative()]).optional(),
-}).strict();
+  maxSamples: z.number().int().min(1).max(100000).optional(),
+}).strict().superRefine((input, context) => {
+  if (!input.baselineExperimentId && !input.baselineExperimentPath && !input.baselineMetadataFile) {
+    context.addIssue({ code: "custom", path: ["baselineExperimentId"], message: "baseline experiment source is required" });
+  }
+  if (!input.candidateExperimentId && !input.candidateExperimentPath && !input.candidateMetadataFile) {
+    context.addIssue({ code: "custom", path: ["candidateExperimentId"], message: "candidate experiment source is required" });
+  }
+});
 
 export function analysisProfilesTool(): { profiles: ReturnType<typeof listAnalysisProfiles> } {
   return { profiles: listAnalysisProfiles() };
@@ -83,7 +104,12 @@ export async function experimentAnalyzeTool(input: unknown): Promise<ExperimentA
   const profile = implementedProfile(parsed.data.analysisProfile);
   if (!profile) return validationError(`Unknown or unimplemented analysisProfile: ${parsed.data.analysisProfile}`);
 
-  const loaded = await loadExperiment(parsed.data.experimentId, parsed.data.fixturePath);
+  const loaded = await loadForTool({
+    ...parsed.data,
+    variables: parsed.data.signals,
+    startSec: parsed.data.windowMs?.[0] === undefined ? undefined : parsed.data.windowMs[0] / 1000,
+    endSec: parsed.data.windowMs?.[1] === undefined ? undefined : parsed.data.windowMs[1] / 1000,
+  });
   if ("error" in loaded) return loaded;
 
   const selected = selectSignals(loaded.record, parsed.data.signals);
@@ -93,12 +119,12 @@ export async function experimentAnalyzeTool(input: unknown): Promise<ExperimentA
   };
   const result = analyzeExperiment(record, profile);
   return {
-    experimentId: parsed.data.experimentId ?? loaded.experimentId,
+    experimentId: loaded.experimentId,
     analysisProfile: profile,
     selectedSignals: selected.selectedSignals,
     summary: result.summary,
     patterns: result.patterns,
-    quality: { warnings: [...selected.warnings, ...result.quality.warnings] },
+    quality: { warnings: [...loaded.qualityWarnings, ...selected.warnings, ...result.quality.warnings] },
   };
 }
 
@@ -108,18 +134,38 @@ export async function experimentCompareTool(input: unknown): Promise<ExperimentC
   const profile = implementedProfile(parsed.data.analysisProfile);
   if (!profile) return validationError(`Unknown or unimplemented analysisProfile: ${parsed.data.analysisProfile}`);
 
-  const baseline = await loadExperiment(parsed.data.baselineExperimentId);
+  const baseline = await loadForTool({
+    experimentId: parsed.data.baselineExperimentId,
+    experimentPath: parsed.data.baselineExperimentPath,
+    metadataFile: parsed.data.baselineMetadataFile,
+    signalRoles: parsed.data.signalRoles,
+    startSec: parsed.data.windowMs?.[0] === undefined ? undefined : parsed.data.windowMs[0] / 1000,
+    endSec: parsed.data.windowMs?.[1] === undefined ? undefined : parsed.data.windowMs[1] / 1000,
+    maxSamples: parsed.data.maxSamples,
+  });
   if ("error" in baseline) return baseline;
-  const candidate = await loadExperiment(parsed.data.candidateExperimentId);
+  const candidate = await loadForTool({
+    experimentId: parsed.data.candidateExperimentId,
+    experimentPath: parsed.data.candidateExperimentPath,
+    metadataFile: parsed.data.candidateMetadataFile,
+    signalRoles: parsed.data.signalRoles,
+    startSec: parsed.data.windowMs?.[0] === undefined ? undefined : parsed.data.windowMs[0] / 1000,
+    endSec: parsed.data.windowMs?.[1] === undefined ? undefined : parsed.data.windowMs[1] / 1000,
+    maxSamples: parsed.data.maxSamples,
+  });
   if ("error" in candidate) return candidate;
 
   const baselineResult = analyzeExperiment({ ...baseline.record, timeWindowMs: parsed.data.windowMs ?? baseline.record.timeWindowMs }, profile);
   const candidateResult = analyzeExperiment({ ...candidate.record, timeWindowMs: parsed.data.windowMs ?? candidate.record.timeWindowMs }, profile);
-  const warnings = [...baselineResult.quality.warnings, ...candidateResult.quality.warnings];
+  const warnings = [...baseline.qualityWarnings, ...candidate.qualityWarnings, ...baselineResult.quality.warnings, ...candidateResult.quality.warnings];
   const metrics = parsed.data.metrics ?? [...new Set([...baselineResult.patterns, ...candidateResult.patterns].map((pattern) => pattern.type))]
     .filter((metric): metric is MetricName => metricNameSchema.safeParse(metric).success);
   const metricDiffs: ExperimentCompareOutput["metricDiffs"] = [];
   for (const metric of metrics) {
+    if (metricDirection[metric] === "neutral") {
+      warnings.push(`${metric} is neutral without configured comparison semantics`);
+      continue;
+    }
     const baselineValue = metricValue(baselineResult, metric);
     const candidateValue = metricValue(candidateResult, metric);
     if (baselineValue === null || candidateValue === null) {
@@ -138,8 +184,8 @@ export async function experimentCompareTool(input: unknown): Promise<ExperimentC
     .filter((diff) => diff.direction !== "unchanged")
     .map((diff) => `${diff.metric} ${diff.direction === "improved" ? "reduced" : "increased"}`);
   return {
-    baselineExperimentId: parsed.data.baselineExperimentId,
-    candidateExperimentId: parsed.data.candidateExperimentId,
+    baselineExperimentId: baseline.experimentId,
+    candidateExperimentId: candidate.experimentId,
     analysisProfile: profile,
     summary: {
       verdict: metricDiffs.some((diff) => diff.direction === "regressed")
@@ -162,38 +208,13 @@ function implementedProfile(value: string): AnalysisProfileName | null {
     : null;
 }
 
-async function loadExperiment(experimentId?: string, fixturePath?: string): Promise<{ experimentId: string; record: ExperimentRecord } | ToolError> {
-  const filePath = fixturePath ? resolveFixturePath(fixturePath) : await fixturePathForId(experimentId ?? "");
-  if (!filePath) return notFound(`Experiment fixture not found: ${experimentId ?? fixturePath}`);
+async function loadForTool(input: LoadExperimentInput): Promise<LoadedExperiment | ToolError> {
   try {
-    const record = await loadExperimentFixture(filePath);
-    return { experimentId: experimentId ?? record.experimentId ?? basename(filePath, ".experiment.json"), record };
+    return await loadExperimentForAnalysis(input);
   } catch (error) {
-    return validationError(`Invalid experiment fixture: ${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    return /not found/i.test(message) ? notFound(message) : validationError(message);
   }
-}
-
-async function fixturePathForId(experimentId: string): Promise<string | null> {
-  const slug = experimentId.replace(/^fixture_/, "").replace(/_/g, "-");
-  for (const candidate of [`${experimentId}.experiment.json`, `${slug}.experiment.json`]) {
-    const filePath = resolveFixturePath(candidate);
-    if (!filePath) continue;
-    try {
-      await access(filePath);
-      return filePath;
-    } catch {
-      // Try the next known fixture spelling.
-    }
-  }
-  return null;
-}
-
-function resolveFixturePath(filePath: string): string | null {
-  const root = resolve(process.cwd(), "src", "mcp", "fixtures");
-  const resolved = resolve(root, filePath);
-  const lowerRoot = root.toLowerCase();
-  const lowerResolved = resolved.toLowerCase();
-  return lowerResolved.startsWith(lowerRoot + sep) ? resolved : null;
 }
 
 function selectSignals(record: ExperimentRecord, requested?: string[]): { record: ExperimentRecord; selectedSignals: string[]; warnings: string[] } {
@@ -230,9 +251,21 @@ function metricValue(result: AnalysisResult, metric: MetricName): number | null 
   return null;
 }
 
+const metricDirection: Record<MetricName, "lower" | "absoluteLower" | "neutral"> = {
+  overshoot: "lower",
+  settling_time: "lower",
+  steady_error: "absoluteLower",
+  saturation: "lower",
+  state_transition: "neutral",
+  fault_transition: "lower",
+  stuck_signal: "lower",
+  counter_stall: "lower",
+  counter_wrap: "lower",
+};
+
 function directionFor(metric: MetricName, baseline: number, candidate: number): "improved" | "regressed" | "unchanged" {
-  const baselineScore = metric === "steady_error" ? Math.abs(baseline) : baseline;
-  const candidateScore = metric === "steady_error" ? Math.abs(candidate) : candidate;
+  const baselineScore = metricDirection[metric] === "absoluteLower" ? Math.abs(baseline) : baseline;
+  const candidateScore = metricDirection[metric] === "absoluteLower" ? Math.abs(candidate) : candidate;
   if (candidateScore < baselineScore) return "improved";
   if (candidateScore > baselineScore) return "regressed";
   return "unchanged";

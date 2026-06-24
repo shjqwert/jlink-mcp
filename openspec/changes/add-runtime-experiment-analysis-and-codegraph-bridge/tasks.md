@@ -37,10 +37,10 @@
 
 ## 3. Experiment records and fixture support
 
-- [ ] 3.1 Add an experiment store abstraction that can load saved experiment metadata and referenced capture data.
-- [ ] 3.2 Add conversion from existing capture metadata to `ExperimentRecord`.
+- [x] 3.1 Add an experiment store abstraction that can load saved experiment metadata and referenced capture data.
+- [x] 3.2 Add conversion from existing capture metadata to `ExperimentRecord`.
 - [x] 3.3 Add fixture loading for synthetic experiments used by tests.
-- [ ] 3.4 Add tests for old capture compatibility.
+- [x] 3.4 Add tests for old capture compatibility.
 
 ## 4. Generic analysis engine
 

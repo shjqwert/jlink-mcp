@@ -13,6 +13,9 @@ export interface EvidenceSignal {
   role: SignalRole;
   selector?: string;
   symbol?: string;
+  rootSymbol?: string;
+  memberPath?: string;
+  displaySymbol?: string;
   fileHint?: string;
 }
 
@@ -45,7 +48,7 @@ export function buildRuntimeEvidence(record: ExperimentRecord, analysis: Analysi
           symbol: signal.symbol,
           fileHint: signal.fileHint,
           selector: signal.selector,
-          reason: `${signal.name} (${signal.role}) is involved in ${pattern.type}`,
+          reason: `${signal.displaySymbol ?? signal.name} (${signal.role}) is involved in ${pattern.type}`,
         })),
       questionsForCodeGraph: questionsForPattern(experimentId, evidenceId, pattern, signals, summary),
       artifacts: record.artifacts,

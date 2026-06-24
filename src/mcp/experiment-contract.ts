@@ -62,6 +62,7 @@ export const evidenceSeverities = ["info", "warning", "error"] as const;
 export type EvidenceSeverity = typeof evidenceSeverities[number];
 
 const nameSchema = z.string().min(1).max(128).regex(/^[A-Za-z_][A-Za-z0-9_.:-]*$/);
+const idSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_.:-]+$/);
 const selectorSchema = z.string()
   .min(1)
   .max(512)
@@ -115,7 +116,7 @@ export const experimentRecordSchema = z.object({
     speedKhz: z.number().finite().positive().optional(),
   }).strict().optional(),
   capture: z.object({
-    captureId: nameSchema.optional(),
+    captureId: idSchema.optional(),
     backend: z.string().min(1).max(64).optional(),
     requestedRateHz: z.number().finite().positive().optional(),
     actualRateHz: z.number().finite().positive().optional(),
@@ -191,6 +192,9 @@ export const runtimeEvidenceSignalSchema = z.object({
   role: signalRoleSchema,
   selector: selectorSchema.optional(),
   symbol: nameSchema.optional(),
+  rootSymbol: nameSchema.optional(),
+  memberPath: nameSchema.optional(),
+  displaySymbol: nameSchema.optional(),
   fileHint: z.string().min(1).max(260).optional(),
 }).strict();
 

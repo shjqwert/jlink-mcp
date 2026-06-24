@@ -43,6 +43,21 @@ interface CaptureQueryOptions {
   buckets?: number;
 }
 
+export interface CaptureSampleReadOptions {
+  variables?: string[];
+  startSec?: number;
+  endSec?: number;
+  maxSamples?: number;
+}
+
+export interface CaptureSampleReadResult {
+  variables: Array<{ name: string; selector: string; alias?: string; unit?: string; type: ScalarType }>;
+  samples: Array<{ timeSec: number; values: Record<string, number> }>;
+  warnings: string[];
+  firstQpc: bigint;
+  qpcFrequency: bigint;
+}
+
 function readCString(buffer: Buffer, offset: number, length: number): string {
   const end = buffer.indexOf(0, offset);
   return buffer.toString("utf8", offset, end < 0 || end >= offset + length ? offset + length : end);
@@ -226,6 +241,37 @@ export async function queryCaptureFile(filePath: string, input: CaptureQueryOpti
   };
 }
 
+export async function readCaptureSamples(filePath: string, input: CaptureSampleReadOptions = {}): Promise<CaptureSampleReadResult> {
+  if (!filePath.toLowerCase().endsWith(".jlcp")) throw new Error("Capture sample reader only accepts .jlcp artifacts");
+  const header = await readCaptureHeader(filePath);
+  const selected = selectVariables(header.symbols, input.variables);
+  const maxSamples = input.maxSamples ?? 10000;
+  if (!Number.isInteger(maxSamples) || maxSamples < 1 || maxSamples > 100000) throw new Error("maxSamples must be 1..100000");
+  if (header.frameCount === 0n) return { variables: selected.map(variableInfo), samples: [], warnings: [], firstQpc: 0n, qpcFrequency: header.qpcFrequency };
+  const bounds = await frameTimeBounds(filePath, header);
+  const startSec = input.startSec ?? 0;
+  const endSec = input.endSec ?? bounds.durationSec;
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || startSec < 0 || endSec < startSec) throw new Error("Invalid sample time range");
+  const stride = Number(header.frameCount) > maxSamples ? Math.ceil(Number(header.frameCount) / maxSamples) : 1;
+  const samples: CaptureSampleReadResult["samples"] = [];
+  await forEachFrame(filePath, header, (frame) => {
+    if (!frame.valid || Number(frame.index % BigInt(stride)) !== 0) return;
+    const timeSec = Number(frame.readMidpointQpc - bounds.firstQpc) / Number(header.qpcFrequency);
+    if (timeSec < startSec || timeSec > endSec) return;
+    samples.push({
+      timeSec,
+      values: Object.fromEntries(selected.map(({ symbol, index }) => [captureSampleSignalName(symbol), frame.values[index]])),
+    });
+  });
+  return {
+    variables: selected.map(variableInfo),
+    samples,
+    warnings: stride > 1 ? [`capture samples decimated by stride ${stride} from ${header.frameCount.toString()} frames to at most ${maxSamples}`] : [],
+    firstQpc: bounds.firstQpc,
+    qpcFrequency: header.qpcFrequency,
+  };
+}
+
 export async function writeCaptureCsv(filePath: string, csvFile: string): Promise<void> {
   const header = await readCaptureHeader(filePath);
   const stream = createWriteStream(csvFile, { flags: "wx", encoding: "utf8" });
@@ -261,6 +307,14 @@ function selectVariables(symbols: CaptureSymbol[], requested?: string[]): Array<
     if (index < 0) throw new Error(`Unknown capture variable: ${name}`);
     return { symbol: symbols[index], index };
   });
+}
+
+export function captureSampleSignalName(symbol: CaptureSymbol): string {
+  return symbol.alias && /^[A-Za-z_][A-Za-z0-9_.:-]*$/.test(symbol.alias) ? symbol.alias : symbol.name;
+}
+
+function variableInfo({ symbol }: { symbol: CaptureSymbol }): CaptureSampleReadResult["variables"][number] {
+  return { name: captureSampleSignalName(symbol), selector: symbol.name, alias: symbol.alias, unit: symbol.unit, type: symbol.type };
 }
 
 async function frameTimeBounds(filePath: string, header: BinaryHeader): Promise<{ firstQpc: bigint; durationSec: number }> {

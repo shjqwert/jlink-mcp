@@ -16,9 +16,9 @@ export function questionsForPattern(
   reason: string,
 ): CodeGraphQuestion[] {
   const roles = new Set(signals.map((signal) => signal.role));
-  const symbols = unique(signals.map((signal) => signal.symbol).filter((value): value is string => Boolean(value)));
+  const symbols = unique(signals.map((signal) => signal.rootSymbol ?? signal.symbol).filter((value): value is string => Boolean(value)));
   const fileHints = unique(signals.map((signal) => signal.fileHint).filter((value): value is string => Boolean(value)));
-  const names = signals.map((signal) => signal.symbol ?? signal.name).join(", ") || (pattern.signal ?? pattern.type);
+  const names = signals.map((signal) => signal.displaySymbol ?? signal.symbol ?? signal.name).join(", ") || (pattern.signal ?? pattern.type);
   const base = { symbols, fileHints, reason, experimentId, evidenceId };
   const questions: CodeGraphQuestion[] = [];
 
@@ -65,14 +65,18 @@ export function bridgeQueriesFromQuestions(questions: CodeGraphQuestion[]): Brid
 }
 
 export function selectorHints(signal: SignalDefinition): EvidenceSignal {
-  const [fileHint, symbol] = signal.selector?.includes("::")
+  const [fileHint, symbolPath] = signal.selector?.includes("::")
     ? signal.selector.split("::", 2)
     : [undefined, signal.selector];
+  const [rootSymbol, ...members] = symbolPath?.split(".") ?? [];
   return {
     name: signal.name,
     role: signal.role,
     selector: signal.selector,
-    symbol,
+    symbol: rootSymbol,
+    rootSymbol,
+    memberPath: members.length ? members.join(".") : undefined,
+    displaySymbol: symbolPath,
     fileHint,
   };
 }

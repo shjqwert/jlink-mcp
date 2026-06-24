@@ -1,7 +1,6 @@
-import { access } from "node:fs/promises";
-import { resolve, sep } from "node:path";
 import { z } from "zod";
-import { ExperimentRecord, PatternFinding, loadExperimentFixture, patternFindingSchema } from "../experiment-contract";
+import { PatternFinding, patternFindingSchema, signalRoleSchema } from "../experiment-contract";
+import { LoadExperimentInput, LoadedExperiment, loadExperimentForAnalysis } from "../experiment-store";
 import { AnalysisForEvidence, buildRuntimeEvidence } from "../evidence/runtime-evidence";
 import { BridgeQuery, bridgeQueriesFromQuestions } from "./queries";
 
@@ -20,9 +19,22 @@ export interface EvidenceForCodegraphOutput {
 }
 
 const evidenceInputSchema = z.object({
-  experimentId: z.string().min(1).max(128),
+  experimentId: z.string().min(1).max(128).optional(),
+  fixturePath: z.string().min(1).max(1024).optional(),
+  experimentPath: z.string().min(1).max(1024).optional(),
+  metadataFile: z.string().min(1).max(1024).optional(),
+  captureId: z.string().min(1).max(64).optional(),
+  outputDir: z.string().min(1).max(1024).optional(),
+  signalRoles: z.record(z.string(), signalRoleSchema).optional(),
   analysisResult: z.unknown(),
-}).strict();
+}).strict().superRefine((input, context) => {
+  if (!input.experimentId && !input.fixturePath && !input.experimentPath && !input.metadataFile && !input.captureId) {
+    context.addIssue({ code: "custom", path: ["experimentId"], message: "experiment source is required" });
+  }
+  if (input.captureId && !input.outputDir) {
+    context.addIssue({ code: "custom", path: ["outputDir"], message: "outputDir is required with captureId" });
+  }
+});
 
 const analysisResultSchema = z.object({
   experimentId: z.string().min(1).max(128).optional(),
@@ -39,12 +51,12 @@ export async function evidenceForCodegraphTool(input: unknown): Promise<Evidence
   const analysis = parseAnalysisResult(parsed.data.analysisResult);
   if ("error" in analysis) return analysis;
 
-  const record = await loadFixture(parsed.data.experimentId);
-  if ("error" in record) return record;
+  const loaded = await loadForTool(parsed.data);
+  if ("error" in loaded) return loaded;
 
-  const evidence = buildRuntimeEvidence(record, { ...analysis, experimentId: parsed.data.experimentId });
+  const evidence = buildRuntimeEvidence(loaded.record, { ...analysis, experimentId: loaded.experimentId });
   return {
-    experimentId: parsed.data.experimentId,
+    experimentId: loaded.experimentId,
     evidence,
     queries: bridgeQueriesFromQuestions(evidence.flatMap((item) => item.questionsForCodeGraph)),
   };
@@ -68,25 +80,13 @@ function parseAnalysisResult(value: unknown): AnalysisForEvidence | ToolError {
   };
 }
 
-async function loadFixture(experimentId: string): Promise<ExperimentRecord | ToolError> {
-  const slug = experimentId.replace(/^fixture_/, "").replace(/_/g, "-");
-  for (const candidate of [`${experimentId}.experiment.json`, `${slug}.experiment.json`]) {
-    const filePath = fixturePath(candidate);
-    try {
-      await access(filePath);
-      return await loadExperimentFixture(filePath);
-    } catch {
-      // Try the next known fixture spelling.
-    }
+async function loadForTool(input: LoadExperimentInput): Promise<LoadedExperiment | ToolError> {
+  try {
+    return await loadExperimentForAnalysis(input);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return /not found/i.test(message) ? { error: { code: "not_found", message } } : validationError(message);
   }
-  return { error: { code: "not_found", message: `Experiment fixture not found: ${experimentId}` } };
-}
-
-function fixturePath(fileName: string): string {
-  const root = resolve(process.cwd(), "src", "mcp", "fixtures");
-  const filePath = resolve(root, fileName);
-  if (!filePath.toLowerCase().startsWith(root.toLowerCase() + sep)) throw new Error("fixture path escapes fixture directory");
-  return filePath;
 }
 
 function validationError(message: string, error?: z.ZodError): ToolError {
