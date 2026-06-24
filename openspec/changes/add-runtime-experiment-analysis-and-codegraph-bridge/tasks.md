@@ -67,20 +67,20 @@
 - [x] 5.1 Add `analysis_profiles`.
 - [x] 5.2 Add `experiment_analyze`.
 - [x] 5.3 Add `experiment_compare`.
-- [ ] 5.4 Add `evidence_for_codegraph`.
-- [ ] 5.5 Ensure all analysis and bridge tools are read-only and do not start/stop/connect/reset/flash/halt/resume hardware.
+- [x] 5.4 Add `evidence_for_codegraph`.
+- [x] 5.5 Ensure all analysis and bridge tools are read-only and do not start/stop/connect/reset/flash/halt/resume hardware.
   - [x] Phase 3A `analysis_profiles`, `experiment_analyze`, and `experiment_compare` are fixture-only/read-only.
-  - [ ] Bridge tool read-only proof remains with `evidence_for_codegraph`.
-- [ ] 5.6 Add MCP-level tests for input validation and outputs.
+  - [x] Bridge tool read-only proof remains with `evidence_for_codegraph`.
+- [x] 5.6 Add MCP-level tests for input validation and outputs.
   - [x] Phase 3A analysis tool input/output tests.
-  - [ ] Bridge tool MCP-level tests remain with `evidence_for_codegraph`.
+  - [x] Bridge tool MCP-level tests remain with `evidence_for_codegraph`.
 
 ## 6. Runtime Evidence and CodeGraph bridge
 
-- [ ] 6.1 Generate `RuntimeEvidence` from analysis findings.
-- [ ] 6.2 Extract symbol and file hints from signal selectors and control names.
-- [ ] 6.3 Generate CodeGraph-friendly questions without calling CodeGraph.
-- [ ] 6.4 Add tests proving no CodeGraph runtime dependency is introduced.
+- [x] 6.1 Generate `RuntimeEvidence` from analysis findings.
+- [x] 6.2 Extract symbol and file hints from signal selectors and control names.
+- [x] 6.3 Generate CodeGraph-friendly questions without calling CodeGraph.
+- [x] 6.4 Add tests proving no CodeGraph runtime dependency is introduced.
 
 ## 7. Optional experiment orchestration
 

@@ -9,6 +9,7 @@ import { TelnetProxy } from "../telnet/telnet-proxy";
 import { ProcessManager } from "../utils/process-manager";
 import { log } from "../utils/logger";
 import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } from "./analysis/tools";
+import { evidenceForCodegraphTool } from "./bridge/tools";
 import { CaptureService } from "./capture";
 
 export class JLinkMcpServer {
@@ -676,6 +677,15 @@ export class JLinkMcpServer {
         windowMs: z.tuple([z.number(), z.number()]).optional(),
       },
       async (input) => result(() => experimentCompareTool(input)),
+    );
+    this.server.tool(
+      "evidence_for_codegraph",
+      "Convert offline analysis output into Runtime Evidence and CodeGraph query suggestions without calling CodeGraph.",
+      {
+        experimentId: z.string(),
+        analysisResult: z.unknown(),
+      },
+      async (input) => result(() => evidenceForCodegraphTool(input)),
     );
   }
 
