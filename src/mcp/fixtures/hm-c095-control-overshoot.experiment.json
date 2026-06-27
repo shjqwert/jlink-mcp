@@ -1,0 +1,42 @@
+{
+  "experimentId": "hm_c095_control_overshoot",
+  "createdAt": "2026-06-27T00:00:00.000Z",
+  "source": "synthetic",
+  "target": {
+    "device": "Z20K146M"
+  },
+  "signals": [
+    {
+      "name": "mod_pu",
+      "selector": "AppMotorDbg.c::gstMotorDbg.fModPu",
+      "type": "float32",
+      "role": "command"
+    },
+    {
+      "name": "iu_pu",
+      "selector": "AppMotorDbg.c::gstMotorDbg.fIuPu",
+      "type": "float32",
+      "role": "feedback"
+    },
+    {
+      "name": "iv_pu",
+      "selector": "AppMotorDbg.c::gstMotorDbg.fIvPu",
+      "type": "float32",
+      "role": "derived"
+    },
+    {
+      "name": "motor_fault",
+      "selector": "AppMotorDbg.c::gstMotorDbg.enFault",
+      "type": "uint32",
+      "role": "fault"
+    }
+  ],
+  "events": [],
+  "samples": [
+    { "timeMs": 0, "values": { "mod_pu": 0, "iu_pu": 0, "iv_pu": 0, "motor_fault": 0 } },
+    { "timeMs": 10, "values": { "mod_pu": 0.3, "iu_pu": 0.18, "iv_pu": 0.12, "motor_fault": 0 } },
+    { "timeMs": 20, "values": { "mod_pu": 0.3, "iu_pu": 0.42, "iv_pu": 0.2, "motor_fault": 0 } },
+    { "timeMs": 30, "values": { "mod_pu": 0.3, "iu_pu": 0.31, "iv_pu": 0.14, "motor_fault": 0 } },
+    { "timeMs": 40, "values": { "mod_pu": 0.3, "iu_pu": 0.3, "iv_pu": 0.13, "motor_fault": 0 } }
+  ]
+}

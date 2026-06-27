@@ -103,16 +103,19 @@ test("analysis tools return structured validation and not-found errors", async (
   assert.equal("error" in missing && missing.error.code, "not_found");
 });
 
-test("incompatible selected signals produce warnings without fabricated patterns", async () => {
+test("incompatible selected signals produce structured validation errors", async () => {
   const result = await experimentAnalyzeTool({
     experimentId: "generic-control-ideal",
     analysisProfile: "generic_control",
     signals: ["setpoint"],
   });
-  assert.ok(!("error" in result));
-  const output = result as ExperimentAnalyzeOutput;
-  assert.deepEqual(output.patterns, []);
-  assert.ok(output.quality.warnings.some((warning) => /feedback signal/.test(warning)));
+  assert.deepEqual(result, {
+    error: {
+      code: "validation_error",
+      message: "generic_control requires a feedback signal",
+      issues: undefined,
+    },
+  });
 });
 
 test("MCP analysis handlers stay offline and read-only", async () => {

@@ -211,6 +211,18 @@ function analyzeGenericStateMachine(record: ExperimentRecord, samples: Experimen
         confidence: "medium",
         evidence: `${signal.name} did not advance`,
       });
+    } else {
+      const stall = repeatedTail(values);
+      if (stall) {
+        patterns.push({
+          type: "counter_stall",
+          signal: signal.name,
+          startMs: stall.startMs,
+          endMs: values[values.length - 1].timeMs,
+          confidence: "medium",
+          evidence: `${signal.name} stopped advancing`,
+        });
+      }
     }
   }
   if (!patterns.length) warnings.push("no state, fault, or counter transitions detected");
@@ -268,6 +280,12 @@ function settlingTime(samples: ExperimentSample[], signal: string, target: numbe
 function numberAt(sample: ExperimentSample | undefined, signal: string): number | null {
   const value = sample?.values[signal];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function repeatedTail(values: Array<{ timeMs: number; value: number }>): { startMs: number } | null {
+  let first = values.length - 1;
+  while (first > 0 && values[first - 1].value === values[values.length - 1].value) first -= 1;
+  return values.length - first >= 3 ? { startMs: values[first].timeMs } : null;
 }
 
 function truthy(value: unknown): boolean {

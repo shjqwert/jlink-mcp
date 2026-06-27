@@ -1,0 +1,42 @@
+{
+  "experimentId": "hm_c095_state_fault",
+  "createdAt": "2026-06-27T00:00:00.000Z",
+  "source": "synthetic",
+  "target": {
+    "device": "Z20K146M"
+  },
+  "signals": [
+    {
+      "name": "sector",
+      "selector": "AppMotorDbg.c::gstMotorDbg.ucSector",
+      "type": "uint8",
+      "role": "state"
+    },
+    {
+      "name": "motor_fault",
+      "selector": "AppMotorDbg.c::gstMotorDbg.enFault",
+      "type": "uint32",
+      "role": "fault"
+    },
+    {
+      "name": "alive_counter",
+      "selector": "TraceAgentPort.c::s_traceAliveCounter",
+      "type": "uint32",
+      "role": "counter"
+    },
+    {
+      "name": "guwWdgFlg",
+      "selector": "TraceSignals.c::g_traceWdgFlg",
+      "type": "uint16",
+      "role": "limit"
+    }
+  ],
+  "events": [],
+  "samples": [
+    { "timeMs": 0, "values": { "sector": 0, "motor_fault": 0, "alive_counter": 0, "guwWdgFlg": 0 } },
+    { "timeMs": 10, "values": { "sector": 1, "motor_fault": 0, "alive_counter": 1, "guwWdgFlg": 0 } },
+    { "timeMs": 20, "values": { "sector": 2, "motor_fault": 0, "alive_counter": 2, "guwWdgFlg": 0 } },
+    { "timeMs": 30, "values": { "sector": 2, "motor_fault": 2, "alive_counter": 2, "guwWdgFlg": 1 } },
+    { "timeMs": 40, "values": { "sector": 2, "motor_fault": 2, "alive_counter": 2, "guwWdgFlg": 1 } }
+  ]
+}

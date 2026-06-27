@@ -117,6 +117,8 @@ export async function experimentAnalyzeTool(input: unknown): Promise<ExperimentA
     ...selected.record,
     timeWindowMs: parsed.data.windowMs ?? selected.record.timeWindowMs,
   };
+  const requiredSignals = validateRequiredSignals(record, profile);
+  if (requiredSignals) return validationError(requiredSignals);
   const result = analyzeExperiment(record, profile);
   return {
     experimentId: loaded.experimentId,
@@ -133,6 +135,8 @@ export async function experimentCompareTool(input: unknown): Promise<ExperimentC
   if (!parsed.success) return validationError("Invalid experiment_compare input", parsed.error);
   const profile = implementedProfile(parsed.data.analysisProfile);
   if (!profile) return validationError(`Unknown or unimplemented analysisProfile: ${parsed.data.analysisProfile}`);
+  const unsupported = parsed.data.metrics?.filter((metric) => !profileMetricNames(profile).includes(metric));
+  if (unsupported?.length) return validationError(`Metrics not supported by ${profile}: ${unsupported.join(", ")}`);
 
   const baseline = await loadForTool({
     experimentId: parsed.data.baselineExperimentId,
@@ -206,6 +210,18 @@ function implementedProfile(value: string): AnalysisProfileName | null {
   return listAnalysisProfiles().some((profile) => profile.name === value && profile.status === "implemented")
     ? value as AnalysisProfileName
     : null;
+}
+
+function profileMetricNames(profile: AnalysisProfileName): MetricName[] {
+  return listAnalysisProfiles().find((item) => item.name === profile)?.patterns
+    .filter((pattern): pattern is MetricName => metricNameSchema.safeParse(pattern).success) ?? [];
+}
+
+function validateRequiredSignals(record: ExperimentRecord, profile: AnalysisProfileName): string | null {
+  if (profile !== "generic_control") return null;
+  if (!record.signals.some((signal) => signal.role === "command")) return "generic_control requires a command signal";
+  if (!record.signals.some((signal) => signal.role === "feedback")) return "generic_control requires a feedback signal";
+  return null;
 }
 
 async function loadForTool(input: LoadExperimentInput): Promise<LoadedExperiment | ToolError> {
