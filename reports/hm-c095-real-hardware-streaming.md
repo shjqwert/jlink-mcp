@@ -28,6 +28,8 @@ Partial fail.
 
 CRC validation passed and real sample frames were decoded, but the acceptance gate requires `sequence_gaps == 0`; this run observed 36 missing sequence numbers.
 
+This SEGGER RTTLogger result is superseded for the final smoke verdict by the direct RTT ring-read capture in `reports/hm-c095-real-hardware-direct-rtt-streaming.md`, which passed with `crc_failures=0` and `sequence_gaps=0`.
+
 ## After Write Observation
 
 - `frames_total`: 347

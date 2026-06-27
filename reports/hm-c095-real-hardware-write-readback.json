@@ -1,8 +1,9 @@
 {
-  "method": "gdb_safe_symbol_fallback",
+  "method": "direct_rtt_down_buffer_write_with_gdb_safe_symbol_fallback",
   "traceagentRttWriteVar": {
-    "status": "blocked",
-    "reason": "MCP rtt_send targets RTT channel 0; HM_C095 TraceAgent command channel is RTT channel 1 AI_CMD"
+    "status": "passed_via_direct_rtt_down_buffer",
+    "artifact": "reports/hm-c095-real-hardware-direct-rtt-write-readback.json",
+    "mcpRttSendLimitation": "MCP rtt_send targets RTT channel 0; HM_C095 TraceAgent command channel is RTT channel 1 AI_CMD"
   },
   "target": {
     "selector": "CddSbc.c::guwWdgFlg",

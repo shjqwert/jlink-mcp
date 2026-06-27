@@ -18,7 +18,8 @@
 
 ## Runtime Result
 
-- TraceAgent RTT write-var: not executable with current MCP RTT send tool because command channel is RTT channel 1
+- TraceAgent RTT write-var: pass via direct RTT down-buffer write to channel 1 `AI_CMD`
+- Direct RTT result artifact: `reports/hm-c095-real-hardware-direct-rtt-write-readback.json`
 - Fallback: GDB safe-symbol write
 - Target used: `CddSbc.c::guwWdgFlg`
 - Address: `0x20006bf0 <guwWdgFlg>`
@@ -37,7 +38,7 @@ TraceAgent uses RTT channel 1:
 - up: `AI_TRACE`
 - down: `AI_CMD`
 
-Current MCP `rtt_send` writes through the default RTT telnet path, which exposes channel 0. SEGGER `JLinkRTTClient` also exposes only `-RTTTelnetPort` and no channel selector. Therefore the TraceAgent channel 1 write-var path is not currently reachable from the available MCP RTT send tool.
+Current MCP `rtt_send` writes through the default RTT telnet path, which exposes channel 0. SEGGER `JLinkRTTClient` also exposes only `-RTTTelnetPort` and no channel selector. The passing TraceAgent write/readback therefore used direct SEGGER DLL memory access to the RTT channel 1 down-buffer and parsed ACK frames from the up-buffer.
 
 GDB fallback was used after the user granted full permissions for this test objective.
 

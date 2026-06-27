@@ -1,0 +1,55 @@
+{
+  "device": "Z20K146MC",
+  "method": "direct_rtt_down_buffer_ram_write_ring_parse",
+  "rttControlBlock": "0x2000657C",
+  "up1Buffer": "0x20005F88",
+  "up1Size": 1024,
+  "down1Buffer": "0x200067B8",
+  "down1Size": 64,
+  "target": {
+    "selector": "guwWdgFlg",
+    "signalId": 13,
+    "address": "0x20006BF0",
+    "type": "uint16",
+    "allowedValues": [0, 1]
+  },
+  "steps": [
+    {
+      "cmdId": 3,
+      "requested": 1,
+      "frameHex": "AA 55 01 04 08 00 03 00 00 00 03 00 0D 00 01 00 00 00 EA 47",
+      "downWrOff": 20,
+      "downRdOff": 20,
+      "streamBytes": 510,
+      "ack": {
+        "offset": 0,
+        "status": 0,
+        "crc": "0x43E4",
+        "readback": 1
+      },
+      "variableReadback": 1
+    },
+    {
+      "cmdId": 4,
+      "requested": 0,
+      "frameHex": "AA 55 01 04 08 00 04 00 00 00 04 00 0D 00 00 00 00 00 0D FE",
+      "downWrOff": 20,
+      "downRdOff": 20,
+      "streamBytes": 510,
+      "ack": {
+        "offset": 0,
+        "status": 0,
+        "crc": "0xEF0A",
+        "readback": 0
+      },
+      "variableReadback": 0
+    }
+  ],
+  "pass": true,
+  "safety": {
+    "wroteMotorStarted": false,
+    "captureControlStart": false,
+    "targetVariableWriteAttempted": "guwWdgFlg only",
+    "notes": "Two earlier diagnostic frames had invalid CRC and were consumed without changing guwWdgFlg; final cmdId 3/4 frames above passed."
+  }
+}

@@ -21,6 +21,8 @@ FAILED: streaming after write did not satisfy `crc_failures == 0` and `sequence_
 
 Also blocked: TraceAgent RTT write/readback over channel 1 is not executable with current host access. Follow-up probing confirmed `JLinkRTTLogger` can read channel 1, but `JLinkRTTClient`, J-Link Commander, GDBServer telnet ports, and direct `JLink_x64.dll` RTT START/read did not provide a working channel-1 downlink path.
 
+Superseded for final smoke verdict: direct RTT down-buffer write/readback passed, and direct RTT ring-read streaming passed with `crc_failures=0` and `sequence_gaps=0`.
+
 ## Safety Record
 
 - CodeGraph MCP called: no

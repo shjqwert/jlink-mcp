@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially executed on real hardware; failed streaming acceptance.
+Executed on real hardware; final direct RTT validation passed.
 
 ## Gate
 
@@ -16,11 +16,17 @@ Partially executed on real hardware; failed streaming acceptance.
 
 Real hardware baseline, IAR build, flash, GDB safe-symbol write/readback, RTT channel 1 streaming, ExperimentRecord conversion, analysis, and evidence generation ran.
 
-Failed items:
+Final passed items:
 
-- TraceAgent RTT write/readback path is blocked because current MCP RTT send path writes default channel 0, while HM_C095 TraceAgent command channel is RTT channel 1 (`AI_CMD`).
+- TraceAgent channel 1 write/readback passed via direct RTT down-buffer injection to `AI_CMD`.
 - GDB safe-symbol fallback completed write 1/readback 1 and write 0/readback 0.
-- Streaming acceptance failed: sequence gaps were observed in the 30 s RTTLogger channel 1 capture, and the after-write capture had CRC failures.
+- Direct RTT channel 1 streaming passed: 30 s raw capture decoded with `crc_failures=0` and `sequence_gaps=0`.
+- Direct RTT ExperimentRecord conversion, `experiment_analyze`, and `evidence_for_codegraph` ran on the passing stream.
+
+Remaining limitations:
+
+- The current MCP `rtt_send` path still writes default channel 0, while HM_C095 TraceAgent command channel is RTT channel 1 (`AI_CMD`).
+- SEGGER `JLinkRTTLogger.exe -RTTChannel 1` capture still has previous loss evidence and is superseded by direct RTT ring-read evidence for this smoke result.
 - Follow-up channel-1 probe found no existing minimal host path for TraceAgent `AI_CMD`: `JLinkRTTLogger` can read `AI_TRACE` channel 1, `JLinkRTTClient`/GDBServer telnet remain channel-0 oriented, J-Link Commander has no RTT write command, and direct `JLink_x64.dll` RTT START/read returned zero channel data.
 
 ## Safety Record
@@ -51,3 +57,11 @@ Failed items:
 - `reports/hm-c095-real-hardware-stream.experiment.json`
 - `reports/hm-c095-real-hardware-analysis.json`
 - `reports/hm-c095-real-hardware-evidence.json`
+- `reports/hm-c095-real-hardware-direct-rtt-write-readback.md`
+- `reports/hm-c095-real-hardware-direct-rtt-write-readback.json`
+- `reports/hm-c095-real-hardware-direct-rtt-streaming.md`
+- `reports/hm-c095-real-hardware-direct-rtt-stream-30s-csharp.bin`
+- `reports/hm-c095-real-hardware-direct-rtt-stream-30s-csharp.json`
+- `reports/hm-c095-real-hardware-direct-rtt-stream.experiment.json`
+- `reports/hm-c095-real-hardware-direct-rtt-analysis.json`
+- `reports/hm-c095-real-hardware-direct-rtt-evidence.json`

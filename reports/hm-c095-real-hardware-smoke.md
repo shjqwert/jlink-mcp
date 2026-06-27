@@ -45,7 +45,8 @@
 ## Safe Write
 
 - Write method intended: TraceAgent RTT write-var
-- TraceAgent RTT write-var result: blocked by channel support; MCP `rtt_send` writes channel 0 while HM_C095 `AI_CMD` is channel 1
+- TraceAgent RTT write-var result: pass via direct RTT down-buffer write to channel 1 `AI_CMD`
+- Direct write artifact: `reports/hm-c095-real-hardware-direct-rtt-write-readback.json`
 - Fallback method: GDB safe-symbol write to `CddSbc.c::guwWdgFlg`
 - Fallback target confirmation: `info variables guwWdgFlg`, `ptype guwWdgFlg`, `print &guwWdgFlg`
 - Address: `0x20006bf0 <guwWdgFlg>`
@@ -79,13 +80,28 @@
 - After-write sequence gaps: 38
 - Result: fail because sequence gaps were observed, and after-write capture had CRC failures
 
+## Direct RTT Streaming
+
+- Method: direct `JLink_x64.dll` read of RTT channel 1 ring buffer, advancing only host `RdOff`
+- Raw artifact: `reports/hm-c095-real-hardware-direct-rtt-stream-30s-csharp.bin`
+- Summary: `reports/hm-c095-real-hardware-direct-rtt-stream-30s-csharp.json`
+- Frames total: 1240
+- Sample frames: 1240
+- Invalid frames: 0
+- CRC failures: 0
+- Sequence gaps: 0
+- Duplicate sequences: 0
+- Agent-time duration: 24.78 s
+- Approx rate: 50.04 Hz
+- Result: pass
+
 ## Analysis
 
-- ExperimentRecord: `reports/hm-c095-real-hardware-stream.experiment.json`
-- Analysis result: `reports/hm-c095-real-hardware-analysis.json`
+- ExperimentRecord: `reports/hm-c095-real-hardware-direct-rtt-stream.experiment.json`
+- Analysis result: `reports/hm-c095-real-hardware-direct-rtt-analysis.json`
 - Analysis profile: `generic_state_machine`
 - Analysis verdict: warning
-- Evidence result: `reports/hm-c095-real-hardware-evidence.json`
+- Evidence result: `reports/hm-c095-real-hardware-direct-rtt-evidence.json`
 - CodeGraph MCP called: no
 - `evidence_for_codegraph` output: empty evidence and empty queries because no analysis patterns were found
 
@@ -100,8 +116,8 @@
 
 ## Remaining Risks
 
-- TraceAgent RTT channel 1 write-var remains unsupported by the current MCP RTT send path.
-- Streaming has sequence gaps and after-write CRC failures, so the streaming acceptance gate is not met.
+- TraceAgent RTT channel 1 write-var remains unsupported by the current MCP `rtt_send` path.
+- SEGGER `JLinkRTTLogger.exe -RTTChannel 1` had sequence gaps and after-write CRC failures; direct RTT ring read passed the streaming gate.
 - `experiment_analyze` MCP tool was not exposed by current tool discovery; the same repository handler was run directly via Node.
 
 ## Follow-Up Channel 1 Probe
@@ -115,4 +131,4 @@
 
 ## Next Recommendation
 
-Fix or expose RTT channel 1 bidirectional access in Jlink-MCP, then rerun TC-WR over TraceAgent and rerun streaming acceptance with `crc_failures == 0` and `sequence_gaps == 0`.
+Fix or expose RTT channel 1 bidirectional access in Jlink-MCP so the passing direct RTT method becomes a normal MCP tool path.

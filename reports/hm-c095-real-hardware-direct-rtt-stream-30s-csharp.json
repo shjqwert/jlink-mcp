@@ -1,0 +1,18 @@
+{
+  "file": "reports/hm-c095-real-hardware-direct-rtt-stream-30s-csharp.bin",
+  "bytes": 121520,
+  "frames": 1240,
+  "sampleFrames": 1240,
+  "ackFrames": 0,
+  "eventFrames": 0,
+  "invalidFrames": 0,
+  "crcFailures": 0,
+  "discardedBytes": 0,
+  "sequenceGaps": 0,
+  "duplicateSeqs": 0,
+  "firstSeq": 64,
+  "lastSeq": 1303,
+  "durationSecByAgentTime": 24.78,
+  "rateHz": 50.04035512510089,
+  "pass": true
+}
