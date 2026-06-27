@@ -1,0 +1,31 @@
+{
+  "allowlists": {
+    "hm-c095-trace-stop-maint": [
+      {
+        "selector": "TraceSignals.c::g_traceWdgFlg",
+        "alias": "guwWdgFlg",
+        "type": "uint16",
+        "min": 0,
+        "max": 1,
+        "modes": ["TRACE_MODE_STOP", "TRACE_MODE_MAINT"]
+      }
+    ],
+    "fake-memory": [
+      { "selector": "test.c::g_JlinkMcpScratch", "type": "uint32", "min": 0, "max": 4294967295 },
+      { "selector": "test.c::g_JlinkMcpTrigger", "type": "uint32", "min": 0, "max": 4294967295 },
+      { "selector": "test.c::g_JlinkMcpObserved", "type": "uint32", "min": 0, "max": 4294967295 },
+      { "selector": "test.c::g_JlinkMcpFloatRef", "type": "float32", "min": -1, "max": 1 },
+      { "selector": "test.c::g_JlinkMcpState", "type": "uint8", "min": 0, "max": 1 }
+    ]
+  },
+  "dangerousSelectors": [
+    "OsUserConfig.c::bMotorStarted",
+    "AppMotorDbg.c::gstMotorDbg.*",
+    "AppMotorCtrl.c::gstMotorCtrl.*",
+    "TraceSignals.c::g_traceModPu",
+    "TraceSignals.c::g_traceIuPu",
+    "TraceSignals.c::g_traceIvPu",
+    "TraceSignals.c::g_traceIwPu",
+    "TraceSignals.c::g_traceMotorFault"
+  ]
+}
