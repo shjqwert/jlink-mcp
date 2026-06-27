@@ -1,0 +1,11 @@
+﻿{
+    "status":  "ok",
+    "project":  "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\FOC.jscope",
+    "exe":  "C:\\Program Files\\SEGGER\\JLink_V884\\JScope.exe",
+    "args":  "-openprj \"D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\FOC.jscope\" -USB 69401227",
+    "windowTitleBefore":  "SEGGER J-Scope V8.84",
+    "windowTitleAfterStart":  "JScope",
+    "mainWindowHandle":  "0xa21226",
+    "screenshot":  "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\jscope-hss-preflight.png",
+    "error":  null
+}

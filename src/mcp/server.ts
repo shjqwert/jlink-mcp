@@ -11,6 +11,11 @@ import { log } from "../utils/logger";
 import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } from "./analysis/tools";
 import { evidenceForCodegraphTool } from "./bridge/tools";
 import { CaptureService } from "./capture";
+import { captureBackendBenchmarkTool, captureBackendListTool, captureBackendProbeTool, captureBackendSelectTool, captureImportExperimentTool } from "./capture-backends/backend-router";
+import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
+import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
+import { RspMemoryIo } from "./rtt-channel/rsp-memory-transport";
+import { traceagentDecodeStream, traceagentWriteSignal } from "./rtt-protocols/traceagent-tools";
 
 export class JLinkMcpServer {
   private server: McpServer;
@@ -546,6 +551,7 @@ export class JLinkMcpServer {
 
     this.registerAnalysisTools();
     this.registerCaptureTools();
+    this.registerCaptureBackendTools();
 
     // ═══════════════════════════════════════════════════════════════
     // RTT
@@ -594,9 +600,44 @@ export class JLinkMcpServer {
     );
 
     this.server.tool("rtt_send", "Send data to device via RTT down-channel",
-      { data: z.string().describe("Data to send") },
-      async ({ data }) => {
+      {
+        data: z.string().describe("Data to send"),
+        channel: z.number().int().nonnegative().optional().describe("Optional RTT down-channel index. Omit for legacy channel-0 telnet behavior."),
+        channelName: z.string().optional().describe("Optional RTT down-channel name. Omit for legacy channel-0 telnet behavior."),
+        downRing: z.object({
+          bufferAddress: z.union([z.string(), z.number()]),
+          size: z.number().int().positive().max(65536),
+          rdOffAddress: z.union([z.string(), z.number()]),
+          wrOffAddress: z.union([z.string(), z.number()]),
+        }).strict().optional(),
+      },
+      async ({ data, channel, channelName, downRing }) => {
         const guard = this.requireDevice(); if (guard) return guard;
+        if (channel !== undefined || channelName !== undefined) {
+          if (downRing) {
+            return this.directRttResult(async () => {
+              this.requireDirectRttWriteAllowed();
+              const io = await this.createDirectRttMemoryIo();
+              try {
+                const written = await writeDirectRttRing(io, parseRttRingAddresses(downRing), Buffer.from(data, "utf8"));
+                return { status: written.ok ? "ok" : "rejected", requestedChannel: channelName ?? channel, ...written };
+              } finally {
+                await io.dispose?.();
+              }
+            });
+          }
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                status: "unavailable",
+                reason: "direct RTT channel transport not configured",
+                requestedChannel: channelName ?? channel,
+                legacyChannel0Used: false,
+              }, null, 2),
+            }],
+          };
+        }
         const sent = this.rttClient.send(data);
         return { content: [{ type: "text", text: sent ? `Sent ${data.length} bytes` : "Failed: RTT not connected" }] };
       }
@@ -766,6 +807,199 @@ export class JLinkMcpServer {
       { outputDir: z.string().optional() }, async ({ outputDir }) => result(() => this.capture.list(outputDir)));
     this.server.tool("capture_delete", "Delete exactly one terminal session; wildcards, bulk deletion, active sessions, and path escape are rejected.", sessionSchema,
       async ({ sessionId }) => result(() => this.capture.delete(sessionId)));
+  }
+
+  private registerCaptureBackendTools(): void {
+    const result = async (operation: () => Promise<unknown> | unknown) => {
+      try {
+        return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
+      } catch (error) {
+        return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", reason: error instanceof Error ? error.message : String(error) }, null, 2) }] };
+      }
+    };
+
+    this.server.tool("capture_backend_list", "List runtime capture backends and HSS-first priority order.", {},
+      async () => result(() => captureBackendListTool()));
+    this.server.tool("capture_backend_probe", "Probe capture backend availability without modifying MCU firmware.", {
+      preferredBackend: z.enum(["jlink-hss", "direct-rtt-channel", "memory-poll-rsp", "external-import"]).optional(),
+      mode: z.enum(["realtime", "offline-import"]).optional(),
+    }, async (input) => result(() => captureBackendProbeTool(input)));
+    this.server.tool("capture_backend_select", "Select the available backend that would be used for capture.", {
+      preferredBackend: z.enum(["jlink-hss", "direct-rtt-channel", "memory-poll-rsp", "external-import"]).optional(),
+      mode: z.enum(["realtime", "offline-import"]).optional(),
+    }, async (input) => result(() => captureBackendSelectTool(input)));
+    this.server.tool("capture_backend_benchmark", "Run backend benchmark when a configured adapter is available.", {
+      backendName: z.enum(["jlink-hss", "direct-rtt-channel", "memory-poll-rsp", "external-import"]).optional(),
+      variables: z.array(z.string()).optional(),
+      requestedRateHz: z.number().positive().optional(),
+      durationSec: z.number().positive().optional(),
+    }, async (input) => result(() => captureBackendBenchmarkTool(input)));
+    this.server.tool("capture_import_experiment", "Register an offline external capture import.", {
+      sourcePath: z.string(),
+      format: z.enum(["csv", "json", "experiment"]),
+    }, async (input) => result(() => captureImportExperimentTool(input)));
+
+    this.server.tool("rtt_channel_list", "List RTT channels from a provided control-block snapshot.", {
+      controlBlockAddress: z.string().optional(),
+      upChannels: z.array(z.object({ index: z.number().int().nonnegative(), name: z.string().optional(), direction: z.literal("up"), size: z.number().optional() })).optional(),
+      downChannels: z.array(z.object({ index: z.number().int().nonnegative(), name: z.string().optional(), direction: z.literal("down"), size: z.number().optional() })).optional(),
+    }, async (input) => result(() => rttChannelListTool({ controlBlockAddress: input.controlBlockAddress, upChannels: input.upChannels ?? [], downChannels: input.downChannels ?? [] })));
+    const ringSchema = z.object({
+      bufferAddress: z.union([z.string(), z.number()]),
+      size: z.number().int().positive().max(65536),
+      rdOffAddress: z.union([z.string(), z.number()]),
+      wrOffAddress: z.union([z.string(), z.number()]),
+    }).strict();
+
+    this.server.tool("rtt_channel_read", "Read an RTT up-channel through direct RTT ring memory when explicitly enabled.", {
+      selector: z.union([z.number().int().nonnegative(), z.string()]),
+      ring: ringSchema.optional(),
+      maxBytes: z.number().int().positive().max(65536).optional(),
+    }, async ({ selector, ring, maxBytes }) => {
+      if (!ring) return result(() => rttChannelReadTool({ snapshot: { upChannels: [], downChannels: [] }, selector }));
+      return this.directRttResult(async () => {
+        this.requireDirectRttReadAllowed();
+        const io = await this.createDirectRttMemoryIo();
+        try {
+          const read = await readDirectRttRing(io, parseRttRingAddresses(ring), maxBytes);
+          return { status: "ok", selector, dataHex: Buffer.from(read.data).toString("hex"), ...read };
+        } finally {
+          await io.dispose?.();
+        }
+      });
+    });
+    this.server.tool("rtt_channel_write", "Write an RTT down-channel through direct RTT ring memory when explicitly enabled.", {
+      selector: z.union([z.number().int().nonnegative(), z.string()]),
+      dataHex: z.string(),
+      ring: ringSchema.optional(),
+    }, async ({ selector, dataHex, ring }) => {
+      if (!ring) return result(() => rttChannelWriteTool({ snapshot: { upChannels: [], downChannels: [] }, selector, data: Buffer.from(dataHex, "hex") }));
+      return this.directRttResult(async () => {
+        this.requireDirectRttWriteAllowed();
+        const io = await this.createDirectRttMemoryIo();
+        try {
+          const write = await writeDirectRttRing(io, parseRttRingAddresses(ring), Buffer.from(dataHex, "hex"));
+          return { status: write.ok ? "ok" : "rejected", selector, ...write };
+        } finally {
+          await io.dispose?.();
+        }
+      });
+    });
+
+    this.server.tool("rtt_stream_capture", "Capture an RTT stream when a direct RTT transport is configured.", {
+      channel: z.number().int().nonnegative().optional(),
+      channelName: z.string().optional(),
+      durationSec: z.number().positive().optional(),
+      pollIntervalMs: z.number().int().positive().max(1000).optional(),
+      ring: ringSchema.optional(),
+    }, async (input) => {
+      if (!input.ring) return result(() => ({
+        status: "unavailable",
+        reason: "direct RTT stream transport not configured",
+        requestedChannel: input.channelName ?? input.channel ?? null,
+        durationSec: input.durationSec ?? null,
+      }));
+      return this.directRttResult(async () => {
+        this.requireDirectRttReadAllowed();
+        const data = await this.captureDirectRttStream(parseRttRingAddresses(input.ring!), input.durationSec ?? 1, input.pollIntervalMs ?? 20);
+        const decoded = traceagentDecodeStream(data);
+        return { status: "ok", requestedChannel: input.channelName ?? input.channel ?? null, bytes: data.length, decoded };
+      });
+    });
+    this.server.tool("rtt_stream_decode", "Decode a TraceAgent RTT byte stream from hex.", {
+      dataHex: z.string(),
+    }, async ({ dataHex }) => result(() => traceagentDecodeStream(Buffer.from(dataHex, "hex"))));
+    this.server.tool("traceagent_decode_stream", "Decode a TraceAgent RTT byte stream from hex.", {
+      dataHex: z.string(),
+    }, async ({ dataHex }) => result(() => traceagentDecodeStream(Buffer.from(dataHex, "hex"))));
+    this.server.tool("traceagent_write_signal", "Encode and optionally send an allowlisted TraceAgent signal write.", {
+      signal: z.string(),
+      value: z.number(),
+      cmdId: z.number().int().nonnegative(),
+      downRing: ringSchema.optional(),
+      upRing: ringSchema.optional(),
+      timeoutMs: z.number().int().positive().max(5000).optional(),
+      pollIntervalMs: z.number().int().positive().max(1000).optional(),
+    }, async (input) => {
+      if (!input.downRing || !input.upRing) return result(() => traceagentWriteSignal(input));
+      return this.directRttResult(async () => {
+        this.requireDirectRttWriteAllowed();
+        this.requireDirectRttReadAllowed();
+        const io = await this.createDirectRttMemoryIo();
+        try {
+          const downRing = parseRttRingAddresses(input.downRing!);
+          const upRing = parseRttRingAddresses(input.upRing!);
+          return traceagentWriteSignal({
+            ...input,
+            transport: {
+              write: async (frame) => {
+                const written = await writeDirectRttRing(io, downRing, frame);
+                if (!written.ok) throw new Error(written.reason ?? "direct RTT down ring write failed");
+              },
+              readAck: async () => this.waitForTraceAgentAck(io, upRing, input.timeoutMs ?? 1000, input.pollIntervalMs ?? 20),
+            },
+          });
+        } finally {
+          await io.dispose?.();
+        }
+      });
+    });
+  }
+
+  private directRttResult(operation: () => Promise<unknown>) {
+    return operation()
+      .then((value) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] }))
+      .catch((error) => ({ content: [{ type: "text" as const, text: JSON.stringify({ status: "error", reason: error instanceof Error ? error.message : String(error) }, null, 2) }] }));
+  }
+
+  private requireDirectRttReadAllowed(): void {
+    if (process.env.JLINK_MCP_ALLOW_RTT_DIRECT !== "1") throw new Error("JLINK_MCP_ALLOW_RTT_DIRECT=1 is required for direct RTT ring access");
+  }
+
+  private requireDirectRttWriteAllowed(): void {
+    if (process.env.JLINK_MCP_ALLOW_RTT_DIRECT_WRITE !== "1") throw new Error("JLINK_MCP_ALLOW_RTT_DIRECT_WRITE=1 is required for direct RTT ring writes");
+  }
+
+  private async createDirectRttMemoryIo(): Promise<DirectRttMemoryIo> {
+    if (this.probe.type !== "jlink") throw new Error("direct RTT ring memory access currently requires the J-Link backend");
+    if (!this.probe.isGDBServerRunning()) {
+      throw new Error("direct RTT ring access requires a running J-Link GDB server for persistent non-resetting memory access");
+    }
+    const config = this.probe.getCaptureConfig();
+    if (!config) throw new Error("direct RTT ring access requires capture-capable probe configuration");
+    return RspMemoryIo.connect({ host: "127.0.0.1", port: config.gdbPort });
+  }
+
+  private async captureDirectRttStream(ring: ReturnType<typeof parseRttRingAddresses>, durationSec: number, pollIntervalMs: number): Promise<Buffer> {
+    if (durationSec > 60) throw new Error("rtt_stream_capture durationSec max is 60");
+    const io = await this.createDirectRttMemoryIo();
+    const chunks: Buffer[] = [];
+    try {
+      const deadline = Date.now() + durationSec * 1000;
+      while (Date.now() < deadline) {
+        const read = await readDirectRttRing(io, ring);
+        if (read.data.length > 0) chunks.push(Buffer.from(read.data));
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+    } finally {
+      await io.dispose?.();
+    }
+    return Buffer.concat(chunks);
+  }
+
+  private async waitForTraceAgentAck(io: DirectRttMemoryIo, ring: ReturnType<typeof parseRttRingAddresses>, timeoutMs: number, pollIntervalMs: number): Promise<Uint8Array> {
+    const chunks: Buffer[] = [];
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const read = await readDirectRttRing(io, ring);
+      if (read.data.length > 0) {
+        chunks.push(Buffer.from(read.data));
+        const data = Buffer.concat(chunks);
+        if (traceagentDecodeStream(data).ackFrames > 0) return data;
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+    throw new Error("TraceAgent ACK timeout");
   }
 
   private registerResources(): void {

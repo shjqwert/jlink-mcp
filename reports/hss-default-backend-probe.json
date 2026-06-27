@@ -1,0 +1,87 @@
+{
+  "preferredOrder": [
+    "jlink-hss",
+    "direct-rtt-channel",
+    "memory-poll-rsp",
+    "external-import"
+  ],
+  "selectedBackend": "jlink-hss",
+  "backends": [
+    {
+      "name": "jlink-hss",
+      "priority": 1,
+      "expectedUse": "highest-rate host-side streaming when J-Link SDK/HSS is configured",
+      "requiresFirmware": false,
+      "requiresTargetCodeChange": false,
+      "requiresSDK": true,
+      "requiresExternalTool": true,
+      "supportsRead": true,
+      "supportsWrite": false,
+      "supportsStreaming": true,
+      "supportsRunWhileTargetRunning": true,
+      "supportsExperimentExport": true,
+      "status": "available",
+      "reason": "JScope/J-Link HSS preflight available",
+      "warnings": [
+        "HSS benchmark requires an implemented adapter; JScope CLI exposes project open/probe selection but no verified headless export path."
+      ]
+    },
+    {
+      "name": "direct-rtt-channel",
+      "priority": 2,
+      "expectedUse": "existing RTT channel ring-buffer access",
+      "requiresFirmware": true,
+      "requiresTargetCodeChange": false,
+      "requiresSDK": false,
+      "requiresExternalTool": false,
+      "supportsRead": true,
+      "supportsWrite": true,
+      "supportsStreaming": true,
+      "supportsRunWhileTargetRunning": true,
+      "supportsExperimentExport": true,
+      "status": "available",
+      "reason": "RTT control block and channel metadata available",
+      "warnings": []
+    },
+    {
+      "name": "memory-poll-rsp",
+      "priority": 3,
+      "expectedUse": "low-rate fallback",
+      "requiresFirmware": false,
+      "requiresTargetCodeChange": false,
+      "requiresSDK": false,
+      "requiresExternalTool": false,
+      "supportsRead": true,
+      "supportsWrite": false,
+      "supportsStreaming": false,
+      "supportsRunWhileTargetRunning": false,
+      "supportsExperimentExport": true,
+      "status": "available",
+      "reason": "available as low-rate fallback",
+      "warnings": [
+        "memory-poll-rsp is a low-rate fallback and may not satisfy motor-loop high-speed capture"
+      ]
+    },
+    {
+      "name": "external-import",
+      "priority": 4,
+      "expectedUse": "offline import from external tools",
+      "requiresFirmware": false,
+      "requiresTargetCodeChange": false,
+      "requiresSDK": false,
+      "requiresExternalTool": false,
+      "supportsRead": false,
+      "supportsWrite": false,
+      "supportsStreaming": false,
+      "supportsRunWhileTargetRunning": false,
+      "supportsExperimentExport": true,
+      "status": "unavailable",
+      "reason": "external import is offline-only",
+      "warnings": []
+    }
+  ],
+  "warnings": [
+    "HSS benchmark requires an implemented adapter; JScope CLI exposes project open/probe selection but no verified headless export path.",
+    "memory-poll-rsp is a low-rate fallback and may not satisfy motor-loop high-speed capture"
+  ]
+}

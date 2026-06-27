@@ -1,0 +1,70 @@
+{
+  "result": "partial-pass",
+  "selectedBackend": "jlink-hss",
+  "hss": {
+    "name": "jlink-hss",
+    "priority": 1,
+    "expectedUse": "highest-rate host-side streaming when J-Link SDK/HSS is configured",
+    "requiresFirmware": false,
+    "requiresTargetCodeChange": false,
+    "requiresSDK": true,
+    "requiresExternalTool": true,
+    "supportsRead": true,
+    "supportsWrite": false,
+    "supportsStreaming": true,
+    "supportsRunWhileTargetRunning": true,
+    "supportsExperimentExport": true,
+    "status": "available",
+    "reason": "JScope/J-Link HSS preflight available",
+    "warnings": [
+      "HSS benchmark requires an implemented adapter; JScope CLI exposes project open/probe selection but no verified headless export path."
+    ]
+  },
+  "directRtt": {
+    "name": "direct-rtt-channel",
+    "priority": 2,
+    "expectedUse": "existing RTT channel ring-buffer access",
+    "requiresFirmware": true,
+    "requiresTargetCodeChange": false,
+    "requiresSDK": false,
+    "requiresExternalTool": false,
+    "supportsRead": true,
+    "supportsWrite": true,
+    "supportsStreaming": true,
+    "supportsRunWhileTargetRunning": true,
+    "supportsExperimentExport": true,
+    "status": "available",
+    "reason": "RTT control block and channel metadata available",
+    "warnings": []
+  },
+  "memoryPollRsp": {
+    "name": "memory-poll-rsp",
+    "priority": 3,
+    "expectedUse": "low-rate fallback",
+    "requiresFirmware": false,
+    "requiresTargetCodeChange": false,
+    "requiresSDK": false,
+    "requiresExternalTool": false,
+    "supportsRead": true,
+    "supportsWrite": false,
+    "supportsStreaming": false,
+    "supportsRunWhileTargetRunning": false,
+    "supportsExperimentExport": true,
+    "status": "available",
+    "reason": "available as low-rate fallback",
+    "warnings": [
+      "memory-poll-rsp is a low-rate fallback and may not satisfy motor-loop high-speed capture"
+    ]
+  },
+  "jscopePreflight": {
+    "status": "ok",
+    "project": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\FOC.jscope",
+    "exe": "C:\\Program Files\\SEGGER\\JLink_V884\\JScope.exe",
+    "args": "-openprj \"D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\FOC.jscope\" -USB 69401227",
+    "windowTitleBefore": "SEGGER J-Scope V8.84",
+    "windowTitleAfterStart": "JScope",
+    "mainWindowHandle": "0xa21226",
+    "screenshot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\jscope-hss-preflight.png",
+    "error": null
+  }
+}

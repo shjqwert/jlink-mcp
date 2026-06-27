@@ -1369,6 +1369,8 @@ int runSelfTest() {
     wchar_t fileName[MAX_PATH]{};
     if (GetTempPathW(MAX_PATH, directory) == 0 || GetTempFileNameW(directory, L"jle", 0, fileName) == 0) throw std::runtime_error("Engine self-test temp path failed");
     (void)DeleteFileW(fileName);
+    const std::wstring sidecar = std::wstring(fileName) + L".native.json";
+    (void)DeleteFileW(sidecar.c_str());
     const std::string outputFile = utf8Text(fileName);
     auto symbol = [](std::string name, double address) {
       return Json(object({
@@ -1428,7 +1430,6 @@ int runSelfTest() {
     const bool validArtifact = artifact != INVALID_HANDLE_VALUE && ReadFile(artifact, &header, sizeof(header), &bytesRead, nullptr) && bytesRead == sizeof(header) && std::string_view(header.magic, 4) == "JLCP";
     if (artifact != INVALID_HANDLE_VALUE) CloseHandle(artifact);
     (void)DeleteFileW(fileName);
-    const std::wstring sidecar = std::wstring(fileName) + L".native.json";
     (void)DeleteFileW(sidecar.c_str());
     if (!validArtifact || notifications.empty() || notifications.back() != "capture_complete") throw std::runtime_error("Engine self-test persistence/event mismatch");
   };
