@@ -87,10 +87,15 @@
 - Phase 5C closure note: Section 7 remains intentionally deferred. Future implementation should use a separate OpenSpec change: `add-safe-experiment-run-orchestration`. This archived change only covers read-only offline experiment analysis, Runtime Evidence, CodeGraph query suggestions, and capture artifact conversion.
 
 - [ ] 7.1 Add `experiment_run` only after tasks 1-6 are complete.
+
 - [ ] 7.2 Use existing capture lifecycle and control allowlist; do not duplicate unsafe write logic.
+
 - [ ] 7.3 Require explicit `allowControls=true` for any control action.
+
 - [ ] 7.4 Record every capture event, control event, rejection, failure, and safety decision.
+
 - [ ] 7.5 Add no-hardware tests using mocks before any hardware test.
+
 - [ ] 7.6 Hardware tests, if performed, must report measured backend capability and must not claim unverified 1 kHz strict support.
 
 ## 8. Documentation
