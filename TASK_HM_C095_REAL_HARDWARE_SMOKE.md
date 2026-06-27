@@ -21,6 +21,7 @@ Failed items:
 - TraceAgent RTT write/readback path is blocked because current MCP RTT send path writes default channel 0, while HM_C095 TraceAgent command channel is RTT channel 1 (`AI_CMD`).
 - GDB safe-symbol fallback completed write 1/readback 1 and write 0/readback 0.
 - Streaming acceptance failed: sequence gaps were observed in the 30 s RTTLogger channel 1 capture, and the after-write capture had CRC failures.
+- Follow-up channel-1 probe found no existing minimal host path for TraceAgent `AI_CMD`: `JLinkRTTLogger` can read `AI_TRACE` channel 1, `JLinkRTTClient`/GDBServer telnet remain channel-0 oriented, J-Link Commander has no RTT write command, and direct `JLink_x64.dll` RTT START/read returned zero channel data.
 
 ## Safety Record
 
@@ -34,6 +35,7 @@ Failed items:
 - `bMotorStarted` written: no
 - Motor started: no
 - Target variable write attempted: yes, only `guwWdgFlg`
+- Extra RTT channel probing: read-only except existing authorized `guwWdgFlg` fallback; no TraceAgent down-channel write sent
 
 ## Artifacts
 

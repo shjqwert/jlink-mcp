@@ -104,6 +104,15 @@
 - Streaming has sequence gaps and after-write CRC failures, so the streaming acceptance gate is not met.
 - `experiment_analyze` MCP tool was not exposed by current tool discovery; the same repository handler was run directly via Node.
 
+## Follow-Up Channel 1 Probe
+
+- `JLinkRTTLogger.exe -RTTChannel 1` still reads real `AI_TRACE` data and reports 3 up-channels: `Terminal`, `AI_TRACE`, and an unnamed channel.
+- `JLinkRTTClient.exe` did not expose an RTT channel selector in CLI help.
+- J-Link Commander help listed no RTT read/write command.
+- GDBServer with `-RTTTelnetPort 19031` opened local ports `19030`, `19031`, `2333`; raw reads showed `19031` as RTT telnet banner and `19030` as binary control data, not a usable `AI_CMD` channel write path.
+- Direct `JLink_x64.dll` probing could open, select `Z20K146MC`, connect over SWD, and call `JLINK_RTTERMINAL_Control(START)`, but `JLINK_RTTERMINAL_Read` returned 0 bytes for channels 0, 1, and 2.
+- Result: no existing minimal host path was found to send TraceAgent write-var commands to RTT down channel 1.
+
 ## Next Recommendation
 
 Fix or expose RTT channel 1 bidirectional access in Jlink-MCP, then rerun TC-WR over TraceAgent and rerun streaming acceptance with `crc_failures == 0` and `sequence_gaps == 0`.

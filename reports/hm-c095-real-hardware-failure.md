@@ -13,10 +13,13 @@
 - Hardware state: flashed, written, resumed, and streaming
 - Target write attempted: yes, only `guwWdgFlg`
 - Last successful step: GDB safe-symbol fallback wrote `guwWdgFlg=1`, read back 1, wrote `guwWdgFlg=0`, read back 0, and resumed CPU
+- Follow-up result: current host tools still do not expose a usable RTT down-channel 1 write path for TraceAgent `AI_CMD`.
 
 ## Failure
 
 FAILED: streaming after write did not satisfy `crc_failures == 0` and `sequence_gaps == 0`.
+
+Also blocked: TraceAgent RTT write/readback over channel 1 is not executable with current host access. Follow-up probing confirmed `JLinkRTTLogger` can read channel 1, but `JLinkRTTClient`, J-Link Commander, GDBServer telnet ports, and direct `JLink_x64.dll` RTT START/read did not provide a working channel-1 downlink path.
 
 ## Safety Record
 
@@ -33,4 +36,4 @@ FAILED: streaming after write did not satisfy `crc_failures == 0` and `sequence_
 
 ## Next Step
 
-Investigate RTT channel 1 collection quality. Current evidence points to host-side RTTLogger attach/ring-buffer artifacts or channel capture loss, but the acceptance gate is not met by the captured data.
+Implement or expose bidirectional RTT channel selection for channel 1, then rerun TraceAgent write/readback and streaming acceptance. Current evidence points to host-side RTTLogger attach/ring-buffer artifacts or channel capture loss for streaming, but the acceptance gate is not met by the captured data.
