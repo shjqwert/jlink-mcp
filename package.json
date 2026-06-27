@@ -203,7 +203,10 @@
     "lint": "tsc --noEmit",
     "test": "npm run compile && node --test out/mcp/capture.test.js out/mcp/experiment-contract.test.js out/mcp/experiment-store.test.js out/mcp/analysis/profiles.test.js out/mcp/analysis/tools.test.js out/mcp/bridge/tools.test.js",
     "test:capture-ipc": "npm run build:capture && npm run compile && node --test out/mcp/capture-native.test.js",
-    "test:elf": "npm run compile && node scripts/test-elf.mjs"
+    "test:elf": "npm run compile && node scripts/test-elf.mjs",
+    "test:hm-c095": "npm run compile && node --test out/mcp/hm-c095/hm-c095-static.test.js out/mcp/hm-c095/hm-c095-runtime-analysis.test.js out/mcp/hm-c095/hm-c095-capture-artifact.test.js out/mcp/hm-c095/hm-c095-mcp-tools.test.js",
+    "test:write": "npm run compile && node --test out/mcp/write/write-validation.test.js",
+    "test:coverage": "npm run compile && node scripts/hm-c095-coverage.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
