@@ -13,10 +13,10 @@ export function executeSafeWrite(request: SafeWriteRequest, policy: WritePolicy,
   const validation = validateSafeWriteRequest(request, policy);
   if (!validation.ok) return validation;
   try {
-    backend.writeSymbol(request.selector, numericValue(request.value));
+    backend.writeSymbol(validation.entry.selector, numericValue(request.value));
     const deadline = Date.now() + (request.verify.timeoutMs ?? 0);
     do {
-      const readback = backend.readSymbol(request.verify.selector);
+      const readback = backend.readSymbol(validation.verifyEntry.selector);
       if (compare(readback, request.verify.operator, request.verify.value)) return { ok: true, readback };
       if ((request.verify.timeoutMs ?? 0) === 0) return { ok: false, error: { code: "verify_timeout", message: "write verification did not match", readback } };
     } while (Date.now() <= deadline);

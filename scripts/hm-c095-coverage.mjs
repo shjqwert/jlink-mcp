@@ -38,6 +38,8 @@ const full = runCoverage("full repo", [
   "out/mcp/write/write-validation.test.js",
 ], false);
 
+const runtimeLines = parseAllFilesLineCoverage(runtime.output);
+const writeLines = parseAllFilesLineCoverage(write.output);
 const fullLines = parseAllFilesLineCoverage(full.output);
 const fullPass = fullLines >= 95;
 await writeFile(join(reportsDir, "coverage-summary.md"), [
@@ -45,8 +47,8 @@ await writeFile(join(reportsDir, "coverage-summary.md"), [
   "",
   "| Scope | Result | Evidence |",
   "| --- | --- | --- |",
-  `| Runtime analysis modules | ${runtime.status === 0 ? "PASS" : "FAIL"} | Node built-in line coverage threshold >=95% |`,
-  `| Write validation modules | ${write.status === 0 ? "PASS" : "FAIL"} | Node built-in line coverage threshold >=95% |`,
+  `| Runtime analysis modules | ${runtime.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(runtimeLines)} |`,
+  `| Write validation modules | ${write.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(writeLines)} |`,
   `| Full repo | ${fullPass ? "PASS" : "GAP"} | line coverage ${Number.isFinite(fullLines) ? `${fullLines.toFixed(2)}%` : "not parsed"} |`,
   "",
   "No c8 dependency was added; Node 24 built-in coverage supplied the scoped gates.",
@@ -93,4 +95,10 @@ function runCoverage(label, args, requirePass = true) {
 function parseAllFilesLineCoverage(output) {
   const match = output.match(/all files\s+\|\s+([0-9.]+)/);
   return match ? Number(match[1]) : Number.NaN;
+}
+
+function coverageEvidence(lines) {
+  return Number.isFinite(lines)
+    ? `Node built-in line coverage ${lines.toFixed(2)}%, threshold >=95%`
+    : "Node built-in line coverage threshold >=95%";
 }

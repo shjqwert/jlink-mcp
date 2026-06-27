@@ -48,6 +48,7 @@ export function validateSafeWriteRequest(input: unknown, policy: WritePolicy): W
   if (selectorError) return invalid(selectorError);
   if (!isScalarType(request.type)) return invalid("unknown type");
   if (!isFiniteWriteValue(request.value)) return invalid("value must be finite");
+  if (!matchesScalarType(request.value, request.type)) return invalid("value does not match scalar type");
   if (!request.verify || typeof request.verify !== "object") return invalid("verify condition is required");
   const verify = request.verify as Partial<VerifyCondition>;
   const verifySelectorError = validateSelector(verify.selector);
@@ -67,8 +68,8 @@ export function validateSafeWriteRequest(input: unknown, policy: WritePolicy): W
   if (verifyEntry.type !== verify.type) return invalid("verify type does not match allowlist");
 
   const numeric = numericValue(request.value!);
-  const min = request.min ?? entry.min;
-  const max = request.max ?? entry.max;
+  const min = maxDefined(entry.min, request.min);
+  const max = minDefined(entry.max, request.max);
   if (min !== undefined && numeric < min) return invalid("value is below allowed range");
   if (max !== undefined && numeric > max) return invalid("value is above allowed range");
 
@@ -100,6 +101,19 @@ function isScalarType(value: unknown): value is ScalarType {
 
 function isFiniteWriteValue(value: unknown): value is number | boolean {
   return typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+}
+
+function matchesScalarType(value: number | boolean, type: ScalarType): boolean {
+  if (typeof value === "boolean") return true;
+  return type === "float32" || Number.isInteger(value);
+}
+
+function maxDefined(left?: number, right?: number): number | undefined {
+  return left === undefined ? right : right === undefined ? left : Math.max(left, right);
+}
+
+function minDefined(left?: number, right?: number): number | undefined {
+  return left === undefined ? right : right === undefined ? left : Math.min(left, right);
 }
 
 export function numericValue(value: number | boolean): number {

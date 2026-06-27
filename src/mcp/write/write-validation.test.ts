@@ -19,6 +19,7 @@ test("safe write contract accepts allowlisted scratch writes and rejects unsafe 
     { ...valid, value: Number.NaN },
     { ...valid, value: Infinity },
     { ...valid, value: -1 },
+    { ...valid, value: 0.5 },
     { ...valid, selector: "" },
     { ...valid, selector: "test.c::ptr->field" },
     { ...valid, selector: "test.c::array[0]" },
@@ -101,6 +102,33 @@ test("HM_C095 write policy allows only guwWdgFlg offline and rejects motor obser
     verify: { selector: "guwWdgFlg", type: "uint16", operator: "eq", value: 1 },
     allowlistId: "hm-c095-trace-stop-maint",
   }, policy).ok, true);
+  assert.equal(validateSafeWriteRequest({
+    selector: "TraceSignals.c::g_traceWdgFlg",
+    type: "uint16",
+    value: 2,
+    max: 999,
+    verify: { selector: "TraceSignals.c::g_traceWdgFlg", type: "uint16", operator: "eq", value: 2 },
+    allowlistId: "hm-c095-trace-stop-maint",
+  }, policy).ok, false);
+
+  let hmValue = 0;
+  const hmBackend = {
+    writeSymbol(selector: string, value: number): void {
+      assert.equal(selector, "TraceSignals.c::g_traceWdgFlg");
+      hmValue = value;
+    },
+    readSymbol(selector: string): number {
+      assert.equal(selector, "TraceSignals.c::g_traceWdgFlg");
+      return hmValue;
+    },
+  };
+  assert.deepEqual(executeSafeWrite({
+    selector: "guwWdgFlg",
+    type: "uint16",
+    value: 1,
+    verify: { selector: "guwWdgFlg", type: "uint16", operator: "eq", value: 1 },
+    allowlistId: "hm-c095-trace-stop-maint",
+  }, policy, hmBackend), { ok: true, readback: 1 });
 
   for (const selector of policy.dangerousSelectors) {
     const concrete = selector.endsWith(".*") ? `${selector.slice(0, -1)}fModPu` : selector;
