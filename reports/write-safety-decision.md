@@ -4,8 +4,8 @@ Decision: default validation is fake-memory only. Real HM_C095 writes are not pe
 
 Allowed offline policy target:
 
-| Selector | Alias | Type | Range | Modes |
-| --- | --- | --- | --- | --- |
+| Selector                        | Alias       | Type     | Range  | Modes                                 |
+| ------------------------------- | ----------- | -------- | ------ | ------------------------------------- |
 | `TraceSignals.c::g_traceWdgFlg` | `guwWdgFlg` | `uint16` | `0..1` | `TRACE_MODE_STOP`, `TRACE_MODE_MAINT` |
 
 Rejected by policy:
