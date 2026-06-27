@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -25,6 +24,7 @@ import {
 } from "./capture";
 import { JLinkBackend } from "../probe/jlink";
 import { ProcessManager } from "../utils/process-manager";
+import { createRepoTempDir } from "./preflight/temp-preflight";
 
 const execFileAsync = promisify(execFile);
 
@@ -74,7 +74,7 @@ test("capture contracts round-trip and reject unsafe control input", () => {
 });
 
 test("capture artifact query preserves spikes and CSV preserves special floats", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "jlink-mcp-test-"));
+  const directory = await createRepoTempDir("test-");
   const binary = join(directory, "capture.jlcp");
   const csv = join(directory, "capture.csv");
   try {
@@ -159,7 +159,7 @@ test("probe selection and server identity fail closed", () => {
 });
 
 test("capture list and delete stay inside the selected directory", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "jlink-mcp-storage-"));
+  const directory = await createRepoTempDir("storage-");
   const id = "123e4567-e89b-42d3-a456-426614174000";
   const prefix = `2026-06-21T12-34-56-789Z-${id}`;
   const binaryFile = join(directory, `${prefix}.jlcp`);
@@ -291,7 +291,7 @@ test("ELF parser accepts writable aligned scalars and rejects unsafe selectors",
 });
 
 test("project control config must be strict and Git-tracked", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "jlink-mcp-config-"));
+  const directory = await createRepoTempDir("config-");
   const configFile = join(directory, ".jlink-mcp.json");
   try {
     await execFileAsync("git", ["init", "-q", directory]);

@@ -137,6 +137,44 @@ test("RSP memory IO handles monitor output and read errors", async () => {
   }
 });
 
+test("RSP memory IO handles monitor OK, timeout, and malformed responses", async () => {
+  const okServer = createRspServer((payload) => payload.startsWith("qRcmd,") ? "OK" : "");
+  await new Promise<void>((resolve) => okServer.listen(0, "127.0.0.1", resolve));
+  const okAddress = okServer.address();
+  if (typeof okAddress !== "object" || okAddress === null) throw new Error("expected TCP server address");
+  const okIo = await RspMemoryIo.connect({ port: okAddress.port, timeoutMs: 100 });
+  try {
+    assert.equal(await okIo.monitor("status"), "");
+  } finally {
+    okIo.dispose();
+    await new Promise<void>((resolve) => okServer.close(() => resolve()));
+  }
+
+  const malformedServer = createRspServer((payload) => payload.startsWith("qRcmd,") ? "BAD" : "");
+  await new Promise<void>((resolve) => malformedServer.listen(0, "127.0.0.1", resolve));
+  const malformedAddress = malformedServer.address();
+  if (typeof malformedAddress !== "object" || malformedAddress === null) throw new Error("expected TCP server address");
+  const malformedIo = await RspMemoryIo.connect({ port: malformedAddress.port, timeoutMs: 100 });
+  try {
+    await assert.rejects(() => malformedIo.monitor("status"), /unexpected response/);
+  } finally {
+    malformedIo.dispose();
+    await new Promise<void>((resolve) => malformedServer.close(() => resolve()));
+  }
+
+  const timeoutServer = createRspServer((payload) => payload.startsWith("qRcmd,") ? [] : "");
+  await new Promise<void>((resolve) => timeoutServer.listen(0, "127.0.0.1", resolve));
+  const timeoutAddress = timeoutServer.address();
+  if (typeof timeoutAddress !== "object" || timeoutAddress === null) throw new Error("expected TCP server address");
+  const timeoutIo = await RspMemoryIo.connect({ port: timeoutAddress.port, timeoutMs: 50 });
+  try {
+    await assert.rejects(() => timeoutIo.monitor("status"), /RSP response timeout/);
+  } finally {
+    timeoutIo.dispose();
+    await new Promise<void>((resolve) => timeoutServer.close(() => resolve()));
+  }
+});
+
 test("RSP memory IO rejects short reads and write failures", async () => {
   const server = createRspServer((payload) => {
     if (payload === "qSupported") return "";

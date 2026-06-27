@@ -80,7 +80,7 @@ export class RspMemoryIo implements DirectRttMemoryIo {
           continue;
         }
         if (/^E[0-9a-fA-F]{2}/.test(response)) throw new Error(`RSP monitor command failed: ${response}`);
-        return response;
+        throw new Error(`RSP monitor unexpected response: ${response}`);
       }
     });
   }

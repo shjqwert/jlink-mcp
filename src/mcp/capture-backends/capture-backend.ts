@@ -25,6 +25,17 @@ export interface BackendProbeResult extends BackendCapability {
   status: BackendStatus;
   reason: string;
   warnings: string[];
+  preflight?: Record<string, unknown>;
+  headlessBenchmark?: {
+    status: "available" | "blocked" | "not_tested";
+    reason: string;
+    artifact?: string;
+  };
+  sdkPrototype?: {
+    status: "found" | "missing";
+    headerPath?: string;
+    evidence?: string;
+  };
 }
 
 export interface BackendBenchmarkResult {
@@ -59,6 +70,7 @@ export interface RttProbeSnapshot {
 
 export interface HssAdapter {
   isAvailable(sdkDir: string): boolean;
+  preflight?(sdkDir: string): Record<string, unknown>;
   benchmark?(variables: string[], requestedRateHz: number, durationSec: number): BackendBenchmarkResult;
 }
 

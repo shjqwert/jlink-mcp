@@ -10,7 +10,6 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { ProbeBackend, CaptureProbeConfig } from "../probe/backend";
 import { ProcessManager } from "../utils/process-manager";
@@ -43,6 +42,7 @@ import {
   loadProjectControlConfig,
   resolveElfSymbols,
 } from "../gdb/elf-resolver";
+import { repoTempRoot } from "./preflight/temp-preflight";
 
 const captureServerProcess = "jlink-capture-gdb-server";
 
@@ -160,7 +160,7 @@ export class CaptureService {
     private processManager: ProcessManager,
     private gdbPath: string,
   ) {
-    this.knownOutputDirs.add(join(tmpdir(), "jlink-mcp-captures"));
+    this.knownOutputDirs.add(join(repoTempRoot(), "captures"));
   }
 
   async prepare(input: CapturePrepareInput): Promise<Record<string, unknown>> {
@@ -593,7 +593,7 @@ function helperControlPayload(config: ProjectControlConfig, symbols: Map<string,
 }
 
 async function prepareOutputDirectory(candidate?: string): Promise<string> {
-  const requested = candidate ?? join(tmpdir(), "jlink-mcp-captures");
+  const requested = candidate ?? join(repoTempRoot(), "captures");
   if (!isAbsolute(requested)) throw new Error("outputDir must be absolute");
   await mkdir(requested, { recursive: true });
   const directory = await realpath(requested);

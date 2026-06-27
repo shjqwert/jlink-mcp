@@ -11,12 +11,33 @@ export class EnvJlinkHssAdapter implements HssAdapter {
   constructor(private readonly options: EnvJlinkHssAdapterOptions = {}) {}
 
   isAvailable(sdkDir: string): boolean {
+    const preflight = this.preflight(sdkDir);
+    return Boolean(preflight.jscopeExeExists && preflight.jlinkDllExists && preflight.hssExportsFound);
+  }
+
+  preflight(sdkDir: string): Record<string, unknown> {
     const installDir = (this.options.installDir ?? sdkDir) || findJLinkInstallDir();
-    if (!installDir) return false;
+    if (!installDir) {
+      return {
+        installDir: "",
+        jscopeExeExists: false,
+        jlinkDllExists: false,
+        hssExportsFound: false,
+        jscopeProjectExists: false,
+        jscopeGuiOpenOk: false,
+      };
+    }
     const jscope = path.join(installDir, "JScope.exe");
     const dll = path.join(installDir, "JLink_x64.dll");
-    if (!fs.existsSync(jscope) || !fs.existsSync(dll)) return false;
-    return dllContainsHssExports(dll);
+    const project = this.projectFile();
+    return {
+      installDir,
+      jscopeExeExists: fs.existsSync(jscope),
+      jlinkDllExists: fs.existsSync(dll),
+      hssExportsFound: fs.existsSync(dll) && dllContainsHssExports(dll),
+      jscopeProjectExists: Boolean(project),
+      jscopeGuiOpenOk: false,
+    };
   }
 
   projectFile(): string | undefined {
@@ -33,6 +54,16 @@ export class FakeJlinkHssAdapter implements HssAdapter {
 
   isAvailable(_sdkDir: string): boolean {
     return this.available;
+  }
+
+  preflight(_sdkDir: string): Record<string, unknown> {
+    return {
+      jscopeExeExists: this.available,
+      jlinkDllExists: this.available,
+      hssExportsFound: this.available,
+      jscopeProjectExists: false,
+      jscopeGuiOpenOk: false,
+    };
   }
 
   benchmark(variables: string[], requestedRateHz: number, durationSec: number): BackendBenchmarkResult {

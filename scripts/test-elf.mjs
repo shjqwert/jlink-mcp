@@ -18,19 +18,22 @@ function find(tool) {
 const gcc = find("arm-none-eabi-gcc");
 const gdb = find("arm-none-eabi-gdb");
 const build = join("native", "capture-helper", "build", "elf-test");
+const tempDir = join(process.cwd(), ".tmp", "jlink-mcp", "elf-test-temp");
 mkdirSync(build, { recursive: true });
+mkdirSync(tempDir, { recursive: true });
+const env = { ...process.env, TEMP: tempDir, TMP: tempDir, TMPDIR: tempDir };
 const elf = join(build, "capture-symbols.elf");
 const compile = spawnSync(gcc, [
   "-mcpu=cortex-m4", "-mthumb", "-g3", "-O0", "-nostdlib",
   "-Wl,-T,src/mcp/fixtures/capture.ld",
   "src/mcp/fixtures/capture-symbols.c", "src/mcp/fixtures/capture-other.c",
   "-o", elf,
-], { stdio: "inherit" });
+], { stdio: "inherit", env });
 if (compile.error) throw compile.error;
 if (compile.status !== 0) process.exit(compile.status ?? 1);
 const tests = spawnSync(process.execPath, ["--test", "out/mcp/elf-integration.test.js"], {
   stdio: "inherit",
-  env: { ...process.env, CAPTURE_TEST_GDB: gdb, CAPTURE_TEST_ELF: join(process.cwd(), elf) },
+  env: { ...env, CAPTURE_TEST_GDB: gdb, CAPTURE_TEST_ELF: join(process.cwd(), elf) },
 });
 if (tests.error) throw tests.error;
 process.exit(tests.status ?? 1);

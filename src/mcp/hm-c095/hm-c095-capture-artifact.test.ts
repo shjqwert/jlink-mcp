@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { selectorHints } from "../bridge/queries";
 import { captureMetadataToExperimentRecord, loadExperimentForAnalysis } from "../experiment-store";
+import { createRepoTempDir } from "../preflight/temp-preflight";
 import { hmCaptureBinary, writeHmCapture } from "./hm-c095-capture-fixture";
 
 test("HM_C095 capture metadata converts to ExperimentRecord with current selectors", async () => {
@@ -41,7 +41,7 @@ test("HM_C095 capture metadata converts to ExperimentRecord with current selecto
 
 test("HM_C095 capture conversion rejects wrong-session, outside binary, and path escape", async () => {
   const { directory, metadataFile, metadata } = await writeHmCapture();
-  const outside = await mkdtemp(join(tmpdir(), "hm-c095-capture-outside-"));
+  const outside = await createRepoTempDir("hm-c095-capture-outside-");
   try {
     const wrongSession = "223e4567-e89b-42d3-a456-426614174000";
     const wrongBinary = join(directory, `2026-06-27T00-00-00-000Z-${wrongSession}.jlcp`);

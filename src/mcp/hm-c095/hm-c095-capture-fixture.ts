@@ -1,6 +1,6 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createRepoTempDir } from "../preflight/temp-preflight";
 
 export async function writeHmCapture(): Promise<{
   directory: string;
@@ -8,7 +8,7 @@ export async function writeHmCapture(): Promise<{
   binaryFile: string;
   metadata: ReturnType<typeof hmMetadata>;
 }> {
-  const directory = await mkdtemp(join(tmpdir(), "hm-c095-capture-"));
+  const directory = await createRepoTempDir("hm-c095-capture-");
   const sessionId = "123e4567-e89b-42d3-a456-426614174000";
   const prefix = `2026-06-27T00-00-00-000Z-${sessionId}`;
   const binaryFile = join(directory, `${prefix}.jlcp`);

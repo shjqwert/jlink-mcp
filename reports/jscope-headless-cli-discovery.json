@@ -1,0 +1,14 @@
+{
+  "executable": "C:\\Program Files\\SEGGER\\JLink_V884\\JScope.exe",
+  "attempts": [
+    { "args": "--help", "timedOut": true, "stdout": "", "stderr": "" },
+    { "args": "-?", "timedOut": true, "stdout": "", "stderr": "" },
+    { "args": "/?", "timedOut": true, "stdout": "", "stderr": "" }
+  ],
+  "docsChecked": [
+    "C:\\Program Files\\SEGGER\\JLink_V884",
+    "C:\\Program Files\\SEGGER\\JLink"
+  ],
+  "headlessStartStopExportFound": false,
+  "conclusion": "JSCOPE_HEADLESS_EXPORT_MISSING"
+}

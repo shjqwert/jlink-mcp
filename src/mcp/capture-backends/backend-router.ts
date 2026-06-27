@@ -15,6 +15,10 @@ import { createMemoryPollRspBackend } from "./memory-poll-rsp-backend";
 export interface BackendProbeReport {
   preferredOrder: CaptureBackendName[];
   selectedBackend: CaptureBackendName | null;
+  fallbackFrom: CaptureBackendName[];
+  fallbackReason?: string;
+  unavailableReasons: Partial<Record<CaptureBackendName, string>>;
+  lowRateWarning?: string;
   backends: BackendProbeResult[];
   warnings: string[];
 }
@@ -35,18 +39,40 @@ export function probeCaptureBackends(context: BackendProbeContext = {}, backends
   if (context.preferredBackend) {
     const preferred = results.find((backend) => backend.name === context.preferredBackend);
     if (!preferred) {
-      return { preferredOrder: preferredBackendOrder, selectedBackend: null, backends: results, warnings: [`preferred backend ${context.preferredBackend} is unknown`] };
+      return report(results, null, [`preferred backend ${context.preferredBackend} is unknown`]);
     }
     warnings.push(`preferred backend override requested: ${context.preferredBackend}`);
     if (preferred.status !== "available") {
       warnings.push(`preferred backend ${context.preferredBackend} unavailable: ${preferred.reason}`);
-      return { preferredOrder: preferredBackendOrder, selectedBackend: null, backends: results, warnings };
+      return report(results, null, warnings);
     }
-    return { preferredOrder: preferredBackendOrder, selectedBackend: preferred.name, backends: results, warnings };
+    return report(results, preferred.name, warnings);
   }
 
   const selected = results.find((backend) => backend.status === "available" && (backend.name !== "external-import" || context.mode === "offline-import"));
-  return { preferredOrder: preferredBackendOrder, selectedBackend: selected?.name ?? null, backends: results, warnings };
+  return report(results, selected?.name ?? null, warnings);
+}
+
+function report(results: BackendProbeResult[], selectedBackend: CaptureBackendName | null, warnings: string[]): BackendProbeReport {
+  const selected = results.find((backend) => backend.name === selectedBackend);
+  const fallbackFrom = selected
+    ? results.filter((backend) => backend.priority < selected.priority && backend.status !== "available").map((backend) => backend.name)
+    : [];
+  const unavailableReasons = Object.fromEntries(results
+    .filter((backend) => backend.status !== "available")
+    .map((backend) => [backend.name, backend.reason])) as Partial<Record<CaptureBackendName, string>>;
+  const rsp = selectedBackend === "memory-poll-rsp" ? selected : undefined;
+  const lowRateWarning = rsp?.warnings.find((warning) => /low-rate fallback/i.test(warning));
+  return {
+    preferredOrder: preferredBackendOrder,
+    selectedBackend,
+    fallbackFrom,
+    fallbackReason: fallbackFrom.length > 0 ? fallbackFrom.map((name) => `${name}: ${unavailableReasons[name]}`).join("; ") : undefined,
+    unavailableReasons,
+    lowRateWarning,
+    backends: results,
+    warnings,
+  };
 }
 
 export function captureBackendListTool(context: BackendProbeContext = {}): BackendProbeReport {

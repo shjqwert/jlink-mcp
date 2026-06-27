@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -10,10 +9,11 @@ import {
   ExperimentAnalyzeOutput,
 } from "../analysis/tools";
 import { evidenceForCodegraphTool } from "../bridge/tools";
+import { createRepoTempDir } from "../preflight/temp-preflight";
 import { writeHmCapture } from "./hm-c095-capture-fixture";
 
 test("HM_C095 MCP tools cover experimentId, fixturePath, experimentPath, metadataFile, and captureId inputs", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hm-c095-tools-"));
+  const directory = await createRepoTempDir("hm-c095-tools-");
   const capture = await writeHmCapture();
   try {
     assert.ok(analysisProfilesTool().profiles.some((profile) => profile.name === "generic_control"));

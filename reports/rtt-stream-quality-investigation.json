@@ -1,0 +1,16 @@
+{
+  "result": "RTT_STREAM_NOT_PASS",
+  "artifact": "reports/hm-c095-real-hardware-csharp-stream-30s.bin",
+  "decoder": {
+    "frames": 280,
+    "sampleFrames": 280,
+    "ackFrames": 0,
+    "crcFailures": 498,
+    "discardedBytes": 45794,
+    "sequenceGaps": 1587,
+    "duplicateSeqs": 0,
+    "actualRateHz": 11.304700162074555
+  },
+  "pass": false,
+  "reason": "CRC failures, discarded bytes, sequence gaps, and missing ACK evidence remain."
+}
