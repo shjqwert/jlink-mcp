@@ -77,8 +77,8 @@ test("TraceAgent stream decoder detects CRC failures, gaps, duplicates, and disc
   assert.equal(decoded.discardedBytes, 1);
 });
 
-test("TraceAgent decoder parses current HM_C095 direct RTT stream without CRC or sequence loss", async () => {
-  const bytes = await readFile(join(process.cwd(), "reports", "hm-c095-real-hardware-direct-rtt-stream-30s-csharp.bin"));
+test("TraceAgent decoder parses a clean sample stream without CRC or sequence loss", async () => {
+  const bytes = Buffer.concat(Array.from({ length: 1240 }, (_, index) => sampleFrame(index + 1, index * 20000, [[0, index]])));
   const decoded = decodeTraceAgentStream(bytes);
   assert.equal(decoded.frames, 1240);
   assert.equal(decoded.sampleFrames, 1240);
@@ -112,6 +112,13 @@ test("TraceAgent decoder parses current HM_C095 direct RTT stream without CRC or
   });
   assert.equal(empty.capture!.actualRateHz, 0);
   assert.deepEqual(empty.timeWindowMs, [0, 0]);
+});
+
+test("TraceAgent recorded HM_C095 RTT stream remains NOT_PASS while CRC/gap/discard evidence exists", async () => {
+  const bytes = await readFile(join(process.cwd(), "reports", "hm-c095-real-hardware-csharp-stream-30s.bin"));
+  const decoded = decodeTraceAgentStream(bytes);
+  assert.equal(decoded.ackFrames, 0);
+  assert.ok(decoded.crcFailures > 0 || decoded.sequenceGaps > 0 || decoded.discardedBytes > 0);
 });
 
 function ackFrame(cmdId: number, status: number, signalId: number, readback: number): Buffer {

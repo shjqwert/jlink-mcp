@@ -22,9 +22,33 @@ export function createJlinkHssBackend(adapter?: HssAdapter): CaptureBackend {
       }
       const hss = context.hssAdapter ?? adapter ?? new EnvJlinkHssAdapter();
       const sdkDir = env.JLINK_SDK_DIR ?? env.JLINK_INSTALL_DIR ?? "";
-      return hss.isAvailable(sdkDir)
-        ? available(cap, "JScope/J-Link HSS preflight available", ["HSS benchmark requires an implemented adapter; JScope CLI exposes project open/probe selection but no verified headless export path."])
-        : unavailable(cap, "JScope/J-Link HSS preflight unavailable");
+      const preflight = hss.preflight?.(sdkDir) ?? {};
+      if (!hss.isAvailable(sdkDir)) {
+        return {
+          ...unavailable(cap, "JScope/J-Link HSS preflight unavailable"),
+          preflight,
+          headlessBenchmark: { status: "not_tested", reason: "HSS preflight unavailable" },
+          sdkPrototype: { status: "missing", evidence: "typed JLINK_HSS_* prototypes not found" },
+        };
+      }
+      const benchmark = (hss as HssAdapter).benchmark;
+      if (!benchmark) {
+        return {
+          ...cap,
+          status: "available-if-configured" as const,
+          reason: "HSS preflight available, headless benchmark blocked: missing typed JLINK_HSS prototypes",
+          warnings: ["JScope/J-Link HSS preflight is not a headless HSS benchmark."],
+          preflight,
+          headlessBenchmark: { status: "blocked", reason: "missing typed JLINK_HSS prototypes" },
+          sdkPrototype: { status: "missing", evidence: "No trusted local JLINK_HSS_* header/prototype evidence is configured" },
+        };
+      }
+      return {
+        ...available(cap, "typed HSS adapter benchmark available"),
+        preflight,
+        headlessBenchmark: { status: "available", reason: "typed HSS adapter benchmark is configured" },
+        sdkPrototype: { status: "found", evidence: "test or typed adapter exposes benchmark()" },
+      };
     },
     benchmark(variables, requestedRateHz, durationSec, context = {}) {
       const hss = context.hssAdapter ?? adapter;

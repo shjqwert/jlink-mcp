@@ -15,12 +15,13 @@ Validated:
 
 HM_C095 recorded stream regression:
 
-- File: `reports/hm-c095-real-hardware-direct-rtt-stream-30s-csharp.bin`
-- Frames: 1240
-- CRC failures: 0
-- Sequence gaps: 0
+- File: `reports/hm-c095-real-hardware-csharp-stream-30s.bin`
+- Frames: 280
+- CRC failures: 498
+- Sequence gaps: 1587
 - Duplicate sequences: 0
-- Discarded bytes: 0
-- Actual rate: 50.04 Hz
+- Discarded bytes: 45794
+- Actual rate: 11.30 Hz
+- Result: NOT_PASS
 
-Remaining risk: direct RTT memory/DLL transport is still not wired to live MCP hardware access in this change.
+Remaining risk: direct RTT stream quality and ACK observation are still blocked; do not report RTT live streaming PASS.

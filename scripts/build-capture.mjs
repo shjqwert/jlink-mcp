@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 
 function findCmake() {
   const probe = spawnSync("cmake", ["--version"], { stdio: "ignore" });
@@ -20,11 +21,15 @@ function findCmake() {
 }
 
 const cmake = findCmake();
+const tempDir = join(process.cwd(), ".tmp", "jlink-mcp", "native-build-temp");
+mkdirSync(tempDir, { recursive: true });
+const env = { ...process.env, TEMP: tempDir, TMP: tempDir, TMPDIR: tempDir };
+
 for (const args of [
   ["-S", "native/capture-helper", "-B", "native/capture-helper/build", "-A", "x64"],
   ["--build", "native/capture-helper/build", "--config", "Release"],
 ]) {
-  const result = spawnSync(cmake, args, { stdio: "inherit" });
+  const result = spawnSync(cmake, args, { stdio: "inherit", env });
   if (result.error) throw result.error;
   if (result.status !== 0) process.exit(result.status ?? 1);
 }

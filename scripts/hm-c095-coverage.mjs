@@ -12,13 +12,17 @@ const tests = [
   "out/mcp/capture-backends/capture-backends.test.js",
   "out/mcp/rtt-channel/rtt-channel.test.js",
   "out/mcp/rtt-protocols/traceagent.test.js",
+  "out/mcp/preflight/temp-preflight.test.js",
   "out/mcp/hm-c095/hm-c095-runtime-analysis.test.js",
   "out/mcp/hm-c095/hm-c095-capture-artifact.test.js",
   "out/mcp/hm-c095/hm-c095-mcp-tools.test.js",
 ];
 
 const reportsDir = join(process.cwd(), "reports");
+const tempDir = join(process.cwd(), ".tmp", "jlink-mcp", "node-coverage-temp");
 await mkdir(reportsDir, { recursive: true });
+await mkdir(tempDir, { recursive: true });
+const env = { ...process.env, TEMP: tempDir, TMP: tempDir, TMPDIR: tempDir };
 
 const runtime = runCoverage("runtime analysis", [
   "--test-coverage-include=out/mcp/analysis/*.js",
@@ -35,14 +39,16 @@ const write = runCoverage("write validation", [
   "out/mcp/write/write-validation.test.js",
 ]);
 
-const backends = runCoverage("backend/router/rtt/traceagent", [
+const backends = runCoverage("backend/router/rtt/traceagent/preflight", [
   "--test-coverage-include=out/mcp/capture-backends/*.js",
   "--test-coverage-include=out/mcp/rtt-channel/*.js",
   "--test-coverage-include=out/mcp/rtt-protocols/*.js",
+  "--test-coverage-include=out/mcp/preflight/*.js",
   "--test-coverage-lines=95",
   "out/mcp/capture-backends/capture-backends.test.js",
   "out/mcp/rtt-channel/rtt-channel.test.js",
   "out/mcp/rtt-protocols/traceagent.test.js",
+  "out/mcp/preflight/temp-preflight.test.js",
 ]);
 
 const full = runCoverage("full repo", [
@@ -63,7 +69,7 @@ await writeFile(join(reportsDir, "coverage-summary.md"), [
   "| --- | --- | --- |",
   `| Runtime analysis modules | ${runtime.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(runtimeLines)} |`,
   `| Write validation modules | ${write.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(writeLines)} |`,
-  `| Backend/router/RTT/TraceAgent modules | ${backends.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(backendLines)} |`,
+  `| Backend/router/RTT/TraceAgent/preflight modules | ${backends.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(backendLines)} |`,
   `| Full repo | ${fullPass ? "PASS" : "GAP"} | line coverage ${Number.isFinite(fullLines) ? `${fullLines.toFixed(2)}%` : "not parsed"} |`,
   "",
   "No c8 dependency was added; Node 24 built-in coverage supplied the scoped gates.",
@@ -82,7 +88,7 @@ if (!fullPass) {
     "",
     "- Runtime analysis modules >=95%",
     "- Write validation modules >=95%",
-    "- Backend/router/RTT/TraceAgent modules >=95%",
+    "- Backend/router/RTT/TraceAgent/preflight modules >=95%",
     "",
     "No files were excluded to fake whole-repo coverage.",
     "",
@@ -98,7 +104,7 @@ function runCoverage(label, args, requirePass = true) {
     cwd: process.cwd(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
+    env,
   });
   const output = `${result.stdout}${result.stderr}`;
   process.stdout.write(`\n=== coverage: ${label} ===\n${output}`);

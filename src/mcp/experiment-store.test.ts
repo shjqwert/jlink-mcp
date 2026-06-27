@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { experimentAnalyzeTool, experimentCompareTool } from "./analysis/tools";
 import { evidenceForCodegraphTool } from "./bridge/tools";
 import { selectorHints } from "./bridge/queries";
 import { readCaptureSamples } from "./capture-storage";
 import { captureMetadataToExperimentRecord, loadExperimentForAnalysis } from "./experiment-store";
+import { createRepoTempDir } from "./preflight/temp-preflight";
 
 test("ExperimentStore loads fixture id and rejects fixture path escape", async () => {
   const fixture = await loadExperimentForAnalysis({ experimentId: "generic-control-ideal" });
@@ -19,7 +19,7 @@ test("ExperimentStore loads fixture id and rejects fixture path escape", async (
 });
 
 test("ExperimentStore loads saved .experiment.json", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "jlink-mcp-exp-"));
+  const directory = await createRepoTempDir("exp-");
   try {
     const source = await readFile(join(process.cwd(), "src", "mcp", "fixtures", "generic-control-ideal.experiment.json"), "utf8");
     const experimentPath = join(directory, "saved.experiment.json");
@@ -64,7 +64,7 @@ test("ExperimentStore converts capture metadata and samples", async () => {
 
 test("ExperimentStore rejects capture metadata binaryFile identity mismatches", async () => {
   const { directory, metadataFile, metadata } = await writeSyntheticCapture();
-  const otherDirectory = await mkdtemp(join(tmpdir(), "jlink-mcp-other-capture-"));
+  const otherDirectory = await createRepoTempDir("other-capture-");
   try {
     const otherBinary = join(otherDirectory, `2026-06-21T12-34-56-789Z-${metadata.sessionId}.jlcp`);
     await writeFile(otherBinary, syntheticCapture());
@@ -174,7 +174,7 @@ async function writeSyntheticCapture(): Promise<{
   binaryFile: string;
   metadata: ReturnType<typeof syntheticMetadata>;
 }> {
-  const directory = await mkdtemp(join(tmpdir(), "jlink-mcp-capture-"));
+  const directory = await createRepoTempDir("capture-");
   const sessionId = "123e4567-e89b-42d3-a456-426614174000";
   const prefix = `2026-06-21T12-34-56-789Z-${sessionId}`;
   const binaryFile = join(directory, `${prefix}.jlcp`);

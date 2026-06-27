@@ -33,6 +33,10 @@ test("RTT unavailable preserves reasons and no-RTT project falls back without MC
   assert.equal(rttBackend?.reason, "RTT control block not found");
   assert.equal(rsp?.requiresFirmware, false);
   assert.match(rsp?.warnings.join("\n") ?? "", /low-rate fallback/);
+  assert.deepEqual(report.fallbackFrom, ["jlink-hss", "direct-rtt-channel"]);
+  assert.match(report.fallbackReason ?? "", /jlink-hss/);
+  assert.match(report.unavailableReasons["direct-rtt-channel"] ?? "", /RTT control block/);
+  assert.match(report.lowRateWarning ?? "", /low-rate fallback/);
 });
 
 test("preferred backend override works only when the backend is available", () => {
@@ -96,6 +100,12 @@ test("EnvJlinkHssAdapter preflights JScope, DLL exports, and current JScope proj
 
     const adapter = new EnvJlinkHssAdapter({ installDir });
     assert.equal(adapter.isAvailable(""), true);
+    const report = probeCaptureBackends({ env: hssEnv, hssAdapter: adapter, rtt });
+    const hss = report.backends.find((backend) => backend.name === "jlink-hss");
+    assert.equal(hss?.status, "available-if-configured");
+    assert.equal(hss?.headlessBenchmark?.status, "blocked");
+    assert.equal(hss?.sdkPrototype?.status, "missing");
+    assert.equal(report.selectedBackend, "direct-rtt-channel");
 
     process.env.APPDATA = appData;
     assert.equal(adapter.projectFile(), project);
