@@ -1,0 +1,30 @@
+{
+  "experimentId": "hm_c095_real_hardware_traceagent_20260627",
+  "analysisProfile": "generic_state_machine",
+  "selectedSignals": [
+    "alive_counter",
+    "os_tick",
+    "trace_state",
+    "motor_fault",
+    "theta_rad",
+    "sector",
+    "mod_pu",
+    "iu_pu",
+    "iv_pu",
+    "iw_pu",
+    "duty_u",
+    "duty_v",
+    "duty_w"
+  ],
+  "summary": {
+    "verdict": "warning",
+    "mainFindings": []
+  },
+  "patterns": [],
+  "quality": {
+    "warnings": [
+      "actual sample rate 48.95046179680941 Hz is below requested 50 Hz",
+      "no state, fault, or counter transitions detected"
+    ]
+  }
+}

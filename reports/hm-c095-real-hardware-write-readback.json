@@ -1,0 +1,59 @@
+{
+  "method": "gdb_safe_symbol_fallback",
+  "traceagentRttWriteVar": {
+    "status": "blocked",
+    "reason": "MCP rtt_send targets RTT channel 0; HM_C095 TraceAgent command channel is RTT channel 1 AI_CMD"
+  },
+  "target": {
+    "selector": "CddSbc.c::guwWdgFlg",
+    "address": "0x20006bf0",
+    "type": "unsigned short",
+    "allowedValues": [0, 1]
+  },
+  "commands": [
+    {
+      "command": "info variables guwWdgFlg",
+      "result": "File CddSbc.c: static UINT16 guwWdgFlg"
+    },
+    {
+      "command": "ptype guwWdgFlg",
+      "result": "type = unsigned short"
+    },
+    {
+      "command": "print &guwWdgFlg",
+      "result": "$3 = (UINT16 *) 0x20006bf0 <guwWdgFlg>"
+    },
+    {
+      "command": "print /u guwWdgFlg",
+      "result": "$6 = 0"
+    },
+    {
+      "command": "set variable guwWdgFlg = 1",
+      "result": "ok"
+    },
+    {
+      "command": "print /u guwWdgFlg",
+      "result": "$7 = 1"
+    },
+    {
+      "command": "set variable guwWdgFlg = 0",
+      "result": "ok"
+    },
+    {
+      "command": "print /u guwWdgFlg",
+      "result": "$8 = 0"
+    }
+  ],
+  "rejectTests": [
+    {
+      "selector": "guwWdgFlg",
+      "value": 2,
+      "result": "local policy rejection; not sent to hardware"
+    },
+    {
+      "selector": "bMotorStarted",
+      "value": 1,
+      "result": "local policy rejection; not sent to hardware"
+    }
+  ]
+}
