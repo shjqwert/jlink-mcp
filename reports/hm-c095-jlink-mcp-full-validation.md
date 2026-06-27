@@ -5,6 +5,7 @@
 | Item                               | Value                                                              |
 | ---------------------------------- | ------------------------------------------------------------------ |
 | Jlink-MCP branch                   | `test/hm-c095-full-validation`                                     |
+| Jlink-MCP validation rerun commit  | `bf06428c3b4ba15fd00b9243a6016b7bf769f5c2`                         |
 | Jlink-MCP base commit              | `c6dbb6926781d8cb37ec7bd7155a93d0c78fb027`                         |
 | Phase 5C archive commit present    | yes, `6dd9010 chore: archive runtime experiment analysis spec`     |
 | HM_C095 path                       | `D:\FOC_Project\Trunk\ProJect\HM_C095_SCM_App-e8f80a2-mcal-config` |
@@ -69,6 +70,7 @@ See `reports/coverage-summary.md`.
 | Added CodeGraph runtime dependency                  | no                                             |
 | Jlink-MCP runtime/tests called CodeGraph MCP        | no                                             |
 | Codex source-inspection CodeGraph MCP call occurred | yes, once before the objective file was reread |
+| CodeGraph completion condition                      | waived by user after review                    |
 
 ## HM_C095 Source State
 
@@ -94,12 +96,13 @@ HM_C095 was dirty before validation and remained dirty after optional IAR build.
 - `36b44a9 test: add coverage threshold enforcement`
 - `test: complete HM_C095 Jlink-MCP full validation` (this final report commit)
 - `fix: harden safe write validation` (this review fix)
+- `bf06428 docs: align write safety reports`
 
 ## Remaining Risks
 
 - Full repo coverage is below 95% because hardware-facing and extension modules remain outside this offline validation scope.
 - Optional IAR build passes with warnings; warning cleanup belongs in the firmware repo, not this Jlink-MCP validation.
-- The conversation contains one Codex CodeGraph source-inspection call. Jlink-MCP code/tests/runtime did not call CodeGraph.
+- The conversation contains one Codex CodeGraph source-inspection call, waived by the user for completion. Jlink-MCP code/tests/runtime did not call CodeGraph.
 
 ## Recommendation
 
