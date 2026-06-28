@@ -1,0 +1,30 @@
+{
+  "status": "ok",
+  "safetyStatus": "HSS_SAFETY_FAIL",
+  "device": "Z20K146MC",
+  "interface": "SWD",
+  "speedKhz": 4000,
+  "serial": "",
+  "dll": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+  "dllVersion": 88400,
+  "firmware": "unknown",
+  "vtrefMv": null,
+  "targetId": 731911287,
+  "probeSerial": 69401227,
+  "returnCodes": {
+    "selectSerial": 0,
+    "open": 0,
+    "device": 0,
+    "tifSelect": 0,
+    "connect": 0
+  },
+  "targetWasHalted": true,
+  "targetWasHaltedRaw": 1,
+  "targetReset": false,
+  "targetWritten": false,
+  "flashIssued": false,
+  "resetIssued": false,
+  "haltIssued": false,
+  "baseApiCandidate": "AUTHORIZED_UNVERIFIED_BASE_API_CANDIDATE",
+  "benchmarkAllowed": false
+}

@@ -11,8 +11,7 @@ export class EnvJlinkHssAdapter implements HssAdapter {
   constructor(private readonly options: EnvJlinkHssAdapterOptions = {}) {}
 
   isAvailable(sdkDir: string): boolean {
-    const preflight = this.preflight(sdkDir);
-    return Boolean(preflight.jscopeExeExists && preflight.jlinkDllExists && preflight.hssExportsFound);
+    return false;
   }
 
   preflight(sdkDir: string): Record<string, unknown> {
@@ -25,6 +24,9 @@ export class EnvJlinkHssAdapter implements HssAdapter {
         hssExportsFound: false,
         jscopeProjectExists: false,
         jscopeGuiOpenOk: false,
+        preflightOnly: true,
+        benchmarkReady: false,
+        reason: "JScope GUI preflight is not HSS headless benchmark",
       };
     }
     const jscope = path.join(installDir, "JScope.exe");
@@ -37,6 +39,9 @@ export class EnvJlinkHssAdapter implements HssAdapter {
       hssExportsFound: fs.existsSync(dll) && dllContainsHssExports(dll),
       jscopeProjectExists: Boolean(project),
       jscopeGuiOpenOk: false,
+      preflightOnly: true,
+      benchmarkReady: false,
+      reason: "JScope GUI preflight is not HSS headless benchmark",
     };
   }
 

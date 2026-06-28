@@ -10,6 +10,8 @@ const tests = [
   "out/mcp/bridge/tools.test.js",
   "out/mcp/experiment-store.test.js",
   "out/mcp/capture-backends/capture-backends.test.js",
+  "out/mcp/hss-dll/hss-api-candidate.test.js",
+  "out/mcp/hss-dll/hss-dll-adapter.test.js",
   "out/mcp/rtt-channel/rtt-channel.test.js",
   "out/mcp/rtt-protocols/traceagent.test.js",
   "out/mcp/preflight/temp-preflight.test.js",
@@ -51,6 +53,13 @@ const backends = runCoverage("backend/router/rtt/traceagent/preflight", [
   "out/mcp/preflight/temp-preflight.test.js",
 ]);
 
+const hssDll = runCoverage("experimental HSS DLL modules", [
+  "--test-coverage-include=out/mcp/hss-dll/*.js",
+  "--test-coverage-lines=95",
+  "out/mcp/hss-dll/hss-api-candidate.test.js",
+  "out/mcp/hss-dll/hss-dll-adapter.test.js",
+]);
+
 const full = runCoverage("full repo", [
   "--test-coverage-include=out/**/*.js",
   ...tests,
@@ -60,6 +69,7 @@ const full = runCoverage("full repo", [
 const runtimeLines = parseAllFilesLineCoverage(runtime.output);
 const writeLines = parseAllFilesLineCoverage(write.output);
 const backendLines = parseAllFilesLineCoverage(backends.output);
+const hssDllLines = parseAllFilesLineCoverage(hssDll.output);
 const fullLines = parseAllFilesLineCoverage(full.output);
 const fullPass = fullLines >= 95;
 await writeFile(join(reportsDir, "coverage-summary.md"), [
@@ -70,6 +80,7 @@ await writeFile(join(reportsDir, "coverage-summary.md"), [
   `| Runtime analysis modules | ${runtime.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(runtimeLines)} |`,
   `| Write validation modules | ${write.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(writeLines)} |`,
   `| Backend/router/RTT/TraceAgent/preflight modules | ${backends.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(backendLines)} |`,
+  `| Experimental HSS DLL modules | ${hssDll.status === 0 ? "PASS" : "FAIL"} | ${coverageEvidence(hssDllLines)} |`,
   `| Full repo | ${fullPass ? "PASS" : "GAP"} | line coverage ${Number.isFinite(fullLines) ? `${fullLines.toFixed(2)}%` : "not parsed"} |`,
   "",
   "No c8 dependency was added; Node 24 built-in coverage supplied the scoped gates.",
@@ -89,13 +100,14 @@ if (!fullPass) {
     "- Runtime analysis modules >=95%",
     "- Write validation modules >=95%",
     "- Backend/router/RTT/TraceAgent/preflight modules >=95%",
+    "- Experimental HSS DLL modules >=95%",
     "",
     "No files were excluded to fake whole-repo coverage.",
     "",
   ].join("\n"));
 }
 
-if (runtime.status !== 0 || write.status !== 0 || backends.status !== 0 || full.status !== 0) {
+if (runtime.status !== 0 || write.status !== 0 || backends.status !== 0 || hssDll.status !== 0 || full.status !== 0) {
   process.exit(1);
 }
 

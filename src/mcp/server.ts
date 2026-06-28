@@ -12,6 +12,7 @@ import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } fr
 import { evidenceForCodegraphTool } from "./bridge/tools";
 import { CaptureService } from "./capture";
 import { captureBackendBenchmarkTool, captureBackendListTool, captureBackendProbeTool, captureBackendSelectTool, captureImportExperimentTool } from "./capture-backends/backend-router";
+import { hssDllBenchmark, hssDllGetCaps, hssDllPreflight, hssDllSmoke } from "./hss-dll/hss-dll-adapter";
 import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
 import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
 import { RspMemoryIo } from "./rtt-channel/rsp-memory-transport";
@@ -838,6 +839,39 @@ export class JLinkMcpServer {
       sourcePath: z.string(),
       format: z.enum(["csv", "json", "experiment"]),
     }, async (input) => result(() => captureImportExperimentTool(input)));
+
+    const hssDllPreflightSchema = {
+      dllPath: z.string().optional(),
+      device: z.string().optional(),
+      interface: z.enum(["SWD", "JTAG"]).optional(),
+      speedKhz: z.number().int().positive().optional(),
+      serial: z.string().optional(),
+    };
+    this.server.tool("hss_dll_preflight", "Probe experimental JLink_x64.dll HSS candidate symbols without using JScope.", hssDllPreflightSchema,
+      async (input) => result(() => hssDllPreflight(input)));
+    this.server.tool("hss_dll_getcaps", "Call experimental JLINK_HSS_GetCaps only when JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1.", {
+      dllPath: z.string().optional(),
+    }, async (input) => result(() => hssDllGetCaps(input)));
+    this.server.tool("hss_dll_smoke", "Run experimental HSS Start/Read/Stop smoke for one read-only variable when explicitly enabled.", {
+      ...hssDllPreflightSchema,
+      elf: z.string().optional(),
+      symbol: z.string(),
+      address: z.string().optional(),
+      size: z.number().int().positive().optional(),
+      durationSec: z.number().positive().optional(),
+      periodUs: z.number().int().positive().optional(),
+    }, async (input) => result(() => hssDllSmoke(input)));
+    this.server.tool("hss_dll_benchmark", "Run experimental HSS benchmark for read-only variables when explicitly enabled.", {
+      ...hssDllPreflightSchema,
+      variables: z.array(z.object({
+        name: z.string(),
+        address: z.string(),
+        size: z.number().int().positive(),
+        type: z.string().optional(),
+      }).strict()).min(1).max(10),
+      durationSec: z.number().positive().optional(),
+      periodUs: z.number().int().positive().optional(),
+    }, async (input) => result(() => hssDllBenchmark(input)));
 
     this.server.tool("rtt_channel_list", "List RTT channels from a provided control-block snapshot.", {
       controlBlockAddress: z.string().optional(),

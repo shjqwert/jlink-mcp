@@ -9,8 +9,11 @@ HSS:
 | JScope executable | present | `C:\Program Files\SEGGER\JLink_V884\JScope.exe` |
 | JLink HSS DLL exports | present | `JLINK_HSS_GetCaps/Read/Start/Stop` in `JLink_x64.dll` |
 | HM_C095 JScope project | present | `D:\FOC_Project\Trunk\ProJect\HM_C095_SCM_App-e8f80a2-mcal-config\FOC.jscope` |
-| GUI HSS preflight | pass | `reports/jscope-hss-preflight.png` |
-| Headless benchmark/export | blocked | no verified JScope CLI export/start option and no local HSS SDK header |
+| GUI HSS preflight | superseded | historical only; not availability or benchmark evidence |
+| DLL HSS preflight | candidate | `reports/hss-dll-preflight.json` |
+| GetCaps | blocked | `HSS_GETCAPS_TIMEOUT` |
+| Connect preflight | safety fail | target halted; helper did not issue halt/reset/write/flash |
+| Headless benchmark/export | blocked | safety gate failed before Start/Read/Stop |
 
 Direct RTT real-board smoke, C# DLL tight loop:
 
@@ -30,5 +33,5 @@ Write-path smoke:
 
 Conclusion:
 
-- HSS must remain first priority, but real benchmark is blocked until headless HSS adapter/export exists.
+- HSS must remain first priority, but real benchmark is blocked while the target is halted.
 - RTT direct channel is usable for safe write/readback smoke, but current direct polling capture does not meet stream quality requirements on this board.

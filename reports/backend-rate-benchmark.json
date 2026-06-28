@@ -1,8 +1,15 @@
 {
   "result": "hss-benchmark-blocked-rtt-quality-failed",
   "hss": {
-    "preflight": "available",
-    "blocker": "No verified headless JScope export/start CLI and no local typed JLINK_HSS_* header.",
+    "preflight": "candidate",
+    "status": "HSS_SAFETY_FAIL",
+    "benchmarkReady": false,
+    "blocker": "connect-preflight detected targetWasHalted=true.",
+    "dll": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+    "getcaps": "HSS_GETCAPS_TIMEOUT",
+    "connectPreflight": "ok",
+    "targetWasHalted": true,
+    "jscopeSuperseded": true,
     "jscopePreflight": {
       "status": "ok",
       "project": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\FOC.jscope",

@@ -2,5 +2,7 @@ out/
 node_modules/
 native/capture-helper/build/
 native/capture-helper/bin/
+native/hss-helper/build/
+native/hss-helper/bin/
 *.vsix
 .vscode-test/

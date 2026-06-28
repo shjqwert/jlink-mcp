@@ -1,0 +1,18 @@
+{
+  "status": "error",
+  "classification": "HSS_GETCAPS_TIMEOUT",
+  "api": "JLINK_HSS_GetCaps",
+  "dll": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+  "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+  "timeoutMs": 5000,
+  "returnCode": null,
+  "caps": null,
+  "errorCode": "HSS_HELPER_TIMEOUT",
+  "reason": "native HSS helper timed out",
+  "targetConnected": false,
+  "targetReset": false,
+  "targetWritten": false,
+  "haltIssued": false,
+  "flashIssued": false,
+  "pass": false
+}

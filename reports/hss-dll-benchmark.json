@@ -1,0 +1,28 @@
+{
+  "status": "blocked",
+  "classification": "HSS_SAFETY_FAIL",
+  "decodeStatus": "NOT_RUN",
+  "benchmarkPass": false,
+  "matrix": [
+    { "variables": 1, "requestedRateHz": 100, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 1, "requestedRateHz": 500, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 1, "requestedRateHz": 1000, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 3, "requestedRateHz": 100, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 3, "requestedRateHz": 500, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 3, "requestedRateHz": 1000, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 7, "requestedRateHz": 100, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 7, "requestedRateHz": 500, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 7, "requestedRateHz": 1000, "actualRateHz": null, "successRate": null, "errors": ["HSS_SAFETY_FAIL_TARGET_HALTED"] },
+    { "variables": 10, "requestedRateHz": 100, "actualRateHz": null, "successRate": null, "errors": ["SYMBOL_COUNT_UNAVAILABLE"] },
+    { "variables": 10, "requestedRateHz": 500, "actualRateHz": null, "successRate": null, "errors": ["SYMBOL_COUNT_UNAVAILABLE"] },
+    { "variables": 10, "requestedRateHz": 1000, "actualRateHz": null, "successRate": null, "errors": ["SYMBOL_COUNT_UNAVAILABLE"] }
+  ],
+  "rawArtifact": null,
+  "summaryArtifact": "reports/hss-dll-benchmark.json",
+  "targetReset": false,
+  "targetWritten": false,
+  "flashIssued": false,
+  "resetIssued": false,
+  "haltIssued": false,
+  "targetWasHalted": true
+}

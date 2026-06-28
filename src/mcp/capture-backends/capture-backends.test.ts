@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { captureBackendBenchmarkTool, captureImportExperimentTool, probeCaptureBackends } from "./backend-router";
+import { captureBackendBenchmarkTool, captureBackendListTool, captureBackendSelectTool, captureImportExperimentTool, probeCaptureBackends } from "./backend-router";
 import { EnvJlinkHssAdapter, FakeJlinkHssAdapter } from "./jlink-hss-adapter";
 
 const hssEnv = { JLINK_HSS_ENABLED: "1", JLINK_SDK_DIR: "C:\\JLinkSDK" };
@@ -21,7 +21,7 @@ test("HSS is selected before RTT and RSP only when SDK adapter is available", ()
 
 test("HSS missing env or adapter is unavailable and does not block RTT/RSP fallback", () => {
   assert.equal(probeCaptureBackends({ env: { JLINK_HSS_ENABLED: "0" }, rtt }).selectedBackend, "direct-rtt-channel");
-  assert.equal(probeCaptureBackends({ env: hssEnv, rtt, hssAdapter: new FakeJlinkHssAdapter(false) }).backends[0].reason, "JScope/J-Link HSS preflight unavailable");
+  assert.equal(probeCaptureBackends({ env: hssEnv, rtt, hssAdapter: new FakeJlinkHssAdapter(false) }).backends[0].reason, "HSS benchmark adapter unavailable");
   assert.equal(probeCaptureBackends({ env: { JLINK_HSS_ENABLED: "0" }, rtt: { upChannels: [], downChannels: [] } }).selectedBackend, "memory-poll-rsp");
 });
 
@@ -58,6 +58,18 @@ test("external import is offline-only and import tool does not compete with real
   assert.equal(captureImportExperimentTool({ sourcePath: "trace.csv", format: "csv" }).backend, "external-import");
 });
 
+test("backend list/select tools and no-selected reports stay structured", () => {
+  assert.equal(captureBackendListTool({ env: { JLINK_HSS_ENABLED: "0" } }).selectedBackend, "memory-poll-rsp");
+  assert.equal(captureBackendSelectTool({ env: { JLINK_HSS_ENABLED: "0" }, rtt }).selectedBackend, "direct-rtt-channel");
+  const result = probeCaptureBackends({}, [{
+    capability: { name: "jlink-hss", priority: 1, expectedUse: "test", requiresFirmware: false, requiresTargetCodeChange: false, requiresSDK: false, requiresExternalTool: false, supportsRead: true, supportsWrite: false, supportsStreaming: false, supportsRunWhileTargetRunning: false, supportsExperimentExport: true },
+    probe: () => ({ name: "jlink-hss", priority: 1, expectedUse: "test", requiresFirmware: false, requiresTargetCodeChange: false, requiresSDK: false, requiresExternalTool: false, supportsRead: true, supportsWrite: false, supportsStreaming: false, supportsRunWhileTargetRunning: false, supportsExperimentExport: true, status: "unavailable", reason: "nope", warnings: [] }),
+  }]);
+  assert.equal(result.selectedBackend, null);
+  assert.equal(result.fallbackReason, undefined);
+  assert.equal(result.unavailableReasons["jlink-hss"], "nope");
+});
+
 test("HSS fake benchmark reports actual rate and RSP benchmark reports fallback warning", () => {
   assert.equal(new EnvJlinkHssAdapter({ installDir: "Z:\\missing" }).isAvailable(""), false);
 
@@ -79,7 +91,7 @@ test("HSS fake benchmark reports actual rate and RSP benchmark reports fallback 
   assert.throws(() => captureBackendBenchmarkTool({ backendName: "missing" as never }), /No available backend selected/);
 });
 
-test("EnvJlinkHssAdapter preflights JScope, DLL exports, and current JScope project", () => {
+test("EnvJlinkHssAdapter records JScope as preflight-only and never benchmark-ready", () => {
   fs.mkdirSync(".tmp", { recursive: true });
   const root = fs.mkdtempSync(path.join(process.cwd(), ".tmp", "jlink-hss-test-"));
   const installDir = path.join(root, "JLink");
@@ -99,12 +111,18 @@ test("EnvJlinkHssAdapter preflights JScope, DLL exports, and current JScope proj
     fs.writeFileSync(path.join(appData, "SEGGER", "JScopeSettings.ini"), `Current="${project}"\n`);
 
     const adapter = new EnvJlinkHssAdapter({ installDir });
-    assert.equal(adapter.isAvailable(""), true);
+    assert.equal(new EnvJlinkHssAdapter({ installDir: path.join(root, "missing") }).preflight("").benchmarkReady, false);
+    assert.equal(adapter.isAvailable(""), false);
     const report = probeCaptureBackends({ env: hssEnv, hssAdapter: adapter, rtt });
     const hss = report.backends.find((backend) => backend.name === "jlink-hss");
-    assert.equal(hss?.status, "available-if-configured");
+    assert.equal(hss?.status, "unavailable");
     assert.equal(hss?.headlessBenchmark?.status, "blocked");
     assert.equal(hss?.sdkPrototype?.status, "missing");
+    assert.equal(hss?.preflight?.preflightOnly, true);
+    assert.equal(hss?.preflight?.benchmarkReady, false);
+    assert.equal(hss?.hssValidationState?.status, "blocked_missing_adapter");
+    assert.equal(hss?.hssValidationState?.benchmarkReady, false);
+    assert.equal(hss?.hssValidationState?.publicPrototypeCandidate, true);
     assert.equal(report.selectedBackend, "direct-rtt-channel");
 
     process.env.APPDATA = appData;
@@ -121,6 +139,31 @@ test("EnvJlinkHssAdapter preflights JScope, DLL exports, and current JScope proj
     }
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("HSS is selected only after benchmark-capable adapter evidence exists", () => {
+  const getCapsOnly = {
+    isAvailable: () => false,
+    preflight: () => ({ hssExportsFound: true, getcapsPass: true }),
+  };
+  const report = probeCaptureBackends({ env: { ...hssEnv, JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1" }, hssAdapter: getCapsOnly, rtt });
+  assert.equal(report.selectedBackend, "direct-rtt-channel");
+  assert.equal(report.backends[0].hssValidationState?.status, "blocked_missing_adapter");
+
+  const benchmark = probeCaptureBackends({ env: hssEnv, hssAdapter: new FakeJlinkHssAdapter(true), rtt });
+  assert.equal(benchmark.selectedBackend, "jlink-hss");
+  assert.equal(benchmark.backends[0].hssValidationState?.status, "experimental_benchmark_pass");
+});
+
+test("HSS preflight available without benchmark remains blocked", () => {
+  const preflightOnly = {
+    isAvailable: () => true,
+    preflight: () => ({ hssExportsFound: true }),
+  };
+  const report = probeCaptureBackends({ env: hssEnv, hssAdapter: preflightOnly, rtt });
+  assert.equal(report.selectedBackend, "direct-rtt-channel");
+  assert.equal(report.backends[0].status, "available-if-configured");
+  assert.equal(report.backends[0].hssValidationState?.benchmarkReady, false);
 });
 
 test("direct RTT preserves missing requested channel reason", () => {

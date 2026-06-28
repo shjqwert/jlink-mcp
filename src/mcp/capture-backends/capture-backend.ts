@@ -5,6 +5,12 @@ export const preferredBackendOrder: CaptureBackendName[] = ["jlink-hss", "direct
 
 export type BackendStatus = "available" | "unavailable" | "available-if-configured";
 export type BackendMode = "realtime" | "offline-import";
+export type HssValidationStatus =
+  | "blocked_missing_adapter"
+  | "experimental_getcaps_pass"
+  | "experimental_read_pass"
+  | "experimental_benchmark_pass"
+  | "official_sdk_ready";
 
 export interface BackendCapability {
   name: CaptureBackendName;
@@ -35,6 +41,13 @@ export interface BackendProbeResult extends BackendCapability {
     status: "found" | "missing";
     headerPath?: string;
     evidence?: string;
+  };
+  hssValidationState?: {
+    status: HssValidationStatus;
+    benchmarkReady: boolean;
+    publicPrototypeCandidate?: boolean;
+    experimentalEnvEnabled?: boolean;
+    reason: string;
   };
 }
 
