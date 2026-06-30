@@ -277,6 +277,27 @@ static bool hss_buffer_overwritten(const std::vector<unsigned char>& buffer, uns
   return std::any_of(buffer.begin(), buffer.end(), [sentinel](unsigned char byte) { return byte != sentinel; });
 }
 
+static bool hss_sample_prefix_overwritten(const std::vector<unsigned char>& buffer, size_t sample_bytes, unsigned char sentinel) {
+  const size_t count = (std::min)(buffer.size(), sample_bytes);
+  return std::any_of(buffer.begin(), buffer.begin() + count, [sentinel](unsigned char byte) { return byte != sentinel; });
+}
+
+static int hss_first_changed_offset(const std::vector<unsigned char>& buffer, unsigned char sentinel) {
+  const auto it = std::find_if(buffer.begin(), buffer.end(), [sentinel](unsigned char byte) { return byte != sentinel; });
+  return it == buffer.end() ? -1 : static_cast<int>(std::distance(buffer.begin(), it));
+}
+
+static std::vector<unsigned char> hss_changed_window(const std::vector<unsigned char>& buffer, int offset) {
+  if (offset < 0 || static_cast<size_t>(offset) >= buffer.size()) return {};
+  const size_t start = static_cast<size_t>(offset);
+  const size_t end = (std::min)(buffer.size(), start + 16U);
+  return std::vector<unsigned char>(buffer.begin() + start, buffer.begin() + end);
+}
+
+static bool hss_capture_failed(bool crashed, uint64_t valid_samples, uint64_t read_errors) {
+  return crashed || valid_samples == 0 || read_errors > 0;
+}
+
 static void write_record(std::ofstream& out, uint64_t sample_index, int64_t timestamp_ticks, uint32_t status_flags, const std::vector<uint32_t>& values, uint32_t* crc) {
   out.write(reinterpret_cast<const char*>(&sample_index), sizeof(sample_index));
   out.write(reinterpret_cast<const char*>(&timestamp_ticks), sizeof(timestamp_ticks));
@@ -797,6 +818,18 @@ static int self_test() {
     error_json("HSS_SELF_TEST_SENTINEL_FAILED", "HSS read buffer sentinel check failed");
     return 0;
   }
+  if (hss_sample_prefix_overwritten({0xA5, 0xA5, 0x00}, 2, 0xA5) || !hss_sample_prefix_overwritten({0xA5, 0x00, 0xA5}, 2, 0xA5)) {
+    error_json("HSS_SELF_TEST_PREFIX_FAILED", "HSS sample prefix sentinel check failed");
+    return 0;
+  }
+  if (hss_first_changed_offset({0xA5, 0xA5, 0x00}, 0xA5) != 2 || bytes_hex(hss_changed_window({0xA5, 0xA5, 0x00, 0x01}, 2)) != "0001") {
+    error_json("HSS_SELF_TEST_CHANGED_WINDOW_FAILED", "HSS changed-window diagnostic failed");
+    return 0;
+  }
+  if (hss_capture_failed(false, 2, 0) || !hss_capture_failed(false, 1, 1) || !hss_capture_failed(false, 0, 0) || !hss_capture_failed(true, 2, 0)) {
+    error_json("HSS_SELF_TEST_CAPTURE_FAILURE_FAILED", "HSS capture failure classification failed");
+    return 0;
+  }
   const std::string temporaryFile = "hss_selftest_" + std::to_string(GetCurrentProcessId()) + ".bin";
   std::ofstream out(temporaryFile, std::ios::binary | std::ios::trunc);
   if (!out) {
@@ -924,17 +957,24 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
   const uint64_t requested_samples = static_cast<uint64_t>(requested_rate) * static_cast<uint64_t>(duration_sec);
-  std::vector<unsigned char> read_buffer(bytes_per_sample);
+  const U32 read_buffer_bytes = (std::max)(bytes_per_sample, 4096U);
+  std::vector<unsigned char> read_buffer(read_buffer_bytes);
   uint32_t crc = 0xFFFFFFFFU;
   uint64_t valid_samples = 0;
   uint64_t read_errors = 0;
   uint64_t unchanged_reads = 0;
+  uint64_t changed_reads = 0;
+  uint64_t sample_prefix_changed_reads = 0;
   int first_read_rc = 0;
   int last_read_rc = 0;
   int min_read_rc = 0;
   int max_read_rc = 0;
   bool first_read_buffer_changed = false;
   bool last_read_buffer_changed = false;
+  bool first_read_sample_prefix_changed = false;
+  bool last_read_sample_prefix_changed = false;
+  int first_changed_offset = -1;
+  std::string first_changed_bytes;
   const int64_t started_ns = now_ns();
   for (uint64_t sample = 0; sample < requested_samples; ++sample) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
@@ -944,21 +984,30 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(wait_ns, 1'000'000)));
     }
     std::fill(read_buffer.begin(), read_buffer.end(), 0xA5);
-    int read_rc = call_hss_read(hss_read, read_buffer.data(), bytes_per_sample, &crashed);
+    int read_rc = call_hss_read(hss_read, read_buffer.data(), read_buffer_bytes, &crashed);
     const bool buffer_changed = hss_buffer_overwritten(read_buffer, 0xA5);
+    const bool sample_prefix_changed = hss_sample_prefix_overwritten(read_buffer, bytes_per_sample, 0xA5);
     if (!buffer_changed) ++unchanged_reads;
+    else ++changed_reads;
+    if (sample_prefix_changed) ++sample_prefix_changed_reads;
+    if (buffer_changed && first_changed_offset < 0) {
+      first_changed_offset = hss_first_changed_offset(read_buffer, 0xA5);
+      first_changed_bytes = bytes_hex(hss_changed_window(read_buffer, first_changed_offset));
+    }
     if (sample == 0) {
       first_read_rc = read_rc;
       min_read_rc = read_rc;
       max_read_rc = read_rc;
       first_read_buffer_changed = buffer_changed;
+      first_read_sample_prefix_changed = sample_prefix_changed;
     } else {
       min_read_rc = (std::min)(min_read_rc, read_rc);
       max_read_rc = (std::max)(max_read_rc, read_rc);
     }
     last_read_rc = read_rc;
     last_read_buffer_changed = buffer_changed;
-    const bool read_ok = !crashed && (read_rc >= static_cast<int>(bytes_per_sample) || (read_rc == 0 && buffer_changed));
+    last_read_sample_prefix_changed = sample_prefix_changed;
+    const bool read_ok = !crashed && sample_prefix_changed && (read_rc >= static_cast<int>(bytes_per_sample) || read_rc == 0);
     std::vector<uint32_t> values;
     values.reserve(symbols.size());
     size_t offset = 0;
@@ -984,13 +1033,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const int64_t elapsed_ns = std::max<int64_t>(1, now_ns() - started_ns);
   const double actual_rate = static_cast<double>(valid_samples) * 1000000000.0 / static_cast<double>(elapsed_ns);
   const uint64_t sample_count = valid_samples + read_errors;
-  const bool read_failed = crashed || valid_samples == 0;
+  const bool read_failed = hss_capture_failed(crashed, valid_samples, read_errors);
   std::ostringstream crc_hex;
   crc_hex << std::hex << crc;
   std::cout
     << "{\"status\":\"" << (read_failed ? "error" : "ok") << "\"";
   if (read_failed) {
-    std::cout << ",\"errorCode\":\"HSS_READ_FAILED\",\"reason\":\"JLINK_HSS_Read produced no valid samples\"";
+    std::cout << ",\"errorCode\":\"HSS_READ_FAILED\",\"reason\":\"JLINK_HSS_Read did not produce a complete valid sample set\"";
   }
   std::cout
     << ",\"captureId\":\"" << escape(capture_id)
@@ -1000,13 +1049,21 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"sampleCount\":" << sample_count
     << ",\"validSamples\":" << valid_samples
     << ",\"readErrors\":" << read_errors
+    << ",\"bytesPerSample\":" << bytes_per_sample
+    << ",\"readBufferBytes\":" << read_buffer_bytes
     << ",\"firstReadReturnCode\":" << first_read_rc
     << ",\"lastReadReturnCode\":" << last_read_rc
     << ",\"minReadReturnCode\":" << min_read_rc
     << ",\"maxReadReturnCode\":" << max_read_rc
     << ",\"firstReadBufferChanged\":" << (first_read_buffer_changed ? "true" : "false")
     << ",\"lastReadBufferChanged\":" << (last_read_buffer_changed ? "true" : "false")
+    << ",\"firstReadSamplePrefixChanged\":" << (first_read_sample_prefix_changed ? "true" : "false")
+    << ",\"lastReadSamplePrefixChanged\":" << (last_read_sample_prefix_changed ? "true" : "false")
     << ",\"unchangedReads\":" << unchanged_reads
+    << ",\"changedReads\":" << changed_reads
+    << ",\"samplePrefixChangedReads\":" << sample_prefix_changed_reads
+    << ",\"firstChangedOffset\":" << first_changed_offset
+    << ",\"firstChangedBytes\":\"" << first_changed_bytes << "\""
     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":0"
     << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
     << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << sample_count
