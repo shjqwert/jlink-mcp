@@ -192,7 +192,7 @@ test("HM_C095 validation rejects read-error captures", async () => {
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+      return Boolean(status.data && (status.data as { state: string }).state === "failed");
     });
     const query = await service.captureQuery({ captureId, hmC095Profile: true });
     const hmC095 = query.data?.hmC095 as { counterDeltaPass?: boolean; validSamples?: number; invalidSamples?: number };
@@ -299,6 +299,8 @@ function fakeHelperSource(options: FakeHelperOptions = {}): string {
   const targetWasHalted = options.targetWasHalted ?? false;
   const statusFlags = options.readError ? HSS_STATUS_FLAGS.read_error : HSS_STATUS_FLAGS.valid;
   const counterExpression = options.readError ? "0" : "i * 16";
+  const helperStatus = options.readError ? "error" : "ok";
+  const helperError = options.readError ? 'errorCode: "HSS_READ_FAILED", reason: "JLINK_HSS_Read produced no valid samples",' : "";
   return `
 const fs = require("fs");
 const command = process.argv[2];
@@ -331,7 +333,7 @@ for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
   records.push(record);
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
-console.log(JSON.stringify({ status: "ok", captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
+console.log(JSON.stringify({ status: "${helperStatus}", ${helperError} captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: ${options.readError ? "0" : "records.length"}, readErrors: ${options.readError ? "records.length" : "0"}, timeouts: 0, overflows: 0, droppedSamples: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
 `;
 }
 

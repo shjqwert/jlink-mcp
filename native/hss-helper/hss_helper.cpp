@@ -645,19 +645,26 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   crc ^= 0xFFFFFFFFU;
   const int64_t elapsed_ns = std::max<int64_t>(1, now_ns() - started_ns);
   const double actual_rate = static_cast<double>(valid_samples) * 1000000000.0 / static_cast<double>(elapsed_ns);
+  const uint64_t sample_count = valid_samples + read_errors;
+  const bool read_failed = crashed || valid_samples == 0;
   std::ostringstream crc_hex;
   crc_hex << std::hex << crc;
   std::cout
-    << "{\"status\":\"ok\",\"captureId\":\"" << escape(capture_id)
+    << "{\"status\":\"" << (read_failed ? "error" : "ok") << "\"";
+  if (read_failed) {
+    std::cout << ",\"errorCode\":\"HSS_READ_FAILED\",\"reason\":\"JLINK_HSS_Read produced no valid samples\"";
+  }
+  std::cout
+    << ",\"captureId\":\"" << escape(capture_id)
     << "\",\"backend\":\"jlink-hss\",\"requestedRateHz\":" << requested_rate
     << ",\"actualRateHz\":" << actual_rate
     << ",\"durationSec\":" << (static_cast<double>(elapsed_ns) / 1000000000.0)
-    << ",\"sampleCount\":" << (valid_samples + read_errors)
+    << ",\"sampleCount\":" << sample_count
     << ",\"validSamples\":" << valid_samples
     << ",\"readErrors\":" << read_errors
     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":0"
     << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
-    << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << (valid_samples + read_errors)
+    << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << sample_count
     << ",\"crc32\":\"" << crc_hex.str() << "\"},\"stopReturnCode\":" << stop_rc << "}";
   return 0;
 }
