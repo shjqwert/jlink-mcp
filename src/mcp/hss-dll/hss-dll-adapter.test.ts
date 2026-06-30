@@ -92,16 +92,19 @@ test("HSS getcaps returns structured errors for missing exports, helper crash, t
     const missingExport = await hssDllGetCaps({ dllPath: partial }, { env: {} });
     assert.equal(missingExport.errorCode, "HSS_DLL_EXPORTS_MISSING");
 
+    const missingDevice = await hssDllGetCaps({ dllPath: dll }, { env: {} });
+    assert.equal(missingDevice.errorCode, "HSS_GETCAPS_DEVICE_REQUIRED");
+
     const badJson = nodeHelper(dir, "console.log('not json');");
-    const parse = await hssDllGetCaps({ dllPath: dll }, { env: {}, ...badJson });
+    const parse = await hssDllGetCaps({ dllPath: dll, device: "Z20K146MC" }, { env: {}, ...badJson });
     assert.equal(parse.errorCode, "HSS_HELPER_JSON_PARSE_FAILED");
 
     const timeoutHelper = nodeHelper(dir, "setTimeout(() => {}, 10000);");
-    const timeout = await hssDllGetCaps({ dllPath: dll }, { env: {}, timeoutMs: 50, ...timeoutHelper });
+    const timeout = await hssDllGetCaps({ dllPath: dll, device: "Z20K146MC" }, { env: {}, timeoutMs: 50, ...timeoutHelper });
     assert.equal(timeout.errorCode, "HSS_HELPER_TIMEOUT");
 
     const crashHelper = nodeHelper(dir, "process.exit(2);");
-    const crash = await hssDllGetCaps({ dllPath: dll }, { env: {}, ...crashHelper });
+    const crash = await hssDllGetCaps({ dllPath: dll, device: "Z20K146MC" }, { env: {}, ...crashHelper });
     assert.equal(crash.errorCode, "HSS_HELPER_JSON_PARSE_FAILED");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -115,7 +118,7 @@ test("HSS wrapper accepts helper JSON and rejects unsafe smoke/benchmark variabl
     fs.writeFileSync(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop");
     const okHelper = nodeHelper(dir, "console.log(JSON.stringify({ status: 'ok', command: process.argv[2] }));");
     const env = {};
-    assert.equal((await hssDllGetCaps({ dllPath: dll }, { env, ...okHelper })).status, "ok");
+    assert.equal((await hssDllGetCaps({ dllPath: dll, device: "Z20K146MC" }, { env, ...okHelper })).status, "ok");
     assert.equal((await hssDllSmoke({ dllPath: dll, symbol: "s_traceAliveCounter", address: "0x20006bdc", size: 4, device: "Z20K146MC", elf: "x.elf" }, { env, ...okHelper })).status, "ok");
     assert.equal((await hssDllBenchmark({ dllPath: dll, variables: [{ name: "s_traceAliveCounter", address: "0x20006bdc", size: 4 }], device: "Z20K146MC" }, { env, ...okHelper })).status, "ok");
     assert.rejects(() => hssDllSmoke({ dllPath: dll, symbol: "bMotorStarted" }, { env, ...okHelper }), /unsafe HSS/);

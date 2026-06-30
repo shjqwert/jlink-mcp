@@ -346,6 +346,25 @@ test("HSS status reports stable error for unknown captureId", async () => {
   }
 });
 
+test("HSS status and stop reject captureId path traversal", async () => {
+  const root = await tempProject();
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, { cwd: root });
+  try {
+    const status = await service.captureStatus({ captureId: "..\\escape" });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, HSS_ERROR.PATH_OUTSIDE_CWD);
+
+    const stopped = await service.captureStop({ captureId: "..\\escape" });
+    assert.equal(stopped.ok, false);
+    assert.equal(stopped.error?.code, HSS_ERROR.PATH_OUTSIDE_CWD);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HSS stop is idempotent and returns finalized metadata details", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");

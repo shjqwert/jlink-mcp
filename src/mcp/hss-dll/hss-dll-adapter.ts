@@ -110,7 +110,17 @@ export async function hssDllGetCaps(input: HssDllPreflightInput = {}, options: H
   if (!discovery.selectedDllPath || !discovery.exportsFound) {
     return { status: "error", errorCode: "HSS_DLL_EXPORTS_MISSING", reason: "JLink_x64.dll or required JLINK_HSS_* exports were not found", discovery };
   }
-  return runHssHelperCommand("getcaps", ["--dll", discovery.selectedDllPath], options);
+  const device = input.device ?? env.JLINK_DEVICE;
+  if (!device) {
+    return { status: "error", errorCode: "HSS_GETCAPS_DEVICE_REQUIRED", reason: "JLINK_HSS_GetCaps requires a configured target device", discovery };
+  }
+  return runHssHelperCommand("getcaps", [
+    "--dll", discovery.selectedDllPath,
+    "--device", device,
+    "--interface", input.interface ?? "SWD",
+    "--speed", String(input.speedKhz ?? Number(env.JLINK_MCP_HSS_SPEED_KHZ ?? 4000)),
+    ...(input.serial ? ["--serial", input.serial] : []),
+  ], options);
 }
 
 export async function hssDllSmoke(input: HssDllPreflightInput & {

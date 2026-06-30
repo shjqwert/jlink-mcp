@@ -14,7 +14,7 @@ import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
-import { ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
+import { assertInsideProject, ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
 
 export interface HssCaptureStartInput extends HssDllPreflightInput, HssCapturePlanInput {
   planId?: string;
@@ -261,7 +261,10 @@ export class HssCaptureService {
   }
 
   private metadataFor(captureId: string): string {
-    return join(hssProjectPaths(this.cwd()).capturesDir, captureId, "capture.json");
+    const paths = hssProjectPaths(this.cwd());
+    const metadataFile = join(paths.capturesDir, captureId, "capture.json");
+    assertInsideProject(metadataFile, paths.capturesDir);
+    return metadataFile;
   }
 
   private cwd(): string {

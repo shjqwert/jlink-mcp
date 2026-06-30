@@ -337,30 +337,89 @@ static int preflight(const std::wstring& dll_path) {
   return 0;
 }
 
-static int getcaps(const std::wstring& dll_path) {
-  HMODULE dll = LoadLibraryW(dll_path.c_str());
+static std::string option_utf8(const std::map<std::wstring, std::wstring>& options, const wchar_t* name, const char* fallback);
+
+static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
   const std::string dll_utf8 = narrow(dll_path);
+  const std::string device = option_utf8(options, L"--device", "");
+  if (device.empty()) {
+    error_json("HSS_GETCAPS_DEVICE_REQUIRED", "--device is required before JLINK_HSS_GetCaps candidate call", dll_utf8);
+    return 0;
+  }
+  HMODULE dll = LoadLibraryW(dll_path.c_str());
   if (!dll) {
     error_json("HSS_DLL_LOAD_FAILED", "LoadLibraryW failed", dll_utf8);
     return 0;
   }
+  auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
+  auto arm_close = reinterpret_cast<JLINKARM_Close_Fn>(required(dll, "JLINKARM_Close"));
+  auto arm_exec = reinterpret_cast<JLINKARM_ExecCommand_Fn>(required(dll, "JLINKARM_ExecCommand"));
+  auto arm_tif = reinterpret_cast<JLINKARM_TIF_Select_Fn>(required(dll, "JLINKARM_TIF_Select"));
+  auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
+  auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
+  auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
   auto fn = reinterpret_cast<JLINK_HSS_GetCaps_Fn>(required(dll, "JLINK_HSS_GetCaps"));
-  if (!fn) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !fn) {
     FreeLibrary(dll);
-    error_json("HSS_EXPORT_MISSING", "JLINK_HSS_GetCaps export was not found", dll_utf8);
+    error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS_GetCaps exports missing", dll_utf8);
     return 0;
   }
+
+  const std::string iface = option_utf8(options, L"--interface", "SWD");
+  const std::string serial_text = option_utf8(options, L"--serial", "");
+  const int speed = std::stoi(option_utf8(options, L"--speed", "4000"));
+  const int tif = iface == "JTAG" ? 0 : 1;
   JLINK_HSS_CAPS caps{};
   bool crashed = false;
+  if (!serial_text.empty() && arm_select_sn) {
+    (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
+    if (crashed) {
+      FreeLibrary(dll);
+      error_json("JLINK_SELECT_SN_EXCEPTION", "JLINKARM_EMU_SelectByUSBSN raised a structured exception", dll_utf8);
+      return 0;
+    }
+  }
+  int open_rc = call_int0(arm_open, &crashed);
+  if (crashed || open_rc < 0) {
+    FreeLibrary(dll);
+    error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
+    return 0;
+  }
+  char exec_out[512] = {};
+  const std::string device_cmd = "device = " + device;
+  (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  if (crashed) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
+    return 0;
+  }
+  (void)call_int1(arm_tif, tif, &crashed);
+  call_void1(arm_speed, speed, &crashed);
+  int connect_rc = call_int0(arm_connect, &crashed);
+  if (crashed || connect_rc < 0) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", dll_utf8);
+    return 0;
+  }
+
   int return_code = call_getcaps(fn, &caps, &crashed);
   if (crashed) {
+    call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json("HSS_GETCAPS_EXCEPTION", "JLINK_HSS_GetCaps raised a structured exception", dll_utf8);
     return 0;
   }
+  call_void0(arm_close, &crashed);
   std::cout
     << "{\"status\":\"ok\",\"api\":\"JLINK_HSS_GetCaps\",\"dll\":\"" << escape(dll_utf8)
     << "\",\"dllVersion\":\"unknown\",\"returnCode\":" << return_code
+    << ",\"device\":\"" << escape(device)
+    << "\",\"interface\":\"" << escape(iface)
+    << "\",\"speedKhz\":" << speed
+    << ",\"connectReturnCode\":" << connect_rc
+    << ",\"execOutput\":\"" << escape(exec_out) << "\""
     << ",\"caps\":{\"maxBlocks\":" << caps.MaxBlocks
     << ",\"maxFreq\":" << caps.MaxFreq
     << ",\"caps\":" << caps.Caps
@@ -969,7 +1028,7 @@ int wmain(int argc, wchar_t** argv) {
     return 0;
   }
   if (command == L"preflight") return preflight(dll_path);
-  if (command == L"getcaps") return getcaps(dll_path);
+  if (command == L"getcaps") return getcaps(dll_path, options);
   if (command == L"connect-preflight") return connect_preflight(dll_path, options);
   if (command == L"read-ram-probe") return read_ram_probe(dll_path, options);
   if (command == L"self-test") return self_test();
