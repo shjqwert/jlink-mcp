@@ -82,12 +82,6 @@ static void error_json(const std::string& code, const std::string& reason, const
     << "\",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
 }
 
-static bool env_enabled(const char* name) {
-  char value[16] = {};
-  DWORD size = GetEnvironmentVariableA(name, value, sizeof(value));
-  return size == 1 && value[0] == '1';
-}
-
 static FARPROC required(HMODULE dll, const char* name) {
   return GetProcAddress(dll, name);
 }
@@ -244,12 +238,6 @@ static int json_int(const std::string& text, const char* name, int fallback = 0)
   std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*(\\d+)");
   std::smatch match;
   return std::regex_search(text, match, pattern) ? std::stoi(match[1].str()) : fallback;
-}
-
-static bool json_bool(const std::string& text, const char* name, bool fallback = false) {
-  std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*(true|false)");
-  std::smatch match;
-  return std::regex_search(text, match, pattern) ? match[1].str() == "true" : fallback;
 }
 
 struct PlanSymbol {
@@ -498,12 +486,7 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
 }
 
 static int self_test() {
-  wchar_t temporaryDirectory[MAX_PATH]{};
-  wchar_t temporaryFile[MAX_PATH]{};
-  if (GetTempPathW(MAX_PATH, temporaryDirectory) == 0 || GetTempFileNameW(temporaryDirectory, L"hss", 0, temporaryFile) == 0) {
-    error_json("HSS_SELF_TEST_TEMP_FAILED", "could not create temp file");
-    return 0;
-  }
+  const std::string temporaryFile = "hss_selftest_" + std::to_string(GetCurrentProcessId()) + ".bin";
   std::ofstream out(temporaryFile, std::ios::binary | std::ios::trunc);
   if (!out) {
     error_json("HSS_SELF_TEST_WRITE_FAILED", "could not open temp capture");
@@ -514,7 +497,7 @@ static int self_test() {
   write_record(out, 1, 1000000, 1, {17, 18}, &crc);
   out.close();
   crc ^= 0xFFFFFFFFU;
-  DeleteFileW(temporaryFile);
+  DeleteFileA(temporaryFile.c_str());
   std::cout
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"uint64,int64,uint32,uint32,uint32[]\""
     << ",\"sampleCount\":2,\"crc32\":\"" << std::hex << crc << std::dec
@@ -528,18 +511,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("HSS_PLAN_MISSING", "--plan is required");
     return 0;
   }
-  if (!env_enabled("JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API") || !env_enabled("JLINK_MCP_REAL_HW_SMOKE")) {
-    error_json("HSS_EXPERIMENTAL_ENV_DISABLED", "JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1 and JLINK_MCP_REAL_HW_SMOKE=1 are required");
-    return 0;
-  }
   const std::string plan = read_text_file(plan_it->second);
   if (plan.empty()) {
     error_json("HSS_PLAN_READ_FAILED", "plan file could not be read");
-    return 0;
-  }
-  const bool start_read_stop_validated = json_bool(plan, "startReadStopValidated", false);
-  if (!start_read_stop_validated && !env_enabled("HSS_START_READ_STOP_NOT_VALIDATED")) {
-    error_json("HSS_START_READ_STOP_NOT_VALIDATED", "HSS_START_READ_STOP_NOT_VALIDATED=1 is required when HSS Start/Read/Stop is not validated");
     return 0;
   }
   const std::string dll_utf8 = json_string(plan, "dllPath");

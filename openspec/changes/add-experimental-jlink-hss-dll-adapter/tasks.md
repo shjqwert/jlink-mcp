@@ -2,7 +2,7 @@
 
 - [x] Create candidate API metadata and tests.
 - [x] Add native helper with dynamic DLL loading.
-- [x] Add wrapper and MCP tools behind `JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1`.
+- [x] Add wrapper and MCP tools.
 - [x] Downgrade JScope GUI to preflight-only.
 - [x] Add backend state tests for JScope-only, GetCaps-only, and benchmark-capable HSS.
 - [x] Add symbol safety tests.

@@ -81,7 +81,7 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
-    env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1", JLINK_MCP_REAL_HW_SMOKE: "1" },
+    env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
   });
@@ -131,14 +131,14 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
   }
 });
 
-test("HSS capture start requires explicit unvalidated Start/Read/Stop authorization when GetCaps fails", async () => {
+test("HSS capture start runs when GetCaps fails but helper and target are available", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
-    env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1", JLINK_MCP_REAL_HW_SMOKE: "1" },
+    env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
   });
@@ -153,8 +153,12 @@ test("HSS capture start requires explicit unvalidated Start/Read/Stop authorizat
       requestedRateHz: 1000,
       durationSec: 1,
     });
-    assert.equal(start.ok, false);
-    assert.equal(start.error?.code, "HSS_START_READ_STOP_NOT_VALIDATED");
+    assert.equal(start.ok, true);
+    const captureId = (start.data as { captureId: string }).captureId;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+    });
     assert.equal(probe.getExclusiveOwner(), null);
   } finally {
     await service.dispose();
@@ -163,19 +167,14 @@ test("HSS capture start requires explicit unvalidated Start/Read/Stop authorizat
   }
 });
 
-test("HSS capture start honors unvalidated authorization but blocks halted targets", async () => {
+test("HSS capture start blocks halted targets", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
-  const env = {
-    JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1",
-    JLINK_MCP_REAL_HW_SMOKE: "1",
-    HSS_START_READ_STOP_NOT_VALIDATED: "1",
-  };
   const service = new HssCaptureService(probe, {
     cwd: root,
-    env,
+    env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
   });

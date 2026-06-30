@@ -17,13 +17,9 @@ export function createJlinkHssBackend(adapter?: HssAdapter): CaptureBackend {
     capability: cap,
     probe(context: BackendProbeContext = {}) {
       const env = context.env ?? process.env;
-      if (env.JLINK_HSS_ENABLED === "0") {
-        return unavailable(cap, "J-Link HSS explicitly disabled by JLINK_HSS_ENABLED=0");
-      }
       const hss = context.hssAdapter ?? adapter ?? new EnvJlinkHssAdapter();
       const sdkDir = env.JLINK_SDK_DIR ?? env.JLINK_INSTALL_DIR ?? "";
       const preflight = hss.preflight?.(sdkDir) ?? {};
-      const experimentalEnvEnabled = env.JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API === "1";
       if (!hss.isAvailable(sdkDir)) {
         const candidateFound = Boolean(preflight.hssExportsFound);
         const reason = candidateFound
@@ -35,7 +31,6 @@ export function createJlinkHssBackend(adapter?: HssAdapter): CaptureBackend {
             ...preflight,
             preflightOnly: true,
             benchmarkReady: false,
-            experimentalEnvEnabled,
           },
           headlessBenchmark: { status: "blocked", reason },
           sdkPrototype: {
@@ -48,7 +43,6 @@ export function createJlinkHssBackend(adapter?: HssAdapter): CaptureBackend {
             status: "blocked_missing_adapter",
             benchmarkReady: false,
             publicPrototypeCandidate: candidateFound,
-            experimentalEnvEnabled,
             reason,
           },
         };
@@ -67,7 +61,6 @@ export function createJlinkHssBackend(adapter?: HssAdapter): CaptureBackend {
             status: "blocked_missing_adapter",
             benchmarkReady: false,
             publicPrototypeCandidate: false,
-            experimentalEnvEnabled,
             reason: "missing typed JLINK_HSS prototypes",
           },
         };
@@ -80,7 +73,6 @@ export function createJlinkHssBackend(adapter?: HssAdapter): CaptureBackend {
         hssValidationState: {
           status: "experimental_benchmark_pass",
           benchmarkReady: true,
-          experimentalEnvEnabled,
           reason: "typed HSS adapter benchmark is configured",
         },
       };

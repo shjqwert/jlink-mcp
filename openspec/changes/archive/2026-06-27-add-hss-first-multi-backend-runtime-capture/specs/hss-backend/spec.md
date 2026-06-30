@@ -6,20 +6,19 @@
 
 The `jlink-hss` backend SHALL require:
 
-- `JLINK_HSS_ENABLED=1`;
 - `JLINK_SDK_DIR`;
 - an adapter that reports available.
 
 #### Scenario: HSS SDK missing
 
-- **GIVEN** HSS environment variables are missing
+- **GIVEN** HSS SDK configuration is missing
 - **WHEN** HSS is probed
 - **THEN** the backend returns `unavailable`
 - **AND** the reason is `J-Link SDK/HSS not configured`.
 
 #### Scenario: HSS adapter missing
 
-- **GIVEN** HSS environment variables are present
+- **GIVEN** HSS SDK configuration is present
 - **AND** no HSS adapter is loaded
 - **WHEN** HSS is probed
 - **THEN** the backend returns `unavailable`

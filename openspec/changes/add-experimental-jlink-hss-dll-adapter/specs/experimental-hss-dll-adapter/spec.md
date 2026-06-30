@@ -2,16 +2,14 @@
 
 ## ADDED Requirements
 
-### Requirement: Experimental HSS DLL calls are env-gated
+### Requirement: Experimental HSS DLL calls are explicit tool actions
 
-Jlink-MCP SHALL NOT call `JLink_x64.dll` HSS functions unless `JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1`.
+Jlink-MCP SHALL call `JLink_x64.dll` HSS functions only through the dedicated HSS DLL MCP tools.
 
-#### Scenario: env disabled
+#### Scenario: tool requested
 
-- **GIVEN** the experimental env variable is absent
 - **WHEN** `hss_dll_getcaps` is requested
-- **THEN** the result is `blocked`
-- **AND** the DLL function is not called.
+- **THEN** the tool attempts the DLL call and returns structured JSON.
 
 ### Requirement: Candidate API is not official SDK evidence
 

@@ -4,8 +4,6 @@ import path from "path";
 import { HSS_CANDIDATE_FUNCTIONS, hssApiCandidateReport } from "./hss-api-candidate";
 import { requireHssReadOnlyVariables } from "./hss-symbols";
 
-export const HSS_EXPERIMENTAL_ENV = "JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API";
-
 export interface HssDllDiscovery {
   searchPaths: string[];
   selectedDllPath?: string;
@@ -38,10 +36,6 @@ export interface HssDllVariable {
   type?: string;
 }
 
-export function experimentalHssDllEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return env[HSS_EXPERIMENTAL_ENV] === "1";
-}
-
 export function hssDllSearchPaths(env: Record<string, string | undefined> = process.env, explicit?: string): string[] {
   const paths = [
     explicit,
@@ -72,32 +66,26 @@ export function discoverHssDll(input: HssDllPreflightInput = {}, env: Record<str
 export async function hssDllPreflight(input: HssDllPreflightInput = {}, options: HssHelperOptions = {}): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
   const discovery = discoverHssDll(input, env);
-  const experimentalEnvEnabled = experimentalHssDllEnabled(env);
   const helperPath = resolveHssHelperPath(env, options.helperPath);
   const helperExists = fs.existsSync(helperPath);
   const device = input.device ?? env.JLINK_DEVICE;
-  const runConnectPreflight = experimentalEnvEnabled
-    && env.JLINK_MCP_REAL_HW_SMOKE === "1"
-    && Boolean(device)
+  const runConnectPreflight = Boolean(device)
     && discovery.dllExists
     && discovery.exportsFound
     && helperExists;
   const base = {
     status: discovery.dllExists && discovery.exportsFound ? "candidate" : "blocked",
     hssStatus: "blocked_missing_adapter",
-    reason: experimentalEnvEnabled
-      ? "experimental HSS DLL candidate found; benchmark remains blocked until GetCaps/Read/Benchmark evidence passes"
-      : `${HSS_EXPERIMENTAL_ENV}=1 is required before calling JLink_x64.dll`,
+    reason: "HSS DLL candidate found; benchmark remains blocked until GetCaps/Read/Benchmark evidence passes",
     candidateApi: hssApiCandidateReport(false),
     discovery,
-    experimentalEnvEnabled,
-    getcapsAllowed: experimentalEnvEnabled && discovery.dllExists && discovery.exportsFound,
+    getcapsAllowed: discovery.dllExists && discovery.exportsFound,
     helperPath,
     helperExists,
     benchmarkReady: false,
     jscopeUsed: false,
   };
-  if (!experimentalEnvEnabled || !discovery.selectedDllPath || !helperExists) return base;
+  if (!discovery.selectedDllPath || !helperExists) return base;
   const helperPreflight = await runHssHelperCommand("preflight", ["--dll", discovery.selectedDllPath], options);
   const connectPreflight = runConnectPreflight
     ? await runHssHelperCommand("connect-preflight", [
@@ -119,9 +107,6 @@ export async function hssDllPreflight(input: HssDllPreflightInput = {}, options:
 export async function hssDllGetCaps(input: HssDllPreflightInput = {}, options: HssHelperOptions = {}): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
   const discovery = discoverHssDll(input, env);
-  if (!experimentalHssDllEnabled(env)) {
-    return { status: "blocked", errorCode: "HSS_EXPERIMENTAL_ENV_DISABLED", reason: `${HSS_EXPERIMENTAL_ENV}=1 is required before calling JLink_x64.dll`, discovery };
-  }
   if (!discovery.selectedDllPath || !discovery.exportsFound) {
     return { status: "error", errorCode: "HSS_DLL_EXPORTS_MISSING", reason: "JLink_x64.dll or required JLINK_HSS_* exports were not found", discovery };
   }
@@ -215,7 +200,6 @@ export function runHssHelperCommand(command: string, args: string[], options: Hs
 async function requireExperimentalDllReady(input: HssDllPreflightInput, options: HssHelperOptions): Promise<Record<string, unknown> | null> {
   const env = options.env ?? process.env;
   const discovery = discoverHssDll(input, env);
-  if (!experimentalHssDllEnabled(env)) return { status: "blocked", errorCode: "HSS_EXPERIMENTAL_ENV_DISABLED", reason: `${HSS_EXPERIMENTAL_ENV}=1 is required before calling JLink_x64.dll`, discovery };
   if (!discovery.selectedDllPath || !discovery.exportsFound) return { status: "error", errorCode: "HSS_DLL_EXPORTS_MISSING", reason: "JLink_x64.dll or required JLINK_HSS_* exports were not found", discovery };
   return null;
 }

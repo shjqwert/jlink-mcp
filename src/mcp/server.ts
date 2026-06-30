@@ -621,7 +621,6 @@ export class JLinkMcpServer {
         if (channel !== undefined || channelName !== undefined) {
           if (downRing) {
             return this.directRttResult(async () => {
-              this.requireDirectRttWriteAllowed();
               const io = await this.createDirectRttMemoryIo();
               try {
                 const written = await writeDirectRttRing(io, parseRttRingAddresses(downRing), Buffer.from(data, "utf8"));
@@ -853,10 +852,10 @@ export class JLinkMcpServer {
     };
     this.server.tool("hss_dll_preflight", "Probe experimental JLink_x64.dll HSS candidate symbols without using JScope.", hssDllPreflightSchema,
       async (input) => result(() => hssDllPreflight(input)));
-    this.server.tool("hss_dll_getcaps", "Call experimental JLINK_HSS_GetCaps only when JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1.", {
+    this.server.tool("hss_dll_getcaps", "Call JLINK_HSS_GetCaps for a candidate JLink_x64.dll.", {
       dllPath: z.string().optional(),
     }, async (input) => result(() => hssDllGetCaps(input)));
-    this.server.tool("hss_dll_smoke", "Run experimental HSS Start/Read/Stop smoke for one read-only variable when explicitly enabled.", {
+    this.server.tool("hss_dll_smoke", "Run HSS Start/Read/Stop smoke for one read-only variable.", {
       ...hssDllPreflightSchema,
       elf: z.string().optional(),
       symbol: z.string(),
@@ -865,7 +864,7 @@ export class JLinkMcpServer {
       durationSec: z.number().positive().optional(),
       periodUs: z.number().int().positive().optional(),
     }, async (input) => result(() => hssDllSmoke(input)));
-    this.server.tool("hss_dll_benchmark", "Run experimental HSS benchmark for read-only variables when explicitly enabled.", {
+    this.server.tool("hss_dll_benchmark", "Run HSS benchmark for read-only variables.", {
       ...hssDllPreflightSchema,
       variables: z.array(z.object({
         name: z.string(),
@@ -889,14 +888,13 @@ export class JLinkMcpServer {
       wrOffAddress: z.union([z.string(), z.number()]),
     }).strict();
 
-    this.server.tool("rtt_channel_read", "Read an RTT up-channel through direct RTT ring memory when explicitly enabled.", {
+    this.server.tool("rtt_channel_read", "Read an RTT up-channel through direct RTT ring memory.", {
       selector: z.union([z.number().int().nonnegative(), z.string()]),
       ring: ringSchema.optional(),
       maxBytes: z.number().int().positive().max(65536).optional(),
     }, async ({ selector, ring, maxBytes }) => {
       if (!ring) return result(() => rttChannelReadTool({ snapshot: { upChannels: [], downChannels: [] }, selector }));
       return this.directRttResult(async () => {
-        this.requireDirectRttReadAllowed();
         const io = await this.createDirectRttMemoryIo();
         try {
           const read = await readDirectRttRing(io, parseRttRingAddresses(ring), maxBytes);
@@ -906,14 +904,13 @@ export class JLinkMcpServer {
         }
       });
     });
-    this.server.tool("rtt_channel_write", "Write an RTT down-channel through direct RTT ring memory when explicitly enabled.", {
+    this.server.tool("rtt_channel_write", "Write an RTT down-channel through direct RTT ring memory.", {
       selector: z.union([z.number().int().nonnegative(), z.string()]),
       dataHex: z.string(),
       ring: ringSchema.optional(),
     }, async ({ selector, dataHex, ring }) => {
       if (!ring) return result(() => rttChannelWriteTool({ snapshot: { upChannels: [], downChannels: [] }, selector, data: Buffer.from(dataHex, "hex") }));
       return this.directRttResult(async () => {
-        this.requireDirectRttWriteAllowed();
         const io = await this.createDirectRttMemoryIo();
         try {
           const write = await writeDirectRttRing(io, parseRttRingAddresses(ring), Buffer.from(dataHex, "hex"));
@@ -938,7 +935,6 @@ export class JLinkMcpServer {
         durationSec: input.durationSec ?? null,
       }));
       return this.directRttResult(async () => {
-        this.requireDirectRttReadAllowed();
         const data = await this.captureDirectRttStream(parseRttRingAddresses(input.ring!), input.durationSec ?? 1, input.pollIntervalMs ?? 20);
         const decoded = traceagentDecodeStream(data);
         return { status: "ok", requestedChannel: input.channelName ?? input.channel ?? null, bytes: data.length, decoded };
@@ -961,8 +957,6 @@ export class JLinkMcpServer {
     }, async (input) => {
       if (!input.downRing || !input.upRing) return result(() => traceagentWriteSignal(input));
       return this.directRttResult(async () => {
-        this.requireDirectRttWriteAllowed();
-        this.requireDirectRttReadAllowed();
         const io = await this.createDirectRttMemoryIo();
         try {
           const downRing = parseRttRingAddresses(input.downRing!);
@@ -1050,14 +1044,6 @@ export class JLinkMcpServer {
     return operation()
       .then((value) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] }))
       .catch((error) => ({ content: [{ type: "text" as const, text: JSON.stringify({ status: "error", reason: error instanceof Error ? error.message : String(error) }, null, 2) }] }));
-  }
-
-  private requireDirectRttReadAllowed(): void {
-    if (process.env.JLINK_MCP_ALLOW_RTT_DIRECT !== "1") throw new Error("JLINK_MCP_ALLOW_RTT_DIRECT=1 is required for direct RTT ring access");
-  }
-
-  private requireDirectRttWriteAllowed(): void {
-    if (process.env.JLINK_MCP_ALLOW_RTT_DIRECT_WRITE !== "1") throw new Error("JLINK_MCP_ALLOW_RTT_DIRECT_WRITE=1 is required for direct RTT ring writes");
   }
 
   private async createDirectRttMemoryIo(): Promise<DirectRttMemoryIo> {

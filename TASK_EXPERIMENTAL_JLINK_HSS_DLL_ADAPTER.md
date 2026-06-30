@@ -1,11 +1,9 @@
 # Experimental JLink HSS DLL Adapter Task
 
-Status: blocked after gated DLL evidence.
+Status: blocked after DLL evidence.
 
-Environment enabled for this run:
+Environment used for this run:
 
-- `JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1`
-- `JLINK_MCP_REAL_HW_SMOKE=1`
 - `JLINK_DEVICE=Z20K146MC`
 
 Done:
@@ -15,7 +13,7 @@ Done:
 - Added experimental native helper using `LoadLibraryW` / `GetProcAddress`.
 - Added MCP tools `hss_dll_preflight`, `hss_dll_getcaps`, `hss_dll_smoke`, and `hss_dll_benchmark`.
 - Downgraded JScope GUI evidence to `preflightOnly`, not benchmark-ready.
-- Added tests for HSS state, env gate, wrapper errors, and safety symbol rejection.
+- Added tests for HSS state, wrapper errors, and safety symbol rejection.
 - Built `native/hss-helper/bin/hss_helper.exe`.
 
 Current blocker:

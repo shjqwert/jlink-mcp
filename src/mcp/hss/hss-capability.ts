@@ -1,8 +1,6 @@
 import { dirname } from "node:path";
 import {
   discoverHssDll,
-  experimentalHssDllEnabled,
-  HSS_EXPERIMENTAL_ENV,
   hssDllGetCaps,
   hssDllPreflight,
   resolveHssHelperPath,
@@ -12,29 +10,20 @@ import {
 import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssProjectPaths } from "./project-paths";
 
-export const HSS_START_READ_STOP_NOT_VALIDATED_ENV = "HSS_START_READ_STOP_NOT_VALIDATED";
-
-export function hssStartReadStopUnvalidatedAllowed(env: Record<string, string | undefined> = process.env): boolean {
-  return env[HSS_START_READ_STOP_NOT_VALIDATED_ENV] === "1";
-}
-
 export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, options: HssHelperOptions & { cwd?: string } = {}): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
   const discovery = discoverHssDll(input, env);
   const helperPath = resolveHssHelperPath(env, options.helperPath);
   const preflight = await hssDllPreflight(input, options);
-  const getCapsAllowed = experimentalHssDllEnabled(env) && discovery.exportsFound;
+  const getCapsAllowed = discovery.exportsFound;
   const getCaps = getCapsAllowed ? await hssDllGetCaps(input, options) : undefined;
   const caps = getCaps && getCaps.status === "ok" ? getCaps.caps as Record<string, unknown> : undefined;
   const connectPreflight = preflight.connectPreflight as { targetWasHalted?: unknown } | undefined;
   const targetWasHalted = connectPreflight?.targetWasHalted === true;
   const startReadStopCandidate = preflight.status === "candidate"
     && discovery.exportsFound
-    && Boolean(preflight.helperExists)
-    && experimentalHssDllEnabled(env)
-    && env.JLINK_MCP_REAL_HW_SMOKE === "1";
+    && Boolean(preflight.helperExists);
   const startReadStopValidated = getCaps?.status === "ok";
-  const startReadStopUnvalidatedAllowed = hssStartReadStopUnvalidatedAllowed(env);
   return {
     jlink: {
       installDir: discovery.selectedDllPath ? dirname(discovery.selectedDllPath) : undefined,
@@ -56,9 +45,8 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
       maxFreqHz: Number(caps?.maxFreq ?? 0),
       targetWasHalted,
       startReadStopValidated,
-      startReadStopUnvalidatedAllowed,
-      startReadStopAttemptAllowed: startReadStopCandidate && !targetWasHalted && (startReadStopValidated || startReadStopUnvalidatedAllowed),
-      startReadStopReady: startReadStopCandidate && !targetWasHalted && startReadStopValidated,
+      startReadStopAttemptAllowed: startReadStopCandidate && !targetWasHalted,
+      startReadStopReady: startReadStopCandidate && !targetWasHalted,
     },
     helper: {
       path: helperPath,
@@ -67,13 +55,6 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
     },
     project: hssProjectPaths(options.cwd).projectRoot,
     safety: HSS_SAFETY_FALSE,
-    gates: {
-      experimentalEnv: HSS_EXPERIMENTAL_ENV,
-      experimentalEnvEnabled: experimentalHssDllEnabled(env),
-      realHwSmokeEnabled: env.JLINK_MCP_REAL_HW_SMOKE === "1",
-      startReadStopUnvalidatedEnv: HSS_START_READ_STOP_NOT_VALIDATED_ENV,
-      startReadStopUnvalidatedEnabled: startReadStopUnvalidatedAllowed,
-    },
     preflight,
     getCaps,
   };

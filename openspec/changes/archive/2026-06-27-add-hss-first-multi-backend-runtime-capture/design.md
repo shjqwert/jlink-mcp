@@ -28,7 +28,7 @@ Each backend exposes:
 
 ## Backend Rules
 
-- `jlink-hss` is available only when `JLINK_HSS_ENABLED=1`, `JLINK_SDK_DIR` is present, and an HSS adapter reports available.
+- `jlink-hss` is available only when SDK configuration is present and an HSS adapter reports available.
 - `direct-rtt-channel` is available only when an RTT control block and requested channel metadata exist.
 - `memory-poll-rsp` is a low-rate fallback and must not be selected ahead of HSS or RTT.
 - `external-import` is selected only for offline import.

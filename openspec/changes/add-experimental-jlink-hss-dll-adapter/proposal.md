@@ -2,13 +2,12 @@
 
 ## Summary
 
-Add a gated experimental JLink HSS DLL path that records public `JLINK_HSS_*` candidate evidence without letting JScope GUI preflight or fallback success count as HSS benchmark success.
+Add an experimental JLink HSS DLL path that records public `JLINK_HSS_*` candidate evidence without letting JScope GUI preflight or fallback success count as HSS benchmark success.
 
 ## Goals
 
 - Keep HSS first in backend priority.
 - Treat JScope GUI as historical/preflight-only evidence.
-- Add explicit `JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1` gate before DLL calls.
 - Record candidate API structs/functions without copying SEGGER headers or DLLs.
 - Add isolated native helper for HSS DLL symbol/GetCaps calls.
 - Report GetCaps, smoke, benchmark, fallback, and safety state as machine-readable artifacts.

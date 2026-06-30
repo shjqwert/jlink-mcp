@@ -40,15 +40,14 @@ test("HSS DLL discovery records search paths and candidate exports", () => {
   }
 });
 
-test("HSS DLL preflight is gated and does not call helper when env is disabled", async () => {
+test("HSS DLL preflight reports candidate without a helper", async () => {
   const dir = tempDir();
   try {
     const dll = path.join(dir, "JLink_x64.dll");
     fs.writeFileSync(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop");
     const preflight = await hssDllPreflight({ dllPath: dll }, { env: {}, helperPath: path.join(dir, "missing.exe") });
     assert.equal(preflight.status, "candidate");
-    assert.equal(preflight.experimentalEnvEnabled, false);
-    assert.equal(preflight.getcapsAllowed, false);
+    assert.equal(preflight.getcapsAllowed, true);
     assert.equal(preflight.benchmarkReady, false);
     assert.equal("helperPreflight" in preflight, false);
   } finally {
@@ -56,7 +55,7 @@ test("HSS DLL preflight is gated and does not call helper when env is disabled",
   }
 });
 
-test("HSS DLL preflight runs connect-preflight only when real smoke env is enabled", async () => {
+test("HSS DLL preflight runs connect-preflight when device and helper are available", async () => {
   const dir = tempDir();
   try {
     const dll = path.join(dir, "JLink_x64.dll");
@@ -67,7 +66,7 @@ test("HSS DLL preflight runs connect-preflight only when real smoke env is enabl
       else console.log(JSON.stringify({ status: 'ok', exportsFound: true }));
     `);
     const preflight = await hssDllPreflight({ dllPath: dll, device: "Z20K146MC", interface: "SWD", speedKhz: 4000, serial: "1" }, {
-      env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1", JLINK_MCP_REAL_HW_SMOKE: "1" },
+      env: {},
       ...helper,
     });
     assert.equal((preflight.connectPreflight as { targetWasHalted?: boolean }).targetWasHalted, true);
@@ -77,28 +76,26 @@ test("HSS DLL preflight runs connect-preflight only when real smoke env is enabl
   }
 });
 
-test("HSS getcaps returns structured errors for missing env, helper crash, timeout, and bad JSON", async () => {
+test("HSS getcaps returns structured errors for missing exports, helper crash, timeout, and bad JSON", async () => {
   const dir = tempDir();
   try {
     const dll = path.join(dir, "JLink_x64.dll");
     fs.writeFileSync(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop");
-    const disabled = await hssDllGetCaps({ dllPath: dll }, { env: {} });
-    assert.equal(disabled.errorCode, "HSS_EXPERIMENTAL_ENV_DISABLED");
     const partial = path.join(dir, "partial.dll");
     fs.writeFileSync(partial, "JLINK_HSS_GetCaps");
-    const missingExport = await hssDllGetCaps({ dllPath: partial }, { env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1" } });
+    const missingExport = await hssDllGetCaps({ dllPath: partial }, { env: {} });
     assert.equal(missingExport.errorCode, "HSS_DLL_EXPORTS_MISSING");
 
     const badJson = nodeHelper(dir, "console.log('not json');");
-    const parse = await hssDllGetCaps({ dllPath: dll }, { env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1" }, ...badJson });
+    const parse = await hssDllGetCaps({ dllPath: dll }, { env: {}, ...badJson });
     assert.equal(parse.errorCode, "HSS_HELPER_JSON_PARSE_FAILED");
 
     const timeoutHelper = nodeHelper(dir, "setTimeout(() => {}, 10000);");
-    const timeout = await hssDllGetCaps({ dllPath: dll }, { env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1" }, timeoutMs: 50, ...timeoutHelper });
+    const timeout = await hssDllGetCaps({ dllPath: dll }, { env: {}, timeoutMs: 50, ...timeoutHelper });
     assert.equal(timeout.errorCode, "HSS_HELPER_TIMEOUT");
 
     const crashHelper = nodeHelper(dir, "process.exit(2);");
-    const crash = await hssDllGetCaps({ dllPath: dll }, { env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1" }, ...crashHelper });
+    const crash = await hssDllGetCaps({ dllPath: dll }, { env: {}, ...crashHelper });
     assert.equal(crash.errorCode, "HSS_HELPER_JSON_PARSE_FAILED");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -111,7 +108,7 @@ test("HSS wrapper accepts helper JSON and rejects unsafe smoke/benchmark variabl
     const dll = path.join(dir, "JLink_x64.dll");
     fs.writeFileSync(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop");
     const okHelper = nodeHelper(dir, "console.log(JSON.stringify({ status: 'ok', command: process.argv[2] }));");
-    const env = { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1" };
+    const env = {};
     assert.equal((await hssDllGetCaps({ dllPath: dll }, { env, ...okHelper })).status, "ok");
     assert.equal((await hssDllSmoke({ dllPath: dll, symbol: "s_traceAliveCounter", address: "0x20006bdc", size: 4, device: "Z20K146MC", elf: "x.elf" }, { env, ...okHelper })).status, "ok");
     assert.equal((await hssDllBenchmark({ dllPath: dll, variables: [{ name: "s_traceAliveCounter", address: "0x20006bdc", size: 4 }], device: "Z20K146MC" }, { env, ...okHelper })).status, "ok");
