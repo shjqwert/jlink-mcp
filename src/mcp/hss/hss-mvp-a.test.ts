@@ -167,6 +167,47 @@ test("HSS capture start runs when GetCaps fails but helper and target are availa
   }
 });
 
+test("HM_C095 validation rejects read-error captures", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource({ readError: true }), "utf8");
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, true);
+    const captureId = (start.data as { captureId: string }).captureId;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+    });
+    const query = await service.captureQuery({ captureId, hmC095Profile: true });
+    const hmC095 = query.data?.hmC095 as { counterDeltaPass?: boolean; validSamples?: number; invalidSamples?: number };
+    const quality = query.data?.quality as { readErrors?: number };
+    assert.equal(hmC095.counterDeltaPass, false);
+    assert.equal(hmC095.validSamples, 0);
+    assert.equal(hmC095.invalidSamples, 1000);
+    assert.equal(quality.readErrors, 1000);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HSS capture start allows halted preflight with warning", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
@@ -250,11 +291,14 @@ async function writeHmProject(root: string): Promise<string> {
 interface FakeHelperOptions {
   getCapsOk?: boolean;
   targetWasHalted?: boolean;
+  readError?: boolean;
 }
 
 function fakeHelperSource(options: FakeHelperOptions = {}): string {
   const getCapsOk = options.getCapsOk ?? true;
   const targetWasHalted = options.targetWasHalted ?? false;
+  const statusFlags = options.readError ? HSS_STATUS_FLAGS.read_error : HSS_STATUS_FLAGS.valid;
+  const counterExpression = options.readError ? "0" : "i * 16";
   return `
 const fs = require("fs");
 const command = process.argv[2];
@@ -281,9 +325,9 @@ for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
   const record = Buffer.alloc(24 + symbolCount * 4);
   record.writeBigUInt64LE(BigInt(i), 0);
   record.writeBigInt64LE(BigInt(i) * 1000000n, 8);
-  record.writeUInt32LE(1, 16);
+  record.writeUInt32LE(${statusFlags}, 16);
   record.writeUInt32LE(0, 20);
-  record.writeUInt32LE(i * 16, 24);
+  record.writeUInt32LE(${counterExpression}, 24);
   records.push(record);
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));

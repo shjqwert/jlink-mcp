@@ -323,21 +323,30 @@ function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol
   const sawIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgSawFocIsr");
   const toggleIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgToggleFocIsr");
   const patternIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgPatternFocIsr");
-  const counter = counterIndex >= 0 ? records.map((record) => record.rawValues[counterIndex] >>> 0) : [];
+  const errorMask = HSS_STATUS_FLAGS.read_error
+    | HSS_STATUS_FLAGS.timeout
+    | HSS_STATUS_FLAGS.overflow
+    | HSS_STATUS_FLAGS.dropped_before_this_sample;
+  const validRecords = records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.valid) !== 0 && (record.statusFlags & errorMask) === 0);
+  const counter = counterIndex >= 0 ? validRecords.map((record) => record.rawValues[counterIndex] >>> 0) : [];
   const deltas = [];
   for (let index = 1; index < counter.length; index += 1) deltas.push((counter[index] - counter[index - 1]) >>> 0);
   const expected = actualRateHz > 0 ? 16000 / actualRateHz : null;
   const mean = deltas.length ? deltas.reduce((sum, value) => sum + value, 0) / deltas.length : null;
-  const sawPass = sawIndex < 0 || counterIndex < 0 || records.every((record) => (record.rawValues[sawIndex] & 0xffff) === (record.rawValues[counterIndex] & 0xffff));
-  const toggleValues = toggleIndex >= 0 ? new Set(records.map((record) => record.rawValues[toggleIndex])) : new Set<number>();
-  const patternValues = patternIndex >= 0 ? new Set(records.map((record) => record.rawValues[patternIndex])) : new Set<number>();
+  const sawPass = sawIndex < 0 || counterIndex < 0 || (validRecords.length > 0 && validRecords.every((record) => (record.rawValues[sawIndex] & 0xffff) === (record.rawValues[counterIndex] & 0xffff)));
+  const toggleValues = toggleIndex >= 0 ? new Set(validRecords.map((record) => record.rawValues[toggleIndex])) : new Set<number>();
+  const patternValues = patternIndex >= 0 ? new Set(validRecords.map((record) => record.rawValues[patternIndex])) : new Set<number>();
+  const allSamplesValid = records.length > 1 && validRecords.length === records.length;
+  const deltaWithinTolerance = expected !== null && mean !== null && Math.abs(mean - expected) <= Math.max(1, expected * 0.25);
   return {
     focIsrFreqHz: 16000,
+    validSamples: validRecords.length,
+    invalidSamples: records.length - validRecords.length,
     counterDeltaExpected: expected,
     counterDeltaMean: mean,
     counterDeltaMin: deltas.length ? Math.min(...deltas) : null,
     counterDeltaMax: deltas.length ? Math.max(...deltas) : null,
-    counterDeltaPass: expected === null || mean === null ? false : Math.abs(mean - expected) <= Math.max(1, expected * 0.25),
+    counterDeltaPass: allSamplesValid && counterIndex >= 0 && deltaWithinTolerance,
     sawFollowsCounterLow16: sawPass,
     toggleAliasWarning: toggleIndex >= 0 && toggleValues.size <= 1,
     patternChanges: patternIndex < 0 ? undefined : patternValues.size > 1,
