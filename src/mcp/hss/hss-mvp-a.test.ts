@@ -250,6 +250,47 @@ test("live HSS status counts read-error records as invalid", async () => {
   }
 });
 
+test("HSS export rejects non-terminal capture metadata", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource(), "utf8");
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, true);
+    const captureId = (start.data as { captureId: string }).captureId;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+    });
+    const metadataFile = join(root, ".jlink-mcp", "captures", captureId, "capture.json");
+    const metadata = JSON.parse(await readFile(metadataFile, "utf8"));
+    metadata.state = "capturing";
+    await writeFile(metadataFile, JSON.stringify(metadata, null, 2), "utf8");
+    const exported = await service.captureExport({ captureId });
+    assert.equal(exported.ok, false);
+    assert.equal(exported.error?.code, HSS_ERROR.HSS_CAPTURE_NOT_TERMINAL);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HSS capture start allows halted preflight with warning", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");

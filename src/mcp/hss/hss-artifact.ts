@@ -153,6 +153,7 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
 export async function exportHssCapture(input: { captureId: string; metadataFile?: string; format?: "csv"; variables?: string[] }, cwd = process.cwd()): Promise<Record<string, unknown>> {
   if (input.format && input.format !== "csv") throw new Error("only CSV export is supported");
   const metadata = await readMetadataForCapture(input.captureId, input.metadataFile, cwd);
+  if (metadata.state !== "completed" && metadata.state !== "stopped" && metadata.state !== "failed") throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_TERMINAL, "capture is not terminal");
   const segment = metadata.segments[0];
   if (!segment) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture has no segment metadata");
   assertInsideProject(metadata.projectRoot, cwd);
