@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <chrono>
 #include <fstream>
@@ -218,6 +219,10 @@ static int64_t now_ns() {
   QueryPerformanceCounter(&counter);
   QueryPerformanceFrequency(&frequency);
   return static_cast<int64_t>((static_cast<long double>(counter.QuadPart) * 1000000000.0L) / static_cast<long double>(frequency.QuadPart));
+}
+
+static int64_t sample_due_ns(int64_t started_ns, uint64_t sample, int requested_rate) {
+  return started_ns + static_cast<int64_t>((sample + 1U) * 1000000000ULL / static_cast<uint64_t>(requested_rate));
 }
 
 static std::string read_text_file(const std::wstring& path) {
@@ -486,6 +491,10 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
 }
 
 static int self_test() {
+  if (sample_due_ns(1000, 0, 1000) != 1001000 || sample_due_ns(1000, 2, 1000) != 3001000) {
+    error_json("HSS_SELF_TEST_TIMING_FAILED", "sample pacing calculation failed");
+    return 0;
+  }
   const std::string temporaryFile = "hss_selftest_" + std::to_string(GetCurrentProcessId()) + ".bin";
   std::ofstream out(temporaryFile, std::ios::binary | std::ios::trunc);
   if (!out) {
@@ -617,22 +626,41 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   uint32_t crc = 0xFFFFFFFFU;
   uint64_t valid_samples = 0;
   uint64_t read_errors = 0;
+  int first_read_rc = 0;
+  int last_read_rc = 0;
+  int min_read_rc = 0;
+  int max_read_rc = 0;
   const int64_t started_ns = now_ns();
   for (uint64_t sample = 0; sample < requested_samples; ++sample) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+    while (true) {
+      const int64_t wait_ns = sample_due_ns(started_ns, sample, requested_rate) - now_ns();
+      if (wait_ns <= 0) break;
+      std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(wait_ns, 1'000'000)));
+    }
     int read_rc = call_hss_read(hss_read, read_buffer.data(), bytes_per_sample, &crashed);
+    if (sample == 0) {
+      first_read_rc = read_rc;
+      min_read_rc = read_rc;
+      max_read_rc = read_rc;
+    } else {
+      min_read_rc = (std::min)(min_read_rc, read_rc);
+      max_read_rc = (std::max)(max_read_rc, read_rc);
+    }
+    last_read_rc = read_rc;
+    const bool read_ok = !crashed && read_rc >= 0;
     std::vector<uint32_t> values;
     values.reserve(symbols.size());
     size_t offset = 0;
     for (const auto& symbol : symbols) {
       uint32_t raw = 0;
-      if (!crashed && read_rc >= static_cast<int>(bytes_per_sample) && offset + symbol.size <= read_buffer.size()) {
+      if (read_ok && offset + symbol.size <= read_buffer.size()) {
         for (U32 byte = 0; byte < symbol.size; ++byte) raw |= static_cast<uint32_t>(read_buffer[offset + byte]) << (byte * 8);
       }
       values.push_back(raw);
       offset += symbol.size;
     }
-    const uint32_t flags = (!crashed && read_rc >= static_cast<int>(bytes_per_sample)) ? 1U : 2U;
+    const uint32_t flags = read_ok ? 1U : 2U;
     if (flags == 1U) ++valid_samples;
     else ++read_errors;
     write_record(out, sample, now_ns(), flags, values, &crc);
@@ -662,6 +690,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"sampleCount\":" << sample_count
     << ",\"validSamples\":" << valid_samples
     << ",\"readErrors\":" << read_errors
+    << ",\"firstReadReturnCode\":" << first_read_rc
+    << ",\"lastReadReturnCode\":" << last_read_rc
+    << ",\"minReadReturnCode\":" << min_read_rc
+    << ",\"maxReadReturnCode\":" << max_read_rc
     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":0"
     << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
     << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << sample_count
