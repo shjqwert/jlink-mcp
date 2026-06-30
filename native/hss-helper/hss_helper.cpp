@@ -273,6 +273,10 @@ static std::vector<PlanSymbol> json_symbols(const std::string& text) {
   return symbols;
 }
 
+static bool hss_buffer_overwritten(const std::vector<unsigned char>& buffer, unsigned char sentinel) {
+  return std::any_of(buffer.begin(), buffer.end(), [sentinel](unsigned char byte) { return byte != sentinel; });
+}
+
 static void write_record(std::ofstream& out, uint64_t sample_index, int64_t timestamp_ticks, uint32_t status_flags, const std::vector<uint32_t>& values, uint32_t* crc) {
   out.write(reinterpret_cast<const char*>(&sample_index), sizeof(sample_index));
   out.write(reinterpret_cast<const char*>(&timestamp_ticks), sizeof(timestamp_ticks));
@@ -730,6 +734,10 @@ static int self_test() {
     error_json("HSS_SELF_TEST_TIMING_FAILED", "sample pacing calculation failed");
     return 0;
   }
+  if (hss_buffer_overwritten({0xA5, 0xA5}, 0xA5) || !hss_buffer_overwritten({0xA5, 0x00}, 0xA5)) {
+    error_json("HSS_SELF_TEST_SENTINEL_FAILED", "HSS read buffer sentinel check failed");
+    return 0;
+  }
   const std::string temporaryFile = "hss_selftest_" + std::to_string(GetCurrentProcessId()) + ".bin";
   std::ofstream out(temporaryFile, std::ios::binary | std::ios::trunc);
   if (!out) {
@@ -861,10 +869,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   uint32_t crc = 0xFFFFFFFFU;
   uint64_t valid_samples = 0;
   uint64_t read_errors = 0;
+  uint64_t unchanged_reads = 0;
   int first_read_rc = 0;
   int last_read_rc = 0;
   int min_read_rc = 0;
   int max_read_rc = 0;
+  bool first_read_buffer_changed = false;
+  bool last_read_buffer_changed = false;
   const int64_t started_ns = now_ns();
   for (uint64_t sample = 0; sample < requested_samples; ++sample) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
@@ -873,17 +884,22 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       if (wait_ns <= 0) break;
       std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(wait_ns, 1'000'000)));
     }
+    std::fill(read_buffer.begin(), read_buffer.end(), 0xA5);
     int read_rc = call_hss_read(hss_read, read_buffer.data(), bytes_per_sample, &crashed);
+    const bool buffer_changed = hss_buffer_overwritten(read_buffer, 0xA5);
+    if (!buffer_changed) ++unchanged_reads;
     if (sample == 0) {
       first_read_rc = read_rc;
       min_read_rc = read_rc;
       max_read_rc = read_rc;
+      first_read_buffer_changed = buffer_changed;
     } else {
       min_read_rc = (std::min)(min_read_rc, read_rc);
       max_read_rc = (std::max)(max_read_rc, read_rc);
     }
     last_read_rc = read_rc;
-    const bool read_ok = !crashed && read_rc >= 0;
+    last_read_buffer_changed = buffer_changed;
+    const bool read_ok = !crashed && (read_rc >= static_cast<int>(bytes_per_sample) || (read_rc == 0 && buffer_changed));
     std::vector<uint32_t> values;
     values.reserve(symbols.size());
     size_t offset = 0;
@@ -929,6 +945,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"lastReadReturnCode\":" << last_read_rc
     << ",\"minReadReturnCode\":" << min_read_rc
     << ",\"maxReadReturnCode\":" << max_read_rc
+    << ",\"firstReadBufferChanged\":" << (first_read_buffer_changed ? "true" : "false")
+    << ",\"lastReadBufferChanged\":" << (last_read_buffer_changed ? "true" : "false")
+    << ",\"unchangedReads\":" << unchanged_reads
     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":0"
     << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
     << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << sample_count
