@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
@@ -105,6 +105,7 @@ export async function finalizeMetadata(input: {
 }
 
 export async function hssCaptureStatusFromMetadata(metadataFile: string): Promise<Record<string, unknown>> {
+  if (!existsSync(metadataFile)) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture metadata was not found", { metadataFile });
   const metadata = await readHssMetadata(metadataFile);
   return {
     captureId: metadata.captureId,

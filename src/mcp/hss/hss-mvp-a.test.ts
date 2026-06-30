@@ -328,6 +328,21 @@ test("HSS export rejects captureId path traversal", async () => {
   }
 });
 
+test("HSS status reports stable error for unknown captureId", async () => {
+  const root = await tempProject();
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, { cwd: root });
+  try {
+    const status = await service.captureStatus({ captureId: "missing-capture" });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, HSS_ERROR.HSS_CAPTURE_NOT_FOUND);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HSS capture start allows halted preflight with warning", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
