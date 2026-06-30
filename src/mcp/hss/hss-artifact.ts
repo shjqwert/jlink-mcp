@@ -1,5 +1,5 @@
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { once } from "node:events";
 import { HSS_SAFETY_FALSE, type HssCaptureMetadata, type HssResolvedSymbol, type HssScalarType } from "./hss-contract";
@@ -190,6 +190,7 @@ export async function exportHssCapture(input: { captureId: string; metadataFile?
   const selected = selectSymbols(metadata.symbols, input.variables);
   const csvFile = join(paths.exportsDir, `${input.captureId}.csv`);
   assertInsideProject(csvFile, paths.exportsDir);
+  await mkdir(paths.exportsDir, { recursive: true });
   const stream = createWriteStream(csvFile, { flags: "w", encoding: "utf8" });
   try {
     await once(stream, "open");

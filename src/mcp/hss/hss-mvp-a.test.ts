@@ -122,6 +122,7 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     const rawQuery = await service.captureQuery({ captureId, includeRawSamples: true, maxSamples: 10, hmC095Profile: false });
     assert.match(rawQuery.warnings[0] ?? "", /raw samples decimated from 1000 to 10/);
 
+    await rm(join(root, ".jlink-mcp", "exports"), { recursive: true, force: true });
     const exported = await service.captureExport({ captureId });
     assert.equal(exported.ok, true);
     assert.equal(existsSync((exported.data as { csvFile: string }).csvFile), true);
