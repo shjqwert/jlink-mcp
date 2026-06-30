@@ -1005,6 +1005,7 @@ export class JLinkMcpServer {
       sessionName: z.string().optional(),
       outputSubdir: z.string().optional(),
       dryRun: z.boolean().optional(),
+      readMode: z.enum(["periodic", "drain"]).optional(),
     };
     const captureId = { captureId: z.string().uuid() };
 

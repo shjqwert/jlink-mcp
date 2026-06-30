@@ -96,15 +96,17 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     assert.equal((cap.data?.hss as { getCapsValidated?: boolean }).getCapsValidated, true);
     assert.equal((cap.data?.hss as { startReadStopValidated?: boolean }).startReadStopValidated, false);
 
-    const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 1000, durationSec: 1 });
+    const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 1000, durationSec: 1, readMode: "drain" });
     assert.equal(plan.ok, true);
     assert.equal(plan.data?.startReady, true);
+    assert.equal(plan.data?.readMode, "drain");
 
     const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
     assert.equal(start.ok, true);
     const helperPlan = JSON.parse(await readFile(plan.data!.output.planFile, "utf8"));
     assert.equal(helperPlan.getCapsValidated, true);
     assert.equal(helperPlan.startReadStopValidated, false);
+    assert.equal(helperPlan.readMode, "drain");
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });

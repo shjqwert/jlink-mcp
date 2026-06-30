@@ -867,12 +867,17 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string device = json_string(plan, "device", "Z20K146MC");
   const std::string iface = json_string(plan, "interface", "SWD");
   const std::string serial_text = json_string(plan, "serial");
+  const std::string read_mode = json_string(plan, "readMode", "periodic");
   const int speed = json_int(plan, "speedKhz", 4000);
   const int requested_rate = json_int(plan, "requestedRateHz", 1000);
   const int duration_sec = json_int(plan, "durationSec", 1);
   const auto symbols = json_symbols(plan);
   if (dll_utf8.empty() || output_file.empty() || capture_id.empty() || symbols.empty() || symbols.size() > 10 || requested_rate < 1 || duration_sec < 1) {
     error_json("HSS_PLAN_INVALID", "plan is missing required fields");
+    return 0;
+  }
+  if (read_mode != "periodic" && read_mode != "drain") {
+    error_json("HSS_PLAN_INVALID", "readMode must be periodic or drain");
     return 0;
   }
 
@@ -976,12 +981,21 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   int first_changed_offset = -1;
   std::string first_changed_bytes;
   const int64_t started_ns = now_ns();
+  if (read_mode == "drain") {
+    const int64_t drain_until_ns = started_ns + static_cast<int64_t>(duration_sec) * 1000000000LL;
+    while (now_ns() < drain_until_ns) {
+      if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
   for (uint64_t sample = 0; sample < requested_samples; ++sample) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
-    while (true) {
-      const int64_t wait_ns = sample_due_ns(started_ns, sample, requested_rate) - now_ns();
-      if (wait_ns <= 0) break;
-      std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(wait_ns, 1'000'000)));
+    if (read_mode == "periodic") {
+      while (true) {
+        const int64_t wait_ns = sample_due_ns(started_ns, sample, requested_rate) - now_ns();
+        if (wait_ns <= 0) break;
+        std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(wait_ns, 1'000'000)));
+      }
     }
     std::fill(read_buffer.begin(), read_buffer.end(), 0xA5);
     int read_rc = call_hss_read(hss_read, read_buffer.data(), read_buffer_bytes, &crashed);
@@ -1044,6 +1058,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   std::cout
     << ",\"captureId\":\"" << escape(capture_id)
     << "\",\"backend\":\"jlink-hss\",\"requestedRateHz\":" << requested_rate
+    << ",\"readMode\":\"" << read_mode << "\""
     << ",\"actualRateHz\":" << actual_rate
     << ",\"durationSec\":" << (static_cast<double>(elapsed_ns) / 1000000000.0)
     << ",\"sampleCount\":" << sample_count

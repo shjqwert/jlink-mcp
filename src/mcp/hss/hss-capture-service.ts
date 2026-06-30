@@ -126,6 +126,7 @@ export class HssCaptureService {
         interface: target.interface,
         speedKhz: target.speedKhz,
         serial,
+        readMode: input.readMode ?? plan.readMode,
         outputFile: plan.output.firstSegmentFile,
         stopFile,
         requestedRateHz: plan.sampling.requestedRateHz,

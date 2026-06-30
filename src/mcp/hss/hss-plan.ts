@@ -25,6 +25,7 @@ export interface HssCapturePlanInput {
   interface?: "SWD" | "JTAG";
   speedKhz?: number;
   serial?: string;
+  readMode?: "periodic" | "drain";
   artifactFile?: string;
   mapFile?: string;
   symbols?: HssRequestedSymbol[];
@@ -67,15 +68,18 @@ export interface HssCapturePlan {
   };
   safety: typeof HSS_SAFETY_FALSE;
   startReady: boolean;
+  readMode: "periodic" | "drain";
 }
 
 export async function buildHssCapturePlan(input: HssCapturePlanInput = {}, cwd = process.cwd(), startReady = false): Promise<HssCapturePlan> {
   const requestedRateHz = input.requestedRateHz ?? 1000;
   const durationSec = input.durationSec ?? 3;
   const segmentSizeMb = input.segmentSizeMb ?? 64;
+  const readMode = input.readMode ?? "periodic";
   if (!Number.isInteger(requestedRateHz) || requestedRateHz < 1 || requestedRateHz > 16000) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "requestedRateHz must be 1..16000");
   if (!Number.isInteger(durationSec) || durationSec < 1 || durationSec > 60) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "durationSec must be 1..60");
   if (!Number.isInteger(segmentSizeMb) || segmentSizeMb < 16 || segmentSizeMb > 512) throw new HssError(HSS_ERROR.PATH_OUTSIDE_CWD, "segmentSizeMb must be 16..512");
+  if (readMode !== "periodic" && readMode !== "drain") throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "readMode must be periodic or drain");
   const symbols = input.symbols?.length ? input.symbols : HM_C095_HSS_VARIABLES;
   if (symbols.length > 10) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "HSS MVP-A supports at most 10 variables");
   const artifact = await resolveHssDebugArtifact({ artifactFile: input.artifactFile, mapFile: input.mapFile, symbols, cwd });
@@ -117,6 +121,7 @@ export async function buildHssCapturePlan(input: HssCapturePlanInput = {}, cwd =
     },
     safety: HSS_SAFETY_FALSE,
     startReady,
+    readMode,
   };
   await mkdir(outputDir, { recursive: true });
   return plan;
