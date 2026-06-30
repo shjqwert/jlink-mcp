@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { ProbeBackend } from "../../probe/backend";
 import { discoverHssDll, resolveHssHelperPath, type HssDllPreflightInput } from "../hss-dll/hss-dll-adapter";
 import { appendHssAudit } from "./audit-log";
-import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, queryHssCapture, writeInitialMetadata } from "./hss-artifact";
+import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, hssCaptureStopFromMetadata, queryHssCapture, writeInitialMetadata } from "./hss-artifact";
 import { hssCapabilityProbe } from "./hss-capability";
 import type { HssCapturePlan, HssCapturePlanInput } from "./hss-plan";
 import { buildHssCapturePlan } from "./hss-plan";
@@ -191,10 +191,10 @@ export class HssCaptureService {
   async captureStop(input: { captureId: string }): Promise<HssEnvelope<Record<string, unknown>>> {
     return this.wrap("hss_capture_stop", input, async () => {
       const active = this.active?.captureId === input.captureId ? this.active : null;
-      if (!active) return hssCaptureStatusFromMetadata(this.metadataFor(input.captureId));
+      if (!active) return hssCaptureStopFromMetadata(this.metadataFor(input.captureId));
       await writeFile(active.stopFile, "stop", "utf8");
       await Promise.race([active.done, new Promise((resolve) => setTimeout(resolve, 30000))]);
-      return hssCaptureStatusFromMetadata(active.metadataFile);
+      return hssCaptureStopFromMetadata(active.metadataFile);
     });
   }
 

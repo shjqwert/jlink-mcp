@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { once } from "node:events";
 import { HSS_SAFETY_FALSE, type HssCaptureMetadata, type HssResolvedSymbol, type HssScalarType } from "./hss-contract";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
@@ -120,6 +120,21 @@ export async function hssCaptureStatusFromMetadata(metadataFile: string): Promis
     overflows: metadata.quality.overflows,
     droppedSamples: metadata.quality.droppedSamples,
     currentSegment: metadata.segments[0]?.file ?? "capture_0001.bin",
+    warnings: metadata.warnings,
+  };
+}
+
+export async function hssCaptureStopFromMetadata(metadataFile: string): Promise<Record<string, unknown>> {
+  if (!existsSync(metadataFile)) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture metadata was not found", { metadataFile });
+  const metadata = await readHssMetadata(metadataFile);
+  const captureDir = dirname(metadataFile);
+  return {
+    captureId: metadata.captureId,
+    state: metadata.state,
+    metadataFile,
+    segments: metadata.segments.map((segment) => ({ ...segment, file: join(captureDir, segment.file) })),
+    quality: metadata.quality,
+    safety: metadata.safety,
     warnings: metadata.warnings,
   };
 }
