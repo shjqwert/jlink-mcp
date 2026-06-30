@@ -41,6 +41,11 @@ Validation matrix:
 Commands after `npm run compile`:
 
 - `node scripts/hss-hm-c095-smoke.mjs 1000 3`
+- `node scripts/hss-hm-c095-smoke.mjs core4 1000 3`
+- `node scripts/hss-hm-c095-smoke.mjs core4 8000 3`
+- `node scripts/hss-hm-c095-smoke.mjs core4 16000 2`
+- `node scripts/hss-hm-c095-smoke.mjs full10 4000 5`
+- `node scripts/hss-hm-c095-smoke.mjs full10 8000 5`
 - `node scripts/hss-validate-capture.mjs <captureId>`
 
 Safety metadata in every `capture.json` must keep `targetReset`, `targetWritten`, `flashIssued`, `resetIssued`, and `haltIssued` false.

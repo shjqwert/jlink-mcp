@@ -2,15 +2,50 @@ import { JLinkBackend } from "../out/probe/jlink.js";
 import { ProcessManager } from "../out/utils/process-manager.js";
 import { HssCaptureService } from "../out/mcp/hss/hss-capture-service.js";
 
-const rateHz = Number(process.argv[2] ?? 1000);
-const durationSec = Number(process.argv[3] ?? 3);
-const dllPath = process.argv[4];
+const symbolSets = {
+  counter: [{ name: "g_hssDbgCounterFocIsr", type: "uint32", unit: "count" }],
+  core4: [
+    { name: "g_hssDbgCounterFocIsr", type: "uint32", unit: "count" },
+    { name: "g_hssDbgSawFocIsr", type: "uint32" },
+    { name: "g_hssDbgToggleFocIsr", type: "uint32" },
+    { name: "g_hssDbgPatternFocIsr", type: "uint32" },
+  ],
+  full10: [
+    { name: "g_hssDbgCounterFocIsr", type: "uint32", unit: "count" },
+    { name: "g_hssDbgSawFocIsr", type: "uint32" },
+    { name: "g_hssDbgToggleFocIsr", type: "uint32" },
+    { name: "g_hssDbgPatternFocIsr", type: "uint32" },
+    { name: "g_hssDbgRawAdcM1U", type: "uint32" },
+    { name: "g_hssDbgRawAdcM1V", type: "uint32" },
+    { name: "g_hssDbgRawAdcM2U", type: "uint32" },
+    { name: "g_hssDbgRawAdcM2V", type: "uint32" },
+    { name: "g_hssDbgOffsetM1U", type: "int16" },
+    { name: "g_hssDbgOffsetM1V", type: "int16" },
+  ],
+};
+
+const args = process.argv.slice(2);
+if (args[0] === "--help") {
+  console.log("usage: node scripts/hss-hm-c095-smoke.mjs [counter|core4|full10] [rateHz] [durationSec] [dllPath]");
+  console.log("legacy: node scripts/hss-hm-c095-smoke.mjs 1000 3 [dllPath]");
+  process.exit(0);
+}
+
+const mode = symbolSets[args[0]] ? args.shift() : "counter";
+const rateHz = Number(args[0] ?? 1000);
+const durationSec = Number(args[1] ?? 3);
+const dllPath = args[2];
+if (!Number.isInteger(rateHz) || rateHz < 1 || !Number.isInteger(durationSec) || durationSec < 1) {
+  console.error("rateHz and durationSec must be positive integers");
+  process.exit(2);
+}
+
 const probe = new JLinkBackend({ device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
 const service = new HssCaptureService(probe);
 
 try {
   const plan = await service.capturePlan({
-    symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32", unit: "count" }],
+    symbols: symbolSets[mode],
     requestedRateHz: rateHz,
     durationSec,
   });
