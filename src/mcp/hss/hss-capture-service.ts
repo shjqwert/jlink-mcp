@@ -57,7 +57,14 @@ export class HssCaptureService {
   async capturePlan(input: HssCapturePlanInput = {}): Promise<HssEnvelope<HssCapturePlan>> {
     return this.wrap("hss_capture_plan", input, async () => {
       await ensureHssProjectDirs(this.cwd());
-      const capability = await hssCapabilityProbe({}, { env: this.env(), helperPath: this.options.helperPath, helperArgsPrefix: this.options.helperArgsPrefix, cwd: this.cwd() });
+      const probe = this.probe.getCaptureConfig();
+      const capability = await hssCapabilityProbe({
+        device: probe?.device,
+        interface: probe?.interface as "SWD" | "JTAG" | undefined,
+        speedKhz: probe?.speed,
+        serial: probe?.serialNumber,
+      }, { env: this.env(), helperPath: this.options.helperPath, helperArgsPrefix: this.options.helperArgsPrefix, cwd: this.cwd() });
+      enforceCapabilityRate(capability, input.requestedRateHz ?? 1000);
       const startReady = Boolean((capability.hss as { startReadStopReady?: boolean }).startReadStopReady);
       const plan = await buildHssCapturePlan(input, this.cwd(), startReady);
       this.plans.set(plan.planId, plan);
@@ -91,6 +98,7 @@ export class HssCaptureService {
       const warnings = targetWasHaltedBeforeCapture ? ["target reported halted during connect preflight; proceeding with read-only HSS capture per operator instruction"] : [];
 
       const plan = input.planId ? this.requirePlan(input.planId) : await buildHssCapturePlan(input, this.cwd(), true);
+      enforceCapabilityRate(capability, plan.sampling.requestedRateHz);
       this.plans.set(plan.planId, plan);
       const owner = `hss:${plan.output.captureId}`;
       if (!this.probe.acquireExclusive(owner)) throw new HssError(HSS_ERROR.HSS_CAPTURE_ACTIVE, `probe is already owned by ${this.probe.getExclusiveOwner() ?? "another operation"}`);
@@ -307,6 +315,14 @@ function warningList(data: unknown): string[] {
   if (!data || typeof data !== "object") return [];
   const warnings = (data as Record<string, unknown>).warnings;
   return Array.isArray(warnings) ? warnings.filter((warning): warning is string => typeof warning === "string") : [];
+}
+
+function enforceCapabilityRate(capability: Record<string, unknown>, requestedRateHz: number): void {
+  const hss = capability.hss as { getCapsOk?: boolean; maxFreqHz?: unknown } | undefined;
+  const maxFreqHz = Number(hss?.maxFreqHz ?? 0);
+  if (hss?.getCapsOk && Number.isFinite(maxFreqHz) && maxFreqHz > 0 && requestedRateHz > maxFreqHz) {
+    throw new HssError(HSS_ERROR.HSS_CAPABILITY_LIMIT, `requestedRateHz ${requestedRateHz} exceeds HSS maxFreqHz ${maxFreqHz}`, { requestedRateHz, maxFreqHz });
+  }
 }
 
 function emptyLiveQuality(): Record<"sampleCount" | "validSamples" | "readErrors" | "timeouts" | "overflows" | "droppedSamples", number> {

@@ -134,6 +134,31 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
   }
 });
 
+test("HSS capture plan rejects requested rate above GetCaps maxFreq", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource({ maxFreq: 1000 }), "utf8");
+    const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 8000, durationSec: 1 });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.error?.code, HSS_ERROR.HSS_CAPABILITY_LIMIT);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HSS capture start runs when GetCaps fails but helper and target are available", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
@@ -489,6 +514,7 @@ async function writeHmProject(root: string): Promise<string> {
 
 interface FakeHelperOptions {
   getCapsOk?: boolean;
+  maxFreq?: number;
   targetWasHalted?: boolean;
   readError?: boolean;
   lingerMs?: number;
@@ -496,6 +522,7 @@ interface FakeHelperOptions {
 
 function fakeHelperSource(options: FakeHelperOptions = {}): string {
   const getCapsOk = options.getCapsOk ?? true;
+  const maxFreq = options.maxFreq ?? 16000;
   const targetWasHalted = options.targetWasHalted ?? false;
   const statusFlags = options.readError ? HSS_STATUS_FLAGS.read_error : HSS_STATUS_FLAGS.valid;
   const counterExpression = options.readError ? "0" : "i * 16";
@@ -513,7 +540,7 @@ if (command === "connect-preflight") {
   process.exit(0);
 }
 if (command === "getcaps") {
-  console.log(JSON.stringify(${getCapsOk ? "{ status: \"ok\", caps: { maxBlocks: 16, maxFreq: 16000 } }" : "{ status: \"error\", errorCode: \"HSS_HELPER_TIMEOUT\", reason: \"GetCaps failed\" }"}));
+  console.log(JSON.stringify(${getCapsOk ? `{ status: "ok", caps: { maxBlocks: 16, maxFreq: ${maxFreq} } }` : "{ status: \"error\", errorCode: \"HSS_HELPER_TIMEOUT\", reason: \"GetCaps failed\" }"}));
   process.exit(0);
 }
 if (command !== "hss-capture") {
