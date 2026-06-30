@@ -20,6 +20,11 @@ export const HM_C095_HSS_VARIABLES = [
 ] satisfies HssRequestedSymbol[];
 
 export interface HssCapturePlanInput {
+  dllPath?: string;
+  device?: string;
+  interface?: "SWD" | "JTAG";
+  speedKhz?: number;
+  serial?: string;
   artifactFile?: string;
   mapFile?: string;
   symbols?: HssRequestedSymbol[];

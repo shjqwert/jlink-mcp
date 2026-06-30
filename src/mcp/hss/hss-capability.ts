@@ -23,7 +23,7 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
   const startReadStopCandidate = preflight.status === "candidate"
     && discovery.exportsFound
     && Boolean(preflight.helperExists);
-  const startReadStopValidated = getCaps?.status === "ok";
+  const getCapsValidated = getCaps?.status === "ok";
   return {
     jlink: {
       installDir: discovery.selectedDllPath ? dirname(discovery.selectedDllPath) : undefined,
@@ -44,9 +44,10 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
       maxBlocks: Number(caps?.maxBlocks ?? 0),
       maxFreqHz: Number(caps?.maxFreq ?? 0),
       targetWasHalted,
-      startReadStopValidated,
+      getCapsValidated,
+      startReadStopValidated: false,
       startReadStopAttemptAllowed: startReadStopCandidate,
-      startReadStopReady: startReadStopValidated,
+      startReadStopReady: getCapsValidated,
     },
     helper: {
       path: helperPath,

@@ -93,6 +93,8 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     const cap = await service.capabilityProbe({ dllPath: dll, device: "Z20K146MC", interface: "SWD", speedKhz: 4000 });
     assert.equal(cap.ok, true);
     assert.equal((cap.data?.helper as { exists?: boolean }).exists, true);
+    assert.equal((cap.data?.hss as { getCapsValidated?: boolean }).getCapsValidated, true);
+    assert.equal((cap.data?.hss as { startReadStopValidated?: boolean }).startReadStopValidated, false);
 
     const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 1000, durationSec: 1 });
     assert.equal(plan.ok, true);
@@ -100,6 +102,9 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
 
     const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
     assert.equal(start.ok, true);
+    const helperPlan = JSON.parse(await readFile(plan.data!.output.planFile, "utf8"));
+    assert.equal(helperPlan.getCapsValidated, true);
+    assert.equal(helperPlan.startReadStopValidated, false);
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
@@ -130,6 +135,56 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
   } finally {
     await service.dispose();
     probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HSS capture plan forwards explicit DLL and connection parameters to capability probe", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "custom", "JLink_x64.dll");
+  const argvLog = join(root, "argv.json");
+  const probe = new JLinkBackend({ installDir: root, device: "WRONG_DEVICE", interface: "JTAG", speed: 1000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: { HSS_ARGV_LOG: argvLog },
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await mkdir(join(root, "custom"), { recursive: true });
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, argvEchoHelperSource(), "utf8");
+
+    const plan = await service.capturePlan({
+      dllPath: dll,
+      device: "Z20K146M",
+      interface: "SWD",
+      speedKhz: 4000,
+      serial: "123456789",
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+    });
+
+    assert.equal(plan.ok, true);
+    assert.equal(plan.data?.startReady, true);
+    const argv = JSON.parse(await readFile(argvLog, "utf8")) as string[];
+    assert.deepEqual(argv, [
+      "getcaps",
+      "--dll",
+      dll,
+      "--device",
+      "Z20K146M",
+      "--interface",
+      "SWD",
+      "--speed",
+      "4000",
+      "--serial",
+      "123456789",
+    ]);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -563,6 +618,27 @@ fs.writeFileSync(plan.outputFile, Buffer.concat(records));
 const result = { status: "${helperStatus}", ${helperError} captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: ${options.readError ? "0" : "records.length"}, readErrors: ${options.readError ? "records.length" : "0"}, timeouts: 0, overflows: 0, droppedSamples: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false };
 const finish = () => console.log(JSON.stringify(result));
 ${options.lingerMs ? `setTimeout(finish, ${options.lingerMs});` : "finish();"}
+`;
+}
+
+function argvEchoHelperSource(): string {
+  return `
+const fs = require("fs");
+const command = process.argv[2];
+if (command === "preflight") {
+  console.log(JSON.stringify({ status: "ok", helperExists: true }));
+  process.exit(0);
+}
+if (command === "connect-preflight") {
+  console.log(JSON.stringify({ status: "ok", targetWasHalted: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
+  process.exit(0);
+}
+if (command === "getcaps") {
+  if (process.env.HSS_ARGV_LOG) fs.writeFileSync(process.env.HSS_ARGV_LOG, JSON.stringify(process.argv.slice(2)));
+  console.log(JSON.stringify({ status: "ok", argv: process.argv.slice(2), caps: { maxBlocks: 10, maxFreq: 1000 } }));
+  process.exit(0);
+}
+console.log(JSON.stringify({ status: "error", errorCode: "BAD_COMMAND" }));
 `;
 }
 

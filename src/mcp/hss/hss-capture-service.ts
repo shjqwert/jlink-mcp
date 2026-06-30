@@ -59,10 +59,11 @@ export class HssCaptureService {
       await ensureHssProjectDirs(this.cwd());
       const probe = this.probe.getCaptureConfig();
       const capability = await hssCapabilityProbe({
-        device: probe?.device,
-        interface: probe?.interface as "SWD" | "JTAG" | undefined,
-        speedKhz: probe?.speed,
-        serial: probe?.serialNumber,
+        dllPath: input.dllPath,
+        device: input.device ?? probe?.device,
+        interface: input.interface ?? (probe?.interface as "SWD" | "JTAG" | undefined),
+        speedKhz: input.speedKhz ?? probe?.speed,
+        serial: input.serial ?? probe?.serialNumber,
       }, { env: this.env(), helperPath: this.options.helperPath, helperArgsPrefix: this.options.helperArgsPrefix, cwd: this.cwd() });
       enforceCapabilityRate(capability, input.requestedRateHz ?? 1000);
       const startReady = Boolean((capability.hss as { startReadStopReady?: boolean }).startReadStopReady);
@@ -118,7 +119,8 @@ export class HssCaptureService {
       await writeHelperPlan(plan.output.planFile, {
         captureId: plan.output.captureId,
         dllPath: discovery.selectedDllPath,
-        startReadStopValidated: Boolean(hss.getCapsOk),
+        getCapsValidated: Boolean(hss.getCapsOk),
+        startReadStopValidated: false,
         targetWasHaltedBeforeCapture,
         device: target.device,
         interface: target.interface,

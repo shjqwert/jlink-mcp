@@ -45,6 +45,7 @@ const service = new HssCaptureService(probe);
 
 try {
   const plan = await service.capturePlan({
+    dllPath,
     symbols: symbolSets[mode],
     requestedRateHz: rateHz,
     durationSec,

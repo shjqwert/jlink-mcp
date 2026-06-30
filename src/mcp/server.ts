@@ -1010,7 +1010,10 @@ export class JLinkMcpServer {
 
     this.server.tool("hss_capability_probe", "Probe read-only J-Link HSS MVP-A availability without reset, halt, flash, raw-command, or target-memory writes.", hssDllInput,
       async (input) => result(() => this.hssCapture.capabilityProbe(input)));
-    this.server.tool("hss_capture_plan", "Resolve HM_C095 IAR variables and build a read-only HSS capture plan under process.cwd().", planInput,
+    this.server.tool("hss_capture_plan", "Resolve HM_C095 IAR variables and build a read-only HSS capture plan under process.cwd().", {
+      ...hssDllInput,
+      ...planInput,
+    },
       async (input) => result(() => this.hssCapture.capturePlan(input)));
     this.server.tool("hss_capture_start", "Start one read-only HSS MVP-A capture from a planId or plan input. No RSP fallback.", {
       planId: z.string().uuid().optional(),
