@@ -211,6 +211,7 @@
     "test:rtt-channel": "npm run compile && node --test out/mcp/rtt-channel/rtt-channel.test.js out/mcp/rtt-protocols/traceagent.test.js",
     "test:hss-backend": "npm run compile && node --test out/mcp/capture-backends/capture-backends.test.js out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js",
     "test:hss-dll": "npm run compile && node --test out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js",
+    "test:hss-mvp-a": "npm run compile && node --test out/mcp/hss/hss-mvp-a.test.js",
     "test:coverage": "npm run compile && node scripts/hm-c095-coverage.mjs"
   },
   "dependencies": {

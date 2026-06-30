@@ -12,6 +12,7 @@ import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } fr
 import { evidenceForCodegraphTool } from "./bridge/tools";
 import { CaptureService } from "./capture";
 import { captureBackendBenchmarkTool, captureBackendListTool, captureBackendProbeTool, captureBackendSelectTool, captureImportExperimentTool } from "./capture-backends/backend-router";
+import { HssCaptureService } from "./hss/hss-capture-service";
 import { hssDllBenchmark, hssDllGetCaps, hssDllPreflight, hssDllSmoke } from "./hss-dll/hss-dll-adapter";
 import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
 import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
@@ -26,6 +27,7 @@ export class JLinkMcpServer {
   private rttClient: RTTClient;
   private telnetProxy: TelnetProxy;
   private capture: CaptureService;
+  private hssCapture: HssCaptureService;
 
   constructor(probeConfig?: ProbeFactoryConfig, rttPort?: number, telnetConfig?: { listenPort?: number; sourceHost?: string; sourcePort?: number }, gdbPath?: string) {
     this.processManager = new ProcessManager();
@@ -37,6 +39,7 @@ export class JLinkMcpServer {
     const effectiveGdbPath = gdbPath || "arm-none-eabi-gdb";
     this.gdb = new GDBClient(effectiveGdbPath, () => this.probe.getExclusiveOwner() ? `Probe is exclusively owned by ${this.probe.getExclusiveOwner()}` : null);
     this.capture = new CaptureService(this.probe, this.processManager, effectiveGdbPath);
+    this.hssCapture = new HssCaptureService(this.probe);
     const effectiveRttPort = rttPort ?? this.probe.getRTTPort();
     this.rttClient = new RTTClient("localhost", effectiveRttPort > 0 ? effectiveRttPort : 19021);
     this.telnetProxy = new TelnetProxy(
@@ -553,6 +556,7 @@ export class JLinkMcpServer {
     this.registerAnalysisTools();
     this.registerCaptureTools();
     this.registerCaptureBackendTools();
+    this.registerHssCaptureTools();
 
     // ═══════════════════════════════════════════════════════════════
     // RTT
@@ -980,6 +984,68 @@ export class JLinkMcpServer {
     });
   }
 
+  private registerHssCaptureTools(): void {
+    const result = async (operation: () => Promise<unknown>) => {
+      return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
+    };
+    const hssDllInput = {
+      dllPath: z.string().optional(),
+      device: z.string().optional(),
+      interface: z.enum(["SWD", "JTAG"]).optional(),
+      speedKhz: z.number().int().positive().optional(),
+      serial: z.string().optional(),
+    };
+    const symbolSchema = z.object({
+      name: z.string().min(1),
+      alias: z.string().optional(),
+      type: z.enum(["uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"]).optional(),
+      unit: z.string().optional(),
+    }).strict();
+    const planInput = {
+      artifactFile: z.string().optional(),
+      mapFile: z.string().optional(),
+      symbols: z.array(symbolSchema).min(1).max(10).optional(),
+      requestedRateHz: z.number().int().min(1).max(16000).optional(),
+      durationSec: z.number().int().min(1).max(60).optional(),
+      segmentSizeMb: z.number().int().min(16).max(512).optional(),
+      sessionName: z.string().optional(),
+      outputSubdir: z.string().optional(),
+      dryRun: z.boolean().optional(),
+    };
+    const captureId = { captureId: z.string().uuid() };
+
+    this.server.tool("hss_capability_probe", "Probe read-only J-Link HSS MVP-A availability without reset, halt, flash, raw-command, or target-memory writes.", hssDllInput,
+      async (input) => result(() => this.hssCapture.capabilityProbe(input)));
+    this.server.tool("hss_capture_plan", "Resolve HM_C095 IAR variables and build a read-only HSS capture plan under process.cwd().", planInput,
+      async (input) => result(() => this.hssCapture.capturePlan(input)));
+    this.server.tool("hss_capture_start", "Start one read-only HSS MVP-A capture from a planId or plan input. No RSP fallback.", {
+      planId: z.string().uuid().optional(),
+      ...hssDllInput,
+      ...planInput,
+    }, async (input) => result(() => this.hssCapture.captureStart(input)));
+    this.server.tool("hss_capture_status", "Return live or terminal HSS MVP-A capture status.", captureId,
+      async (input) => result(() => this.hssCapture.captureStatus(input)));
+    this.server.tool("hss_capture_stop", "Stop/finalize one read-only HSS MVP-A capture.", captureId,
+      async (input) => result(() => this.hssCapture.captureStop(input)));
+    this.server.tool("hss_capture_query", "Query a terminal HSS MVP-A capture and run HM_C095 validation metrics.", {
+      ...captureId,
+      metadataFile: z.string().optional(),
+      variables: z.array(z.string()).min(1).max(10).optional(),
+      startSec: z.number().nonnegative().optional(),
+      endSec: z.number().nonnegative().optional(),
+      buckets: z.number().int().min(1).max(2000).optional(),
+      includeRawSamples: z.boolean().optional(),
+      maxSamples: z.number().int().min(1).max(100000).optional(),
+      hmC095Profile: z.boolean().optional(),
+    }, async (input) => result(() => this.hssCapture.captureQuery(input)));
+    this.server.tool("hss_capture_export", "Export a terminal HSS MVP-A capture to CSV under .jlink-mcp/exports.", {
+      ...captureId,
+      metadataFile: z.string().optional(),
+      format: z.literal("csv").optional(),
+      variables: z.array(z.string()).min(1).max(10).optional(),
+    }, async (input) => result(() => this.hssCapture.captureExport(input)));
+  }
+
   private directRttResult(operation: () => Promise<unknown>) {
     return operation()
       .then((value) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] }))
@@ -1135,6 +1201,7 @@ Start by checking list_devices, then set_device, then start_debug_session.` }}],
   }
 
   async dispose(): Promise<void> {
+    await this.hssCapture.dispose();
     await this.capture.dispose();
     this.gdb.disconnect();
     this.rttClient.disconnect();

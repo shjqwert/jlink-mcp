@@ -173,7 +173,10 @@ export async function hssDllBenchmark(input: HssDllPreflightInput & {
 }
 
 export function resolveHssHelperPath(env: Record<string, string | undefined> = process.env, explicit?: string): string {
-  return explicit ?? env.JLINK_MCP_HSS_HELPER_PATH ?? path.join(process.cwd(), "native", "hss-helper", "bin", "hss_helper.exe");
+  if (explicit) return explicit;
+  if (env.JLINK_MCP_HSS_HELPER_PATH) return env.JLINK_MCP_HSS_HELPER_PATH;
+  const bundled = path.resolve(__dirname, "..", "..", "..", "native", "hss-helper", "bin", "hss_helper.exe");
+  return fs.existsSync(bundled) ? bundled : path.join(process.cwd(), "native", "hss-helper", "bin", "hss_helper.exe");
 }
 
 export function runHssHelperCommand(command: string, args: string[], options: HssHelperOptions = {}): Promise<Record<string, unknown>> {
