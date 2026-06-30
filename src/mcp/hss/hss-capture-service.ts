@@ -13,6 +13,7 @@ import { buildHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
+import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
 
 export interface HssCaptureStartInput extends HssDllPreflightInput, HssCapturePlanInput {
@@ -171,19 +172,14 @@ export class HssCaptureService {
       const active = this.active?.captureId === input.captureId ? this.active : null;
       if (active) {
         const recordSize = 24 + active.plan.symbols.length * 4;
-        const sampleCount = existsSync(active.segmentFile) ? Math.floor((await readFile(active.segmentFile)).length / recordSize) : 0;
+        const quality = existsSync(active.segmentFile) ? activeQuality(await readFile(active.segmentFile), recordSize) : emptyLiveQuality();
         return {
           captureId: input.captureId,
           state: "capturing",
-          elapsedSec: sampleCount / active.plan.sampling.requestedRateHz,
+          elapsedSec: quality.sampleCount / active.plan.sampling.requestedRateHz,
           requestedRateHz: active.plan.sampling.requestedRateHz,
           actualRateHz: 0,
-          sampleCount,
-          validSamples: sampleCount,
-          readErrors: 0,
-          timeouts: 0,
-          overflows: 0,
-          droppedSamples: 0,
+          ...quality,
           currentSegment: "capture_0001.bin",
           warnings: [],
         };
@@ -308,4 +304,23 @@ function warningList(data: unknown): string[] {
   if (!data || typeof data !== "object") return [];
   const warnings = (data as Record<string, unknown>).warnings;
   return Array.isArray(warnings) ? warnings.filter((warning): warning is string => typeof warning === "string") : [];
+}
+
+function emptyLiveQuality(): Record<"sampleCount" | "validSamples" | "readErrors" | "timeouts" | "overflows" | "droppedSamples", number> {
+  return { sampleCount: 0, validSamples: 0, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0 };
+}
+
+function activeQuality(data: Buffer, recordSize: number): ReturnType<typeof emptyLiveQuality> {
+  const quality = emptyLiveQuality();
+  quality.sampleCount = Math.floor(data.length / recordSize);
+  for (let offset = 0; offset < quality.sampleCount * recordSize; offset += recordSize) {
+    const flags = data.readUInt32LE(offset + 16);
+    assertNoMvpAWriteFlags(flags);
+    if ((flags & HSS_STATUS_FLAGS.valid) !== 0) quality.validSamples += 1;
+    if ((flags & HSS_STATUS_FLAGS.read_error) !== 0) quality.readErrors += 1;
+    if ((flags & HSS_STATUS_FLAGS.timeout) !== 0) quality.timeouts += 1;
+    if ((flags & HSS_STATUS_FLAGS.overflow) !== 0) quality.overflows += 1;
+    if ((flags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0) quality.droppedSamples += 1;
+  }
+  return quality;
 }

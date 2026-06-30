@@ -208,6 +208,48 @@ test("HM_C095 validation rejects read-error captures", async () => {
   }
 });
 
+test("live HSS status counts read-error records as invalid", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource({ readError: true, lingerMs: 1000 }), "utf8");
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, true);
+    const captureId = (start.data as { captureId: string }).captureId;
+    let live: Record<string, unknown> | undefined;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId });
+      live = status.data as Record<string, unknown> | undefined;
+      return live?.state === "capturing" && live.sampleCount === 1000;
+    });
+    assert.equal(live?.validSamples, 0);
+    assert.equal(live?.readErrors, 1000);
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "failed");
+    });
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HSS capture start allows halted preflight with warning", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
@@ -292,6 +334,7 @@ interface FakeHelperOptions {
   getCapsOk?: boolean;
   targetWasHalted?: boolean;
   readError?: boolean;
+  lingerMs?: number;
 }
 
 function fakeHelperSource(options: FakeHelperOptions = {}): string {
@@ -333,7 +376,9 @@ for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
   records.push(record);
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
-console.log(JSON.stringify({ status: "${helperStatus}", ${helperError} captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: ${options.readError ? "0" : "records.length"}, readErrors: ${options.readError ? "records.length" : "0"}, timeouts: 0, overflows: 0, droppedSamples: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
+const result = { status: "${helperStatus}", ${helperError} captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: ${options.readError ? "0" : "records.length"}, readErrors: ${options.readError ? "records.length" : "0"}, timeouts: 0, overflows: 0, droppedSamples: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false };
+const finish = () => console.log(JSON.stringify(result));
+${options.lingerMs ? `setTimeout(finish, ${options.lingerMs});` : "finish();"}
 `;
 }
 
