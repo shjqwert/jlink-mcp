@@ -7,6 +7,7 @@ import {
   hssDllBenchmark,
   hssDllGetCaps,
   hssDllPreflight,
+  hssDllSearchPaths,
   hssDllSmoke,
   runHssHelperCommand,
 } from "./hss-dll-adapter";
@@ -38,6 +39,11 @@ test("HSS DLL discovery records search paths and candidate exports", () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("HSS DLL discovery prefers current SEGGER install before legacy fixed installs", () => {
+  const paths = hssDllSearchPaths({});
+  assert.ok(paths.indexOf("C:\\Program Files\\SEGGER\\JLink\\JLink_x64.dll") < paths.indexOf("C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll"));
 });
 
 test("HSS DLL preflight reports candidate without a helper", async () => {

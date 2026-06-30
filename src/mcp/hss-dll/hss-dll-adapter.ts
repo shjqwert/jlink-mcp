@@ -41,8 +41,8 @@ export function hssDllSearchPaths(env: Record<string, string | undefined> = proc
     explicit,
     env.JLINK_MCP_HSS_DLL_PATH,
     env.JLINK_INSTALL_DIR ? path.join(env.JLINK_INSTALL_DIR, "JLink_x64.dll") : undefined,
-    "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
     "C:\\Program Files\\SEGGER\\JLink\\JLink_x64.dll",
+    "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
   ].filter((candidate): candidate is string => Boolean(candidate));
   return [...new Set(paths)];
 }
