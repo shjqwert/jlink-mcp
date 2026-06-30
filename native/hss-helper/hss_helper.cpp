@@ -246,6 +246,12 @@ static int json_int(const std::string& text, const char* name, int fallback = 0)
   return std::regex_search(text, match, pattern) ? std::stoi(match[1].str()) : fallback;
 }
 
+static bool json_bool(const std::string& text, const char* name, bool fallback = false) {
+  std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*(true|false)");
+  std::smatch match;
+  return std::regex_search(text, match, pattern) ? match[1].str() == "true" : fallback;
+}
+
 struct PlanSymbol {
   std::string name;
   U32 address;
@@ -529,6 +535,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string plan = read_text_file(plan_it->second);
   if (plan.empty()) {
     error_json("HSS_PLAN_READ_FAILED", "plan file could not be read");
+    return 0;
+  }
+  const bool start_read_stop_validated = json_bool(plan, "startReadStopValidated", false);
+  if (!start_read_stop_validated && !env_enabled("HSS_START_READ_STOP_NOT_VALIDATED")) {
+    error_json("HSS_START_READ_STOP_NOT_VALIDATED", "HSS_START_READ_STOP_NOT_VALIDATED=1 is required when HSS Start/Read/Stop is not validated");
     return 0;
   }
   const std::string dll_utf8 = json_string(plan, "dllPath");

@@ -128,6 +128,89 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
   }
 });
 
+test("HSS capture start requires explicit unvalidated Start/Read/Stop authorization when GetCaps fails", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: { JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1", JLINK_MCP_REAL_HW_SMOKE: "1" },
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource({ getCapsOk: false }), "utf8");
+
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, false);
+    assert.equal(start.error?.code, "HSS_START_READ_STOP_NOT_VALIDATED");
+    assert.equal(probe.getExclusiveOwner(), null);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HSS capture start honors unvalidated authorization but blocks halted targets", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const env = {
+    JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API: "1",
+    JLINK_MCP_REAL_HW_SMOKE: "1",
+    HSS_START_READ_STOP_NOT_VALIDATED: "1",
+  };
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env,
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource({ getCapsOk: false }), "utf8");
+
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, true);
+    const captureId = (start.data as { captureId: string }).captureId;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+    });
+
+    await writeFile(helper, fakeHelperSource({ targetWasHalted: true }), "utf8");
+    const halted = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+    });
+    assert.equal(halted.ok, false);
+    assert.equal(halted.error?.code, "HSS_TARGET_HALTED");
+    assert.equal(probe.getExclusiveOwner(), null);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function tempProject(): Promise<string> {
   const root = join(process.cwd(), ".tmp", `hss-mvp-a-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await mkdir(root, { recursive: true });
@@ -157,7 +240,14 @@ async function writeHmProject(root: string): Promise<string> {
   return map;
 }
 
-function fakeHelperSource(): string {
+interface FakeHelperOptions {
+  getCapsOk?: boolean;
+  targetWasHalted?: boolean;
+}
+
+function fakeHelperSource(options: FakeHelperOptions = {}): string {
+  const getCapsOk = options.getCapsOk ?? true;
+  const targetWasHalted = options.targetWasHalted ?? false;
   return `
 const fs = require("fs");
 const command = process.argv[2];
@@ -165,8 +255,12 @@ if (command === "preflight") {
   console.log(JSON.stringify({ status: "ok", exportsFound: true }));
   process.exit(0);
 }
+if (command === "connect-preflight") {
+  console.log(JSON.stringify({ status: "ok", targetWasHalted: ${targetWasHalted ? "true" : "false"}, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
+  process.exit(0);
+}
 if (command === "getcaps") {
-  console.log(JSON.stringify({ status: "ok", caps: { maxBlocks: 16, maxFreq: 16000 } }));
+  console.log(JSON.stringify(${getCapsOk ? "{ status: \"ok\", caps: { maxBlocks: 16, maxFreq: 16000 } }" : "{ status: \"error\", errorCode: \"HSS_HELPER_TIMEOUT\", reason: \"GetCaps failed\" }"}));
   process.exit(0);
 }
 if (command !== "hss-capture") {

@@ -7,7 +7,7 @@ import type { ProbeBackend } from "../../probe/backend";
 import { discoverHssDll, experimentalHssDllEnabled, HSS_EXPERIMENTAL_ENV, resolveHssHelperPath, type HssDllPreflightInput } from "../hss-dll/hss-dll-adapter";
 import { appendHssAudit } from "./audit-log";
 import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, queryHssCapture, writeInitialMetadata } from "./hss-artifact";
-import { hssCapabilityProbe } from "./hss-capability";
+import { hssCapabilityProbe, HSS_START_READ_STOP_NOT_VALIDATED_ENV } from "./hss-capability";
 import type { HssCapturePlan, HssCapturePlanInput } from "./hss-plan";
 import { buildHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
@@ -66,19 +66,39 @@ export class HssCaptureService {
 
   async captureStart(input: HssCaptureStartInput = {}): Promise<HssEnvelope<Record<string, unknown>>> {
     return this.wrap("hss_capture_start", input, async () => {
+      const env = this.env();
       if (this.active) throw new HssError(HSS_ERROR.HSS_CAPTURE_ACTIVE, "an HSS capture is already active", { captureId: this.active.captureId });
-      if (!experimentalHssDllEnabled(this.env()) || this.env().JLINK_MCP_REAL_HW_SMOKE !== "1") {
+      if (!experimentalHssDllEnabled(env) || env.JLINK_MCP_REAL_HW_SMOKE !== "1") {
         throw new HssError(HSS_ERROR.HSS_EXPERIMENTAL_ENV_DISABLED, `${HSS_EXPERIMENTAL_ENV}=1 and JLINK_MCP_REAL_HW_SMOKE=1 are required before HSS capture`);
       }
-      const discovery = discoverHssDll(input, this.env());
+      const discovery = discoverHssDll(input, env);
       if (!discovery.selectedDllPath) throw new HssError(HSS_ERROR.HSS_DLL_MISSING, "JLink_x64.dll was not found");
       if (!discovery.exportsFound) throw new HssError(HSS_ERROR.HSS_DLL_EXPORTS_MISSING, "required JLINK_HSS_* exports were not found");
-      const helperPath = resolveHssHelperPath(this.env(), this.options.helperPath);
+      const helperPath = resolveHssHelperPath(env, this.options.helperPath);
       if (!existsSync(helperPath)) throw new HssError(HSS_ERROR.HSS_HELPER_MISSING, "native HSS helper was not found", { helperPath });
-      const capability = await hssCapabilityProbe(input, { env: this.env(), helperPath, helperArgsPrefix: this.options.helperArgsPrefix, cwd: this.cwd() });
-      const hss = capability.hss as { startReadStopReady?: boolean; getCapsOk?: boolean };
-      if (!hss.startReadStopReady || !hss.getCapsOk) {
-        throw new HssError(HSS_ERROR.HSS_START_READ_STOP_NOT_VALIDATED, "HSS Start/Read/Stop is not validated for capture", { capability });
+      const probe = this.probe.getCaptureConfig();
+      const target = {
+        device: input.device ?? probe?.device ?? "Z20K146MC",
+        interface: input.interface ?? probe?.interface ?? "SWD",
+        speedKhz: input.speedKhz ?? probe?.speed ?? 4000,
+      } as const;
+      const serial = input.serial ?? probe?.serialNumber;
+      const capabilityInput = { ...input, device: target.device, interface: target.interface, speedKhz: target.speedKhz, serial };
+      const capability = await hssCapabilityProbe(capabilityInput, { env, helperPath, helperArgsPrefix: this.options.helperArgsPrefix, cwd: this.cwd() });
+      const hss = capability.hss as {
+        getCapsOk?: boolean;
+        startReadStopAttemptAllowed?: boolean;
+        startReadStopUnvalidatedAllowed?: boolean;
+        targetWasHalted?: boolean;
+      };
+      if (hss.targetWasHalted) {
+        throw new HssError(HSS_ERROR.HSS_TARGET_HALTED, "target is halted; HSS capture requires a running target and MVP-A will not resume it", { capability });
+      }
+      if (!hss.startReadStopAttemptAllowed) {
+        throw new HssError(HSS_ERROR.HSS_START_READ_STOP_NOT_VALIDATED, "HSS Start/Read/Stop is not validated for capture", {
+          requiredEnv: `${HSS_START_READ_STOP_NOT_VALIDATED_ENV}=1`,
+          capability,
+        });
       }
 
       const plan = input.planId ? this.requirePlan(input.planId) : await buildHssCapturePlan(input, this.cwd(), true);
@@ -86,12 +106,6 @@ export class HssCaptureService {
       const owner = `hss:${plan.output.captureId}`;
       if (!this.probe.acquireExclusive(owner)) throw new HssError(HSS_ERROR.HSS_CAPTURE_ACTIVE, `probe is already owned by ${this.probe.getExclusiveOwner() ?? "another operation"}`);
       const stopFile = join(plan.output.outputDir, "stop.request");
-      const probe = this.probe.getCaptureConfig();
-      const target = {
-        device: input.device ?? probe?.device ?? "Z20K146MC",
-        interface: input.interface ?? probe?.interface ?? "SWD",
-        speedKhz: input.speedKhz ?? probe?.speed ?? 4000,
-      } as const;
       await writeInitialMetadata({
         metadataFile: plan.output.metadataFile,
         captureId: plan.output.captureId,
@@ -106,10 +120,12 @@ export class HssCaptureService {
       await writeHelperPlan(plan.output.planFile, {
         captureId: plan.output.captureId,
         dllPath: discovery.selectedDllPath,
+        startReadStopValidated: Boolean(hss.getCapsOk),
+        startReadStopUnvalidatedAllowed: Boolean(hss.startReadStopUnvalidatedAllowed),
         device: target.device,
         interface: target.interface,
         speedKhz: target.speedKhz,
-        serial: input.serial ?? probe?.serialNumber,
+        serial,
         outputFile: plan.output.firstSegmentFile,
         stopFile,
         requestedRateHz: plan.sampling.requestedRateHz,

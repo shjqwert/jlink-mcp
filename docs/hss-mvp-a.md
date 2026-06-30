@@ -21,4 +21,4 @@ Artifacts:
 
 Every tool returns the shared JSON envelope with `ok`, `operation`, `data`, `risk`, `backend`, `artifacts`, `warnings`, and `message`. Failures include `error.code`, `error.message`, and `error.details`.
 
-`hss_capture_start` requires `JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1` and `JLINK_MCP_REAL_HW_SMOKE=1` when only DLL export evidence is available. If HSS cannot run, the tools return structured errors and suggestions; they do not fall back to RSP as a fake HSS pass.
+`hss_capture_start` requires `JLINK_MCP_EXPERIMENTAL_HSS_UNVERIFIED_API=1` and `JLINK_MCP_REAL_HW_SMOKE=1` when only DLL export evidence is available. If `JLINK_HSS_GetCaps` does not validate the candidate Start/Read/Stop path, capture also requires explicit `HSS_START_READ_STOP_NOT_VALIDATED=1` authorization. If HSS cannot run, the tools return structured errors and suggestions; they do not fall back to RSP as a fake HSS pass.
