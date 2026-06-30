@@ -159,12 +159,16 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
   const filtered = filterByTime(records, input.startSec, input.endSec);
   const buckets = bucketRecords(filtered, selected, metadata.sampling.actualRateHz, input.buckets ?? 100);
   const rawSamples = input.includeRawSamples ? decimateRaw(filtered, selected, input.maxSamples ?? 10000) : undefined;
+  const warnings = input.includeRawSamples && rawSamples && rawSamples.length < filtered.length
+    ? [`raw samples decimated from ${filtered.length} to ${rawSamples.length}`]
+    : [];
   return {
     captureId: metadata.captureId,
     variables: selected.map(({ symbol }) => symbol),
     buckets,
     rawSamples,
     quality: metadata.quality,
+    warnings,
     hmC095: input.hmC095Profile === false ? undefined : hmC095Validation(records, metadata.symbols, metadata.sampling.actualRateHz || metadata.sampling.requestedRateHz),
   };
 }

@@ -119,6 +119,8 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     assert.equal(query.ok, true);
     assert.equal((query.data?.hmC095 as { counterDeltaPass?: boolean }).counterDeltaPass, true);
     assert.equal((query.data?.hmC095 as { counterDeltaMean?: number }).counterDeltaMean, 16);
+    const rawQuery = await service.captureQuery({ captureId, includeRawSamples: true, maxSamples: 10, hmC095Profile: false });
+    assert.match(rawQuery.warnings[0] ?? "", /raw samples decimated from 1000 to 10/);
 
     const exported = await service.captureExport({ captureId });
     assert.equal(exported.ok, true);
