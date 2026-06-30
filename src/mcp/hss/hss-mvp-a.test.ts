@@ -291,6 +291,43 @@ test("HSS export rejects non-terminal capture metadata", async () => {
   }
 });
 
+test("HSS export rejects captureId path traversal", async () => {
+  const root = await tempProject();
+  const captureId = "..\\evil";
+  const metadataFile = join(root, ".jlink-mcp", "captures", "malicious.json");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, { cwd: root });
+  try {
+    await mkdir(join(root, ".jlink-mcp", "captures"), { recursive: true });
+    await writeFile(metadataFile, JSON.stringify({
+      version: 1,
+      captureId,
+      sessionName: "bad",
+      projectRoot: root,
+      backend: "jlink-hss",
+      state: "completed",
+      artifact: {},
+      target: {},
+      probe: {},
+      symbols: [{ name: "g_hssDbgCounterFocIsr", address: "0x20000000", size: 4, type: "uint32", source: "iar-map" }],
+      sampling: { requestedRateHz: 1000, actualRateHz: 1000, durationSec: 1, timestampSource: "qpc", timestampFrequency: "1000000000" },
+      segments: [{ file: "capture_0001.bin", sampleStart: 0, sampleCount: 1, recordSize: 28, crc32: "00000000" }],
+      quality: { sampleCount: 1, validSamples: 1, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, targetHaltedSamples: 0, actualRateHz: 1000 },
+      events: [],
+      warnings: [],
+      failures: [],
+      safety: HSS_SAFETY_FALSE,
+    }), "utf8");
+    const exported = await service.captureExport({ captureId, metadataFile });
+    assert.equal(exported.ok, false);
+    assert.equal(exported.error?.code, HSS_ERROR.PATH_OUTSIDE_CWD);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("HSS capture start allows halted preflight with warning", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");

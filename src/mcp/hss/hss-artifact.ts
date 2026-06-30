@@ -131,8 +131,11 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
   const segment = metadata.segments[0];
   if (!segment) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture has no segment metadata");
   assertInsideProject(metadata.projectRoot, cwd);
-  const segmentFile = join(hssProjectPaths(cwd).capturesDir, metadata.captureId, segment.file);
-  assertInsideProject(segmentFile, cwd);
+  const paths = hssProjectPaths(cwd);
+  const captureDir = join(paths.capturesDir, metadata.captureId);
+  assertInsideProject(captureDir, paths.capturesDir);
+  const segmentFile = join(captureDir, segment.file);
+  assertInsideProject(segmentFile, captureDir);
   const actualCrc = await crc32File(segmentFile);
   if (actualCrc !== segment.crc32) throw new HssError(HSS_ERROR.HSS_CRC_MISMATCH, "capture segment CRC mismatch", { expected: segment.crc32, actual: actualCrc });
   const records = await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize);
@@ -157,12 +160,16 @@ export async function exportHssCapture(input: { captureId: string; metadataFile?
   const segment = metadata.segments[0];
   if (!segment) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture has no segment metadata");
   assertInsideProject(metadata.projectRoot, cwd);
-  const segmentFile = join(hssProjectPaths(cwd).capturesDir, metadata.captureId, segment.file);
-  assertInsideProject(segmentFile, cwd);
+  const paths = hssProjectPaths(cwd);
+  const captureDir = join(paths.capturesDir, metadata.captureId);
+  assertInsideProject(captureDir, paths.capturesDir);
+  const segmentFile = join(captureDir, segment.file);
+  assertInsideProject(segmentFile, captureDir);
   if (await crc32File(segmentFile) !== segment.crc32) throw new HssError(HSS_ERROR.HSS_CRC_MISMATCH, "capture segment CRC mismatch");
   const records = await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize);
   const selected = selectSymbols(metadata.symbols, input.variables);
-  const csvFile = join(hssProjectPaths(cwd).exportsDir, `${input.captureId}.csv`);
+  const csvFile = join(paths.exportsDir, `${input.captureId}.csv`);
+  assertInsideProject(csvFile, paths.exportsDir);
   const stream = createWriteStream(csvFile, { flags: "w", encoding: "utf8" });
   try {
     await once(stream, "open");
