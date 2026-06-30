@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -111,6 +111,9 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     assert.equal(metadata.segments[0].file, "capture_0001.bin");
     assert.equal(metadata.quality.sampleCount, 1000);
     assert.equal(probe.getExclusiveOwner(), null);
+    const audit = await readAuditText(root);
+    assert.match(audit, /capture_terminal/);
+    assert.match(audit, /"state":"completed"/);
 
     const query = await service.captureQuery({ captureId, hmC095Profile: true });
     assert.equal(query.ok, true);
@@ -290,6 +293,13 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.fail("condition timed out");
+}
+
+async function readAuditText(root: string): Promise<string> {
+  const auditRoot = join(root, ".jlink-mcp", "audit");
+  const sessions = await readdir(auditRoot);
+  const chunks = await Promise.all(sessions.map((session) => readFile(join(auditRoot, session, "audit.jsonl"), "utf8").catch(() => "")));
+  return chunks.join("\n");
 }
 
 void encodeHssRecord;

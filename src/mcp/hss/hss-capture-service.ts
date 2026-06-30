@@ -253,6 +253,14 @@ export class HssCaptureService {
       metadata.failures = [...(Array.isArray(metadata.failures) ? metadata.failures : []), error instanceof Error ? error.message : String(error)];
       await writeFile(active.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
     } finally {
+      await appendHssAudit(this.sessionId, "hss_capture_status", { event: "capture_terminal", captureId: active.captureId }, {
+        captureId: active.captureId,
+        state,
+        metadataFile: active.metadataFile,
+        segmentFile: active.segmentFile,
+        helperResult,
+        failure,
+      }, this.cwd()).catch(() => undefined);
       await rm(active.stopFile, { force: true });
       this.probe.releaseExclusive(active.owner);
       this.active = null;
