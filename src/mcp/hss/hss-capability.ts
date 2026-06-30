@@ -45,8 +45,8 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
       maxFreqHz: Number(caps?.maxFreq ?? 0),
       targetWasHalted,
       startReadStopValidated,
-      startReadStopAttemptAllowed: startReadStopCandidate && !targetWasHalted,
-      startReadStopReady: startReadStopCandidate && !targetWasHalted,
+      startReadStopAttemptAllowed: startReadStopCandidate,
+      startReadStopReady: startReadStopCandidate,
     },
     helper: {
       path: helperPath,

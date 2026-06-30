@@ -167,7 +167,7 @@ test("HSS capture start runs when GetCaps fails but helper and target are availa
   }
 });
 
-test("HSS capture start blocks halted targets", async () => {
+test("HSS capture start allows halted preflight with warning", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -203,8 +203,13 @@ test("HSS capture start blocks halted targets", async () => {
       requestedRateHz: 1000,
       durationSec: 1,
     });
-    assert.equal(halted.ok, false);
-    assert.equal(halted.error?.code, "HSS_TARGET_HALTED");
+    assert.equal(halted.ok, true);
+    assert.match(halted.warnings[0] ?? "", /target reported halted/);
+    const haltedCaptureId = (halted.data as { captureId: string }).captureId;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId: haltedCaptureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+    });
     assert.equal(probe.getExclusiveOwner(), null);
   } finally {
     await service.dispose();

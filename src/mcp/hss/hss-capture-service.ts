@@ -86,9 +86,8 @@ export class HssCaptureService {
         getCapsOk?: boolean;
         targetWasHalted?: boolean;
       };
-      if (hss.targetWasHalted) {
-        throw new HssError(HSS_ERROR.HSS_TARGET_HALTED, "target is halted; HSS capture requires a running target and MVP-A will not resume it", { capability });
-      }
+      const targetWasHaltedBeforeCapture = Boolean(hss.targetWasHalted);
+      const warnings = targetWasHaltedBeforeCapture ? ["target reported halted during connect preflight; proceeding with read-only HSS capture per operator instruction"] : [];
 
       const plan = input.planId ? this.requirePlan(input.planId) : await buildHssCapturePlan(input, this.cwd(), true);
       this.plans.set(plan.planId, plan);
@@ -105,11 +104,13 @@ export class HssCaptureService {
         probe: { serial: input.serial ?? probe?.serialNumber, dllVersion: undefined, model: undefined },
         symbols: plan.symbols,
         requestedRateHz: plan.sampling.requestedRateHz,
+        warnings,
       });
       await writeHelperPlan(plan.output.planFile, {
         captureId: plan.output.captureId,
         dllPath: discovery.selectedDllPath,
         startReadStopValidated: Boolean(hss.getCapsOk),
+        targetWasHaltedBeforeCapture,
         device: target.device,
         interface: target.interface,
         speedKhz: target.speedKhz,
@@ -159,6 +160,8 @@ export class HssCaptureService {
         metadataFile: plan.output.metadataFile,
         segments: [plan.output.firstSegmentFile],
         safety: HSS_SAFETY_FALSE,
+        targetWasHaltedBeforeCapture,
+        warnings,
       };
     });
   }
@@ -277,7 +280,7 @@ export class HssCaptureService {
     try {
       const data = await fn();
       const artifacts = artifactList(data);
-      const envelope = hssOk(operation, data, artifacts);
+      const envelope = hssOk(operation, data, artifacts, warningList(data));
       await appendHssAudit(this.sessionId, operation, input, envelope, this.cwd());
       return envelope;
     } catch (error) {
@@ -299,4 +302,10 @@ function artifactList(data: unknown): string[] {
   const direct = values.filter((value): value is string => typeof value === "string" && /(?:capture\.json|capture_0001\.bin|\.csv)$/i.test(value));
   const nested = values.flatMap((value) => value && typeof value === "object" ? artifactList(value) : []);
   return [...new Set([...direct, ...nested])];
+}
+
+function warningList(data: unknown): string[] {
+  if (!data || typeof data !== "object") return [];
+  const warnings = (data as Record<string, unknown>).warnings;
+  return Array.isArray(warnings) ? warnings.filter((warning): warning is string => typeof warning === "string") : [];
 }

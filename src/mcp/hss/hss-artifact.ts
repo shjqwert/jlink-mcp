@@ -36,6 +36,7 @@ export async function writeInitialMetadata(input: {
   probe?: HssCaptureMetadata["probe"];
   symbols: HssResolvedSymbol[];
   requestedRateHz: number;
+  warnings?: string[];
 }): Promise<void> {
   const metadata: HssCaptureMetadata = {
     version: 1,
@@ -58,7 +59,7 @@ export async function writeInitialMetadata(input: {
     segments: [],
     quality: emptyQuality(),
     events: [],
-    warnings: [],
+    warnings: input.warnings ?? [],
     failures: [],
     safety: HSS_SAFETY_FALSE,
   };
