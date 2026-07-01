@@ -271,6 +271,12 @@ struct PlanSymbol {
   U32 size;
 };
 
+struct HssBlockPlan {
+  std::vector<JLINK_HSS_MEM_BLOCK_DESC> blocks;
+  std::vector<U32> symbolOffsets;
+  U32 bytesPerSample = 0;
+};
+
 static std::vector<PlanSymbol> json_symbols(const std::string& text) {
   std::vector<PlanSymbol> symbols;
   std::regex pattern("\\{[^{}]*\"name\"\\s*:\\s*\"([^\"]+)\"[^{}]*\"address\"\\s*:\\s*\"0x([0-9a-fA-F]+)\"[^{}]*\"size\"\\s*:\\s*(\\d+)[^{}]*\\}");
@@ -278,6 +284,31 @@ static std::vector<PlanSymbol> json_symbols(const std::string& text) {
     symbols.push_back({(*it)[1].str(), static_cast<U32>(std::stoul((*it)[2].str(), nullptr, 16)), static_cast<U32>(std::stoul((*it)[3].str()))});
   }
   return symbols;
+}
+
+static HssBlockPlan build_hss_block_plan(const std::vector<PlanSymbol>& symbols) {
+  struct IndexedSymbol {
+    PlanSymbol symbol;
+    size_t index;
+  };
+  std::vector<IndexedSymbol> sorted;
+  for (size_t index = 0; index < symbols.size(); ++index) sorted.push_back({symbols[index], index});
+  std::sort(sorted.begin(), sorted.end(), [](const IndexedSymbol& left, const IndexedSymbol& right) {
+    return left.symbol.address == right.symbol.address ? left.index < right.index : left.symbol.address < right.symbol.address;
+  });
+  HssBlockPlan plan;
+  plan.symbolOffsets.resize(symbols.size());
+  for (const auto& item : sorted) {
+    if (!plan.blocks.empty() && item.symbol.address == plan.blocks.back().Addr + plan.blocks.back().NumBytes) {
+      plan.symbolOffsets[item.index] = plan.bytesPerSample;
+      plan.blocks.back().NumBytes += item.symbol.size;
+    } else {
+      plan.symbolOffsets[item.index] = plan.bytesPerSample;
+      plan.blocks.push_back({item.symbol.address, item.symbol.size, 0, 0});
+    }
+    plan.bytesPerSample += item.symbol.size;
+  }
+  return plan;
 }
 
 static bool hss_buffer_overwritten(const std::vector<unsigned char>& buffer, unsigned char sentinel) {
@@ -837,6 +868,17 @@ static int self_test() {
     error_json("HSS_SELF_TEST_CAPTURE_FAILURE_FAILED", "HSS capture failure classification failed");
     return 0;
   }
+  const auto block_plan = build_hss_block_plan({
+    {"counter", 0x20006B28U, 4},
+    {"pattern", 0x20000800U, 4},
+    {"raw", 0x20006B2CU, 4},
+    {"offset_u", 0x20006C00U, 2},
+    {"offset_v", 0x20006C02U, 2},
+  });
+  if (block_plan.blocks.size() != 3 || block_plan.bytesPerSample != 16 || block_plan.symbolOffsets[0] != 4 || block_plan.symbolOffsets[1] != 0 || block_plan.symbolOffsets[2] != 8 || block_plan.symbolOffsets[3] != 12 || block_plan.symbolOffsets[4] != 14) {
+    error_json("HSS_SELF_TEST_BLOCK_PLAN_FAILED", "HSS contiguous block planner failed");
+    return 0;
+  }
   const std::string temporaryFile = "hss_selftest_" + std::to_string(GetCurrentProcessId()) + ".bin";
   std::ofstream out(temporaryFile, std::ios::binary | std::ios::trunc);
   if (!out) {
@@ -974,12 +1016,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     if (crashed) halted_after_resume = -2;
   }
 
-  std::vector<JLINK_HSS_MEM_BLOCK_DESC> blocks;
-  U32 bytes_per_sample = 0;
-  for (const auto& symbol : symbols) {
-    blocks.push_back({symbol.address, symbol.size, 0, 0});
-    bytes_per_sample += symbol.size;
-  }
+  auto block_plan = build_hss_block_plan(symbols);
+  auto& blocks = block_plan.blocks;
+  const auto& symbol_offsets = block_plan.symbolOffsets;
+  const U32 bytes_per_sample = block_plan.bytesPerSample;
   const U32 hss_sample_header_bytes = 4;
   const U32 hss_sample_stride_bytes = hss_sample_header_bytes + bytes_per_sample;
   const U32 period_us = static_cast<U32>((1000000 / requested_rate) > 1 ? (1000000 / requested_rate) : 1);
@@ -1082,13 +1122,14 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       uint32_t hss_sample_index = 0;
       for (U32 byte = 0; byte < hss_sample_header_bytes; ++byte) hss_sample_index |= static_cast<uint32_t>(read_buffer[offset + byte]) << (byte * 8);
       offset += hss_sample_header_bytes;
-      for (const auto& symbol : symbols) {
+      for (size_t symbol_index = 0; symbol_index < symbols.size(); ++symbol_index) {
+        const auto& symbol = symbols[symbol_index];
         uint32_t raw = 0;
-        if (offset + symbol.size <= read_buffer.size()) {
-          for (U32 byte = 0; byte < symbol.size; ++byte) raw |= static_cast<uint32_t>(read_buffer[offset + byte]) << (byte * 8);
+        const size_t symbol_offset = offset + symbol_offsets[symbol_index];
+        if (symbol_offset + symbol.size <= read_buffer.size()) {
+          for (U32 byte = 0; byte < symbol.size; ++byte) raw |= static_cast<uint32_t>(read_buffer[symbol_offset + byte]) << (byte * 8);
         }
         values.push_back(raw);
-        offset += symbol.size;
       }
       ++valid_samples;
       ++decoded_samples;
@@ -1135,6 +1176,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"requestedSamples\":" << requested_samples
     << ",\"validSamples\":" << valid_samples
     << ",\"readErrors\":" << read_errors
+    << ",\"hssBlockCount\":" << blocks.size()
     << ",\"hssSampleHeaderBytes\":" << hss_sample_header_bytes
     << ",\"hssSampleStrideBytes\":" << hss_sample_stride_bytes
     << ",\"readAttempts\":" << read_attempts
