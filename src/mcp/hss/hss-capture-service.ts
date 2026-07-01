@@ -48,6 +48,7 @@ interface ActiveCapture {
   stdout: string;
   stderr: string;
   writeQueue: HssCaptureWriteQueue;
+  startTimeUs: number;
   done: Promise<void>;
 }
 
@@ -169,6 +170,7 @@ export class HssCaptureService {
         stdout: "",
         stderr: "",
         writeQueue: new HssCaptureWriteQueue(),
+        startTimeUs: Date.now() * 1000,
         done: Promise.resolve(),
       };
       active.done = new Promise((resolveDone) => {
@@ -236,7 +238,7 @@ export class HssCaptureService {
       active.writeQueue.beginStopping();
       await active.writeQueue.waitForIdle();
       await writeFile(active.stopFile, "stop", "utf8");
-      await Promise.race([active.done, new Promise((resolve) => setTimeout(resolve, 30000))]);
+      await raceWithTimeout(active.done, 30000);
       return hssCaptureStopFromMetadata(active.metadataFile);
     });
   }
@@ -283,9 +285,10 @@ export class HssCaptureService {
         const io = this.options.memoryIo ?? new ProbeHssVariableMemoryIo(this.probe, active.owner);
         try {
           const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun));
+          this.attachSampleIndex(active, result);
           if (!input.dryRun) {
             await appendHssWriteEvent(active.metadataFile, plan, result, true);
-            await appendHssWriteFlagIntervals(active.metadataFile, { eventId: result.eventId, writeStartUs: result.writeStartUs, writeEndUs: result.writeEndUs, requestedRateHz: active.plan.sampling.requestedRateHz });
+            await appendHssWriteFlagIntervals(active.metadataFile, { eventId: result.eventId, writeStartUs: this.captureTimeUs(active, result), writeEndUs: this.captureTimeUs(active, result) + Math.max(1, result.writeEndUs - result.writeStartUs), requestedRateHz: active.plan.sampling.requestedRateHz });
             await materializeHssCaptureEvents(active.metadataFile);
             await materializeHssFlagIntervals(active.metadataFile);
             this.consumeWrite(plan);
@@ -295,8 +298,9 @@ export class HssCaptureService {
         } catch (error) {
           if (error instanceof HssError && error.details.writeIssued === true) {
             const maybeResult = "writeId" in error.details ? error.details as unknown as HssVariableWriteExecuteResult : undefined;
+            if (maybeResult) this.attachSampleIndex(active, maybeResult);
             await appendHssWriteEvent(active.metadataFile, plan, maybeResult, false, error.code);
-            if (maybeResult) await appendHssWriteFlagIntervals(active.metadataFile, { eventId: maybeResult.eventId, writeStartUs: maybeResult.writeStartUs, writeEndUs: maybeResult.writeEndUs, requestedRateHz: active.plan.sampling.requestedRateHz, backendBusy: error.code === HSS_ERROR.UNKNOWN_WRITE_STATE });
+            if (maybeResult) await appendHssWriteFlagIntervals(active.metadataFile, { eventId: maybeResult.eventId, writeStartUs: this.captureTimeUs(active, maybeResult), writeEndUs: this.captureTimeUs(active, maybeResult) + Math.max(1, maybeResult.writeEndUs - maybeResult.writeStartUs), requestedRateHz: active.plan.sampling.requestedRateHz, backendBusy: error.code === HSS_ERROR.UNKNOWN_WRITE_STATE });
             await materializeHssCaptureEvents(active.metadataFile);
             await materializeHssFlagIntervals(active.metadataFile);
             this.consumeWrite(plan);
@@ -394,6 +398,15 @@ export class HssCaptureService {
     this.writeCounters.set(key, counter);
   }
 
+  private attachSampleIndex(active: ActiveCapture, result: HssVariableWriteExecuteResult): void {
+    const elapsedUs = Math.max(0, result.writeStartUs - active.startTimeUs);
+    result.sampleIndexNear = Math.max(0, Math.round(elapsedUs * active.plan.sampling.requestedRateHz / 1_000_000));
+  }
+
+  private captureTimeUs(active: ActiveCapture, result: HssVariableWriteExecuteResult): number {
+    return result.sampleIndexNear === null ? Math.max(0, result.writeStartUs - active.startTimeUs) : result.sampleIndexNear * 1_000_000 / active.plan.sampling.requestedRateHz;
+  }
+
   private async wrap<T>(operation: Parameters<typeof hssOk<T>>[0], input: unknown, fn: () => Promise<T> | T): Promise<HssEnvelope<T>> {
     try {
       const data = await fn();
@@ -478,4 +491,16 @@ function activeQuality(data: Buffer, recordSize: number): LiveQuality {
     if ((flags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0) quality.droppedSamples += 1;
   }
   return quality;
+}
+
+async function raceWithTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T | void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
