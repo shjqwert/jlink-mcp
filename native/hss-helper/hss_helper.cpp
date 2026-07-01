@@ -332,6 +332,19 @@ static std::vector<unsigned char> hss_changed_window(const std::vector<unsigned 
   return std::vector<unsigned char>(buffer.begin() + start, buffer.begin() + end);
 }
 
+static bool hss_range_overwritten(const std::vector<unsigned char>& buffer, size_t start, size_t length, unsigned char sentinel) {
+  if (start >= buffer.size() || length == 0) return false;
+  const size_t end = (std::min)(buffer.size(), start + length);
+  return std::any_of(buffer.begin() + start, buffer.begin() + end, [sentinel](unsigned char byte) { return byte != sentinel; });
+}
+
+static int hss_first_changed_offset_in_range(const std::vector<unsigned char>& buffer, size_t start, size_t length, unsigned char sentinel) {
+  if (start >= buffer.size() || length == 0) return -1;
+  const size_t end = (std::min)(buffer.size(), start + length);
+  const auto it = std::find_if(buffer.begin() + start, buffer.begin() + end, [sentinel](unsigned char byte) { return byte != sentinel; });
+  return it == buffer.begin() + end ? -1 : static_cast<int>(std::distance(buffer.begin(), it));
+}
+
 static bool hss_capture_failed(bool crashed, uint64_t valid_samples, uint64_t requested_samples) {
   return crashed || valid_samples < requested_samples;
 }
@@ -1082,6 +1095,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   uint64_t unchanged_reads = 0;
   uint64_t changed_reads = 0;
   uint64_t sample_prefix_changed_reads = 0;
+  uint64_t header_changed_reads = 0;
+  uint64_t payload_changed_reads = 0;
   int first_read_rc = 0;
   int last_read_rc = 0;
   int min_read_rc = 0;
@@ -1092,6 +1107,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   bool last_read_sample_prefix_changed = false;
   int first_changed_offset = -1;
   std::string first_changed_bytes;
+  int payload_first_changed_offset = -1;
+  std::string payload_first_changed_bytes;
   const int64_t started_ns = now_ns();
   if (read_mode == "drain") {
     const int64_t drain_until_ns = started_ns + static_cast<int64_t>(duration_sec) * 1000000000LL;
@@ -1115,12 +1132,20 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     ++read_attempts;
     const bool buffer_changed = hss_buffer_overwritten(read_buffer, 0xA5);
     const bool sample_prefix_changed = hss_sample_prefix_overwritten(read_buffer, hss_sample_stride_bytes, 0xA5);
+    const bool header_changed = hss_range_overwritten(read_buffer, 0, hss_sample_header_bytes, 0xA5);
+    const bool payload_changed = hss_range_overwritten(read_buffer, hss_sample_header_bytes, bytes_per_sample, 0xA5);
     if (!buffer_changed) ++unchanged_reads;
     else ++changed_reads;
     if (sample_prefix_changed) ++sample_prefix_changed_reads;
+    if (header_changed) ++header_changed_reads;
+    if (payload_changed) ++payload_changed_reads;
     if (buffer_changed && first_changed_offset < 0) {
       first_changed_offset = hss_first_changed_offset(read_buffer, 0xA5);
       first_changed_bytes = bytes_hex(hss_changed_window(read_buffer, first_changed_offset));
+    }
+    if (payload_changed && payload_first_changed_offset < 0) {
+      payload_first_changed_offset = hss_first_changed_offset_in_range(read_buffer, hss_sample_header_bytes, bytes_per_sample, 0xA5);
+      payload_first_changed_bytes = bytes_hex(hss_changed_window(read_buffer, payload_first_changed_offset));
     }
     if (attempt == 0) {
       first_read_rc = read_rc;
@@ -1182,6 +1207,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const int64_t elapsed_ns = std::max<int64_t>(1, now_ns() - started_ns);
   const double actual_rate = static_cast<double>(valid_samples) * 1000000000.0 / static_cast<double>(elapsed_ns);
   const uint64_t sample_count = valid_samples + read_errors;
+  const double header_changed_ratio = read_attempts > 0 ? static_cast<double>(header_changed_reads) / static_cast<double>(read_attempts) : 0.0;
+  const double payload_changed_ratio = read_attempts > 0 ? static_cast<double>(payload_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const bool read_failed = hss_capture_failed(crashed, valid_samples, requested_samples);
   std::ostringstream crc_hex;
   crc_hex << std::hex << crc;
@@ -1227,8 +1254,25 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"unchangedReads\":" << unchanged_reads
     << ",\"changedReads\":" << changed_reads
     << ",\"samplePrefixChangedReads\":" << sample_prefix_changed_reads
+    << ",\"headerChangedReads\":" << header_changed_reads
+    << ",\"payloadChangedReads\":" << payload_changed_reads
     << ",\"firstChangedOffset\":" << first_changed_offset
     << ",\"firstChangedBytes\":\"" << first_changed_bytes << "\""
+    << ",\"headerChangedRatio\":" << header_changed_ratio
+    << ",\"payloadChangedRatio\":" << payload_changed_ratio
+    << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
+    << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\""
+    << ",\"layout\":{\"hssSampleHeaderBytes\":" << hss_sample_header_bytes
+    << ",\"hssSampleStrideBytes\":" << hss_sample_stride_bytes
+    << ",\"bytesPerSample\":" << bytes_per_sample
+    << ",\"hssBlockCount\":" << blocks.size()
+    << ",\"readBufferBytes\":" << read_buffer_bytes
+    << ",\"firstChangedOffset\":" << first_changed_offset
+    << ",\"firstChangedBytes\":\"" << first_changed_bytes << "\""
+    << ",\"headerChangedRatio\":" << header_changed_ratio
+    << ",\"payloadChangedRatio\":" << payload_changed_ratio
+    << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
+    << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":0"
     << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
     << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << sample_count

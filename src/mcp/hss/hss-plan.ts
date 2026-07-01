@@ -88,9 +88,10 @@ export async function buildHssCapturePlan(input: HssCapturePlanInput = {}, cwd =
   const artifact = await resolveHssDebugArtifact({ artifactFile: input.artifactFile, mapFile: input.mapFile, symbols, cwd });
   const paths = hssProjectPaths(cwd);
   const captureId = randomUUID();
-  const outputDir = input.outputSubdir
+  const baseDir = input.outputSubdir
     ? resolveInsideProject(input.outputSubdir, cwd)
-    : join(paths.capturesDir, captureId);
+    : paths.capturesDir;
+  const outputDir = join(baseDir, captureId);
   const recordSize = 24 + artifact.symbols.length * 4;
   const estimatedSamples = requestedRateHz * durationSec;
   const plan: HssCapturePlan = {

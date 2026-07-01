@@ -18,16 +18,28 @@ export const HSS_TOOL_RISK: Record<HssToolOperation, HssRiskLevel> = {
   hss_capture_export: "R0",
 };
 
-export const HSS_SAFETY_FALSE = {
+export interface HssSafety {
+  targetReset: boolean;
+  targetWritten: boolean;
+  flashIssued: boolean;
+  resetIssued: boolean;
+  haltIssued: boolean;
+  resumeIssued: boolean;
+}
+
+export const HSS_SAFETY_FALSE: HssSafety = {
   targetReset: false,
   targetWritten: false,
   flashIssued: false,
   resetIssued: false,
   haltIssued: false,
-} as const;
+  resumeIssued: false,
+};
 
 export type HssScalarType = "uint8" | "int8" | "uint16" | "int16" | "uint32" | "int32" | "float32";
 export type HssCaptureState = "planned" | "starting" | "capturing" | "stopping" | "completed" | "stopped" | "failed";
+export type HssTransportStatus = "pass" | "failed";
+export type HssValidationStatus = "pass" | "failed" | "warning" | "not_run";
 
 export interface HssRequestedSymbol {
   name: string;
@@ -59,6 +71,10 @@ export interface HssCaptureMetadata {
   projectRoot: string;
   backend: "jlink-hss";
   state: "completed" | "stopped" | "failed";
+  transportStatus: HssTransportStatus;
+  dataQualityStatus: HssValidationStatus;
+  semanticValidationStatus: HssValidationStatus;
+  payloadValidationStatus: HssValidationStatus;
   artifact: {
     file: string;
     mapFile?: string;
@@ -79,10 +95,40 @@ export interface HssCaptureMetadata {
   sampling: {
     requestedRateHz: number;
     actualRateHz: number;
+    hssIndexRateHz: number;
+    hostObservedRateHz: number;
+    helperReportedRateHz: number;
+    helperActualRateHz: number;
+    readMode: "periodic" | "drain";
     durationSec: number;
     timestampSource: "qpc";
     timestampFrequency: string;
   };
+  layout: {
+    hssSampleHeaderBytes: number;
+    hssSampleStrideBytes: number;
+    bytesPerSample: number;
+    hssBlockCount: number;
+    readBufferBytes: number;
+    firstChangedOffset: number | null;
+    firstChangedBytes: string;
+    headerChangedRatio: number;
+    payloadChangedRatio: number;
+    payloadFirstChangedOffset: number | null;
+    payloadFirstChangedBytes: string;
+    payloadAllConstant: boolean;
+    payloadAllZero: boolean;
+  };
+  targetState: {
+    targetWasHaltedBeforeCapture: boolean;
+    resumeBeforeStart: boolean;
+    resumeIssued: boolean;
+    targetWasHaltedAfterResume: boolean | null;
+    targetWasHaltedBeforeResume?: boolean;
+    targetHaltedBeforeResumeRaw?: number;
+    targetHaltedAfterResumeRaw?: number;
+  };
+  hmC095?: Record<string, unknown>;
   segments: HssSegmentMetadata[];
   quality: {
     sampleCount: number;
@@ -97,5 +143,5 @@ export interface HssCaptureMetadata {
   events: Array<Record<string, unknown>>;
   warnings: string[];
   failures: string[];
-  safety: typeof HSS_SAFETY_FALSE;
+  safety: HssSafety;
 }

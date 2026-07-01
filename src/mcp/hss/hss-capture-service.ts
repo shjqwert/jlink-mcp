@@ -43,6 +43,7 @@ interface ActiveCapture {
 export class HssCaptureService {
   private readonly sessionId = randomUUID();
   private readonly plans = new Map<string, HssCapturePlan>();
+  private readonly metadataFiles = new Map<string, string>();
   private active: ActiveCapture | null = null;
 
   constructor(private readonly probe: ProbeBackend, private readonly options: HssCaptureServiceOptions = {}) {}
@@ -114,8 +115,12 @@ export class HssCaptureService {
         probe: { serial: input.serial ?? probe?.serialNumber, dllVersion: undefined, model: undefined },
         symbols: plan.symbols,
         requestedRateHz: plan.sampling.requestedRateHz,
+        readMode: input.readMode ?? plan.readMode,
+        resumeBeforeStart: input.resumeBeforeStart ?? plan.resumeBeforeStart,
+        targetWasHaltedBeforeCapture,
         warnings,
       });
+      this.metadataFiles.set(plan.output.captureId, plan.output.metadataFile);
       await writeHelperPlan(plan.output.planFile, {
         captureId: plan.output.captureId,
         dllPath: discovery.selectedDllPath,
@@ -191,6 +196,14 @@ export class HssCaptureService {
           elapsedSec: quality.sampleCount / active.plan.sampling.requestedRateHz,
           requestedRateHz: active.plan.sampling.requestedRateHz,
           actualRateHz: 0,
+          sampling: {
+            requestedRateHz: active.plan.sampling.requestedRateHz,
+            hssIndexRateHz: 0,
+            hostObservedRateHz: 0,
+            helperReportedRateHz: 0,
+            helperActualRateHz: 0,
+            readMode: active.plan.readMode,
+          },
           ...quality,
           currentSegment: "capture_0001.bin",
           warnings: [],
@@ -211,11 +224,11 @@ export class HssCaptureService {
   }
 
   async captureQuery(input: Parameters<typeof queryHssCapture>[0]): Promise<HssEnvelope<Record<string, unknown>>> {
-    return this.wrap("hss_capture_query", input, () => queryHssCapture(input, this.cwd()));
+    return this.wrap("hss_capture_query", input, () => queryHssCapture({ ...input, metadataFile: input.metadataFile ?? this.metadataFor(input.captureId) }, this.cwd()));
   }
 
   async captureExport(input: Parameters<typeof exportHssCapture>[0]): Promise<HssEnvelope<Record<string, unknown>>> {
-    return this.wrap("hss_capture_export", input, () => exportHssCapture(input, this.cwd()));
+    return this.wrap("hss_capture_export", input, () => exportHssCapture({ ...input, metadataFile: input.metadataFile ?? this.metadataFor(input.captureId) }, this.cwd()));
   }
 
   async dispose(): Promise<void> {
@@ -273,6 +286,8 @@ export class HssCaptureService {
   }
 
   private metadataFor(captureId: string): string {
+    const known = this.metadataFiles.get(captureId);
+    if (known) return known;
     const paths = hssProjectPaths(this.cwd());
     const metadataFile = join(paths.capturesDir, captureId, "capture.json");
     assertInsideProject(metadataFile, paths.capturesDir);

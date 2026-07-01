@@ -27,7 +27,7 @@ test("HSS envelope, risk, project paths, status flags, and audit are stable", as
     assert.equal(fail.ok, false);
     assert.equal(fail.risk.level, "R0");
     assert.equal(fail.error?.code, "HSS_HELPER_MISSING");
-    assert.deepEqual(HSS_SAFETY_FALSE, { targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false });
+    assert.deepEqual(HSS_SAFETY_FALSE, { targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false });
     assert.equal(HSS_STATUS_FLAGS.write_nearby, 64);
     await ensureHssProjectDirs(root);
     assert.throws(() => resolveInsideProject("..\\escape", root), /path escapes/);
@@ -115,6 +115,13 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     const metadataFile = join(root, ".jlink-mcp", "captures", captureId, "capture.json");
     const metadata = JSON.parse(await readFile(metadataFile, "utf8"));
     assert.equal(metadata.safety.targetReset, false);
+    assert.equal(metadata.safety.resumeIssued, false);
+    assert.equal(metadata.transportStatus, "pass");
+    assert.equal(metadata.dataQualityStatus, "pass");
+    assert.equal(metadata.semanticValidationStatus, "pass");
+    assert.equal(metadata.payloadValidationStatus, "pass");
+    assert.equal(metadata.sampling.readMode, "drain");
+    assert.equal(metadata.layout.payloadAllConstant, false);
     assert.equal(metadata.segments[0].file, "capture_0001.bin");
     assert.equal(metadata.quality.sampleCount, 1000);
     assert.equal(probe.getExclusiveOwner(), null);
@@ -124,6 +131,8 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
 
     const query = await service.captureQuery({ captureId, hmC095Profile: true });
     assert.equal(query.ok, true);
+    assert.equal((query.data?.sampling as { readMode?: string }).readMode, "drain");
+    assert.equal(query.data?.transportStatus, "pass");
     assert.equal((query.data?.hmC095 as { counterDeltaPass?: boolean }).counterDeltaPass, true);
     assert.equal((query.data?.hmC095 as { counterDeltaMean?: number }).counterDeltaMean, 16);
     const rawQuery = await service.captureQuery({ captureId, includeRawSamples: true, maxSamples: 10, hmC095Profile: false });
@@ -133,7 +142,12 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     const exported = await service.captureExport({ captureId });
     assert.equal(exported.ok, true);
     assert.equal(existsSync((exported.data as { csvFile: string }).csvFile), true);
+    assert.equal((exported.data as { readMode?: string }).readMode, "drain");
     assert.match(await readFile((exported.data as { csvFile: string }).csvFile, "utf8"), /sampleIndex,timeSec,timestampTicks,statusFlags,g_hssDbgCounterFocIsr/);
+    const exportedAgain = await service.captureExport({ captureId });
+    assert.equal(exportedAgain.ok, true);
+    assert.notEqual((exportedAgain.data as { csvFile: string }).csvFile, (exported.data as { csvFile: string }).csvFile);
+    assert.equal(existsSync((exportedAgain.data as { csvFile: string }).csvFile), true);
   } finally {
     await service.dispose();
     probe.dispose();
@@ -286,6 +300,7 @@ test("HM_C095 validation rejects read-error captures", async () => {
     assert.equal(hmC095.validSamples, 0);
     assert.equal(hmC095.invalidSamples, 1000);
     assert.equal(quality.readErrors, 1000);
+    assert.equal(query.data?.dataQualityStatus, "failed");
   } finally {
     await service.dispose();
     probe.dispose();
@@ -328,6 +343,117 @@ test("live HSS status counts read-error records as invalid", async () => {
       const status = await service.captureStatus({ captureId });
       return Boolean(status.data && (status.data as { state: string }).state === "failed");
     });
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HSS metadata separates transport, payload quality, and HM_C095 semantic failures", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  async function run(options: FakeHelperOptions, input: Parameters<typeof service.captureStart>[0] = {}): Promise<Record<string, unknown>> {
+    await writeFile(helper, fakeHelperSource(options), "utf8");
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+      ...input,
+    });
+    assert.equal(start.ok, true);
+    const data = start.data as { captureId: string; metadataFile: string };
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId: data.captureId });
+      return Boolean(status.data && ["completed", "failed"].includes((status.data as { state: string }).state));
+    });
+    return JSON.parse(await readFile(data.metadataFile, "utf8")) as Record<string, unknown>;
+  }
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+
+    const zero = await run({ counterMode: "zero" }, { requestedRateHz: 16000 });
+    assert.equal(((zero.hmC095 as Record<string, unknown>).counterDeltaMean), 0);
+    assert.equal((zero.hmC095 as Record<string, unknown>).counterDeltaPass, false);
+    assert.equal(zero.semanticValidationStatus, "failed");
+
+    const constant = await run({ counterMode: "constant" });
+    assert.equal((constant.hmC095 as Record<string, unknown>).counterAllConstant, true);
+    assert.equal((constant.hmC095 as Record<string, unknown>).counterDeltaPass, false);
+    assert.equal(constant.semanticValidationStatus, "failed");
+
+    const readWarning = await run({ readErrorCount: 1 });
+    assert.equal(readWarning.state, "completed");
+    assert.equal(readWarning.transportStatus, "pass");
+    assert.equal(readWarning.dataQualityStatus, "warning");
+
+    const headerOnly = await run({ counterMode: "constant", payloadHeaderOnly: true });
+    assert.equal((headerOnly.layout as Record<string, unknown>).headerChangedRatio, 1);
+    assert.equal((headerOnly.layout as Record<string, unknown>).payloadChangedRatio, 0);
+    assert.equal(headerOnly.payloadValidationStatus, "failed");
+    assert.equal((headerOnly.hmC095 as Record<string, unknown>).payloadPass, false);
+
+    const resumed = await run({}, { resumeBeforeStart: true });
+    assert.equal((resumed.safety as Record<string, unknown>).resumeIssued, true);
+    assert.equal((resumed.targetState as Record<string, unknown>).resumeBeforeStart, true);
+    assert.equal((resumed.targetState as Record<string, unknown>).resumeIssued, true);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HSS outputSubdir is a base directory and HM_C095 10-var payload can pass while semantics fail", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const baseDir = join(root, ".jlink-mcp", "custom-captures");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeHmProject(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource({ patternConstant: true }), "utf8");
+
+    const firstPlan = await service.capturePlan({ outputSubdir: baseDir, requestedRateHz: 4000, durationSec: 1 });
+    const secondPlan = await service.capturePlan({ outputSubdir: baseDir, requestedRateHz: 4000, durationSec: 1 });
+    assert.notEqual(firstPlan.data!.output.outputDir, secondPlan.data!.output.outputDir);
+    assert.equal(firstPlan.data!.output.outputDir.startsWith(baseDir), true);
+
+    const start = await service.captureStart({ planId: firstPlan.data!.planId, dllPath: dll });
+    const captureId = (start.data as { captureId: string }).captureId;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+    });
+    assert.equal(existsSync(firstPlan.data!.output.metadataFile), true);
+    assert.equal(existsSync(firstPlan.data!.output.firstSegmentFile), true);
+    const query = await service.captureQuery({ captureId, hmC095Profile: true });
+    const hmC095 = query.data?.hmC095 as Record<string, unknown>;
+    assert.equal(hmC095.transportPass, true);
+    assert.equal(hmC095.payloadPass, true);
+    assert.equal(hmC095.counterDeltaPass, true);
+    assert.equal(hmC095.patternChanges, false);
+    assert.equal(hmC095.semanticPass, false);
+    assert.equal(query.data?.transportStatus, "pass");
+    assert.equal(query.data?.dataQualityStatus, "pass");
+    assert.equal(query.data?.semanticValidationStatus, "failed");
   } finally {
     await service.dispose();
     probe.dispose();
@@ -574,6 +700,11 @@ interface FakeHelperOptions {
   maxFreq?: number;
   targetWasHalted?: boolean;
   readError?: boolean;
+  readErrorCount?: number;
+  helperOkWithReadErrors?: boolean;
+  counterMode?: "expected" | "zero" | "constant";
+  patternConstant?: boolean;
+  payloadHeaderOnly?: boolean;
   lingerMs?: number;
 }
 
@@ -581,9 +712,9 @@ function fakeHelperSource(options: FakeHelperOptions = {}): string {
   const getCapsOk = options.getCapsOk ?? true;
   const maxFreq = options.maxFreq ?? 16000;
   const targetWasHalted = options.targetWasHalted ?? false;
-  const statusFlags = options.readError ? HSS_STATUS_FLAGS.read_error : HSS_STATUS_FLAGS.valid;
-  const counterExpression = options.readError ? "0" : "i * 16";
-  const helperStatus = options.readError ? "error" : "ok";
+  const counterMode = options.counterMode ?? "expected";
+  const readErrorCount = options.readError ? "totalSamples" : String(options.readErrorCount ?? 0);
+  const helperStatus = options.readError && !options.helperOkWithReadErrors ? "error" : "ok";
   const helperError = options.readError ? 'errorCode: "HSS_READ_FAILED", reason: "JLINK_HSS_Read produced no valid samples",' : "";
   return `
 const fs = require("fs");
@@ -593,7 +724,7 @@ if (command === "preflight") {
   process.exit(0);
 }
 if (command === "connect-preflight") {
-  console.log(JSON.stringify({ status: "ok", targetWasHalted: ${targetWasHalted ? "true" : "false"}, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
+  console.log(JSON.stringify({ status: "ok", targetWasHalted: ${targetWasHalted ? "true" : "false"}, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false }));
   process.exit(0);
 }
 if (command === "getcaps") {
@@ -607,17 +738,40 @@ if (command !== "hss-capture") {
 const plan = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
 const records = [];
 const symbolCount = plan.symbols.length;
-for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
+const totalSamples = plan.requestedRateHz * plan.durationSec;
+const readErrorCount = ${readErrorCount};
+const expectedDelta = Math.max(1, Math.round(16000 / plan.requestedRateHz));
+function counterValue(i) {
+  if ("${counterMode}" === "zero") return 0;
+  if ("${counterMode}" === "constant") return 7;
+  return i * expectedDelta;
+}
+function valueFor(symbol, i) {
+  const counter = counterValue(i);
+  if (symbol.name === "g_hssDbgCounterFocIsr") return counter;
+  if (symbol.name === "g_hssDbgSawFocIsr") return counter & 0xffff;
+  if (symbol.name === "g_hssDbgToggleFocIsr") return counter & 1;
+  if (symbol.name === "g_hssDbgPatternFocIsr") return ${options.patternConstant ? "0x12345678" : "(0xa5a50000 ^ i)"};
+  if (symbol.name.startsWith("g_hssDbgRawAdc")) return 100 + (i & 3);
+  if (symbol.name.startsWith("g_hssDbgOffset")) return 2048;
+  return counter;
+}
+for (let i = 0; i < totalSamples; i++) {
   const record = Buffer.alloc(24 + symbolCount * 4);
   record.writeBigUInt64LE(BigInt(i), 0);
-  record.writeBigInt64LE(BigInt(i) * 1000000n, 8);
-  record.writeUInt32LE(${statusFlags}, 16);
+  record.writeBigInt64LE(BigInt(Math.round(i * 1000000000 / plan.requestedRateHz)), 8);
+  const flags = i < readErrorCount ? ${HSS_STATUS_FLAGS.read_error} : ${HSS_STATUS_FLAGS.valid};
+  record.writeUInt32LE(flags, 16);
   record.writeUInt32LE(0, 20);
-  record.writeUInt32LE(${counterExpression}, 24);
+  for (let symbolIndex = 0; symbolIndex < symbolCount; symbolIndex++) {
+    record.writeUInt32LE(valueFor(plan.symbols[symbolIndex], i) >>> 0, 24 + symbolIndex * 4);
+  }
   records.push(record);
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
-const result = { status: "${helperStatus}", ${helperError} captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: ${options.readError ? "0" : "records.length"}, readErrors: ${options.readError ? "records.length" : "0"}, timeouts: 0, overflows: 0, droppedSamples: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false };
+const validSamples = records.length - readErrorCount;
+const payloadChangedRatio = ${options.payloadHeaderOnly ? "0" : "validSamples > 1 ? 1 : 0"};
+const result = { status: "${helperStatus}", ${helperError} captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples, readErrors: readErrorCount, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: plan.resumeBeforeStart === true, resumeIssued: plan.resumeBeforeStart === true, targetWasHaltedBeforeResume: ${targetWasHalted ? "true" : "false"}, targetWasHaltedAfterResume: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 4 + symbolCount * 4, bytesPerSample: symbolCount * 4, hssBlockCount: Math.min(3, symbolCount), readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: records.length > 1 ? 1 : 0, payloadChangedRatio, payloadFirstChangedOffset: payloadChangedRatio > 0 ? 4 : -1, payloadFirstChangedBytes: payloadChangedRatio > 0 ? "01000000" : "" };
 const finish = () => console.log(JSON.stringify(result));
 ${options.lingerMs ? `setTimeout(finish, ${options.lingerMs});` : "finish();"}
 `;
