@@ -255,7 +255,7 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
   };
 }
 
-export async function exportHssCapture(input: { captureId: string; metadataFile?: string; format?: "csv"; variables?: string[] }, cwd = process.cwd()): Promise<Record<string, unknown>> {
+export async function exportHssCapture(input: { captureId: string; metadataFile?: string; format?: "csv"; variables?: string[]; eventAware?: boolean; eventId?: string; windowBeforeMs?: number; windowAfterMs?: number }, cwd = process.cwd()): Promise<Record<string, unknown>> {
   if (input.format && input.format !== "csv") throw new Error("only CSV export is supported");
   const metadataFile = metadataPathForCapture(input.captureId, input.metadataFile, cwd);
   const metadata = await readMetadataForCapture(input.captureId, metadataFile, cwd);
@@ -269,7 +269,11 @@ export async function exportHssCapture(input: { captureId: string; metadataFile?
   const segmentFile = join(captureDir, segment.file);
   assertInsideProject(segmentFile, captureDir);
   if (await crc32File(segmentFile) !== segment.crc32) throw new HssError(HSS_ERROR.HSS_CRC_MISMATCH, "capture segment CRC mismatch");
-  const records = await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize);
+  const intervals = await readHssFlagIntervals(metadataFile);
+  const records = input.eventAware ? applyFlagOverlays(await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize), intervals) : await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize);
+  const exportRecords = input.eventAware && input.eventId
+    ? eventWindowSelection(records, metadata.events, { captureId: input.captureId, eventId: input.eventId, mode: "event_window", windowBeforeMs: input.windowBeforeMs, windowAfterMs: input.windowAfterMs }).records
+    : records;
   const selected = selectSymbols(metadata.symbols, input.variables);
   const csvFile = nextCsvFile(paths.exportsDir, input.captureId);
   assertInsideProject(csvFile, paths.exportsDir);
@@ -277,23 +281,41 @@ export async function exportHssCapture(input: { captureId: string; metadataFile?
   const stream = createWriteStream(csvFile, { flags: "wx", encoding: "utf8" });
   try {
     await once(stream, "open");
-    await writeLine(stream, ["sampleIndex", "timeSec", "timestampTicks", "statusFlags", ...selected.map(({ symbol }) => symbol.name)].join(",") + "\n");
-    const firstTicks = records[0]?.timestampTicks ?? 0n;
-    for (const record of records) {
-      await writeLine(stream, [
-        record.sampleIndex.toString(),
-        String(Number(record.timestampTicks - firstTicks) / 1_000_000_000),
-        record.timestampTicks.toString(),
-        String(record.statusFlags),
-        ...selected.map(({ index, symbol }) => String(decodeValue(symbol.type, record.rawValues[index]))),
-      ].join(",") + "\n");
+    if (input.eventAware) {
+      await writeLine(stream, ["sampleIndex", "timeUs", "statusFlags", "effectiveStatusFlags", "eventMarker", "eventId", ...selected.map(({ symbol }) => symbol.name)].join(",") + "\n");
+      const firstTicks = records[0]?.timestampTicks ?? 0n;
+      for (const record of exportRecords) {
+        const timeUs = Number(record.timestampTicks - firstTicks) / 1000;
+        const marker = eventMarker(record.statusFlags);
+        await writeLine(stream, [
+          record.sampleIndex.toString(),
+          String(timeUs),
+          String(record.statusFlags),
+          String(record.statusFlags),
+          marker,
+          eventIdForTime(timeUs, intervals) ?? "",
+          ...selected.map(({ index, symbol }) => String(decodeValue(symbol.type, record.rawValues[index]))),
+        ].join(",") + "\n");
+      }
+    } else {
+      await writeLine(stream, ["sampleIndex", "timeSec", "timestampTicks", "statusFlags", ...selected.map(({ symbol }) => symbol.name)].join(",") + "\n");
+      const firstTicks = records[0]?.timestampTicks ?? 0n;
+      for (const record of records) {
+        await writeLine(stream, [
+          record.sampleIndex.toString(),
+          String(Number(record.timestampTicks - firstTicks) / 1_000_000_000),
+          record.timestampTicks.toString(),
+          String(record.statusFlags),
+          ...selected.map(({ index, symbol }) => String(decodeValue(symbol.type, record.rawValues[index]))),
+        ].join(",") + "\n");
+      }
     }
     stream.end();
     await once(stream, "close");
     return {
       captureId: input.captureId,
       csvFile,
-      rows: records.length,
+      rows: exportRecords.length,
       readMode: metadata.sampling.readMode,
       sampling: metadata.sampling,
       transportStatus: metadata.transportStatus,
@@ -575,6 +597,17 @@ function summarizeRecords(records: HssSampleRecord[], selected: Array<{ symbol: 
       avg: values.reduce((sum, value) => sum + value, 0) / values.length,
     }];
   }));
+}
+
+function eventMarker(flags: number): string {
+  if ((flags & HSS_STATUS_FLAGS.backend_busy) !== 0) return "backend_busy";
+  if ((flags & HSS_STATUS_FLAGS.write_in_progress) !== 0) return "write_in_progress";
+  if ((flags & HSS_STATUS_FLAGS.write_nearby) !== 0) return "write_nearby";
+  return "none";
+}
+
+function eventIdForTime(timeUs: number, intervals: NonNullable<HssCaptureMetadata["flagIntervals"]>): string | undefined {
+  return intervals.find((interval) => timeUs >= interval.startUs && timeUs <= interval.endUs)?.eventId;
 }
 
 function decodeValue(type: HssScalarType, raw: number): number {

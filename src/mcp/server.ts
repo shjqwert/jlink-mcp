@@ -1058,6 +1058,10 @@ export class JLinkMcpServer {
       metadataFile: z.string().optional(),
       format: z.literal("csv").optional(),
       variables: z.array(z.string()).min(1).max(10).optional(),
+      eventAware: z.boolean().optional(),
+      eventId: z.string().optional(),
+      windowBeforeMs: z.number().nonnegative().optional(),
+      windowAfterMs: z.number().nonnegative().optional(),
     }, async (input) => result(() => this.hssCapture.captureExport(input)));
     this.server.tool("variable_write_plan", "Plan an allowlisted capture-time RAM scalar or fixed-array write for the active HSS capture. This does not write target memory.", {
       ...captureId,
