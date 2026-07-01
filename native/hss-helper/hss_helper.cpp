@@ -980,6 +980,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     blocks.push_back({symbol.address, symbol.size, 0, 0});
     bytes_per_sample += symbol.size;
   }
+  const U32 hss_sample_header_bytes = 4;
+  const U32 hss_sample_stride_bytes = hss_sample_header_bytes + bytes_per_sample;
   const U32 period_us = static_cast<U32>((1000000 / requested_rate) > 1 ? (1000000 / requested_rate) : 1);
   int start_rc = call_hss_start(hss_start, blocks.data(), static_cast<U32>(blocks.size()), period_us, &crashed);
   if (crashed || start_rc < 0) {
@@ -998,7 +1000,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
   const uint64_t requested_samples = static_cast<uint64_t>(requested_rate) * static_cast<uint64_t>(duration_sec);
-  const U32 read_buffer_bytes = (std::max)(bytes_per_sample, 4096U);
+  const U32 read_buffer_bytes = (std::max)(hss_sample_stride_bytes, 4096U);
   std::vector<unsigned char> read_buffer(read_buffer_bytes);
   uint32_t crc = 0xFFFFFFFFU;
   uint64_t valid_samples = 0;
@@ -1042,7 +1044,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     int read_rc = call_hss_read(hss_read, read_buffer.data(), read_buffer_bytes, &crashed);
     ++read_attempts;
     const bool buffer_changed = hss_buffer_overwritten(read_buffer, 0xA5);
-    const bool sample_prefix_changed = hss_sample_prefix_overwritten(read_buffer, bytes_per_sample, 0xA5);
+    const bool sample_prefix_changed = hss_sample_prefix_overwritten(read_buffer, hss_sample_stride_bytes, 0xA5);
     if (!buffer_changed) ++unchanged_reads;
     else ++changed_reads;
     if (sample_prefix_changed) ++sample_prefix_changed_reads;
@@ -1064,8 +1066,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     last_read_buffer_changed = buffer_changed;
     last_read_sample_prefix_changed = sample_prefix_changed;
     uint64_t samples_in_read = 0;
-    if (!crashed && bytes_per_sample > 0 && read_rc >= static_cast<int>(bytes_per_sample)) {
-      samples_in_read = static_cast<uint64_t>((std::min)(static_cast<U32>(read_rc), read_buffer_bytes) / bytes_per_sample);
+    if (!crashed && hss_sample_stride_bytes > hss_sample_header_bytes && read_rc >= static_cast<int>(hss_sample_stride_bytes)) {
+      samples_in_read = static_cast<uint64_t>((std::min)(static_cast<U32>(read_rc), read_buffer_bytes) / hss_sample_stride_bytes);
     } else if (!crashed && read_rc == 0 && sample_prefix_changed) {
       samples_in_read = 1;
     } else if (read_rc == 0) {
@@ -1073,11 +1075,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     } else {
       ++short_reads;
     }
-    const int64_t read_ns = now_ns();
     for (uint64_t batch_sample = 0; batch_sample < samples_in_read && sample < requested_samples; ++batch_sample) {
       std::vector<uint32_t> values;
       values.reserve(symbols.size());
-      size_t offset = static_cast<size_t>(batch_sample) * bytes_per_sample;
+      size_t offset = static_cast<size_t>(batch_sample) * hss_sample_stride_bytes;
+      uint32_t hss_sample_index = 0;
+      for (U32 byte = 0; byte < hss_sample_header_bytes; ++byte) hss_sample_index |= static_cast<uint32_t>(read_buffer[offset + byte]) << (byte * 8);
+      offset += hss_sample_header_bytes;
       for (const auto& symbol : symbols) {
         uint32_t raw = 0;
         if (offset + symbol.size <= read_buffer.size()) {
@@ -1088,7 +1092,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       }
       ++valid_samples;
       ++decoded_samples;
-      write_record(out, sample++, read_ns, 1U, values, &crc);
+      const int64_t sample_ns = started_ns + static_cast<int64_t>(static_cast<uint64_t>(hss_sample_index) * 1000000000ULL / static_cast<uint64_t>(requested_rate));
+      write_record(out, hss_sample_index, sample_ns, 1U, values, &crc);
+      ++sample;
     }
     if (crashed) break;
   }
@@ -1129,6 +1135,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"requestedSamples\":" << requested_samples
     << ",\"validSamples\":" << valid_samples
     << ",\"readErrors\":" << read_errors
+    << ",\"hssSampleHeaderBytes\":" << hss_sample_header_bytes
+    << ",\"hssSampleStrideBytes\":" << hss_sample_stride_bytes
     << ",\"readAttempts\":" << read_attempts
     << ",\"decodedSamples\":" << decoded_samples
     << ",\"emptyReads\":" << empty_reads
