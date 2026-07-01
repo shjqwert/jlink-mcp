@@ -16,12 +16,12 @@ const symbolSets = {
     { name: "g_hssDbgSawFocIsr", type: "uint32" },
     { name: "g_hssDbgToggleFocIsr", type: "uint32" },
     { name: "g_hssDbgPatternFocIsr", type: "uint32" },
-    { name: "g_hssDbgRawAdcM1U", type: "uint32" },
-    { name: "g_hssDbgRawAdcM1V", type: "uint32" },
-    { name: "g_hssDbgRawAdcM2U", type: "uint32" },
-    { name: "g_hssDbgRawAdcM2V", type: "uint32" },
-    { name: "g_hssDbgOffsetM1U", type: "int16" },
-    { name: "g_hssDbgOffsetM1V", type: "int16" },
+    { name: "g_hssDbgRawAdcM1U" },
+    { name: "g_hssDbgRawAdcM1V" },
+    { name: "g_hssDbgRawAdcM2U" },
+    { name: "g_hssDbgRawAdcM2V" },
+    { name: "g_hssDbgOffsetM1U" },
+    { name: "g_hssDbgOffsetM1V" },
   ],
 };
 

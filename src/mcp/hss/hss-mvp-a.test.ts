@@ -74,6 +74,13 @@ test("HSS capture plan resolves one and ten HM_C095 variables without Git", asyn
   }
 });
 
+test("HSS smoke full10 lets IAR map infer ADC and offset widths", async () => {
+  const script = await readFile(join(process.cwd(), "scripts", "hss-hm-c095-smoke.mjs"), "utf8");
+  for (const name of ["g_hssDbgRawAdcM1U", "g_hssDbgRawAdcM1V", "g_hssDbgRawAdcM2U", "g_hssDbgRawAdcM2V", "g_hssDbgOffsetM1U", "g_hssDbgOffsetM1V"]) {
+    assert.doesNotMatch(script, new RegExp(`${name}", type:`));
+  }
+});
+
 test("HSS capture service starts fake helper, finalizes metadata, queries and exports", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
@@ -205,7 +212,7 @@ test("HSS capture plan forwards explicit DLL and connection parameters to capabi
   }
 });
 
-test("HSS capture plan rejects requested rate above GetCaps maxFreq", async () => {
+test("HSS capture plan records GetCaps maxFreq without gating requested rate", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -221,8 +228,8 @@ test("HSS capture plan rejects requested rate above GetCaps maxFreq", async () =
     await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
     await writeFile(helper, fakeHelperSource({ maxFreq: 1000 }), "utf8");
     const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 8000, durationSec: 1 });
-    assert.equal(plan.ok, false);
-    assert.equal(plan.error?.code, HSS_ERROR.HSS_CAPABILITY_LIMIT);
+    assert.equal(plan.ok, true);
+    assert.equal(plan.data?.sampling.requestedRateHz, 8000);
   } finally {
     await service.dispose();
     probe.dispose();
@@ -339,6 +346,8 @@ test("live HSS status counts read-error records as invalid", async () => {
     });
     assert.equal(live?.validSamples, 0);
     assert.equal(live?.readErrors, 1000);
+    assert.ok(Number(live?.elapsedSec) > 0.9);
+    assert.ok(Number(live?.actualRateHz) > 900);
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
       return Boolean(status.data && (status.data as { state: string }).state === "failed");

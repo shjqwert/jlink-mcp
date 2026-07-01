@@ -193,18 +193,18 @@ export class HssCaptureService {
         return {
           captureId: input.captureId,
           state: "capturing",
-          elapsedSec: quality.sampleCount / active.plan.sampling.requestedRateHz,
+          ...quality,
+          elapsedSec: quality.elapsedSec,
           requestedRateHz: active.plan.sampling.requestedRateHz,
-          actualRateHz: 0,
+          actualRateHz: quality.actualRateHz,
           sampling: {
             requestedRateHz: active.plan.sampling.requestedRateHz,
-            hssIndexRateHz: 0,
-            hostObservedRateHz: 0,
+            hssIndexRateHz: quality.actualRateHz,
+            hostObservedRateHz: quality.actualRateHz,
             helperReportedRateHz: 0,
             helperActualRateHz: 0,
             readMode: active.plan.readMode,
           },
-          ...quality,
           currentSegment: "capture_0001.bin",
           warnings: [],
         };
@@ -337,20 +337,37 @@ function warningList(data: unknown): string[] {
 }
 
 function enforceCapabilityRate(capability: Record<string, unknown>, requestedRateHz: number): void {
-  const hss = capability.hss as { getCapsOk?: boolean; maxFreqHz?: unknown } | undefined;
-  const maxFreqHz = Number(hss?.maxFreqHz ?? 0);
-  if (hss?.getCapsOk && Number.isFinite(maxFreqHz) && maxFreqHz > 0 && requestedRateHz > maxFreqHz) {
-    throw new HssError(HSS_ERROR.HSS_CAPABILITY_LIMIT, `requestedRateHz ${requestedRateHz} exceeds HSS maxFreqHz ${maxFreqHz}`, { requestedRateHz, maxFreqHz });
-  }
+  void capability;
+  void requestedRateHz;
 }
 
-function emptyLiveQuality(): Record<"sampleCount" | "validSamples" | "readErrors" | "timeouts" | "overflows" | "droppedSamples", number> {
-  return { sampleCount: 0, validSamples: 0, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0 };
+interface LiveQuality {
+  sampleCount: number;
+  validSamples: number;
+  readErrors: number;
+  timeouts: number;
+  overflows: number;
+  droppedSamples: number;
+  elapsedSec: number;
+  actualRateHz: number;
 }
 
-function activeQuality(data: Buffer, recordSize: number): ReturnType<typeof emptyLiveQuality> {
+function emptyLiveQuality(): LiveQuality {
+  return { sampleCount: 0, validSamples: 0, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, elapsedSec: 0, actualRateHz: 0 };
+}
+
+function activeQuality(data: Buffer, recordSize: number): LiveQuality {
   const quality = emptyLiveQuality();
   quality.sampleCount = Math.floor(data.length / recordSize);
+  if (quality.sampleCount >= 2) {
+    const firstIndex = data.readBigUInt64LE(0);
+    const firstTicks = data.readBigInt64LE(8);
+    const lastOffset = (quality.sampleCount - 1) * recordSize;
+    const lastIndex = data.readBigUInt64LE(lastOffset);
+    const lastTicks = data.readBigInt64LE(lastOffset + 8);
+    quality.elapsedSec = Math.max(0, Number(lastTicks - firstTicks) / 1_000_000_000);
+    quality.actualRateHz = quality.elapsedSec > 0 ? Number(lastIndex - firstIndex) / quality.elapsedSec : 0;
+  }
   for (let offset = 0; offset < quality.sampleCount * recordSize; offset += recordSize) {
     const flags = data.readUInt32LE(offset + 16);
     assertNoMvpAWriteFlags(flags);
