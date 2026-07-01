@@ -1058,6 +1058,10 @@ export class JLinkMcpServer {
       values: z.array(z.number()).optional(),
       expiresInMs: z.number().int().positive().max(3600000).optional(),
     }, async (input) => result(() => this.hssCapture.variableWritePlan(input as HssVariableWritePlanInput)));
+    this.server.tool("variable_write_execute", "Execute a previously planned active-capture variable write through the HSS write queue with old-value read and readback verification.", {
+      writePlanId: z.string().startsWith("wp_"),
+      dryRun: z.boolean().optional(),
+    }, async (input) => result(() => this.hssCapture.variableWriteExecute(input)));
   }
 
   private directRttResult(operation: () => Promise<unknown>) {

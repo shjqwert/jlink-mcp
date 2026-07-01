@@ -13,8 +13,10 @@ import { buildHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
+import { ProbeHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
 import { loadHssPolicy } from "./hss-policy";
 import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
+import { executeHssVariableWritePlan, type HssVariableWriteExecuteInput, type HssVariableWriteExecuteResult } from "./hss-write-execute";
 import { HssCaptureWriteQueue } from "./hss-write-queue";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { assertInsideProject, ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
@@ -28,6 +30,8 @@ export interface HssCaptureServiceOptions {
   env?: Record<string, string | undefined>;
   helperPath?: string;
   helperArgsPrefix?: string[];
+  memoryIo?: HssVariableMemoryIo;
+  targetEndian?: "little" | "big";
 }
 
 interface ActiveCapture {
@@ -50,6 +54,7 @@ export class HssCaptureService {
   private readonly plans = new Map<string, HssCapturePlan>();
   private readonly metadataFiles = new Map<string, string>();
   private readonly writePlans = new HssWritePlanStore();
+  private readonly writeCounters = new Map<string, { ops: number; elements: number }>();
   private captureGeneration = 0;
   private active: ActiveCapture | null = null;
 
@@ -254,7 +259,39 @@ export class HssCaptureService {
         backend: "jlink-hss",
         mapFile: active.plan.artifact.mapFile,
         policy,
+        ...this.writeCounts(active.captureId, input.targetRef?.path ?? input.target ?? ""),
       }));
+    });
+  }
+
+  async variableWriteExecute(input: HssVariableWriteExecuteInput): Promise<HssEnvelope<HssVariableWriteExecuteResult>> {
+    return this.wrap("variable_write_execute", input, async () => {
+      const active = this.active;
+      if (!active) throw new HssError(HSS_ERROR.CAPTURE_NOT_ACTIVE, "no active HSS capture");
+      if (!active.plan.artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "active HSS capture has no map file");
+      const policy = await loadHssPolicy(this.cwd());
+      const plan = this.writePlans.get(input.writePlanId, {
+        captureId: active.captureId,
+        captureGeneration: active.generation,
+        policy,
+        mapFile: active.plan.artifact.mapFile,
+      });
+      if (!plan.executable) throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "write plan risk is not executable", { writePlanId: input.writePlanId, operationPlanRequired: true });
+      return active.writeQueue.run(async () => {
+        const io = this.options.memoryIo ?? new ProbeHssVariableMemoryIo(this.probe, active.owner);
+        try {
+          const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun));
+          if (!input.dryRun) this.consumeWrite(plan);
+          if (!input.dryRun) this.writePlans.markExecuted(input.writePlanId);
+          return result;
+        } catch (error) {
+          if (error instanceof HssError && error.details.writeIssued === true) {
+            this.consumeWrite(plan);
+            this.writePlans.markExecuted(input.writePlanId);
+          }
+          throw error;
+        }
+      });
     });
   }
 
@@ -329,6 +366,19 @@ export class HssCaptureService {
 
   private env(): Record<string, string | undefined> {
     return this.options.env ?? process.env;
+  }
+
+  private writeCounts(captureId: string, path: string): { writeOpsUsed: number; elementsUsed: number } {
+    const counter = this.writeCounters.get(`${captureId}:${path}`) ?? { ops: 0, elements: 0 };
+    return { writeOpsUsed: counter.ops, elementsUsed: counter.elements };
+  }
+
+  private consumeWrite(plan: HssVariableWritePlan): void {
+    const key = `${plan.captureId}:${plan.targetRef.path}`;
+    const counter = this.writeCounters.get(key) ?? { ops: 0, elements: 0 };
+    counter.ops += 1;
+    counter.elements += plan.writeElementCount;
+    this.writeCounters.set(key, counter);
   }
 
   private async wrap<T>(operation: Parameters<typeof hssOk<T>>[0], input: unknown, fn: () => Promise<T> | T): Promise<HssEnvelope<T>> {

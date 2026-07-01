@@ -242,6 +242,21 @@ export class JLinkBackend extends ProbeBackend {
   async writeMemory(address: number, value: number): Promise<CommandResult> {
     return this.withPreflight("writeMemory", () => this.execRaw([`w4 0x${address.toString(16)}, 0x${value.toString(16)}`]));
   }
+  async readMemoryForExclusiveOwner(owner: string, address: number, length: number): Promise<CommandResult> {
+    if (this.getExclusiveOwner() !== owner) return this.ownerMemoryRejected(owner);
+    return this.acquireLock(() => this.execRaw([`mem 0x${address.toString(16)}, ${length}`]));
+  }
+  async writeMemoryForExclusiveOwner(owner: string, address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<CommandResult> {
+    if (this.getExclusiveOwner() !== owner) return this.ownerMemoryRejected(owner);
+    const commands: string[] = [];
+    for (let offset = 0; offset < bytes.length; offset += accessSize) {
+      const chunk = bytes.subarray(offset, offset + accessSize);
+      if (chunk.length !== accessSize) return { success: false, rawOutput: "", output: "unaligned write byte count", error: "unaligned write byte count" };
+      const value = accessSize === 1 ? chunk.readUInt8(0) : accessSize === 2 ? chunk.readUInt16LE(0) : chunk.readUInt32LE(0);
+      commands.push(`w${accessSize} 0x${(address + offset).toString(16)}, 0x${value.toString(16)}`);
+    }
+    return this.acquireLock(() => this.execRaw(commands));
+  }
 
   async readAllRegisters(): Promise<CommandResult> {
     return this.withPreflight("readAllRegisters", () => this.execRaw(["halt", "regs"]));

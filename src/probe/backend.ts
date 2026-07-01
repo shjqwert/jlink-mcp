@@ -276,6 +276,19 @@ export abstract class ProbeBackend {
   abstract readMemory(address: number, length: number): Promise<CommandResult>;
   abstract writeMemory(address: number, value: number): Promise<CommandResult>;
 
+  async readMemoryForExclusiveOwner(owner: string, address: number, length: number): Promise<CommandResult> {
+    void address;
+    void length;
+    return this.ownerMemoryRejected(owner);
+  }
+
+  async writeMemoryForExclusiveOwner(owner: string, address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<CommandResult> {
+    void address;
+    void bytes;
+    void accessSize;
+    return this.ownerMemoryRejected(owner);
+  }
+
   // ── Registers ────────────────────────────────────────────────────
 
   abstract readAllRegisters(): Promise<CommandResult>;
@@ -361,6 +374,16 @@ export abstract class ProbeBackend {
     }
 
     return Object.keys(regs).length > 0 ? regs : null;
+  }
+
+  protected ownerMemoryRejected(owner: string): CommandResult {
+    return {
+      success: false,
+      rawOutput: "",
+      output: this._exclusiveOwner === owner ? "exclusive-owner memory IO is not supported by this backend" : `Probe is exclusively owned by ${this._exclusiveOwner}`,
+      error: "Capture owner memory IO unavailable",
+      errorCode: ProbeErrorCode.PROBE_BUSY,
+    };
   }
 
   /** Format registers as a compact, LLM-friendly summary */

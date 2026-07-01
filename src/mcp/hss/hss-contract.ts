@@ -7,7 +7,8 @@ export type HssToolOperation =
   | "hss_capture_stop"
   | "hss_capture_query"
   | "hss_capture_export"
-  | "variable_write_plan";
+  | "variable_write_plan"
+  | "variable_write_execute";
 
 export const HSS_TOOL_RISK: Record<HssToolOperation, HssRiskLevel> = {
   hss_capability_probe: "R0",
@@ -18,6 +19,7 @@ export const HSS_TOOL_RISK: Record<HssToolOperation, HssRiskLevel> = {
   hss_capture_query: "R0",
   hss_capture_export: "R0",
   variable_write_plan: "R2",
+  variable_write_execute: "R2",
 };
 
 export interface HssSafety {
