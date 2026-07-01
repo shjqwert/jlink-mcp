@@ -399,12 +399,20 @@ export class HssCaptureService {
       const data = await fn();
       const artifacts = artifactList(data);
       const envelope = hssOk(operation, data, artifacts, warningList(data));
-      await appendHssAudit(this.sessionId, operation, input, envelope, this.cwd());
+      await this.safeAudit(operation, input, envelope);
       return envelope;
     } catch (error) {
       const envelope = hssFail<T>(operation, error);
-      await appendHssAudit(this.sessionId, operation, input, envelope, this.cwd());
+      await this.safeAudit(operation, input, envelope);
       return envelope;
+    }
+  }
+
+  private async safeAudit(operation: Parameters<typeof hssOk<unknown>>[0], input: unknown, envelope: HssEnvelope<unknown>): Promise<void> {
+    try {
+      await appendHssAudit(this.sessionId, operation, input, envelope, this.cwd());
+    } catch (error) {
+      envelope.warnings.push(`audit append failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }
