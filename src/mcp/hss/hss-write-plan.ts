@@ -58,6 +58,69 @@ export interface HssVariableWritePlan {
   expiresAt: string;
 }
 
+interface StoredWritePlan {
+  plan: HssVariableWritePlan;
+  executed: boolean;
+}
+
+export interface HssWritePlanRevalidateContext {
+  captureId: string;
+  captureGeneration: number;
+  policy: HssPolicy;
+  mapFile: string;
+  expectedPolicyHash?: string;
+  expectedSymbolLayoutHash?: string;
+}
+
+export class HssWritePlanStore {
+  private readonly plans = new Map<string, StoredWritePlan>();
+
+  put(plan: HssVariableWritePlan): HssVariableWritePlan {
+    this.plans.set(plan.writePlanId, { plan, executed: false });
+    return plan;
+  }
+
+  get(writePlanId: string, context: HssWritePlanRevalidateContext): HssVariableWritePlan {
+    const stored = this.plans.get(writePlanId);
+    if (!stored) throw new HssError(HSS_ERROR.WRITE_PLAN_NOT_FOUND, "write plan was not found", { writePlanId });
+    const plan = stored.plan;
+    if (stored.executed) throw new HssError(HSS_ERROR.WRITE_PLAN_ALREADY_EXECUTED, "write plan was already executed", { writePlanId });
+    if (Date.now() > Date.parse(plan.expiresAt)) throw new HssError(HSS_ERROR.WRITE_PLAN_EXPIRED, "write plan expired", { writePlanId, expiresAt: plan.expiresAt });
+    if (plan.captureId !== context.captureId || plan.captureGeneration !== context.captureGeneration) {
+      throw new HssError(HSS_ERROR.WRITE_PLAN_CAPTURE_MISMATCH, "write plan does not match active capture", { writePlanId, captureId: context.captureId });
+    }
+    if (plan.policyHash !== context.policy.policyHash || (context.expectedPolicyHash && context.expectedPolicyHash !== plan.policyHash)) {
+      throw new HssError(HSS_ERROR.WRITE_PLAN_POLICY_HASH_MISMATCH, "write plan policy hash is stale", { writePlanId });
+    }
+    if (context.expectedSymbolLayoutHash && context.expectedSymbolLayoutHash !== plan.symbolLayoutHash) {
+      throw new HssError(HSS_ERROR.WRITE_PLAN_SYMBOL_HASH_MISMATCH, "write plan symbol layout hash is stale", { writePlanId });
+    }
+    const entry = policyEntryForPath(context.policy, plan.targetRef.path, plan.targetRef.kind === "scalar" ? "scalar" : "fixed_array");
+    let layout: ReturnType<typeof resolveIarMapWriteTargetLayout>;
+    try {
+      layout = resolveIarMapWriteTargetLayout(context.mapFile, entry);
+    } catch (error) {
+      throw new HssError(HSS_ERROR.WRITE_PLAN_LAYOUT_CHANGED, "write plan target layout changed", { writePlanId, reason: error instanceof Error ? error.message : String(error) });
+    }
+    if (layout.symbolLayoutHash !== plan.symbolLayoutHash) throw new HssError(HSS_ERROR.WRITE_PLAN_LAYOUT_CHANGED, "write plan target layout changed", { writePlanId });
+    return plan;
+  }
+
+  markExecuted(writePlanId: string): void {
+    const stored = this.plans.get(writePlanId);
+    if (!stored) throw new HssError(HSS_ERROR.WRITE_PLAN_NOT_FOUND, "write plan was not found", { writePlanId });
+    stored.executed = true;
+  }
+
+  invalidateCapture(captureId: string, captureGeneration?: number): void {
+    for (const [writePlanId, stored] of this.plans) {
+      if (stored.plan.captureId === captureId && (captureGeneration === undefined || stored.plan.captureGeneration === captureGeneration)) {
+        this.plans.delete(writePlanId);
+      }
+    }
+  }
+}
+
 export function createHssVariableWritePlan(input: HssVariableWritePlanInput, context: {
   captureId: string;
   captureGeneration: number;

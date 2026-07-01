@@ -14,7 +14,7 @@ import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { loadHssPolicy } from "./hss-policy";
-import { createHssVariableWritePlan, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
+import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { assertInsideProject, ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
 
@@ -47,6 +47,7 @@ export class HssCaptureService {
   private readonly sessionId = randomUUID();
   private readonly plans = new Map<string, HssCapturePlan>();
   private readonly metadataFiles = new Map<string, string>();
+  private readonly writePlans = new HssWritePlanStore();
   private captureGeneration = 0;
   private active: ActiveCapture | null = null;
 
@@ -242,13 +243,13 @@ export class HssCaptureService {
       if (!active) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "active HSS capture was not found", { captureId: input.captureId });
       if (!active.plan.artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "active HSS capture has no map file");
       const policy = await loadHssPolicy(this.cwd());
-      return createHssVariableWritePlan(input, {
+      return this.writePlans.put(createHssVariableWritePlan(input, {
         captureId: active.captureId,
         captureGeneration: active.generation,
         backend: "jlink-hss",
         mapFile: active.plan.artifact.mapFile,
         policy,
-      });
+      }));
     });
   }
 
@@ -286,6 +287,7 @@ export class HssCaptureService {
       metadata.failures = [...(Array.isArray(metadata.failures) ? metadata.failures : []), error instanceof Error ? error.message : String(error)];
       await writeFile(active.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
     } finally {
+      this.writePlans.invalidateCapture(active.captureId, active.generation);
       await appendHssAudit(this.sessionId, "hss_capture_status", { event: "capture_terminal", captureId: active.captureId }, {
         captureId: active.captureId,
         state,
