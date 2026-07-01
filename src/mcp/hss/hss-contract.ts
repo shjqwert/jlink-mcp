@@ -68,6 +68,14 @@ export interface HssSegmentMetadata {
   crc32: string;
 }
 
+export interface HssFlagInterval {
+  eventId?: string;
+  startUs: number;
+  endUs: number;
+  flags: number;
+  reason: "write_in_progress" | "write_nearby" | "backend_busy";
+}
+
 export interface HssCaptureMetadata {
   version: 1;
   captureId: string;
@@ -145,6 +153,7 @@ export interface HssCaptureMetadata {
     actualRateHz: number;
   };
   events: Array<Record<string, unknown>>;
+  flagIntervals?: HssFlagInterval[];
   warnings: string[];
   failures: string[];
   safety: HssSafety;

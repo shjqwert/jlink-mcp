@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { once } from "node:events";
 import { HSS_SAFETY_FALSE, type HssCaptureMetadata, type HssResolvedSymbol, type HssScalarType, type HssValidationStatus } from "./hss-contract";
 import { readHssCaptureEvents } from "./hss-events";
+import { readHssFlagIntervals } from "./hss-flag-overlay";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { assertInsideProject, hssProjectPaths } from "./project-paths";
@@ -145,6 +146,7 @@ export async function finalizeMetadata(input: {
   if (decodeFailure) metadata.failures.push(decodeFailure);
   if (input.failure) metadata.failures.push(input.failure);
   metadata.events = [...await readHssCaptureEvents(input.metadataFile), ...(input.helperResult ? [{ type: "helperResult", helperResult: input.helperResult }] : [])];
+  metadata.flagIntervals = await readHssFlagIntervals(input.metadataFile);
   await writeFile(input.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
   return metadata;
 }

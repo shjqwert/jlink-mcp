@@ -12,6 +12,7 @@ import type { HssCapturePlan, HssCapturePlanInput } from "./hss-plan";
 import { buildHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
+import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-flag-overlay";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { ProbeHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
@@ -284,7 +285,9 @@ export class HssCaptureService {
           const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun));
           if (!input.dryRun) {
             await appendHssWriteEvent(active.metadataFile, plan, result, true);
+            await appendHssWriteFlagIntervals(active.metadataFile, { eventId: result.eventId, writeStartUs: result.writeStartUs, writeEndUs: result.writeEndUs, requestedRateHz: active.plan.sampling.requestedRateHz });
             await materializeHssCaptureEvents(active.metadataFile);
+            await materializeHssFlagIntervals(active.metadataFile);
             this.consumeWrite(plan);
             this.writePlans.markExecuted(input.writePlanId);
           }
@@ -293,7 +296,9 @@ export class HssCaptureService {
           if (error instanceof HssError && error.details.writeIssued === true) {
             const maybeResult = "writeId" in error.details ? error.details as unknown as HssVariableWriteExecuteResult : undefined;
             await appendHssWriteEvent(active.metadataFile, plan, maybeResult, false, error.code);
+            if (maybeResult) await appendHssWriteFlagIntervals(active.metadataFile, { eventId: maybeResult.eventId, writeStartUs: maybeResult.writeStartUs, writeEndUs: maybeResult.writeEndUs, requestedRateHz: active.plan.sampling.requestedRateHz, backendBusy: error.code === HSS_ERROR.UNKNOWN_WRITE_STATE });
             await materializeHssCaptureEvents(active.metadataFile);
+            await materializeHssFlagIntervals(active.metadataFile);
             this.consumeWrite(plan);
             this.writePlans.markExecuted(input.writePlanId);
           }
