@@ -1043,6 +1043,15 @@ export class JLinkMcpServer {
       includeRawSamples: z.boolean().optional(),
       maxSamples: z.number().int().min(1).max(100000).optional(),
       hmC095Profile: z.boolean().optional(),
+      mode: z.literal("event_window").optional(),
+      eventId: z.string().optional(),
+      windowBeforeMs: z.number().nonnegative().optional(),
+      windowAfterMs: z.number().nonnegative().optional(),
+      flagFilter: z.object({
+        exclude: z.array(z.enum(["write_in_progress", "write_nearby", "backend_busy"])).optional(),
+        includeNearby: z.boolean().optional(),
+      }).strict().optional(),
+      summary: z.array(z.enum(["avg", "min", "max", "first", "last", "delta"])).optional(),
     }, async (input) => result(() => this.hssCapture.captureQuery(input)));
     this.server.tool("hss_capture_export", "Export a terminal HSS MVP-A capture to CSV under .jlink-mcp/exports.", {
       ...captureId,

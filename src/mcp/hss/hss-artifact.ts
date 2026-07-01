@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { once } from "node:events";
 import { HSS_SAFETY_FALSE, type HssCaptureMetadata, type HssResolvedSymbol, type HssScalarType, type HssValidationStatus } from "./hss-contract";
 import { readHssCaptureEvents } from "./hss-events";
-import { readHssFlagIntervals } from "./hss-flag-overlay";
+import { effectiveHssStatusFlags, readHssFlagIntervals } from "./hss-flag-overlay";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { assertInsideProject, hssProjectPaths } from "./project-paths";
@@ -26,6 +26,15 @@ export interface HssQueryInput {
   includeRawSamples?: boolean;
   maxSamples?: number;
   hmC095Profile?: boolean;
+  mode?: "event_window";
+  eventId?: string;
+  windowBeforeMs?: number;
+  windowAfterMs?: number;
+  flagFilter?: {
+    exclude?: Array<"write_in_progress" | "write_nearby" | "backend_busy">;
+    includeNearby?: boolean;
+  };
+  summary?: Array<"avg" | "min" | "max" | "first" | "last" | "delta">;
 }
 
 const PAYLOAD_CHANGED_RATIO_PASS = 0.5;
@@ -211,14 +220,17 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
   assertInsideProject(segmentFile, captureDir);
   const actualCrc = await crc32File(segmentFile);
   if (actualCrc !== segment.crc32) throw new HssError(HSS_ERROR.HSS_CRC_MISMATCH, "capture segment CRC mismatch", { expected: segment.crc32, actual: actualCrc });
-  const records = await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize);
+  const records = applyFlagOverlays(await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize), await readHssFlagIntervals(metadataFile));
   const selected = selectSymbols(metadata.symbols, input.variables);
-  const filtered = filterByTime(records, input.startSec, input.endSec);
+  const eventWindow = input.mode === "event_window" ? eventWindowSelection(records, metadata.events, input) : undefined;
+  const filteredByTime = eventWindow ? eventWindow.records : filterByTime(records, input.startSec, input.endSec);
+  const filtered = filterByFlags(filteredByTime, input.flagFilter);
   const buckets = bucketRecords(filtered, selected, metadata.sampling.actualRateHz, input.buckets ?? 100);
   const rawSamples = input.includeRawSamples ? decimateRaw(filtered, selected, input.maxSamples ?? 10000) : undefined;
   const warnings = input.includeRawSamples && rawSamples && rawSamples.length < filtered.length
     ? [`raw samples decimated from ${filtered.length} to ${rawSamples.length}`]
     : [];
+  if (eventWindow?.warnings.length) warnings.push(...eventWindow.warnings);
   return {
     captureId: metadata.captureId,
     variables: selected.map(({ symbol }) => symbol),
@@ -231,6 +243,13 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
     semanticValidationStatus: metadata.semanticValidationStatus,
     payloadValidationStatus: metadata.payloadValidationStatus,
     layout: metadata.layout,
+    eventWindow: eventWindow ? {
+      eventId: input.eventId,
+      startSec: eventWindow.startUs / 1_000_000,
+      endSec: eventWindow.endUs / 1_000_000,
+      sampleCount: filtered.length,
+      summary: summarizeRecords(filtered, selected),
+    } : undefined,
     warnings,
     hmC095: input.hmC095Profile === false ? undefined : hmC095Validation(records, metadata.symbols, metadata.sampling.hssIndexRateHz || metadata.sampling.actualRateHz || metadata.sampling.requestedRateHz, metadata),
   };
@@ -497,7 +516,64 @@ function decimateRaw(records: HssSampleRecord[], selected: Array<{ symbol: HssRe
     sampleIndex: record.sampleIndex.toString(),
     timeSec: Number(record.timestampTicks - first) / 1_000_000_000,
     statusFlags: record.statusFlags,
+    effectiveStatusFlags: record.statusFlags,
     values: Object.fromEntries(selected.map(({ symbol, index }) => [symbol.name, decodeValue(symbol.type, record.rawValues[index])])),
+  }));
+}
+
+function applyFlagOverlays(records: HssSampleRecord[], intervals: NonNullable<HssCaptureMetadata["flagIntervals"]>): HssSampleRecord[] {
+  if (!intervals.length || !records.length) return records;
+  const firstTicks = records[0].timestampTicks;
+  return records.map((record) => ({
+    ...record,
+    statusFlags: effectiveHssStatusFlags(record.statusFlags, Number(record.timestampTicks - firstTicks) / 1000, intervals),
+  }));
+}
+
+function eventWindowSelection(records: HssSampleRecord[], events: Array<Record<string, unknown>>, input: HssQueryInput): { records: HssSampleRecord[]; startUs: number; endUs: number; warnings: string[] } {
+  if (!input.eventId) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "eventId is required for event_window query");
+  const event = events.find((candidate) => candidate.type === "variable_write" && candidate.eventId === input.eventId);
+  if (!event) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture event was not found", { eventId: input.eventId });
+  const firstTicks = records[0]?.timestampTicks ?? 0n;
+  const bySampleIndex = typeof event.sampleIndexNear === "number"
+    ? records.find((record) => Number(record.sampleIndex) === event.sampleIndexNear)
+    : undefined;
+  const centerUs = bySampleIndex
+    ? Number(bySampleIndex.timestampTicks - firstTicks) / 1000
+    : Number(event.writeStartUs ?? 0);
+  const startUs = Math.max(0, centerUs - (input.windowBeforeMs ?? 100) * 1000);
+  const endUs = centerUs + (input.windowAfterMs ?? 100) * 1000;
+  const selected = records.filter((record) => {
+    const timeUs = Number(record.timestampTicks - firstTicks) / 1000;
+    return timeUs >= startUs && timeUs <= endUs;
+  });
+  const warnings: string[] = [];
+  if (!selected.length) warnings.push("event window contains no samples");
+  if (records.length && startUs < Number(records[0].timestampTicks - firstTicks) / 1000) warnings.push("before window is incomplete");
+  if (records.length && endUs > Number(records.at(-1)!.timestampTicks - firstTicks) / 1000) warnings.push("after window is incomplete");
+  return { records: selected, startUs, endUs, warnings };
+}
+
+function filterByFlags(records: HssSampleRecord[], flagFilter?: HssQueryInput["flagFilter"]): HssSampleRecord[] {
+  const exclude = flagFilter?.exclude ?? [];
+  if (!exclude.length) return records;
+  const mask = exclude.reduce((flags, name) => flags | HSS_STATUS_FLAGS[name], 0);
+  return records.filter((record) => (record.statusFlags & mask) === 0);
+}
+
+function summarizeRecords(records: HssSampleRecord[], selected: Array<{ symbol: HssResolvedSymbol; index: number }>): Record<string, unknown> {
+  return Object.fromEntries(selected.map(({ symbol, index }) => {
+    const values = records.map((record) => decodeValue(symbol.type, record.rawValues[index]));
+    if (!values.length) return [symbol.name, { count: 0 }];
+    return [symbol.name, {
+      count: values.length,
+      first: values[0],
+      last: values.at(-1),
+      delta: values.at(-1)! - values[0],
+      min: Math.min(...values),
+      max: Math.max(...values),
+      avg: values.reduce((sum, value) => sum + value, 0) / values.length,
+    }];
   }));
 }
 
