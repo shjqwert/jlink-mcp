@@ -213,6 +213,7 @@
     "test:hss-dll": "npm run compile && node --test out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js",
     "test:hss-mvp-a": "npm run compile && node --test out/mcp/hss/hss-mvp-a.test.js",
     "test:hss-mvp-b": "npm run compile && node --test out/mcp/hss/hss-policy.test.js out/mcp/hss/hss-write-layout.test.js out/mcp/hss/hss-typed-value.test.js out/mcp/hss/hss-write-plan.test.js out/mcp/hss/hss-write-plan-store.test.js out/mcp/hss/hss-write-queue.test.js out/mcp/hss/hss-write-execute.test.js out/mcp/hss/hss-events.test.js out/mcp/hss/hss-flag-overlay.test.js out/mcp/hss/hss-query-event-window.test.js out/mcp/hss/hss-export-event-aware.test.js out/mcp/hss/hss-audit.test.js out/mcp/hss/hss-mvp-b-integration.test.js",
+    "validate:hss-mvp-b-capture": "node scripts/hss-validate-mvp-b-capture.mjs",
     "test:coverage": "npm run compile && node scripts/hm-c095-coverage.mjs"
   },
   "dependencies": {
