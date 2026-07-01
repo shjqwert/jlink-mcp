@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { once } from "node:events";
 import { HSS_SAFETY_FALSE, type HssCaptureMetadata, type HssResolvedSymbol, type HssScalarType, type HssValidationStatus } from "./hss-contract";
+import { readHssCaptureEvents } from "./hss-events";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { assertInsideProject, hssProjectPaths } from "./project-paths";
@@ -143,7 +144,7 @@ export async function finalizeMetadata(input: {
   metadata.semanticValidationStatus = semanticValidationStatus(metadata.hmC095);
   if (decodeFailure) metadata.failures.push(decodeFailure);
   if (input.failure) metadata.failures.push(input.failure);
-  if (input.helperResult) metadata.events.push({ type: "helperResult", helperResult: input.helperResult });
+  metadata.events = [...await readHssCaptureEvents(input.metadataFile), ...(input.helperResult ? [{ type: "helperResult", helperResult: input.helperResult }] : [])];
   await writeFile(input.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
   return metadata;
 }

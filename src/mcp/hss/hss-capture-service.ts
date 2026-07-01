@@ -11,6 +11,7 @@ import { hssCapabilityProbe } from "./hss-capability";
 import type { HssCapturePlan, HssCapturePlanInput } from "./hss-plan";
 import { buildHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
+import { appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { ProbeHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
@@ -281,11 +282,18 @@ export class HssCaptureService {
         const io = this.options.memoryIo ?? new ProbeHssVariableMemoryIo(this.probe, active.owner);
         try {
           const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun));
-          if (!input.dryRun) this.consumeWrite(plan);
-          if (!input.dryRun) this.writePlans.markExecuted(input.writePlanId);
+          if (!input.dryRun) {
+            await appendHssWriteEvent(active.metadataFile, plan, result, true);
+            await materializeHssCaptureEvents(active.metadataFile);
+            this.consumeWrite(plan);
+            this.writePlans.markExecuted(input.writePlanId);
+          }
           return result;
         } catch (error) {
           if (error instanceof HssError && error.details.writeIssued === true) {
+            const maybeResult = "writeId" in error.details ? error.details as unknown as HssVariableWriteExecuteResult : undefined;
+            await appendHssWriteEvent(active.metadataFile, plan, maybeResult, false, error.code);
+            await materializeHssCaptureEvents(active.metadataFile);
             this.consumeWrite(plan);
             this.writePlans.markExecuted(input.writePlanId);
           }
