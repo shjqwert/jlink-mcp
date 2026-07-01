@@ -26,7 +26,7 @@ const symbolSets = {
 
 const args = process.argv.slice(2);
 if (args[0] === "--help") {
-  console.log("usage: node scripts/hss-hm-c095-smoke.mjs [counter|core4|full10] [rateHz] [durationSec] [dllPath] [periodic|drain]");
+  console.log("usage: node scripts/hss-hm-c095-smoke.mjs [counter|core4|full10] [rateHz] [durationSec] [dllPath] [periodic|drain] [resume]");
   console.log("legacy: node scripts/hss-hm-c095-smoke.mjs 1000 3 [dllPath]");
   process.exit(0);
 }
@@ -36,6 +36,7 @@ const rateHz = Number(args[0] ?? 1000);
 const durationSec = Number(args[1] ?? 3);
 const dllPath = args[2];
 const readMode = args[3] ?? "periodic";
+const resumeBeforeStart = args[4] === "resume";
 if (!Number.isInteger(rateHz) || rateHz < 1 || !Number.isInteger(durationSec) || durationSec < 1) {
   console.error("rateHz and durationSec must be positive integers");
   process.exit(2);
@@ -52,13 +53,14 @@ try {
   const plan = await service.capturePlan({
     dllPath,
     readMode,
+    resumeBeforeStart,
     symbols: symbolSets[mode],
     requestedRateHz: rateHz,
     durationSec,
   });
   console.log(JSON.stringify(plan, null, 2));
   if (!plan.ok) process.exit(1);
-  const start = await service.captureStart({ planId: plan.data.planId, dllPath, readMode });
+  const start = await service.captureStart({ planId: plan.data.planId, dllPath, readMode, resumeBeforeStart });
   console.log(JSON.stringify(start, null, 2));
   if (!start.ok) process.exit(1);
   const captureId = start.data.captureId;

@@ -26,6 +26,7 @@ export interface HssCapturePlanInput {
   speedKhz?: number;
   serial?: string;
   readMode?: "periodic" | "drain";
+  resumeBeforeStart?: boolean;
   artifactFile?: string;
   mapFile?: string;
   symbols?: HssRequestedSymbol[];
@@ -69,6 +70,7 @@ export interface HssCapturePlan {
   safety: typeof HSS_SAFETY_FALSE;
   startReady: boolean;
   readMode: "periodic" | "drain";
+  resumeBeforeStart: boolean;
 }
 
 export async function buildHssCapturePlan(input: HssCapturePlanInput = {}, cwd = process.cwd(), startReady = false): Promise<HssCapturePlan> {
@@ -76,6 +78,7 @@ export async function buildHssCapturePlan(input: HssCapturePlanInput = {}, cwd =
   const durationSec = input.durationSec ?? 3;
   const segmentSizeMb = input.segmentSizeMb ?? 64;
   const readMode = input.readMode ?? "periodic";
+  const resumeBeforeStart = input.resumeBeforeStart ?? false;
   if (!Number.isInteger(requestedRateHz) || requestedRateHz < 1 || requestedRateHz > 16000) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "requestedRateHz must be 1..16000");
   if (!Number.isInteger(durationSec) || durationSec < 1 || durationSec > 60) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "durationSec must be 1..60");
   if (!Number.isInteger(segmentSizeMb) || segmentSizeMb < 16 || segmentSizeMb > 512) throw new HssError(HSS_ERROR.PATH_OUTSIDE_CWD, "segmentSizeMb must be 16..512");
@@ -122,6 +125,7 @@ export async function buildHssCapturePlan(input: HssCapturePlanInput = {}, cwd =
     safety: HSS_SAFETY_FALSE,
     startReady,
     readMode,
+    resumeBeforeStart,
   };
   await mkdir(outputDir, { recursive: true });
   return plan;

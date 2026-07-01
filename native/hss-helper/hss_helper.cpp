@@ -44,6 +44,7 @@ using JLINKARM_GetDLLVersion_Fn = int (*)();
 using JLINKARM_GetSN_Fn = U32 (*)();
 using JLINKARM_GetId_Fn = U32 (*)();
 using JLINKARM_IsHalted_Fn = int (*)();
+using JLINKARM_Go_Fn = void (*)();
 using JLINKARM_ReadMem_Fn = int (*)(U32, U32, void*);
 
 static std::string narrow(const std::wstring& input) {
@@ -258,6 +259,12 @@ static int json_int(const std::string& text, const char* name, int fallback = 0)
   return std::regex_search(text, match, pattern) ? std::stoi(match[1].str()) : fallback;
 }
 
+static bool json_bool(const std::string& text, const char* name, bool fallback = false) {
+  std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*(true|false)");
+  std::smatch match;
+  return std::regex_search(text, match, pattern) ? match[1].str() == "true" : fallback;
+}
+
 struct PlanSymbol {
   std::string name;
   U32 address;
@@ -294,8 +301,8 @@ static std::vector<unsigned char> hss_changed_window(const std::vector<unsigned 
   return std::vector<unsigned char>(buffer.begin() + start, buffer.begin() + end);
 }
 
-static bool hss_capture_failed(bool crashed, uint64_t valid_samples, uint64_t read_errors) {
-  return crashed || valid_samples == 0 || read_errors > 0;
+static bool hss_capture_failed(bool crashed, uint64_t valid_samples, uint64_t requested_samples) {
+  return crashed || valid_samples < requested_samples;
 }
 
 static void write_record(std::ofstream& out, uint64_t sample_index, int64_t timestamp_ticks, uint32_t status_flags, const std::vector<uint32_t>& values, uint32_t* crc) {
@@ -826,7 +833,7 @@ static int self_test() {
     error_json("HSS_SELF_TEST_CHANGED_WINDOW_FAILED", "HSS changed-window diagnostic failed");
     return 0;
   }
-  if (hss_capture_failed(false, 2, 0) || !hss_capture_failed(false, 1, 1) || !hss_capture_failed(false, 0, 0) || !hss_capture_failed(true, 2, 0)) {
+  if (hss_capture_failed(false, 2, 2) || !hss_capture_failed(false, 1, 2) || !hss_capture_failed(false, 0, 2) || !hss_capture_failed(true, 2, 2)) {
     error_json("HSS_SELF_TEST_CAPTURE_FAILURE_FAILED", "HSS capture failure classification failed");
     return 0;
   }
@@ -868,6 +875,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string iface = json_string(plan, "interface", "SWD");
   const std::string serial_text = json_string(plan, "serial");
   const std::string read_mode = json_string(plan, "readMode", "periodic");
+  const bool resume_before_start = json_bool(plan, "resumeBeforeStart", false);
   const int speed = json_int(plan, "speedKhz", 4000);
   const int requested_rate = json_int(plan, "requestedRateHz", 1000);
   const int duration_sec = json_int(plan, "durationSec", 1);
@@ -894,6 +902,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
+  auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
   auto hss_start = reinterpret_cast<JLINK_HSS_Start_Fn>(required(dll, "JLINK_HSS_Start"));
   auto hss_read = reinterpret_cast<JLINK_HSS_Read_Fn>(required(dll, "JLINK_HSS_Read"));
   auto hss_stop = reinterpret_cast<JLINK_HSS_Stop_Fn>(required(dll, "JLINK_HSS_Stop"));
@@ -937,6 +947,32 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", dll_utf8);
     return 0;
   }
+  int halted_before_resume = -1;
+  int halted_after_resume = -1;
+  if (arm_halted) {
+    halted_before_resume = call_int0(arm_halted, &crashed);
+    if (crashed) halted_before_resume = -2;
+  }
+  if (resume_before_start) {
+    if (!arm_go) {
+      call_void0(arm_close, &crashed);
+      FreeLibrary(dll);
+      error_json("JLINK_GO_MISSING", "JLINKARM_Go export missing", dll_utf8);
+      return 0;
+    }
+    call_void0(arm_go, &crashed);
+    if (crashed) {
+      call_void0(arm_close, &crashed);
+      FreeLibrary(dll);
+      error_json("JLINK_GO_EXCEPTION", "JLINKARM_Go raised a structured exception", dll_utf8);
+      return 0;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (arm_halted) {
+    halted_after_resume = call_int0(arm_halted, &crashed);
+    if (crashed) halted_after_resume = -2;
+  }
 
   std::vector<JLINK_HSS_MEM_BLOCK_DESC> blocks;
   U32 bytes_per_sample = 0;
@@ -967,6 +1003,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   uint32_t crc = 0xFFFFFFFFU;
   uint64_t valid_samples = 0;
   uint64_t read_errors = 0;
+  uint64_t read_attempts = 0;
+  uint64_t decoded_samples = 0;
+  uint64_t empty_reads = 0;
+  uint64_t short_reads = 0;
   uint64_t unchanged_reads = 0;
   uint64_t changed_reads = 0;
   uint64_t sample_prefix_changed_reads = 0;
@@ -988,17 +1028,19 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
-  for (uint64_t sample = 0; sample < requested_samples; ++sample) {
+  uint64_t sample = 0;
+  for (uint64_t attempt = 0; attempt < requested_samples && sample < requested_samples; ++attempt) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
     if (read_mode == "periodic") {
       while (true) {
-        const int64_t wait_ns = sample_due_ns(started_ns, sample, requested_rate) - now_ns();
+        const int64_t wait_ns = sample_due_ns(started_ns, attempt, requested_rate) - now_ns();
         if (wait_ns <= 0) break;
         std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<int64_t>(wait_ns, 1'000'000)));
       }
     }
     std::fill(read_buffer.begin(), read_buffer.end(), 0xA5);
     int read_rc = call_hss_read(hss_read, read_buffer.data(), read_buffer_bytes, &crashed);
+    ++read_attempts;
     const bool buffer_changed = hss_buffer_overwritten(read_buffer, 0xA5);
     const bool sample_prefix_changed = hss_sample_prefix_overwritten(read_buffer, bytes_per_sample, 0xA5);
     if (!buffer_changed) ++unchanged_reads;
@@ -1008,7 +1050,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       first_changed_offset = hss_first_changed_offset(read_buffer, 0xA5);
       first_changed_bytes = bytes_hex(hss_changed_window(read_buffer, first_changed_offset));
     }
-    if (sample == 0) {
+    if (attempt == 0) {
       first_read_rc = read_rc;
       min_read_rc = read_rc;
       max_read_rc = read_rc;
@@ -1021,23 +1063,39 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     last_read_rc = read_rc;
     last_read_buffer_changed = buffer_changed;
     last_read_sample_prefix_changed = sample_prefix_changed;
-    const bool read_ok = !crashed && sample_prefix_changed && (read_rc >= static_cast<int>(bytes_per_sample) || read_rc == 0);
-    std::vector<uint32_t> values;
-    values.reserve(symbols.size());
-    size_t offset = 0;
-    for (const auto& symbol : symbols) {
-      uint32_t raw = 0;
-      if (read_ok && offset + symbol.size <= read_buffer.size()) {
-        for (U32 byte = 0; byte < symbol.size; ++byte) raw |= static_cast<uint32_t>(read_buffer[offset + byte]) << (byte * 8);
-      }
-      values.push_back(raw);
-      offset += symbol.size;
+    uint64_t samples_in_read = 0;
+    if (!crashed && bytes_per_sample > 0 && read_rc >= static_cast<int>(bytes_per_sample)) {
+      samples_in_read = static_cast<uint64_t>((std::min)(static_cast<U32>(read_rc), read_buffer_bytes) / bytes_per_sample);
+    } else if (!crashed && read_rc == 0 && sample_prefix_changed) {
+      samples_in_read = 1;
+    } else if (read_rc == 0) {
+      ++empty_reads;
+    } else {
+      ++short_reads;
     }
-    const uint32_t flags = read_ok ? 1U : 2U;
-    if (flags == 1U) ++valid_samples;
-    else ++read_errors;
-    write_record(out, sample, now_ns(), flags, values, &crc);
+    const int64_t read_ns = now_ns();
+    for (uint64_t batch_sample = 0; batch_sample < samples_in_read && sample < requested_samples; ++batch_sample) {
+      std::vector<uint32_t> values;
+      values.reserve(symbols.size());
+      size_t offset = static_cast<size_t>(batch_sample) * bytes_per_sample;
+      for (const auto& symbol : symbols) {
+        uint32_t raw = 0;
+        if (offset + symbol.size <= read_buffer.size()) {
+          for (U32 byte = 0; byte < symbol.size; ++byte) raw |= static_cast<uint32_t>(read_buffer[offset + byte]) << (byte * 8);
+        }
+        values.push_back(raw);
+        offset += symbol.size;
+      }
+      ++valid_samples;
+      ++decoded_samples;
+      write_record(out, sample++, read_ns, 1U, values, &crc);
+    }
     if (crashed) break;
+  }
+  while (sample < requested_samples) {
+    std::vector<uint32_t> values(symbols.size(), 0);
+    ++read_errors;
+    write_record(out, sample++, now_ns(), 2U, values, &crc);
   }
   out.close();
   int stop_rc = call_hss_stop(hss_stop, &crashed);
@@ -1047,7 +1105,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const int64_t elapsed_ns = std::max<int64_t>(1, now_ns() - started_ns);
   const double actual_rate = static_cast<double>(valid_samples) * 1000000000.0 / static_cast<double>(elapsed_ns);
   const uint64_t sample_count = valid_samples + read_errors;
-  const bool read_failed = hss_capture_failed(crashed, valid_samples, read_errors);
+  const bool read_failed = hss_capture_failed(crashed, valid_samples, requested_samples);
   std::ostringstream crc_hex;
   crc_hex << std::hex << crc;
   std::cout
@@ -1059,11 +1117,23 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"captureId\":\"" << escape(capture_id)
     << "\",\"backend\":\"jlink-hss\",\"requestedRateHz\":" << requested_rate
     << ",\"readMode\":\"" << read_mode << "\""
+    << ",\"resumeBeforeStart\":" << (resume_before_start ? "true" : "false")
+    << ",\"resumeIssued\":" << (resume_before_start ? "true" : "false")
+    << ",\"targetWasHaltedBeforeResume\":" << (halted_before_resume > 0 ? "true" : "false")
+    << ",\"targetHaltedBeforeResumeRaw\":" << halted_before_resume
+    << ",\"targetWasHaltedAfterResume\":" << (halted_after_resume > 0 ? "true" : "false")
+    << ",\"targetHaltedAfterResumeRaw\":" << halted_after_resume
     << ",\"actualRateHz\":" << actual_rate
     << ",\"durationSec\":" << (static_cast<double>(elapsed_ns) / 1000000000.0)
     << ",\"sampleCount\":" << sample_count
+    << ",\"requestedSamples\":" << requested_samples
     << ",\"validSamples\":" << valid_samples
     << ",\"readErrors\":" << read_errors
+    << ",\"readAttempts\":" << read_attempts
+    << ",\"decodedSamples\":" << decoded_samples
+    << ",\"emptyReads\":" << empty_reads
+    << ",\"shortReads\":" << short_reads
+    << ",\"missingSamples\":" << read_errors
     << ",\"bytesPerSample\":" << bytes_per_sample
     << ",\"readBufferBytes\":" << read_buffer_bytes
     << ",\"firstReadReturnCode\":" << first_read_rc

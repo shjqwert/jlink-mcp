@@ -1006,6 +1006,7 @@ export class JLinkMcpServer {
       outputSubdir: z.string().optional(),
       dryRun: z.boolean().optional(),
       readMode: z.enum(["periodic", "drain"]).optional(),
+      resumeBeforeStart: z.boolean().optional(),
     };
     const captureId = { captureId: z.string().uuid() };
 
