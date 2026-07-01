@@ -212,7 +212,7 @@
     "test:hss-backend": "npm run compile && node --test out/mcp/capture-backends/capture-backends.test.js out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js",
     "test:hss-dll": "npm run compile && node --test out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js",
     "test:hss-mvp-a": "npm run compile && node --test out/mcp/hss/hss-mvp-a.test.js",
-    "test:hss-mvp-b": "npm run compile && node --test out/mcp/hss/hss-policy.test.js out/mcp/hss/hss-write-layout.test.js",
+    "test:hss-mvp-b": "npm run compile && node --test out/mcp/hss/hss-policy.test.js out/mcp/hss/hss-write-layout.test.js out/mcp/hss/hss-typed-value.test.js",
     "test:coverage": "npm run compile && node scripts/hm-c095-coverage.mjs"
   },
   "dependencies": {
