@@ -119,6 +119,40 @@ export function hssPolicyElementSize(type: HssScalarType): number {
   return TYPE_BYTES[type];
 }
 
+export function assertHssPolicyValues(entry: HssPolicyEntry, values: number[]): void {
+  if (values.length === 0) throw new HssError(HSS_ERROR.POLICY_MAX_ELEMENTS_EXCEEDED, "values must not be empty");
+  for (const value of values) {
+    assertValueMatchesType(entry.kind === "scalar" ? entry.type : entry.elementType, value);
+    if (entry.min !== undefined && value < entry.min) throw new HssError(HSS_ERROR.POLICY_VALUE_OUT_OF_RANGE, "value is below policy min", { path: entry.path, value, min: entry.min });
+    if (entry.max !== undefined && value > entry.max) throw new HssError(HSS_ERROR.POLICY_VALUE_OUT_OF_RANGE, "value is above policy max", { path: entry.path, value, max: entry.max });
+    if (entry.allowedValues && !entry.allowedValues.includes(value)) throw new HssError(HSS_ERROR.POLICY_VALUE_NOT_ALLOWED, "value is not in policy allowedValues", { path: entry.path, value });
+  }
+}
+
+export function assertHssPolicyArrayElement(entry: HssFixedArrayPolicyEntry, index: number): void {
+  if (!Number.isInteger(index) || index < 0 || index >= entry.arrayLength) {
+    throw new HssError(HSS_ERROR.POLICY_ARRAY_INDEX_OUT_OF_RANGE, "array index is outside policy bounds", { path: entry.path, index, arrayLength: entry.arrayLength });
+  }
+  if (entry.allowedIndices && !entry.allowedIndices.includes(index)) {
+    throw new HssError(HSS_ERROR.POLICY_ARRAY_INDEX_NOT_ALLOWED, "array index is not allowlisted", { path: entry.path, index });
+  }
+  if (entry.allowedIndexRange && (index < entry.allowedIndexRange.start || index > entry.allowedIndexRange.end)) {
+    throw new HssError(HSS_ERROR.POLICY_ARRAY_INDEX_NOT_ALLOWED, "array index is outside allowlisted range", { path: entry.path, index, range: entry.allowedIndexRange });
+  }
+}
+
+export function assertHssPolicyArraySlice(entry: HssFixedArrayPolicyEntry, startIndex: number, elementCount: number): void {
+  if (!entry.allowArraySliceWrite) throw new HssError(HSS_ERROR.POLICY_ARRAY_SLICE_NOT_ALLOWED, "array slice writes are disabled by policy", { path: entry.path });
+  if (elementCount <= 0) throw new HssError(HSS_ERROR.POLICY_MAX_ELEMENTS_EXCEEDED, "array slice values must not be empty", { path: entry.path });
+  if (!Number.isInteger(startIndex) || startIndex < 0 || startIndex + elementCount > entry.arrayLength) {
+    throw new HssError(HSS_ERROR.POLICY_ARRAY_SLICE_OUT_OF_RANGE, "array slice is outside policy bounds", { path: entry.path, startIndex, elementCount, arrayLength: entry.arrayLength });
+  }
+  if (elementCount > entry.maxElementsPerWrite) {
+    throw new HssError(HSS_ERROR.POLICY_MAX_ELEMENTS_EXCEEDED, "array slice exceeds maxElementsPerWrite", { path: entry.path, elementCount, maxElementsPerWrite: entry.maxElementsPerWrite });
+  }
+  for (let index = startIndex; index < startIndex + elementCount; index += 1) assertHssPolicyArrayElement(entry, index);
+}
+
 function normalizeEntry(raw: unknown, index: number, rootRequireReadback: boolean, defaultMaxWritesScope: HssPolicyMaxWritesScope): HssPolicyEntry {
   const entry = record(raw, `variableWriteAllowlist[${index}]`);
   const kind = stringField(entry, "kind");

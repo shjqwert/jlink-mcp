@@ -6,7 +6,7 @@ export interface HssEnvelope<T> {
   operation: HssToolOperation;
   data: T | null;
   risk: {
-    level: "R0" | "R1";
+    level: "R0" | "R1" | "R2" | "R3";
     requiresUserApproval: false;
   };
   backend: {

@@ -13,6 +13,7 @@ import { evidenceForCodegraphTool } from "./bridge/tools";
 import { CaptureService } from "./capture";
 import { captureBackendBenchmarkTool, captureBackendListTool, captureBackendProbeTool, captureBackendSelectTool, captureImportExperimentTool } from "./capture-backends/backend-router";
 import { HssCaptureService } from "./hss/hss-capture-service";
+import type { HssVariableWritePlanInput } from "./hss/hss-write-plan";
 import { hssDllBenchmark, hssDllGetCaps, hssDllPreflight, hssDllSmoke } from "./hss-dll/hss-dll-adapter";
 import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
 import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
@@ -1009,6 +1010,12 @@ export class JLinkMcpServer {
       resumeBeforeStart: z.boolean().optional(),
     };
     const captureId = { captureId: z.string().uuid() };
+    const writeTargetRef = z.object({
+      kind: z.enum(["scalar", "array_element", "array_slice"]),
+      path: z.string().min(1),
+      index: z.number().int().optional(),
+      startIndex: z.number().int().optional(),
+    }).strict();
 
     this.server.tool("hss_capability_probe", "Probe read-only J-Link HSS MVP-A availability without reset, halt, flash, raw-command, or target-memory writes.", hssDllInput,
       async (input) => result(() => this.hssCapture.capabilityProbe(input)));
@@ -1043,6 +1050,14 @@ export class JLinkMcpServer {
       format: z.literal("csv").optional(),
       variables: z.array(z.string()).min(1).max(10).optional(),
     }, async (input) => result(() => this.hssCapture.captureExport(input)));
+    this.server.tool("variable_write_plan", "Plan an allowlisted capture-time RAM scalar or fixed-array write for the active HSS capture. This does not write target memory.", {
+      ...captureId,
+      target: z.string().optional(),
+      targetRef: writeTargetRef.optional(),
+      value: z.number().optional(),
+      values: z.array(z.number()).optional(),
+      expiresInMs: z.number().int().positive().max(3600000).optional(),
+    }, async (input) => result(() => this.hssCapture.variableWritePlan(input as HssVariableWritePlanInput)));
   }
 
   private directRttResult(operation: () => Promise<unknown>) {

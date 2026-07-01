@@ -1,4 +1,4 @@
-export type HssRiskLevel = "R0" | "R1";
+export type HssRiskLevel = "R0" | "R1" | "R2" | "R3";
 export type HssToolOperation =
   | "hss_capability_probe"
   | "hss_capture_plan"
@@ -6,7 +6,8 @@ export type HssToolOperation =
   | "hss_capture_status"
   | "hss_capture_stop"
   | "hss_capture_query"
-  | "hss_capture_export";
+  | "hss_capture_export"
+  | "variable_write_plan";
 
 export const HSS_TOOL_RISK: Record<HssToolOperation, HssRiskLevel> = {
   hss_capability_probe: "R0",
@@ -16,6 +17,7 @@ export const HSS_TOOL_RISK: Record<HssToolOperation, HssRiskLevel> = {
   hss_capture_stop: "R1",
   hss_capture_query: "R0",
   hss_capture_export: "R0",
+  variable_write_plan: "R2",
 };
 
 export interface HssSafety {

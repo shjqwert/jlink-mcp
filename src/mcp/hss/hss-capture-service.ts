@@ -13,6 +13,8 @@ import { buildHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
+import { loadHssPolicy } from "./hss-policy";
+import { createHssVariableWritePlan, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { assertInsideProject, ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
 
@@ -29,6 +31,7 @@ export interface HssCaptureServiceOptions {
 
 interface ActiveCapture {
   captureId: string;
+  generation: number;
   owner: string;
   plan: HssCapturePlan;
   metadataFile: string;
@@ -44,6 +47,7 @@ export class HssCaptureService {
   private readonly sessionId = randomUUID();
   private readonly plans = new Map<string, HssCapturePlan>();
   private readonly metadataFiles = new Map<string, string>();
+  private captureGeneration = 0;
   private active: ActiveCapture | null = null;
 
   constructor(private readonly probe: ProbeBackend, private readonly options: HssCaptureServiceOptions = {}) {}
@@ -145,6 +149,7 @@ export class HssCaptureService {
       });
       const active: ActiveCapture = {
         captureId: plan.output.captureId,
+        generation: ++this.captureGeneration,
         owner,
         plan,
         metadataFile: plan.output.metadataFile,
@@ -229,6 +234,22 @@ export class HssCaptureService {
 
   async captureExport(input: Parameters<typeof exportHssCapture>[0]): Promise<HssEnvelope<Record<string, unknown>>> {
     return this.wrap("hss_capture_export", input, () => exportHssCapture({ ...input, metadataFile: input.metadataFile ?? this.metadataFor(input.captureId) }, this.cwd()));
+  }
+
+  async variableWritePlan(input: HssVariableWritePlanInput): Promise<HssEnvelope<HssVariableWritePlan>> {
+    return this.wrap("variable_write_plan", input, async () => {
+      const active = this.active?.captureId === input.captureId ? this.active : null;
+      if (!active) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "active HSS capture was not found", { captureId: input.captureId });
+      if (!active.plan.artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "active HSS capture has no map file");
+      const policy = await loadHssPolicy(this.cwd());
+      return createHssVariableWritePlan(input, {
+        captureId: active.captureId,
+        captureGeneration: active.generation,
+        backend: "jlink-hss",
+        mapFile: active.plan.artifact.mapFile,
+        policy,
+      });
+    });
   }
 
   async dispose(): Promise<void> {
