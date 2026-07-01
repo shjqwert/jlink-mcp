@@ -4,6 +4,7 @@ import { HssCaptureService } from "../out/mcp/hss/hss-capture-service.js";
 
 const symbolSets = {
   counter: [{ name: "g_hssDbgCounterFocIsr", type: "uint32", unit: "count" }],
+  task1ms: [{ name: "g_hssDbgCounterTask1ms", type: "uint32", unit: "count" }],
   core4: [
     { name: "g_hssDbgCounterFocIsr", type: "uint32", unit: "count" },
     { name: "g_hssDbgSawFocIsr", type: "uint32" },
@@ -26,7 +27,7 @@ const symbolSets = {
 
 const args = process.argv.slice(2);
 if (args[0] === "--help") {
-  console.log("usage: node scripts/hss-hm-c095-smoke.mjs [counter|core4|full10] [rateHz] [durationSec] [dllPath] [periodic|drain] [resume]");
+  console.log("usage: node scripts/hss-hm-c095-smoke.mjs [counter|task1ms|core4|full10] [rateHz] [durationSec] [dllPath] [periodic|drain] [resume]");
   console.log("legacy: node scripts/hss-hm-c095-smoke.mjs 1000 3 [dllPath]");
   process.exit(0);
 }
