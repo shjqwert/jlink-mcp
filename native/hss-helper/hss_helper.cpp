@@ -704,6 +704,7 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
+  auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
   auto arm_read_mem = reinterpret_cast<JLINKARM_ReadMem_Fn>(required(dll, "JLINKARM_ReadMem"));
   if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_read_mem) {
     FreeLibrary(dll);
@@ -714,6 +715,7 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
   const std::string device = option_utf8(options, L"--device", "");
   const std::string iface = option_utf8(options, L"--interface", "SWD");
   const std::string serial_text = option_utf8(options, L"--serial", "");
+  const bool resume_before_read = option_utf8(options, L"--resume-before-read", "false") == "true";
   int speed = 4000;
   if (!parse_int_text(option_utf8(options, L"--speed", "4000"), &speed) || speed < 1) {
     FreeLibrary(dll);
@@ -777,6 +779,30 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     if (crashed) halted = -2;
   }
 
+  bool resume_issued = false;
+  int halted_after_resume = -1;
+  if (resume_before_read) {
+    if (!arm_go) {
+      call_void0(arm_close, &crashed);
+      FreeLibrary(dll);
+      error_json("JLINK_GO_EXPORT_MISSING", "JLINKARM_Go export missing", dll_utf8);
+      return 0;
+    }
+    call_void0(arm_go, &crashed);
+    if (crashed) {
+      call_void0(arm_close, &crashed);
+      FreeLibrary(dll);
+      error_json("JLINK_GO_EXCEPTION", "JLINKARM_Go raised a structured exception", dll_utf8);
+      return 0;
+    }
+    resume_issued = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (arm_halted) {
+      halted_after_resume = call_int0(arm_halted, &crashed);
+      if (crashed) halted_after_resume = -2;
+    }
+  }
+
   std::vector<unsigned char> first_value;
   bool changed = false;
   bool all_zero = true;
@@ -799,6 +825,10 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     << "},\"execOutput\":\"" << escape(exec_out)
     << "\",\"targetWasHalted\":" << (halted > 0 ? "true" : "false")
     << ",\"targetWasHaltedRaw\":" << halted
+    << ",\"resumeBeforeRead\":" << (resume_before_read ? "true" : "false")
+    << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
+    << ",\"targetWasHaltedAfterResume\":" << (halted_after_resume > 0 ? "true" : "false")
+    << ",\"targetWasHaltedAfterResumeRaw\":" << halted_after_resume
     << ",\"samples\":[";
   for (int sample = 0; sample < samples; ++sample) {
     std::vector<unsigned char> buffer(static_cast<size_t>(size), 0);
