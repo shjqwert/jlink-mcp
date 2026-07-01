@@ -15,6 +15,7 @@ import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { loadHssPolicy } from "./hss-policy";
 import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
+import { HssCaptureWriteQueue } from "./hss-write-queue";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { assertInsideProject, ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
 
@@ -40,6 +41,7 @@ interface ActiveCapture {
   child: ChildProcessWithoutNullStreams;
   stdout: string;
   stderr: string;
+  writeQueue: HssCaptureWriteQueue;
   done: Promise<void>;
 }
 
@@ -159,6 +161,7 @@ export class HssCaptureService {
         child,
         stdout: "",
         stderr: "",
+        writeQueue: new HssCaptureWriteQueue(),
         done: Promise.resolve(),
       };
       active.done = new Promise((resolveDone) => {
@@ -223,6 +226,8 @@ export class HssCaptureService {
     return this.wrap("hss_capture_stop", input, async () => {
       const active = this.active?.captureId === input.captureId ? this.active : null;
       if (!active) return hssCaptureStopFromMetadata(this.metadataFor(input.captureId));
+      active.writeQueue.beginStopping();
+      await active.writeQueue.waitForIdle();
       await writeFile(active.stopFile, "stop", "utf8");
       await Promise.race([active.done, new Promise((resolve) => setTimeout(resolve, 30000))]);
       return hssCaptureStopFromMetadata(active.metadataFile);
@@ -288,6 +293,7 @@ export class HssCaptureService {
       await writeFile(active.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
     } finally {
       this.writePlans.invalidateCapture(active.captureId, active.generation);
+      active.writeQueue.close();
       await appendHssAudit(this.sessionId, "hss_capture_status", { event: "capture_terminal", captureId: active.captureId }, {
         captureId: active.captureId,
         state,
