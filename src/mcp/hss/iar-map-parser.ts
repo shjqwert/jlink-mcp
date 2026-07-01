@@ -10,7 +10,7 @@ export interface IarMapSymbol {
 
 export function parseIarMap(mapFile: string): Map<string, IarMapSymbol[]> {
   const symbols = new Map<string, IarMapSymbol[]>();
-  const linePattern = /^\s*([A-Za-z_]\w*)\s+0x([0-9a-fA-F']+)\s+0x([0-9a-fA-F]+)\s+Data\s+Gb\b/;
+  const linePattern = /^\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+0x([0-9a-fA-F']+)\s+0x([0-9a-fA-F]+)\s+Data\s+\w+\b/;
   for (const line of readFileSync(mapFile, "utf8").split(/\r?\n/)) {
     const match = line.match(linePattern);
     if (!match) continue;
