@@ -35,27 +35,28 @@ test("variable_write_execute supports dryRun without memory changes", async () =
 test("variable_write_execute reports old read, write, readback, and mismatch failures", async () => {
   await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), new FakeMemory({ failRead: true }), "little"), hssError(HSS_ERROR.OLD_VALUE_READ_FAILED));
   await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), seeded({ failWrite: true }), "little"), hssError(HSS_ERROR.UNKNOWN_WRITE_STATE));
-  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), seeded({ failReadback: true }), "little"), hssError(HSS_ERROR.READBACK_FAILED));
-  const mismatch = seeded({ corruptReadback: true });
+  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), seeded({ failReadback: true }), "little"), hssError(HSS_ERROR.WRITE_RESTORE_FAILED));
+  const mismatch = seeded({ corruptFirstReadback: true });
   await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), mismatch, "little"), hssError(HSS_ERROR.READBACK_MISMATCH));
-  assert.deepEqual([...mismatch.get(0x20000000, 4)], [...encodeHssValues("int32", [1], "little")]);
+  assert.deepEqual([...mismatch.get(0x20000000, 4)], [...encodeHssValues("int32", [7], "little")]);
+  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), seeded({ corruptFirstReadback: true, failRestoreWrite: true }), "little"), hssError(HSS_ERROR.WRITE_RESTORE_FAILED));
 });
 
 class FakeMemory implements HssVariableMemoryIo {
   private readonly memory = new Map<number, Buffer>();
   private writes = 0;
-  constructor(private readonly options: { failRead?: boolean; failWrite?: boolean; failReadback?: boolean; corruptReadback?: boolean } = {}) {}
+  constructor(private readonly options: { failRead?: boolean; failWrite?: boolean; failReadback?: boolean; corruptFirstReadback?: boolean; failRestoreWrite?: boolean } = {}) {}
   set(address: number, bytes: Buffer): void { this.memory.set(address, Buffer.from(bytes)); }
   get(address: number, length: number): Buffer { return Buffer.from(this.memory.get(address) ?? Buffer.alloc(length)); }
   async read(address: number, length: number): Promise<Buffer> {
     if (this.options.failRead || (this.options.failReadback && this.writes > 0)) throw new Error("read failed");
     const bytes = this.get(address, length);
-    if (this.options.corruptReadback && this.writes > 0) bytes[0] ^= 0xff;
+    if (this.options.corruptFirstReadback && this.writes === 1) bytes[0] ^= 0xff;
     return bytes;
   }
   async write(address: number, bytes: Buffer): Promise<void> {
     this.writes += 1;
-    if (this.options.failWrite) throw new Error("write failed");
+    if (this.options.failWrite || (this.options.failRestoreWrite && this.writes > 1)) throw new Error("write failed");
     this.set(address, bytes);
   }
 }

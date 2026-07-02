@@ -24,6 +24,7 @@ export interface HssVariableWriteExecuteResult {
   readbackValues?: number[];
   readbackOk: boolean;
   mismatches: Array<{ index: number; expected: number; readback: number }>;
+  recovery?: { attempted: boolean; restored: boolean; errorCode?: string; readbackOk?: boolean };
   writeStartUs: number;
   writeEndUs: number;
   sampleIndexNear: number | null;
@@ -61,15 +62,39 @@ export async function executeHssVariableWritePlan(plan: HssVariableWritePlan, io
   try {
     readbackBytes = await io.read(address, plan.writeByteCount);
   } catch (error) {
-    throw hssStageError(error, HSS_ERROR.READBACK_FAILED, "readback failed", true);
+    const result = resultFor(plan, oldValues, values, [], writeStartUs, nowUs(), false, [], false);
+    await restoreOldValue(io, address, oldBytes, accessSize, result);
+    throw new HssError(HSS_ERROR.READBACK_FAILED, "readback failed; old value restored", { ...result, reason: error instanceof Error ? error.message : String(error), writeIssued: true });
   }
   const readbackValues = decodeHssValues(type, readbackBytes, endian);
   const mismatches = mismatchValues(values, readbackValues);
   if (!hssBytesEqual(encoded, readbackBytes)) {
     const result = resultFor(plan, oldValues, values, readbackValues, writeStartUs, nowUs(), false, mismatches, false);
-    throw new HssError(HSS_ERROR.READBACK_MISMATCH, "readback does not match written bytes", { ...result, writeIssued: true });
+    await restoreOldValue(io, address, oldBytes, accessSize, result);
+    throw new HssError(HSS_ERROR.READBACK_MISMATCH, "readback does not match written bytes; old value restored", { ...result, writeIssued: true });
   }
   return resultFor(plan, oldValues, values, readbackValues, writeStartUs, nowUs(), true, [], false);
+}
+
+async function restoreOldValue(io: HssVariableMemoryIo, address: number, oldBytes: Buffer, accessSize: 1 | 2 | 4, result: HssVariableWriteExecuteResult): Promise<void> {
+  result.recovery = { attempted: true, restored: false };
+  try {
+    await io.write(address, oldBytes, accessSize);
+    const restoredBytes = await io.read(address, oldBytes.length);
+    result.recovery.restored = hssBytesEqual(oldBytes, restoredBytes);
+    result.recovery.readbackOk = result.recovery.restored;
+    if (!result.recovery.restored) {
+      result.recovery.errorCode = HSS_ERROR.WRITE_RESTORE_FAILED;
+      throw new Error("restore readback mismatch");
+    }
+  } catch (error) {
+    result.recovery.errorCode = HSS_ERROR.WRITE_RESTORE_FAILED;
+    throw new HssError(HSS_ERROR.WRITE_RESTORE_FAILED, "failed to restore old value after write failure", {
+      ...result,
+      reason: error instanceof Error ? error.message : String(error),
+      writeIssued: true,
+    });
+  }
 }
 
 function resultFor(plan: HssVariableWritePlan, oldValues: number[], newValues: number[], readbackValues: number[], writeStartUs: number, writeEndUs: number, readbackOk: boolean, mismatches: Array<{ index: number; expected: number; readback: number }>, dryRun: boolean): HssVariableWriteExecuteResult {

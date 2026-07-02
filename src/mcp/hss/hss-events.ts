@@ -55,6 +55,7 @@ export async function appendHssWriteEvent(metadataFile: string, plan: HssVariabl
     readbackValues: result?.readbackValues,
     readbackOk: result?.readbackOk ?? false,
     mismatches: result?.mismatches ?? [],
+    recovery: result?.recovery,
     writeStartUs: result?.writeStartUs ?? Date.now() * 1000,
     writeEndUs: result?.writeEndUs ?? Date.now() * 1000,
     sampleIndexNear: result?.sampleIndexNear ?? null,
