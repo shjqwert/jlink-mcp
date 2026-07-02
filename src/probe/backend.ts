@@ -413,9 +413,10 @@ export abstract class ProbeBackend {
   /** Parse hex dump lines from probe output */
   parseMemoryDump(raw: string): MemoryDumpLine[] {
     const results: MemoryDumpLine[] = [];
-    for (const line of raw.split("\n")) {
+    for (const rawLine of raw.split("\n")) {
+      const line = rawLine.trimEnd();
       // J-Link format: "E000ED28 = 00 00 00 00 ..."
-      const jlinkMatch = line.match(/^([0-9A-Fa-f]{8})\s*=\s*(.+?)\s{2,}(.*)$/);
+      const jlinkMatch = line.match(/^(?:J-Link>\s*)?([0-9A-Fa-f]{8})\s*=\s*(.+?)\s{2,}(.*)$/);
       if (jlinkMatch) {
         results.push({ address: `0x${jlinkMatch[1]}`, hex: jlinkMatch[2].trim(), ascii: jlinkMatch[3].trim() });
         continue;

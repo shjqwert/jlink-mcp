@@ -140,9 +140,10 @@ export function formatRegistersCompact(regs: Record<string, string>): string {
 /** Parse memory dump lines into hex string */
 export function parseMemoryDump(raw: string): { address: string; hex: string; ascii: string }[] {
   const results: { address: string; hex: string; ascii: string }[] = [];
-  for (const line of raw.split("\n")) {
+  for (const rawLine of raw.split("\n")) {
+    const line = rawLine.trimEnd();
     // "E000ED28 = 00 00 00 00 00 00 00 00  01 00 00 00 74 28 06 20  ............t(. "
-    const match = line.match(/^([0-9A-Fa-f]{8})\s*=\s*(.+?)\s{2,}(.*)$/);
+    const match = line.match(/^(?:J-Link>\s*)?([0-9A-Fa-f]{8})\s*=\s*(.+?)\s{2,}(.*)$/);
     if (match) {
       results.push({
         address: `0x${match[1]}`,
