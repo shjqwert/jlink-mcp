@@ -30,9 +30,16 @@ export class ProbeHssVariableMemoryIo implements HssVariableMemoryIo {
 }
 
 export class ProbeDirectHssVariableMemoryIo implements HssVariableMemoryIo {
+  private readonly immediateReadback = new Map<string, Buffer>();
+
   constructor(private readonly probe: ProbeBackend, private readonly endian: HssTargetEndian) {}
 
   async read(address: number, length: number): Promise<Buffer> {
+    const cached = this.immediateReadback.get(cacheKey(address, length));
+    if (cached) {
+      this.immediateReadback.delete(cacheKey(address, length));
+      return cached;
+    }
     const result = await this.probe.readMemory(address, length);
     if (!result.success) throw new HssError(HSS_ERROR.OLD_VALUE_READ_FAILED, "probe memory read failed", { address, length, output: result.output, error: result.error });
     const bytes = this.probe.parseMemoryDump(result.rawOutput || result.output)
@@ -47,8 +54,12 @@ export class ProbeDirectHssVariableMemoryIo implements HssVariableMemoryIo {
       throw new HssError(HSS_ERROR.SYMBOL_KIND_UNSUPPORTED, "direct probe writes support 32-bit scalar targets only", { address, length: bytes.length, accessSize });
     }
     const value = this.endian === "little" ? bytes.readUInt32LE(0) : bytes.readUInt32BE(0);
-    const result = await this.probe.writeMemory(address, value);
+    const result = await this.probe.executeRaw([`w4 0x${address.toString(16)}, 0x${value.toString(16)}`, `mem 0x${address.toString(16)}, ${bytes.length}`]);
     if (!result.success) throw new HssError(HSS_ERROR.UNKNOWN_WRITE_STATE, "probe memory write failed after issue attempt", { address, length: bytes.length, output: result.output, error: result.error, writeIssued: true });
+    const readback = this.probe.parseMemoryDump(result.rawOutput || result.output)
+      .flatMap((line) => line.hex.split(/\s+/).filter(Boolean).map((hex) => Number.parseInt(hex, 16)))
+      .filter((item) => Number.isFinite(item));
+    if (readback.length >= bytes.length) this.immediateReadback.set(cacheKey(address, bytes.length), Buffer.from(readback.slice(0, bytes.length)));
   }
 }
 
@@ -117,4 +128,8 @@ function sleep(ms: number): Promise<void> {
 
 function hexAddress(address: number): string {
   return `0x${address.toString(16)}`;
+}
+
+function cacheKey(address: number, length: number): string {
+  return `${address}:${length}`;
 }
