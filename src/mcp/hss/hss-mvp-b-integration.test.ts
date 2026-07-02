@@ -6,6 +6,7 @@ import test from "node:test";
 import { ProcessManager } from "../../utils/process-manager";
 import { JLinkBackend } from "../../probe/jlink";
 import { HssCaptureService } from "./hss-capture-service";
+import { HSS_ERROR } from "./hss-errors";
 import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { encodeHssValues } from "./hss-typed-value";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
@@ -66,6 +67,45 @@ test("MVP-B fake backend completes scalar, array element, and array slice write 
     const audit = await readAudit(root);
     assert.match(audit, /variable_write_plan/);
     assert.match(audit, /variable_write_execute/);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MVP-B rejects J-Link Commander-backed capture writes", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+  });
+  try {
+    await writeProject(root);
+    await writePolicy(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource(), "utf8");
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      requestedRateHz: 100,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, true);
+    const captureId = (start.data as { captureId: string }).captureId;
+    const plan = await service.variableWritePlan({ captureId, targetRef: { kind: "scalar", path: "Debug_IqRef" }, value: 120 });
+
+    const execute = await service.variableWriteExecute({ writePlanId: plan.data!.writePlanId });
+
+    assert.equal(execute.ok, false);
+    assert.equal(execute.error?.code, HSS_ERROR.BACKEND_FATAL);
+    assert.match(execute.error?.message ?? "", /J-Link Commander/);
+    await service.captureStop({ captureId });
   } finally {
     await service.dispose();
     probe.dispose();

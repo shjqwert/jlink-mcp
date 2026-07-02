@@ -284,6 +284,12 @@ export class HssCaptureService {
         mapFile: active.plan.artifact.mapFile,
       });
       if (!plan.executable) throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "write plan risk is not executable", { writePlanId: input.writePlanId, operationPlanRequired: true });
+      if (!this.options.memoryIo && this.probe.type === "jlink") {
+        throw new HssError(HSS_ERROR.BACKEND_FATAL, "active HSS variable writes require native helper memory IO; J-Link Commander memory IO is unsafe during capture", {
+          backend: this.probe.type,
+          reason: "J-Link Commander reconnects can reset or halt the target before readback",
+        });
+      }
       return active.writeQueue.run(async () => {
         const io = this.options.memoryIo ?? new ProbeHssVariableMemoryIo(this.probe, active.owner);
         try {
