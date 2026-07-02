@@ -74,7 +74,7 @@ test("MVP-B fake backend completes scalar, array element, and array slice write 
   }
 });
 
-test("MVP-B rejects J-Link Commander-backed capture writes", async () => {
+test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -102,9 +102,13 @@ test("MVP-B rejects J-Link Commander-backed capture writes", async () => {
 
     const execute = await service.variableWriteExecute({ writePlanId: plan.data!.writePlanId });
 
-    assert.equal(execute.ok, false);
-    assert.equal(execute.error?.code, HSS_ERROR.BACKEND_FATAL);
-    assert.match(execute.error?.message ?? "", /J-Link Commander/);
+    assert.equal(execute.ok, true);
+    assert.equal(execute.data!.readback, 120);
+
+    const elementPlan = await service.variableWritePlan({ captureId, targetRef: { kind: "array_element", path: "Debug_TargetTable", index: 2 }, value: 120 });
+    const elementExecute = await service.variableWriteExecute({ writePlanId: elementPlan.data!.writePlanId });
+    assert.equal(elementExecute.ok, false);
+    assert.equal(elementExecute.error?.code, HSS_ERROR.SYMBOL_KIND_UNSUPPORTED);
     await service.captureStop({ captureId });
   } finally {
     await service.dispose();
@@ -166,7 +170,27 @@ for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
   records.push(record);
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
-setTimeout(() => console.log(JSON.stringify({ status: "ok", captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 8, bytesPerSample: 4, hssBlockCount: 1, readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: 1, payloadChangedRatio: 1, payloadFirstChangedOffset: 4, payloadFirstChangedBytes: "01000000" })), 500);
+const memory = new Map([["536870912", "00000000"]]);
+let targetWritten = false;
+function handleWriteRequest() {
+  if (!plan.writeRequestFile || !plan.writeResponseFile || !fs.existsSync(plan.writeRequestFile)) return;
+  const request = JSON.parse(fs.readFileSync(plan.writeRequestFile, "utf8"));
+  fs.rmSync(plan.writeRequestFile, { force: true });
+  const address = String(Number.parseInt(String(request.address), 16));
+  if (request.op === "read") {
+    fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "ok", bytesHex: memory.get(address) ?? "00000000" }));
+    return;
+  }
+  if (request.op === "write") {
+    memory.set(address, request.bytesHex);
+    targetWritten = true;
+    fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "ok", writeIssued: true }));
+    return;
+  }
+  fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "error", reason: "bad op" }));
+}
+const timer = setInterval(handleWriteRequest, 5);
+setTimeout(() => { clearInterval(timer); console.log(JSON.stringify({ status: "ok", captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 8, bytesPerSample: 4, hssBlockCount: 1, readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: 1, payloadChangedRatio: 1, payloadFirstChangedOffset: 4, payloadFirstChangedBytes: "01000000" })); }, 1000);
 `;
 }
 

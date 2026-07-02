@@ -1,6 +1,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <chrono>
 #include <fstream>
@@ -46,6 +47,7 @@ using JLINKARM_GetId_Fn = U32 (*)();
 using JLINKARM_IsHalted_Fn = int (*)();
 using JLINKARM_Go_Fn = void (*)();
 using JLINKARM_ReadMem_Fn = int (*)(U32, U32, void*);
+using JLINKARM_WriteMem_Fn = int (*)(U32, U32, const void*);
 
 static std::string narrow(const std::wstring& input) {
   if (input.empty()) return "";
@@ -208,6 +210,17 @@ static int call_hss_stop(JLINK_HSS_Stop_Fn fn, bool* crashed) {
 }
 
 static int call_read_mem(JLINKARM_ReadMem_Fn fn, U32 address, U32 size, void* data, bool* crashed) {
+  int return_code = 0;
+  *crashed = false;
+  __try {
+    return_code = fn(address, size, data);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *crashed = true;
+  }
+  return return_code;
+}
+
+static int call_write_mem(JLINKARM_WriteMem_Fn fn, U32 address, U32 size, const void* data, bool* crashed) {
   int return_code = 0;
   *crashed = false;
   __try {
@@ -542,6 +555,36 @@ static std::string bytes_hex(const std::vector<unsigned char>& bytes) {
   out << std::hex << std::nouppercase << std::setfill('0');
   for (unsigned char byte : bytes) out << std::setw(2) << static_cast<unsigned int>(byte);
   return out.str();
+}
+
+static std::string read_text_file_a(const std::string& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return "";
+  std::ostringstream out;
+  out << file.rdbuf();
+  return out.str();
+}
+
+static bool parse_hex_bytes(const std::string& text, std::vector<unsigned char>* bytes) {
+  if ((text.size() % 2U) != 0U) return false;
+  bytes->clear();
+  bytes->reserve(text.size() / 2U);
+  for (size_t index = 0; index < text.size(); index += 2U) {
+    const unsigned char hi = static_cast<unsigned char>(text[index]);
+    const unsigned char lo = static_cast<unsigned char>(text[index + 1U]);
+    if (!std::isxdigit(hi) || !std::isxdigit(lo)) return false;
+    bytes->push_back(static_cast<unsigned char>(std::stoul(text.substr(index, 2U), nullptr, 16)));
+  }
+  return true;
+}
+
+static void write_text_file_a(const std::string& path, const std::string& text) {
+  const std::string temporary = path + ".tmp";
+  {
+    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+    file << text;
+  }
+  MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
 static int connect_preflight(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
@@ -941,6 +984,93 @@ static int self_test() {
   return 0;
 }
 
+struct HssMemoryIpc {
+  std::string requestFile;
+  std::string responseFile;
+  std::string captureId;
+  JLINKARM_ReadMem_Fn readMem = nullptr;
+  JLINKARM_WriteMem_Fn writeMem = nullptr;
+};
+
+static std::string memory_response_error(const std::string& request_id, const std::string& code, const std::string& reason, bool write_issued) {
+  std::ostringstream out;
+  out
+    << "{\"requestId\":\"" << escape(request_id)
+    << "\",\"status\":\"error\",\"errorCode\":\"" << escape(code)
+    << "\",\"reason\":\"" << escape(reason)
+    << "\",\"writeIssued\":" << (write_issued ? "true" : "false")
+    << ",\"targetReset\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+  return out.str();
+}
+
+static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_written) {
+  if (ipc.requestFile.empty() || ipc.responseFile.empty()) return false;
+  if (GetFileAttributesA(ipc.requestFile.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+  const std::string request = read_text_file_a(ipc.requestFile);
+  DeleteFileA(ipc.requestFile.c_str());
+  const std::string request_id = json_string(request, "requestId");
+  const std::string capture_id = json_string(request, "captureId");
+  const std::string op = json_string(request, "op");
+  const std::string address_text = json_string(request, "address");
+  U32 address = 0;
+  int length = json_int(request, "length", 0);
+  if (request_id.empty() || capture_id != ipc.captureId || (op != "read" && op != "write") || !parse_u32_text(address_text, &address) || length < 1 || length > 4) {
+    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_WRITE_REQUEST_INVALID", "memory request is malformed", false));
+    return true;
+  }
+  if (!ipc.readMem) {
+    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_READMEM_EXPORT_MISSING", "JLINKARM_ReadMem export missing", false));
+    return true;
+  }
+
+  bool crashed = false;
+  if (op == "read") {
+    std::vector<unsigned char> bytes(static_cast<size_t>(length), 0);
+    const int read_rc = call_read_mem(ipc.readMem, address, static_cast<U32>(length), bytes.data(), &crashed);
+    if (crashed || read_rc < 0) {
+      write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_READMEM_FAILED", "JLINKARM_ReadMem failed", false));
+      return true;
+    }
+    std::ostringstream out;
+    out
+      << "{\"requestId\":\"" << escape(request_id)
+      << "\",\"status\":\"ok\",\"op\":\"read\",\"address\":\"" << hex_u32(address)
+      << "\",\"length\":" << length
+      << ",\"bytesHex\":\"" << bytes_hex(bytes)
+      << "\",\"targetReset\":false,\"targetWritten\":" << (*target_written ? "true" : "false")
+      << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+    write_text_file_a(ipc.responseFile, out.str());
+    return true;
+  }
+
+  if (!ipc.writeMem) {
+    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_WRITEMEM_EXPORT_MISSING", "JLINKARM_WriteMem export missing", false));
+    return true;
+  }
+  std::vector<unsigned char> bytes;
+  const std::string bytes_hex_text = json_string(request, "bytesHex");
+  const int access_size = json_int(request, "accessSize", 0);
+  if ((access_size != 1 && access_size != 2 && access_size != 4) || access_size != length || !parse_hex_bytes(bytes_hex_text, &bytes) || bytes.size() != static_cast<size_t>(length)) {
+    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_WRITE_BYTES_INVALID", "write bytes are malformed", false));
+    return true;
+  }
+  const int write_rc = call_write_mem(ipc.writeMem, address, static_cast<U32>(bytes.size()), bytes.data(), &crashed);
+  if (crashed || write_rc < 0) {
+    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_WRITEMEM_FAILED", "JLINKARM_WriteMem failed", true));
+    return true;
+  }
+  *target_written = true;
+  std::ostringstream out;
+  out
+    << "{\"requestId\":\"" << escape(request_id)
+    << "\",\"status\":\"ok\",\"op\":\"write\",\"address\":\"" << hex_u32(address)
+    << "\",\"length\":" << length
+    << ",\"writeIssued\":true,\"targetReset\":false,\"targetWritten\":true"
+    << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+  write_text_file_a(ipc.responseFile, out.str());
+  return true;
+}
+
 static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const auto plan_it = options.find(L"--plan");
   if (plan_it == options.end()) {
@@ -955,6 +1085,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string dll_utf8 = json_string(plan, "dllPath");
   const std::string output_file = json_string(plan, "outputFile");
   const std::string stop_file = json_string(plan, "stopFile");
+  const std::string write_request_file = json_string(plan, "writeRequestFile");
+  const std::string write_response_file = json_string(plan, "writeResponseFile");
   const std::string capture_id = json_string(plan, "captureId");
   const std::string device = json_string(plan, "device", "Z20K146MC");
   const std::string iface = json_string(plan, "interface", "SWD");
@@ -989,6 +1121,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
   auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
+  auto arm_read_mem = reinterpret_cast<JLINKARM_ReadMem_Fn>(required(dll, "JLINKARM_ReadMem"));
+  auto arm_write_mem = reinterpret_cast<JLINKARM_WriteMem_Fn>(required(dll, "JLINKARM_WriteMem"));
   auto hss_start = reinterpret_cast<JLINK_HSS_Start_Fn>(required(dll, "JLINK_HSS_Start"));
   auto hss_read = reinterpret_cast<JLINK_HSS_Read_Fn>(required(dll, "JLINK_HSS_Read"));
   auto hss_stop = reinterpret_cast<JLINK_HSS_Stop_Fn>(required(dll, "JLINK_HSS_Stop"));
@@ -1105,6 +1239,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   bool last_read_buffer_changed = false;
   bool first_read_sample_prefix_changed = false;
   bool last_read_sample_prefix_changed = false;
+  bool target_written = false;
   int first_changed_offset = -1;
   std::string first_changed_bytes;
   int payload_first_changed_offset = -1;
@@ -1118,8 +1253,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     }
   }
   uint64_t sample = 0;
+  const HssMemoryIpc memory_ipc{write_request_file, write_response_file, capture_id, arm_read_mem, arm_write_mem};
   for (uint64_t attempt = 0; attempt < requested_samples && sample < requested_samples; ++attempt) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+    (void)handle_hss_memory_request(memory_ipc, &target_written);
     if (read_mode == "periodic") {
       while (true) {
         const int64_t wait_ns = sample_due_ns(started_ns, attempt, requested_rate) - now_ns();
@@ -1274,7 +1411,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":0"
-    << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
+    << ",\"targetReset\":false,\"targetWritten\":" << (target_written ? "true" : "false")
+    << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
     << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << sample_count
     << ",\"crc32\":\"" << crc_hex.str() << "\"},\"stopReturnCode\":" << stop_rc << "}";
   return 0;

@@ -140,7 +140,14 @@ export async function finalizeMetadata(input: {
   metadata.payloadValidationStatus = payloadValidationStatus(metadata.quality, metadata.layout);
   metadata.transportStatus = transportStatus(input.state, metadata.quality);
   metadata.dataQualityStatus = dataQualityStatus(metadata.quality, metadata.payloadValidationStatus, decodeFailure);
-  metadata.safety = { ...HSS_SAFETY_FALSE, resumeIssued: boolField(helperResult, "resumeIssued") };
+  metadata.safety = {
+    targetReset: boolField(helperResult, "targetReset"),
+    targetWritten: boolField(helperResult, "targetWritten"),
+    flashIssued: boolField(helperResult, "flashIssued"),
+    resetIssued: boolField(helperResult, "resetIssued"),
+    haltIssued: boolField(helperResult, "haltIssued"),
+    resumeIssued: boolField(helperResult, "resumeIssued"),
+  };
   metadata.targetState = {
     targetWasHaltedBeforeCapture: boolField(helperResult, "targetWasHaltedBeforeResume") || metadata.targetState.targetWasHaltedBeforeCapture,
     resumeBeforeStart: boolField(helperResult, "resumeBeforeStart") || metadata.targetState.resumeBeforeStart,

@@ -15,7 +15,7 @@ import { appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
 import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-flag-overlay";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
-import { ProbeHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
+import { HelperHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
 import { loadHssPolicy } from "./hss-policy";
 import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
 import { executeHssVariableWritePlan, type HssVariableWriteExecuteInput, type HssVariableWriteExecuteResult } from "./hss-write-execute";
@@ -44,6 +44,8 @@ interface ActiveCapture {
   metadataFile: string;
   segmentFile: string;
   stopFile: string;
+  writeRequestFile: string;
+  writeResponseFile: string;
   child: ChildProcessWithoutNullStreams;
   stdout: string;
   stderr: string;
@@ -123,6 +125,8 @@ export class HssCaptureService {
       const owner = `hss:${plan.output.captureId}`;
       if (!this.probe.acquireExclusive(owner)) throw new HssError(HSS_ERROR.HSS_CAPTURE_ACTIVE, `probe is already owned by ${this.probe.getExclusiveOwner() ?? "another operation"}`);
       const stopFile = join(plan.output.outputDir, "stop.request");
+      const writeRequestFile = join(plan.output.outputDir, "write.request.json");
+      const writeResponseFile = join(plan.output.outputDir, "write.response.json");
       await writeInitialMetadata({
         metadataFile: plan.output.metadataFile,
         captureId: plan.output.captureId,
@@ -153,6 +157,8 @@ export class HssCaptureService {
         resumeBeforeStart: input.resumeBeforeStart ?? plan.resumeBeforeStart,
         outputFile: plan.output.firstSegmentFile,
         stopFile,
+        writeRequestFile,
+        writeResponseFile,
         requestedRateHz: plan.sampling.requestedRateHz,
         durationSec: plan.sampling.durationSec,
         symbols: plan.symbols,
@@ -169,6 +175,8 @@ export class HssCaptureService {
         metadataFile: plan.output.metadataFile,
         segmentFile: plan.output.firstSegmentFile,
         stopFile,
+        writeRequestFile,
+        writeResponseFile,
         child,
         stdout: "",
         stderr: "",
@@ -284,14 +292,11 @@ export class HssCaptureService {
         mapFile: active.plan.artifact.mapFile,
       });
       if (!plan.executable) throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "write plan risk is not executable", { writePlanId: input.writePlanId, operationPlanRequired: true });
-      if (!this.options.memoryIo && this.probe.type === "jlink") {
-        throw new HssError(HSS_ERROR.BACKEND_FATAL, "active HSS variable writes require native helper memory IO; J-Link Commander memory IO is unsafe during capture", {
-          backend: this.probe.type,
-          reason: "J-Link Commander reconnects can reset or halt the target before readback",
-        });
+      if (!this.options.memoryIo && plan.targetRef.kind !== "scalar") {
+        throw new HssError(HSS_ERROR.SYMBOL_KIND_UNSUPPORTED, "native helper capture-time writes support scalar targets only", { targetRef: plan.targetRef });
       }
       return active.writeQueue.run(async () => {
-        const io = this.options.memoryIo ?? new ProbeHssVariableMemoryIo(this.probe, active.owner);
+        const io = this.options.memoryIo ?? new HelperHssVariableMemoryIo(active.writeRequestFile, active.writeResponseFile, active.captureId);
         try {
           const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun));
           this.attachSampleIndex(active, result);
