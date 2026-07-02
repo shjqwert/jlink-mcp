@@ -112,7 +112,10 @@ export class HssCaptureService {
         targetWasHalted?: boolean;
       };
       const targetWasHaltedBeforeCapture = Boolean(hss.targetWasHalted);
-      const warnings = targetWasHaltedBeforeCapture ? ["target reported halted during connect preflight; proceeding with read-only HSS capture per operator instruction"] : [];
+      if (targetWasHaltedBeforeCapture) {
+        throw new HssError(HSS_ERROR.HSS_TARGET_HALTED, "target is halted before HSS capture start", { targetWasHaltedBeforeCapture });
+      }
+      const warnings: string[] = [];
 
       const plan = input.planId ? this.requirePlan(input.planId) : await buildHssCapturePlan(input, this.cwd(), true);
       enforceCapabilityRate(capability, plan.sampling.requestedRateHz);
