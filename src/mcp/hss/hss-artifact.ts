@@ -449,11 +449,6 @@ function layoutFromRecords(records: HssSampleRecord[], symbols: HssResolvedSymbo
   layout.payloadAllConstant = layout.payloadChangedRatio === 0;
   layout.payloadAllZero = validRecords.length === 0 || validRecords.every((record) => record.rawValues.every((value) => value === 0));
 
-  const helperHeaderRatio = numberField(helperResult, "headerChangedRatio");
-  const helperPayloadRatio = numberField(helperResult, "payloadChangedRatio");
-  if (helperHeaderRatio !== undefined) layout.headerChangedRatio = helperHeaderRatio;
-  if (helperPayloadRatio !== undefined) layout.payloadChangedRatio = helperPayloadRatio;
-
   const helperPayloadOffset = numberField(helperResult, "payloadFirstChangedOffset");
   layout.payloadFirstChangedOffset = helperPayloadOffset !== undefined && helperPayloadOffset >= 0 ? helperPayloadOffset : firstPayloadChangedOffset(validRecords, symbols);
   layout.payloadFirstChangedBytes = textField(helperResult, "payloadFirstChangedBytes", firstPayloadChangedBytes(validRecords, symbols));

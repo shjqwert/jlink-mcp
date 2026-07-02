@@ -86,7 +86,7 @@ export async function loadHssPolicy(cwd = process.cwd()): Promise<HssPolicy> {
   }
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(text.replace(/^\uFEFF/, ""));
   } catch (error) {
     throw new HssError(HSS_ERROR.POLICY_INVALID_JSON, "HSS policy.json is not valid JSON", { file, reason: error instanceof Error ? error.message : String(error) });
   }

@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+using U8 = std::uint8_t;
+using U16 = std::uint16_t;
 using U32 = std::uint32_t;
 
 struct JLINK_HSS_MEM_BLOCK_DESC {
@@ -48,6 +50,12 @@ using JLINKARM_IsHalted_Fn = int (*)();
 using JLINKARM_Go_Fn = void (*)();
 using JLINKARM_ReadMem_Fn = int (*)(U32, U32, void*);
 using JLINKARM_WriteMem_Fn = int (*)(U32, U32, const void*);
+using JLINKARM_ReadMemU8_Fn = int (*)(U32, U32, U8*, U8*);
+using JLINKARM_ReadMemU16_Fn = int (*)(U32, U32, U16*, U8*);
+using JLINKARM_ReadMemU32_Fn = int (*)(U32, U32, U32*, U8*);
+using JLINKARM_WriteU8_Fn = void (*)(U32, U8);
+using JLINKARM_WriteU16_Fn = void (*)(U32, U16);
+using JLINKARM_WriteU32_Fn = void (*)(U32, U32);
 
 static std::string narrow(const std::wstring& input) {
   if (input.empty()) return "";
@@ -229,6 +237,66 @@ static int call_write_mem(JLINKARM_WriteMem_Fn fn, U32 address, U32 size, const 
     *crashed = true;
   }
   return return_code;
+}
+
+static int call_read_mem_u8(JLINKARM_ReadMemU8_Fn fn, U32 address, U32 count, U8* data, U8* status, bool* crashed) {
+  int return_code = 0;
+  *crashed = false;
+  __try {
+    return_code = fn(address, count, data, status);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *crashed = true;
+  }
+  return return_code;
+}
+
+static int call_read_mem_u16(JLINKARM_ReadMemU16_Fn fn, U32 address, U32 count, U16* data, U8* status, bool* crashed) {
+  int return_code = 0;
+  *crashed = false;
+  __try {
+    return_code = fn(address, count, data, status);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *crashed = true;
+  }
+  return return_code;
+}
+
+static int call_read_mem_u32(JLINKARM_ReadMemU32_Fn fn, U32 address, U32 count, U32* data, U8* status, bool* crashed) {
+  int return_code = 0;
+  *crashed = false;
+  __try {
+    return_code = fn(address, count, data, status);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *crashed = true;
+  }
+  return return_code;
+}
+
+static void call_write_u8(JLINKARM_WriteU8_Fn fn, U32 address, U8 data, bool* crashed) {
+  *crashed = false;
+  __try {
+    fn(address, data);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *crashed = true;
+  }
+}
+
+static void call_write_u16(JLINKARM_WriteU16_Fn fn, U32 address, U16 data, bool* crashed) {
+  *crashed = false;
+  __try {
+    fn(address, data);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *crashed = true;
+  }
+}
+
+static void call_write_u32(JLINKARM_WriteU32_Fn fn, U32 address, U32 data, bool* crashed) {
+  *crashed = false;
+  __try {
+    fn(address, data);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    *crashed = true;
+  }
 }
 
 static uint32_t crc32_update(uint32_t crc, const void* data, size_t size) {
@@ -990,6 +1058,12 @@ struct HssMemoryIpc {
   std::string captureId;
   JLINKARM_ReadMem_Fn readMem = nullptr;
   JLINKARM_WriteMem_Fn writeMem = nullptr;
+  JLINKARM_ReadMemU8_Fn readU8 = nullptr;
+  JLINKARM_ReadMemU16_Fn readU16 = nullptr;
+  JLINKARM_ReadMemU32_Fn readU32 = nullptr;
+  JLINKARM_WriteU8_Fn writeU8 = nullptr;
+  JLINKARM_WriteU16_Fn writeU16 = nullptr;
+  JLINKARM_WriteU32_Fn writeU32 = nullptr;
 };
 
 static std::string memory_response_error(const std::string& request_id, const std::string& code, const std::string& reason, bool write_issued) {
@@ -1001,6 +1075,60 @@ static std::string memory_response_error(const std::string& request_id, const st
     << "\",\"writeIssued\":" << (write_issued ? "true" : "false")
     << ",\"targetReset\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
   return out.str();
+}
+
+static bool read_scalar_memory(const HssMemoryIpc& ipc, U32 address, int length, std::vector<unsigned char>* bytes) {
+  bool crashed = false;
+  U8 status = 0;
+  bytes->assign(static_cast<size_t>(length), 0);
+  if (length == 1 && ipc.readU8) {
+    U8 value = 0;
+    const int rc = call_read_mem_u8(ipc.readU8, address, 1U, &value, &status, &crashed);
+    if (!crashed && rc >= 0 && status == 0U) {
+      (*bytes)[0] = value;
+      return true;
+    }
+  } else if (length == 2 && ipc.readU16) {
+    U16 value = 0;
+    const int rc = call_read_mem_u16(ipc.readU16, address, 1U, &value, &status, &crashed);
+    if (!crashed && rc >= 0 && status == 0U) {
+      (*bytes)[0] = static_cast<unsigned char>(value & 0xFFU);
+      (*bytes)[1] = static_cast<unsigned char>((value >> 8U) & 0xFFU);
+      return true;
+    }
+  } else if (length == 4 && ipc.readU32) {
+    U32 value = 0;
+    const int rc = call_read_mem_u32(ipc.readU32, address, 1U, &value, &status, &crashed);
+    if (!crashed && rc >= 0 && status == 0U) {
+      (*bytes)[0] = static_cast<unsigned char>(value & 0xFFU);
+      (*bytes)[1] = static_cast<unsigned char>((value >> 8U) & 0xFFU);
+      (*bytes)[2] = static_cast<unsigned char>((value >> 16U) & 0xFFU);
+      (*bytes)[3] = static_cast<unsigned char>((value >> 24U) & 0xFFU);
+      return true;
+    }
+  }
+  if (!ipc.readMem) return false;
+  const int rc = call_read_mem(ipc.readMem, address, static_cast<U32>(length), bytes->data(), &crashed);
+  return !crashed && rc >= 0;
+}
+
+static bool write_scalar_memory(const HssMemoryIpc& ipc, U32 address, const std::vector<unsigned char>& bytes) {
+  bool crashed = false;
+  if (bytes.size() == 1U && ipc.writeU8) {
+    call_write_u8(ipc.writeU8, address, bytes[0], &crashed);
+    if (!crashed) return true;
+  } else if (bytes.size() == 2U && ipc.writeU16) {
+    const U16 value = static_cast<U16>(bytes[0]) | (static_cast<U16>(bytes[1]) << 8U);
+    call_write_u16(ipc.writeU16, address, value, &crashed);
+    if (!crashed) return true;
+  } else if (bytes.size() == 4U && ipc.writeU32) {
+    const U32 value = static_cast<U32>(bytes[0]) | (static_cast<U32>(bytes[1]) << 8U) | (static_cast<U32>(bytes[2]) << 16U) | (static_cast<U32>(bytes[3]) << 24U);
+    call_write_u32(ipc.writeU32, address, value, &crashed);
+    if (!crashed) return true;
+  }
+  if (!ipc.writeMem) return false;
+  const int rc = call_write_mem(ipc.writeMem, address, static_cast<U32>(bytes.size()), bytes.data(), &crashed);
+  return !crashed && rc >= 0;
 }
 
 static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_written) {
@@ -1023,11 +1151,9 @@ static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_writ
     return true;
   }
 
-  bool crashed = false;
   if (op == "read") {
-    std::vector<unsigned char> bytes(static_cast<size_t>(length), 0);
-    const int read_rc = call_read_mem(ipc.readMem, address, static_cast<U32>(length), bytes.data(), &crashed);
-    if (crashed || read_rc < 0) {
+    std::vector<unsigned char> bytes;
+    if (!read_scalar_memory(ipc, address, length, &bytes)) {
       write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_READMEM_FAILED", "JLINKARM_ReadMem failed", false));
       return true;
     }
@@ -1054,8 +1180,7 @@ static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_writ
     write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_WRITE_BYTES_INVALID", "write bytes are malformed", false));
     return true;
   }
-  const int write_rc = call_write_mem(ipc.writeMem, address, static_cast<U32>(bytes.size()), bytes.data(), &crashed);
-  if (crashed || write_rc < 0) {
+  if (!write_scalar_memory(ipc, address, bytes)) {
     write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_WRITEMEM_FAILED", "JLINKARM_WriteMem failed", true));
     return true;
   }
@@ -1123,6 +1248,12 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
   auto arm_read_mem = reinterpret_cast<JLINKARM_ReadMem_Fn>(required(dll, "JLINKARM_ReadMem"));
   auto arm_write_mem = reinterpret_cast<JLINKARM_WriteMem_Fn>(required(dll, "JLINKARM_WriteMem"));
+  auto arm_read_u8 = reinterpret_cast<JLINKARM_ReadMemU8_Fn>(required(dll, "JLINKARM_ReadMemU8"));
+  auto arm_read_u16 = reinterpret_cast<JLINKARM_ReadMemU16_Fn>(required(dll, "JLINKARM_ReadMemU16"));
+  auto arm_read_u32 = reinterpret_cast<JLINKARM_ReadMemU32_Fn>(required(dll, "JLINKARM_ReadMemU32"));
+  auto arm_write_u8 = reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8"));
+  auto arm_write_u16 = reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16"));
+  auto arm_write_u32 = reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32"));
   auto hss_start = reinterpret_cast<JLINK_HSS_Start_Fn>(required(dll, "JLINK_HSS_Start"));
   auto hss_read = reinterpret_cast<JLINK_HSS_Read_Fn>(required(dll, "JLINK_HSS_Read"));
   auto hss_stop = reinterpret_cast<JLINK_HSS_Stop_Fn>(required(dll, "JLINK_HSS_Stop"));
@@ -1253,7 +1384,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     }
   }
   uint64_t sample = 0;
-  const HssMemoryIpc memory_ipc{write_request_file, write_response_file, capture_id, arm_read_mem, arm_write_mem};
+  const HssMemoryIpc memory_ipc{write_request_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32};
   for (uint64_t attempt = 0; attempt < requested_samples && sample < requested_samples; ++attempt) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
     (void)handle_hss_memory_request(memory_ipc, &target_written);

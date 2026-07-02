@@ -120,6 +120,8 @@ test("policy loader reports malformed JSON and unsupported version", async () =>
     await assert.rejects(() => loadHssPolicy(root), policyError(HSS_ERROR.POLICY_INVALID_JSON));
     await writeFile(file, JSON.stringify({ version: 1, variableWriteAllowlist: [] }), "utf8");
     await assert.rejects(() => loadHssPolicy(root), policyError(HSS_ERROR.POLICY_UNSUPPORTED_VERSION));
+    await writeFile(file, `\uFEFF${JSON.stringify({ version: 2, variableWriteAllowlist: [{ path: "Debug_IqRef", kind: "scalar", type: "int32" }] })}`, "utf8");
+    assert.equal((await loadHssPolicy(root)).variableWriteAllowlist[0].path, "Debug_IqRef");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

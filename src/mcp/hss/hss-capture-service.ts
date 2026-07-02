@@ -327,14 +327,15 @@ export class HssCaptureService {
   }
 
   async dispose(): Promise<void> {
-    if (!this.active) return;
+    const active = this.active;
+    if (!active) return;
     try {
-      await writeFile(this.active.stopFile, "stop", "utf8");
-      this.active.child.kill();
-      await this.active.done;
+      await writeFile(active.stopFile, "stop", "utf8");
+      active.child.kill();
+      await active.done;
     } finally {
-      this.probe.releaseExclusive(this.active.owner);
-      this.active = null;
+      this.probe.releaseExclusive(active.owner);
+      if (this.active?.captureId === active.captureId) this.active = null;
     }
   }
 
