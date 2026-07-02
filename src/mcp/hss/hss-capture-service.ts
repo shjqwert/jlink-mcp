@@ -1,16 +1,16 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ProbeBackend } from "../../probe/backend";
 import { discoverHssDll, resolveHssHelperPath, type HssDllPreflightInput } from "../hss-dll/hss-dll-adapter";
 import { appendHssAudit } from "./audit-log";
-import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, hssCaptureStopFromMetadata, queryHssCapture, writeInitialMetadata } from "./hss-artifact";
+import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, hssCaptureStopFromMetadata, queryHssCapture, readHssMetadata, writeInitialMetadata } from "./hss-artifact";
 import { hssCapabilityProbe } from "./hss-capability";
 import type { HssCapturePlan, HssCapturePlanInput } from "./hss-plan";
 import { buildHssCapturePlan } from "./hss-plan";
-import { HSS_SAFETY_FALSE } from "./hss-contract";
+import { HSS_SAFETY_FALSE, type HssCaptureMetadata } from "./hss-contract";
 import { appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
 import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-flag-overlay";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
@@ -268,6 +268,36 @@ export class HssCaptureService {
     return this.wrap("hss_capture_export", input, () => exportHssCapture({ ...input, metadataFile: input.metadataFile ?? this.metadataFor(input.captureId) }, this.cwd()));
   }
 
+  async sessionRecover(input: { captureId?: string } = {}): Promise<HssEnvelope<Record<string, unknown>>> {
+    return this.wrap("hss_session_recover", input, async () => {
+      const paths = hssProjectPaths(this.cwd());
+      const captureIds = input.captureId ? [input.captureId] : await readdir(paths.capturesDir).catch(() => []);
+      const recovered: Array<Record<string, unknown>> = [];
+      const skipped: Array<Record<string, unknown>> = [];
+      for (const captureId of captureIds) {
+        const metadataFile = join(paths.capturesDir, captureId, "capture.json");
+        assertInsideProject(metadataFile, paths.capturesDir);
+        if (!existsSync(metadataFile)) {
+          skipped.push({ captureId, reason: "metadata_missing" });
+          continue;
+        }
+        const metadata = await readHssMetadata(metadataFile);
+        if (!isAbandonedMetadata(metadata)) {
+          skipped.push({ captureId, reason: "not_abandoned" });
+          continue;
+        }
+        const reason = "capture abandoned by previous process";
+        metadata.failures.push(reason);
+        metadata.warnings.push("session recovered as abandoned");
+        metadata.events.push({ type: "helperResult", helperResult: { status: "error", errorCode: HSS_ERROR.HSS_SESSION_ABANDONED, reason } });
+        await writeFile(metadataFile, JSON.stringify(metadata, null, 2), "utf8");
+        this.metadataFiles.set(captureId, metadataFile);
+        recovered.push({ captureId, state: metadata.state, metadataFile, reason });
+      }
+      return { recovered: recovered.length, skipped: skipped.length, sessions: recovered, skippedSessions: skipped };
+    });
+  }
+
   async variableWritePlan(input: HssVariableWritePlanInput): Promise<HssEnvelope<HssVariableWritePlan>> {
     return this.wrap("variable_write_plan", input, async () => {
       const active = this.active?.captureId === input.captureId ? this.active : null;
@@ -517,6 +547,10 @@ function activeQuality(data: Buffer, recordSize: number): LiveQuality {
     if ((flags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0) quality.droppedSamples += 1;
   }
   return quality;
+}
+
+function isAbandonedMetadata(metadata: HssCaptureMetadata): boolean {
+  return metadata.backend === "jlink-hss" && metadata.state === "failed" && metadata.segments.length === 0 && metadata.failures.length === 0;
 }
 
 async function raceWithTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<boolean> {

@@ -7,6 +7,7 @@ import { ProcessManager } from "../../utils/process-manager";
 import { JLinkBackend } from "../../probe/jlink";
 import { HssCaptureService } from "./hss-capture-service";
 import { HSS_ERROR } from "./hss-errors";
+import { writeInitialMetadata } from "./hss-artifact";
 import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { encodeHssValues } from "./hss-typed-value";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
@@ -156,6 +157,40 @@ test("hss_capture_stop timeout kills helper and finalizes failed metadata", asyn
     assert.equal(helperEvent?.helperResult?.errorCode, HSS_ERROR.HSS_CAPTURE_STOP_TIMEOUT);
   } finally {
     await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("hss_session_recover marks abandoned local capture metadata", async () => {
+  const root = await tempProject();
+  const captureId = "11111111-1111-4111-8111-111111111111";
+  const captureDir = join(root, ".jlink-mcp", "captures", captureId);
+  const metadataFile = join(captureDir, "capture.json");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, { cwd: root });
+  try {
+    await mkdir(captureDir, { recursive: true });
+    await writeInitialMetadata({
+      metadataFile,
+      captureId,
+      sessionName: "abandoned",
+      projectRoot: root,
+      artifact: { file: join(root, "FOC_SCM.out"), sha256: "0", resolver: "iar-map" },
+      target: { device: "Z20K146MC", interface: "SWD", speedKhz: 4000 },
+      symbols: [{ name: "Debug_IqRef", type: "int32", address: "0x20000000", size: 4, source: "iar-map" }],
+      requestedRateHz: 100,
+    });
+
+    const recovered = await service.sessionRecover();
+
+    assert.equal(recovered.ok, true);
+    assert.equal((recovered.data as { recovered: number }).recovered, 1);
+    const metadata = JSON.parse(await readFile(metadataFile, "utf8")) as Record<string, unknown>;
+    assert.match((metadata.failures as string[]).join("\n"), /abandoned by previous process/);
+    const helperEvent = (metadata.events as Array<{ helperResult?: Record<string, unknown> }>).find((event) => event.helperResult);
+    assert.equal(helperEvent?.helperResult?.errorCode, HSS_ERROR.HSS_SESSION_ABANDONED);
+  } finally {
     probe.dispose();
     await rm(root, { recursive: true, force: true });
   }

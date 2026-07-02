@@ -1063,6 +1063,9 @@ export class JLinkMcpServer {
       windowBeforeMs: z.number().nonnegative().optional(),
       windowAfterMs: z.number().nonnegative().optional(),
     }, async (input) => result(() => this.hssCapture.captureExport(input)));
+    this.server.tool("hss_session_recover", "Mark abandoned local HSS capture metadata from a previous process as failed without touching target hardware.", {
+      captureId: z.string().uuid().optional(),
+    }, async (input) => result(() => this.hssCapture.sessionRecover(input)));
     this.server.tool("variable_write_plan", "Plan an allowlisted capture-time RAM scalar or fixed-array write for the active HSS capture. This does not write target memory.", {
       ...captureId,
       target: z.string().optional(),
