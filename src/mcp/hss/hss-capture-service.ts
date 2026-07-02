@@ -34,6 +34,7 @@ export interface HssCaptureServiceOptions {
   helperArgsPrefix?: string[];
   memoryIo?: HssVariableMemoryIo;
   targetEndian?: "little" | "big";
+  stopTimeoutMs?: number;
 }
 
 interface ActiveCapture {
@@ -52,6 +53,7 @@ interface ActiveCapture {
   writeQueue: HssCaptureWriteQueue;
   startTimeUs: number;
   done: Promise<void>;
+  stopTimedOut?: boolean;
 }
 
 export class HssCaptureService {
@@ -249,7 +251,11 @@ export class HssCaptureService {
       active.writeQueue.beginStopping();
       await active.writeQueue.waitForIdle();
       await writeFile(active.stopFile, "stop", "utf8");
-      await raceWithTimeout(active.done, 30000);
+      if (!await raceWithTimeout(active.done, this.options.stopTimeoutMs ?? 30000)) {
+        active.stopTimedOut = true;
+        active.child.kill();
+        await active.done;
+      }
       return hssCaptureStopFromMetadata(active.metadataFile);
     });
   }
@@ -344,13 +350,18 @@ export class HssCaptureService {
     let state: "completed" | "stopped" | "failed" = "failed";
     let helperResult: Record<string, unknown> | undefined;
     let failure: string | undefined;
-    try {
-      helperResult = JSON.parse(active.stdout.trim() || "{}") as Record<string, unknown>;
-      state = helperResult.status === "ok" ? "completed" : helperResult.status === "stopped" ? "stopped" : "failed";
-      if (state === "failed") failure = String(helperResult.reason ?? helperResult.errorCode ?? `helper exited ${code}`);
-    } catch (error) {
-      failure = error instanceof Error ? error.message : String(error);
-      helperResult = { status: "error", errorCode: HSS_ERROR.HSS_HELPER_BAD_JSON, exitCode: code, stdout: active.stdout, stderr: active.stderr, reason: failure };
+    if (active.stopTimedOut) {
+      failure = "capture stop timed out; helper was killed";
+      helperResult = { status: "error", errorCode: HSS_ERROR.HSS_CAPTURE_STOP_TIMEOUT, reason: failure, exitCode: code, stdout: active.stdout, stderr: active.stderr };
+    } else {
+      try {
+        helperResult = JSON.parse(active.stdout.trim() || "{}") as Record<string, unknown>;
+        state = helperResult.status === "ok" ? "completed" : helperResult.status === "stopped" ? "stopped" : "failed";
+        if (state === "failed") failure = String(helperResult.reason ?? helperResult.errorCode ?? `helper exited ${code}`);
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+        helperResult = { status: "error", errorCode: HSS_ERROR.HSS_HELPER_BAD_JSON, exitCode: code, stdout: active.stdout, stderr: active.stderr, reason: failure };
+      }
     }
     try {
       await finalizeMetadata({ metadataFile: active.metadataFile, state, segmentFile: active.segmentFile, helperResult, failure });
@@ -508,12 +519,12 @@ function activeQuality(data: Buffer, recordSize: number): LiveQuality {
   return quality;
 }
 
-async function raceWithTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T | void> {
+async function raceWithTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<boolean> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
-      work,
-      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+      work.then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);

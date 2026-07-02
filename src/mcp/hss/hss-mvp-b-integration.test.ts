@@ -117,6 +117,50 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
   }
 });
 
+test("hss_capture_stop timeout kills helper and finalizes failed metadata", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+    stopTimeoutMs: 50,
+  });
+  try {
+    await writeProject(root);
+    await writePolicy(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource(), "utf8");
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      requestedRateHz: 100,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, true);
+    const captureId = (start.data as { captureId: string }).captureId;
+
+    const stopped = await service.captureStop({ captureId });
+
+    assert.equal(stopped.ok, true);
+    assert.equal((stopped.data as { state: string }).state, "failed");
+    assert.equal(probe.getExclusiveOwner(), null);
+    const metadataFile = join(root, ".jlink-mcp", "captures", captureId, "capture.json");
+    const metadata = JSON.parse(await readFile(metadataFile, "utf8")) as Record<string, unknown>;
+    assert.equal(metadata.state, "failed");
+    assert.match((metadata.failures as string[]).join("\n"), /capture stop timed out/);
+    const helperEvent = (metadata.events as Array<{ type?: string; helperResult?: Record<string, unknown> }>).find((event) => event.type === "helperResult");
+    assert.equal(helperEvent?.helperResult?.errorCode, HSS_ERROR.HSS_CAPTURE_STOP_TIMEOUT);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 class FakeMemory implements HssVariableMemoryIo {
   private readonly memory = new Map<number, Buffer>();
   set(address: number, bytes: Buffer): void { this.memory.set(address, Buffer.from(bytes)); }
