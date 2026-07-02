@@ -118,6 +118,56 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
   }
 });
 
+test("variable_write_execute supports outside-capture scalar writes and rejects active bypass", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const memory = new FakeMemory();
+  memory.set(0x20000000, encodeHssValues("int32", [0], "little"));
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, {
+    cwd: root,
+    env: {},
+    helperPath: process.execPath,
+    helperArgsPrefix: [helper],
+    memoryIo: memory,
+  });
+  try {
+    await writeProject(root);
+    await writePolicy(root);
+    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFile(helper, fakeHelperSource(), "utf8");
+
+    const plan = await service.variableWritePlan({ targetRef: { kind: "scalar", path: "Debug_IqRef" }, type: "int32", value: 120 });
+    assert.equal(plan.ok, true);
+    assert.equal(plan.data!.willEnterCaptureQueue, false);
+    const executed = await service.variableWriteExecute({ writePlanId: plan.data!.writePlanId });
+    assert.equal(executed.ok, true);
+    assert.equal(executed.data!.readback, 120);
+
+    const implicit = await service.variableWriteExecute({ target: "Debug_IqRef", type: "int32", value: 140 });
+    assert.equal(implicit.ok, true);
+    assert.equal(implicit.data!.readback, 140);
+    assert.deepEqual([...memory.get(0x20000000, 4)], [...encodeHssValues("int32", [140], "little")]);
+
+    const start = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      requestedRateHz: 100,
+      durationSec: 1,
+    });
+    assert.equal(start.ok, true);
+    const bypass = await service.variableWriteExecute({ target: "Debug_IqRef", type: "int32", value: 160 });
+    assert.equal(bypass.ok, false);
+    assert.equal(bypass.error?.code, HSS_ERROR.ACTIVE_CAPTURE_WRITE_REQUIRES_CAPTURE_QUEUE);
+    await service.captureStop({ captureId: (start.data as { captureId: string }).captureId });
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("hss_capture_stop timeout kills helper and finalizes failed metadata", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");

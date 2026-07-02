@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ProbeBackend } from "../../probe/backend";
 import { discoverHssDll, resolveHssHelperPath, type HssDllPreflightInput } from "../hss-dll/hss-dll-adapter";
+import { resolveHssDebugArtifact } from "./debug-artifact";
 import { appendHssAudit } from "./audit-log";
 import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, hssCaptureStopFromMetadata, queryHssCapture, readHssMetadata, writeInitialMetadata } from "./hss-artifact";
 import { hssCapabilityProbe } from "./hss-capability";
@@ -15,13 +16,15 @@ import { appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
 import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-flag-overlay";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
-import { HelperHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
+import { HelperHssVariableMemoryIo, ProbeDirectHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
 import { loadHssPolicy } from "./hss-policy";
 import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
 import { executeHssVariableWritePlan, type HssVariableWriteExecuteInput, type HssVariableWriteExecuteResult } from "./hss-write-execute";
 import { HssCaptureWriteQueue } from "./hss-write-queue";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { assertInsideProject, ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
+
+const OUTSIDE_CAPTURE_ID = "outside-capture";
 
 export interface HssCaptureStartInput extends HssDllPreflightInput, HssCapturePlanInput {
   planId?: string;
@@ -61,6 +64,7 @@ export class HssCaptureService {
   private readonly plans = new Map<string, HssCapturePlan>();
   private readonly metadataFiles = new Map<string, string>();
   private readonly writePlans = new HssWritePlanStore();
+  private readonly outsideWritePlanMapFiles = new Map<string, string>();
   private readonly writeCounters = new Map<string, { ops: number; elements: number }>();
   private captureGeneration = 0;
   private active: ActiveCapture | null = null;
@@ -300,6 +304,10 @@ export class HssCaptureService {
 
   async variableWritePlan(input: HssVariableWritePlanInput): Promise<HssEnvelope<HssVariableWritePlan>> {
     return this.wrap("variable_write_plan", input, async () => {
+      if (!input.captureId) {
+        if (this.active) throw new HssError(HSS_ERROR.ACTIVE_CAPTURE_WRITE_REQUIRES_CAPTURE_QUEUE, "active HSS capture writes require captureId and queue ownership");
+        return this.createOutsideWritePlan(input);
+      }
       const active = this.active?.captureId === input.captureId ? this.active : null;
       if (!active) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "active HSS capture was not found", { captureId: input.captureId });
       if (!active.plan.artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "active HSS capture has no map file");
@@ -318,10 +326,12 @@ export class HssCaptureService {
   async variableWriteExecute(input: HssVariableWriteExecuteInput): Promise<HssEnvelope<HssVariableWriteExecuteResult>> {
     return this.wrap("variable_write_execute", input, async () => {
       const active = this.active;
-      if (!active) throw new HssError(HSS_ERROR.CAPTURE_NOT_ACTIVE, "no active HSS capture");
+      if (!active) return this.executeOutsideWrite(input);
+      const writePlanId = input.writePlanId;
+      if (!writePlanId) throw new HssError(HSS_ERROR.ACTIVE_CAPTURE_WRITE_REQUIRES_CAPTURE_QUEUE, "active HSS capture writes require a queued write plan");
       if (!active.plan.artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "active HSS capture has no map file");
       const policy = await loadHssPolicy(this.cwd());
-      const plan = this.writePlans.get(input.writePlanId, {
+      const plan = this.writePlans.get(writePlanId, {
         captureId: active.captureId,
         captureGeneration: active.generation,
         policy,
@@ -342,7 +352,7 @@ export class HssCaptureService {
             await materializeHssCaptureEvents(active.metadataFile);
             await materializeHssFlagIntervals(active.metadataFile);
             this.consumeWrite(plan);
-            this.writePlans.markExecuted(input.writePlanId);
+            this.writePlans.markExecuted(writePlanId);
           }
           return result;
         } catch (error) {
@@ -354,7 +364,7 @@ export class HssCaptureService {
             await materializeHssCaptureEvents(active.metadataFile);
             await materializeHssFlagIntervals(active.metadataFile);
             this.consumeWrite(plan);
-            this.writePlans.markExecuted(input.writePlanId);
+            this.writePlans.markExecuted(writePlanId);
           }
           throw error;
         }
@@ -372,6 +382,57 @@ export class HssCaptureService {
     } finally {
       this.probe.releaseExclusive(active.owner);
       if (this.active?.captureId === active.captureId) this.active = null;
+    }
+  }
+
+  private async createOutsideWritePlan(input: HssVariableWritePlanInput): Promise<HssVariableWritePlan> {
+    const path = outsideScalarTargetPath(input);
+    const artifact = await resolveHssDebugArtifact({
+      artifactFile: input.artifactFile,
+      mapFile: input.mapFile,
+      symbols: [{ name: path, type: input.type }],
+      cwd: this.cwd(),
+    });
+    if (!artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "write target map file was not found");
+    const policy = await loadHssPolicy(this.cwd());
+    const plan = this.writePlans.put(createHssVariableWritePlan(input, {
+      captureId: OUTSIDE_CAPTURE_ID,
+      captureGeneration: 0,
+      backend: "jlink-hss",
+      mapFile: artifact.mapFile,
+      policy,
+      willEnterCaptureQueue: false,
+      ...this.writeCounts(OUTSIDE_CAPTURE_ID, path),
+    }));
+    this.outsideWritePlanMapFiles.set(plan.writePlanId, artifact.mapFile);
+    return plan;
+  }
+
+  private async executeOutsideWrite(input: HssVariableWriteExecuteInput): Promise<HssVariableWriteExecuteResult> {
+    const policy = await loadHssPolicy(this.cwd());
+    const storedMapFile = input.writePlanId ? this.outsideWritePlanMapFiles.get(input.writePlanId) : undefined;
+    if (input.writePlanId && !storedMapFile) throw new HssError(HSS_ERROR.WRITE_PLAN_NOT_FOUND, "outside-capture write plan was not found", { writePlanId: input.writePlanId });
+    const plan = input.writePlanId
+      ? this.writePlans.get(input.writePlanId, {
+        captureId: OUTSIDE_CAPTURE_ID,
+        captureGeneration: 0,
+        policy,
+        mapFile: storedMapFile!,
+      })
+      : await this.createOutsideWritePlan(input);
+    const io = this.options.memoryIo ?? new ProbeDirectHssVariableMemoryIo(this.probe, this.options.targetEndian ?? "little");
+    try {
+      const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun));
+      if (!input.dryRun) {
+        this.consumeWrite(plan);
+        this.writePlans.markExecuted(plan.writePlanId);
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof HssError && error.details.writeIssued === true) {
+        this.writePlans.markExecuted(plan.writePlanId);
+      }
+      throw error;
     }
   }
 
@@ -551,6 +612,15 @@ function activeQuality(data: Buffer, recordSize: number): LiveQuality {
 
 function isAbandonedMetadata(metadata: HssCaptureMetadata): boolean {
   return metadata.backend === "jlink-hss" && metadata.state === "failed" && metadata.segments.length === 0 && metadata.failures.length === 0;
+}
+
+function outsideScalarTargetPath(input: Pick<HssVariableWritePlanInput, "target" | "targetRef">): string {
+  if (input.targetRef) {
+    if (input.targetRef.kind === "scalar") return input.targetRef.path;
+    throw new HssError(HSS_ERROR.SYMBOL_KIND_UNSUPPORTED, "outside-capture writes support scalar targets only", { targetRef: input.targetRef });
+  }
+  if (input.target && /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(input.target)) return input.target;
+  throw new HssError(HSS_ERROR.POLICY_TARGET_NOT_ALLOWLISTED, "outside-capture write target must be a scalar variable path", { target: input.target });
 }
 
 async function raceWithTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<boolean> {

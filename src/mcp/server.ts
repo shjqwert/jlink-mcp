@@ -14,6 +14,7 @@ import { CaptureService } from "./capture";
 import { captureBackendBenchmarkTool, captureBackendListTool, captureBackendProbeTool, captureBackendSelectTool, captureImportExperimentTool } from "./capture-backends/backend-router";
 import { HssCaptureService } from "./hss/hss-capture-service";
 import type { HssVariableWritePlanInput } from "./hss/hss-write-plan";
+import type { HssVariableWriteExecuteInput } from "./hss/hss-write-execute";
 import { hssDllBenchmark, hssDllGetCaps, hssDllPreflight, hssDllSmoke } from "./hss-dll/hss-dll-adapter";
 import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
 import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
@@ -990,10 +991,11 @@ export class JLinkMcpServer {
       speedKhz: z.number().int().positive().optional(),
       serial: z.string().optional(),
     };
+    const scalarType = z.enum(["uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"]);
     const symbolSchema = z.object({
       name: z.string().min(1),
       alias: z.string().optional(),
-      type: z.enum(["uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"]).optional(),
+      type: scalarType.optional(),
       unit: z.string().optional(),
     }).strict();
     const planInput = {
@@ -1066,18 +1068,28 @@ export class JLinkMcpServer {
     this.server.tool("hss_session_recover", "Mark abandoned local HSS capture metadata from a previous process as failed without touching target hardware.", {
       captureId: z.string().uuid().optional(),
     }, async (input) => result(() => this.hssCapture.sessionRecover(input)));
-    this.server.tool("variable_write_plan", "Plan an allowlisted capture-time RAM scalar or fixed-array write for the active HSS capture. This does not write target memory.", {
-      ...captureId,
+    this.server.tool("variable_write_plan", "Plan an allowlisted RAM scalar or active-capture fixed-array write. This does not write target memory.", {
+      captureId: z.string().uuid().optional(),
+      artifactFile: z.string().optional(),
+      mapFile: z.string().optional(),
       target: z.string().optional(),
       targetRef: writeTargetRef.optional(),
+      type: scalarType.optional(),
       value: z.number().optional(),
       values: z.array(z.number()).optional(),
       expiresInMs: z.number().int().positive().max(3600000).optional(),
     }, async (input) => result(() => this.hssCapture.variableWritePlan(input as HssVariableWritePlanInput)));
-    this.server.tool("variable_write_execute", "Execute a previously planned active-capture variable write through the HSS write queue with old-value read and readback verification.", {
-      writePlanId: z.string().startsWith("wp_"),
+    this.server.tool("variable_write_execute", "Execute a planned or implicit allowlisted RAM write with old-value read and readback verification.", {
+      writePlanId: z.string().startsWith("wp_").optional(),
+      artifactFile: z.string().optional(),
+      mapFile: z.string().optional(),
+      target: z.string().optional(),
+      targetRef: writeTargetRef.optional(),
+      type: scalarType.optional(),
+      value: z.number().optional(),
+      values: z.array(z.number()).optional(),
       dryRun: z.boolean().optional(),
-    }, async (input) => result(() => this.hssCapture.variableWriteExecute(input)));
+    }, async (input) => result(() => this.hssCapture.variableWriteExecute(input as HssVariableWriteExecuteInput)));
   }
 
   private directRttResult(operation: () => Promise<unknown>) {

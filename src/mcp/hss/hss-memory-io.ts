@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { ProbeBackend } from "../../probe/backend";
 import { HSS_ERROR, HssError } from "./hss-errors";
+import type { HssTargetEndian } from "./hss-typed-value";
 
 export interface HssVariableMemoryIo {
   read(address: number, length: number): Promise<Buffer>;
@@ -24,6 +25,29 @@ export class ProbeHssVariableMemoryIo implements HssVariableMemoryIo {
 
   async write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<void> {
     const result = await this.probe.writeMemoryForExclusiveOwner(this.owner, address, bytes, accessSize);
+    if (!result.success) throw new HssError(HSS_ERROR.UNKNOWN_WRITE_STATE, "probe memory write failed after issue attempt", { address, length: bytes.length, output: result.output, error: result.error, writeIssued: true });
+  }
+}
+
+export class ProbeDirectHssVariableMemoryIo implements HssVariableMemoryIo {
+  constructor(private readonly probe: ProbeBackend, private readonly endian: HssTargetEndian) {}
+
+  async read(address: number, length: number): Promise<Buffer> {
+    const result = await this.probe.readMemory(address, length);
+    if (!result.success) throw new HssError(HSS_ERROR.OLD_VALUE_READ_FAILED, "probe memory read failed", { address, length, output: result.output, error: result.error });
+    const bytes = this.probe.parseMemoryDump(result.rawOutput || result.output)
+      .flatMap((line) => line.hex.split(/\s+/).filter(Boolean).map((hex) => Number.parseInt(hex, 16)))
+      .filter((value) => Number.isFinite(value));
+    if (bytes.length < length) throw new HssError(HSS_ERROR.OLD_VALUE_READ_FAILED, "probe memory read returned too few bytes", { address, length, bytes: bytes.length });
+    return Buffer.from(bytes.slice(0, length));
+  }
+
+  async write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<void> {
+    if (accessSize !== 4 || bytes.length !== 4) {
+      throw new HssError(HSS_ERROR.SYMBOL_KIND_UNSUPPORTED, "direct probe writes support 32-bit scalar targets only", { address, length: bytes.length, accessSize });
+    }
+    const value = this.endian === "little" ? bytes.readUInt32LE(0) : bytes.readUInt32BE(0);
+    const result = await this.probe.writeMemory(address, value);
     if (!result.success) throw new HssError(HSS_ERROR.UNKNOWN_WRITE_STATE, "probe memory write failed after issue attempt", { address, length: bytes.length, output: result.output, error: result.error, writeIssued: true });
   }
 }

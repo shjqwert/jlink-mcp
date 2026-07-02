@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { HssScalarType } from "./hss-contract";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import {
   assertHssPolicyArrayElement,
@@ -18,9 +19,12 @@ export type HssWriteTargetRef =
   | { kind: "array_slice"; path: string; startIndex: number };
 
 export interface HssVariableWritePlanInput {
-  captureId: string;
+  captureId?: string;
+  artifactFile?: string;
+  mapFile?: string;
   target?: string;
   targetRef?: HssWriteTargetRef;
+  type?: HssScalarType;
   value?: number;
   values?: number[];
   expiresInMs?: number;
@@ -51,7 +55,7 @@ export interface HssVariableWritePlan {
   readbackRequired: true;
   maxWriteOpsRemaining: number;
   maxElementsRemaining: number;
-  willEnterCaptureQueue: true;
+  willEnterCaptureQueue: boolean;
   executable: boolean;
   backend: "jlink-hss";
   createdAt: string;
@@ -129,10 +133,14 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
   policy: HssPolicy;
   writeOpsUsed?: number;
   elementsUsed?: number;
+  willEnterCaptureQueue?: boolean;
 }): HssVariableWritePlan {
-  if (input.captureId !== context.captureId) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "captureId is not active", { captureId: input.captureId });
+  if (input.captureId !== undefined && input.captureId !== context.captureId) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "captureId is not active", { captureId: input.captureId });
   const targetRef = canonicalTargetRef(input);
   const entry = policyEntryForPath(context.policy, targetRef.path, targetRef.kind === "scalar" ? "scalar" : "fixed_array");
+  if (input.type && ((entry.kind === "scalar" && input.type !== entry.type) || (entry.kind === "fixed_array" && input.type !== entry.elementType))) {
+    throw new HssError(HSS_ERROR.POLICY_TYPE_MISMATCH, "requested type does not match policy", { path: entry.path, requestedType: input.type });
+  }
   if (!entry.captureTimeWrite) throw new HssError(HSS_ERROR.POLICY_CAPTURE_TIME_WRITE_DISABLED, "capture-time writes are disabled by policy", { path: entry.path });
   if (!entry.requireReadback) throw new HssError(HSS_ERROR.POLICY_TYPE_MISMATCH, "variable writes require readback", { path: entry.path });
   const layout = resolveIarMapWriteTargetLayout(context.mapFile, entry);
@@ -162,7 +170,7 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
     readbackRequired: true as const,
     maxWriteOpsRemaining,
     maxElementsRemaining,
-    willEnterCaptureQueue: true as const,
+    willEnterCaptureQueue: context.willEnterCaptureQueue ?? true,
     executable: entry.risk === "R2",
     backend: context.backend,
     createdAt,

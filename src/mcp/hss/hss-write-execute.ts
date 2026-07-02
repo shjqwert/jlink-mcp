@@ -3,10 +3,17 @@ import type { HssScalarType } from "./hss-contract";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { decodeHssValues, encodeHssValues, hssBytesEqual, type HssTargetEndian } from "./hss-typed-value";
-import type { HssVariableWritePlan } from "./hss-write-plan";
+import type { HssVariableWritePlan, HssWriteTargetRef } from "./hss-write-plan";
 
 export interface HssVariableWriteExecuteInput {
-  writePlanId: string;
+  writePlanId?: string;
+  artifactFile?: string;
+  mapFile?: string;
+  target?: string;
+  targetRef?: HssWriteTargetRef;
+  type?: HssScalarType;
+  value?: number;
+  values?: number[];
   dryRun?: boolean;
 }
 
