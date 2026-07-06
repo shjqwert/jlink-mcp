@@ -662,6 +662,21 @@ test("HSS capture start rejects halted preflight", async () => {
     });
     assert.equal(halted.ok, false);
     assert.equal(halted.error?.code, HSS_ERROR.HSS_TARGET_HALTED);
+
+    const resumed = await service.captureStart({
+      dllPath: dll,
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
+      requestedRateHz: 1000,
+      durationSec: 1,
+      resumeBeforeStart: true,
+    });
+    assert.equal(resumed.ok, true);
+    assert.match(resumed.warnings.join("\n"), /explicitly resumed/);
+    const resumedCaptureId = (resumed.data as { captureId: string }).captureId;
+    await waitFor(async () => {
+      const status = await service.captureStatus({ captureId: resumedCaptureId });
+      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+    });
     assert.equal(probe.getExclusiveOwner(), null);
   } finally {
     await service.dispose();

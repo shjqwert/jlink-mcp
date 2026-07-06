@@ -61,6 +61,11 @@ interface ActiveCapture {
   helperExited?: boolean;
 }
 
+interface SampleAnchor {
+  sampleIndex: number;
+  captureTimeUs: number;
+}
+
 export class HssCaptureService {
   private readonly sessionId = randomUUID();
   private readonly plans = new Map<string, HssCapturePlan>();
@@ -127,16 +132,18 @@ export class HssCaptureService {
         targetWasHaltedRaw?: number;
       };
       const targetWasHaltedBeforeCapture = Boolean(hss.targetWasHalted);
-      if (targetWasHaltedBeforeCapture) {
-        throw new HssError(HSS_ERROR.HSS_TARGET_HALTED, "target is halted before HSS capture start; resumeBeforeStart is disabled for MVP-B scalar stabilization", {
+      const resumeBeforeStart = Boolean(input.resumeBeforeStart ?? false);
+      const warnings: string[] = [];
+      if (targetWasHaltedBeforeCapture && !resumeBeforeStart) {
+        throw new HssError(HSS_ERROR.HSS_TARGET_HALTED, "target is halted before HSS capture start; pass resumeBeforeStart to resume explicitly", {
           targetWasHaltedBeforeCapture,
           targetWasHaltedRaw: hss.targetWasHaltedRaw,
-          resumeBeforeStart: Boolean(input.resumeBeforeStart),
+          resumeBeforeStart,
           requestedDevice: target.requestedDevice,
           resolvedDevice: target.resolvedDevice,
         });
       }
-      const warnings: string[] = [];
+      if (targetWasHaltedBeforeCapture && resumeBeforeStart) warnings.push("target was halted before capture and was explicitly resumed before HSS start");
 
       const plan = input.planId ? this.requirePlan(input.planId) : await buildHssCapturePlan(input, this.cwd(), true);
       enforceCapabilityRate(capability, plan.sampling.requestedRateHz);
@@ -368,7 +375,7 @@ export class HssCaptureService {
         const io = this.options.memoryIo ?? new HelperHssVariableMemoryIo(active.writeRequestFile, active.writeResponseFile, active.captureId);
         try {
           const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun), (stage) => active.writeQueue.setStage(stage));
-          this.attachSampleIndex(active, result);
+          await this.attachSampleIndex(active, result);
           if (!input.dryRun) {
             active.writeQueue.setStage("EVENT_APPEND");
             await appendHssWriteEvent(active.metadataFile, plan, result, true);
@@ -384,7 +391,7 @@ export class HssCaptureService {
         } catch (error) {
           if (error instanceof HssError && error.details.writeIssued === true) {
             const maybeResult = "writeId" in error.details ? error.details as unknown as HssVariableWriteExecuteResult : undefined;
-            if (maybeResult) this.attachSampleIndex(active, maybeResult);
+            if (maybeResult) await this.attachSampleIndex(active, maybeResult);
             active.writeQueue.setStage("EVENT_APPEND");
             await appendHssWriteEvent(active.metadataFile, plan, maybeResult, false, error.code);
             active.writeQueue.setStage("FLAG_APPEND");
@@ -546,12 +553,22 @@ export class HssCaptureService {
     this.writeCounters.set(key, counter);
   }
 
-  private attachSampleIndex(active: ActiveCapture, result: HssVariableWriteExecuteResult): void {
+  private async attachSampleIndex(active: ActiveCapture, result: HssVariableWriteExecuteResult): Promise<void> {
     const hostStartUs = result.hostWriteStartUs ?? result.writeStartUs;
     const hostEndUs = result.hostWriteEndUs ?? result.writeEndUs;
-    result.captureWriteStartUs = Math.max(0, hostStartUs - active.startTimeUs);
-    result.captureWriteEndUs = Math.max(result.captureWriteStartUs, hostEndUs - active.startTimeUs);
-    result.sampleIndexNear = Math.max(0, Math.round(result.captureWriteStartUs * active.plan.sampling.requestedRateHz / 1_000_000));
+    const fallbackStartUs = Math.max(0, hostStartUs - active.startTimeUs);
+    const fallbackEndUs = Math.max(fallbackStartUs, hostEndUs - active.startTimeUs);
+    const anchor = await readSampleAnchor(active, fallbackStartUs).catch(() => null);
+    if (anchor) {
+      const durationUs = Math.max(1, hostEndUs - hostStartUs);
+      result.captureWriteStartUs = anchor.captureTimeUs;
+      result.captureWriteEndUs = anchor.captureTimeUs + durationUs;
+      result.sampleIndexNear = anchor.sampleIndex;
+      return;
+    }
+    result.captureWriteStartUs = fallbackStartUs;
+    result.captureWriteEndUs = fallbackEndUs;
+    result.sampleIndexNear = Math.max(0, Math.round(fallbackStartUs * active.plan.sampling.requestedRateHz / 1_000_000));
   }
 
   private captureTimeUs(active: ActiveCapture, result: HssVariableWriteExecuteResult): number {
@@ -656,6 +673,34 @@ function activeQuality(data: Buffer, recordSize: number): LiveQuality {
     if ((flags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0) quality.droppedSamples += 1;
   }
   return quality;
+}
+
+async function readSampleAnchor(active: ActiveCapture, fallbackStartUs: number): Promise<SampleAnchor | null> {
+  if (!existsSync(active.segmentFile)) return null;
+  const recordSize = 24 + active.plan.symbols.length * 4;
+  const data = await readFile(active.segmentFile);
+  const sampleCount = Math.floor(data.length / recordSize);
+  if (sampleCount < 1) return null;
+  const firstTicks = data.readBigInt64LE(8);
+  const requestedRateHz = active.plan.sampling.requestedRateHz;
+  const fallbackIndex = requestedRateHz > 0 ? Math.round(fallbackStartUs * requestedRateHz / 1_000_000) : 0;
+  let bestOffset = 0;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const offset = index * recordSize;
+    const sampleIndex = Number(data.readBigUInt64LE(offset));
+    const delta = Math.abs(sampleIndex - fallbackIndex);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      bestOffset = offset;
+    }
+  }
+  const sampleIndex = Number(data.readBigUInt64LE(bestOffset));
+  const timestampTicks = data.readBigInt64LE(bestOffset + 8);
+  return {
+    sampleIndex,
+    captureTimeUs: Math.max(0, Number(timestampTicks - firstTicks) / 1000),
+  };
 }
 
 function isAbandonedMetadata(metadata: HssCaptureMetadata): boolean {

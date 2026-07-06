@@ -7,10 +7,11 @@ import { ProcessManager } from "../../utils/process-manager";
 import { JLinkBackend } from "../../probe/jlink";
 import { HssCaptureService } from "./hss-capture-service";
 import { HSS_ERROR } from "./hss-errors";
-import { writeInitialMetadata } from "./hss-artifact";
+import { encodeHssRecord, writeInitialMetadata } from "./hss-artifact";
 import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { encodeHssValues } from "./hss-typed-value";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
+import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 
 test("MVP-B fake/injected memoryIo covers scalar write and draft array write paths", async () => {
   const root = await tempProject();
@@ -126,6 +127,44 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
   } finally {
     await service.dispose();
     probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("active write event time is anchored to HSS sample time when host time is skewed", async () => {
+  const root = await tempProject();
+  try {
+    const segmentFile = join(root, "capture_0001.bin");
+    const records = Array.from({ length: 500 }, (_, index) => encodeHssRecord({
+      sampleIndex: BigInt(index),
+      timestampTicks: BigInt(index * 1_000_000),
+      statusFlags: HSS_STATUS_FLAGS.valid,
+      rawValues: [index],
+    }, 1));
+    await writeFile(segmentFile, Buffer.concat(records));
+    const result = writeExecuteResult({
+      hostWriteStartUs: 10_002_954_000,
+      hostWriteEndUs: 10_002_955_000,
+      writeStartUs: 10_002_954_000,
+      writeEndUs: 10_002_955_000,
+    });
+    const attachSampleIndex = (HssCaptureService.prototype as unknown as {
+      attachSampleIndex(active: unknown, result: HssVariableWriteExecuteResult): Promise<void>;
+    }).attachSampleIndex;
+
+    await attachSampleIndex.call({}, {
+      segmentFile,
+      startTimeUs: 10_000_000_000,
+      plan: {
+        sampling: { requestedRateHz: 1000 },
+        symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      },
+    }, result);
+
+    assert.equal(result.sampleIndexNear, 499);
+    assert.equal(result.captureWriteStartUs, 499_000);
+    assert.equal(result.captureWriteEndUs, 500_000);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -288,6 +327,28 @@ class FakeMemory implements HssVariableMemoryIo {
   get(address: number, length: number): Buffer { return Buffer.from(this.memory.get(address) ?? Buffer.alloc(length)); }
   async read(address: number, length: number): Promise<Buffer> { return this.get(address, length); }
   async write(address: number, bytes: Buffer): Promise<void> { this.set(address, bytes); }
+}
+
+function writeExecuteResult(overrides: Partial<HssVariableWriteExecuteResult>): HssVariableWriteExecuteResult {
+  return {
+    writeId: "wr_test",
+    eventId: "evt_test",
+    captureId: "capture_test",
+    targetRef: { kind: "scalar", path: "Debug_IqRef" },
+    canonicalTarget: "Debug_IqRef",
+    oldValue: 0,
+    newValue: 1,
+    readback: 1,
+    readbackOk: true,
+    mismatches: [],
+    writeStartUs: 0,
+    writeEndUs: 1,
+    sampleIndexNear: null,
+    risk: "R2",
+    consumedWriteOps: 1,
+    consumedElements: 1,
+    ...overrides,
+  };
 }
 
 async function writeProject(root: string): Promise<void> {

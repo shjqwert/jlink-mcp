@@ -22,14 +22,16 @@ const rateHz = Number(options.rateHz ?? 100);
 const durationSec = Number(options.durationSec ?? 3);
 const minSamples = Number(options.minSamples ?? 10);
 const pollMs = Number(options.pollMs ?? 100);
+const preWriteMs = Number(options.preWriteMs ?? 150);
+const postWriteMs = Number(options.postWriteMs ?? 300);
 const hmC095Dll = "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll";
 const dllPath = options.dllPath ?? (options.fake ? join(root, "JLink_x64.dll") : existsSync(hmC095Dll) ? hmC095Dll : undefined);
 const symbols = options.fake
   ? [{ name: "Debug_IqRef", type: "int32" }]
   : undefined;
 
-if (!Number.isFinite(value) || !Number.isInteger(rateHz) || rateHz < 1 || !Number.isInteger(durationSec) || durationSec < 1 || !Number.isInteger(minSamples) || minSamples < 1) {
-  console.error("value/rateHz/durationSec/minSamples are invalid");
+if (!Number.isFinite(value) || !Number.isInteger(rateHz) || rateHz < 1 || !Number.isInteger(durationSec) || durationSec < 1 || !Number.isInteger(minSamples) || minSamples < 1 || !Number.isInteger(preWriteMs) || preWriteMs < 0 || !Number.isInteger(postWriteMs) || postWriteMs < 0) {
+  console.error("value/rateHz/durationSec/minSamples/preWriteMs/postWriteMs are invalid");
   process.exit(2);
 }
 
@@ -60,9 +62,10 @@ try {
     finalResult = classify({ start, readiness, stop });
   } else {
 
+  if (preWriteMs > 0) await new Promise((resolve) => setTimeout(resolve, preWriteMs));
   const writePlan = await service.variableWritePlan({ captureId, targetRef: { kind: "scalar", path: target }, value });
   const writeExec = writePlan.ok ? await service.variableWriteExecute({ writePlanId: writePlan.data.writePlanId }) : null;
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  if (postWriteMs > 0) await new Promise((resolve) => setTimeout(resolve, postWriteMs));
   const stop = await service.captureStop({ captureId });
   const eventId = writeExec?.data?.eventId;
   const query = eventId ? await service.captureQuery({ captureId, mode: "event_window", eventId, windowBeforeMs: 100, windowAfterMs: 100, includeRawSamples: true, hmC095Profile: !options.fake }) : null;
@@ -116,6 +119,14 @@ function classify(run) {
     target,
     value,
     captureId,
+    timing: {
+      rateHz,
+      durationSec,
+      minSamples,
+      pollMs,
+      preWriteMs,
+      postWriteMs,
+    },
     overallStatus,
     writePathStatus,
     captureQualityStatus,
@@ -202,6 +213,8 @@ function parseArgs(args) {
     else if (arg === "--duration") parsed.durationSec = args[++index];
     else if (arg === "--min-samples") parsed.minSamples = args[++index];
     else if (arg === "--poll-ms") parsed.pollMs = args[++index];
+    else if (arg === "--pre-write-ms") parsed.preWriteMs = args[++index];
+    else if (arg === "--post-write-ms") parsed.postWriteMs = args[++index];
     else if (arg === "--dll") parsed.dllPath = args[++index];
   }
   return parsed;

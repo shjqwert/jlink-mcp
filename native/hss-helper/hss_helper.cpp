@@ -57,6 +57,8 @@ using JLINKARM_WriteU8_Fn = void (*)(U32, U8);
 using JLINKARM_WriteU16_Fn = void (*)(U32, U16);
 using JLINKARM_WriteU32_Fn = void (*)(U32, U32);
 
+static bool suppress_jlink_gui(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed);
+
 static std::string narrow(const std::wstring& input) {
   if (input.empty()) return "";
   int size = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr, nullptr);
@@ -538,6 +540,12 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
     return 0;
   }
+  if (!suppress_jlink_gui(arm_exec, &crashed)) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", dll_utf8);
+    return 0;
+  }
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
   (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
@@ -669,6 +677,12 @@ static void write_hss_diag(const std::string& path, const std::string& capture_i
   write_text_file_a(path, out.str());
 }
 
+static bool suppress_jlink_gui(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed) {
+  char out[512] = {};
+  (void)call_exec(arm_exec, "SuppressGUI = 1", out, sizeof(out), crashed);
+  return !*crashed;
+}
+
 static int connect_preflight(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
   HMODULE dll = LoadLibraryW(dll_path.c_str());
   const std::string dll_utf8 = narrow(dll_path);
@@ -715,6 +729,12 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   if (crashed) {
     FreeLibrary(dll);
     error_json("JLINK_OPEN_EXCEPTION", "JLINKARM_Open raised a structured exception", dll_utf8);
+    return 0;
+  }
+  if (!suppress_jlink_gui(arm_exec, &crashed)) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", dll_utf8);
     return 0;
   }
 
@@ -1300,6 +1320,14 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
     return 0;
   }
+  write_hss_diag(diagnostic_file, capture_id, "before_suppress_gui");
+  if (!suppress_jlink_gui(arm_exec, &crashed)) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", dll_utf8);
+    return 0;
+  }
+  write_hss_diag(diagnostic_file, capture_id, "after_suppress_gui");
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
   write_hss_diag(diagnostic_file, capture_id, "before_exec_device");
@@ -1501,6 +1529,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       write_record(out, hss_sample_index, sample_ns, 1U, values, &crc);
       ++sample;
     }
+    if (samples_in_read > 0) out.flush();
     if (crashed) break;
   }
   while (!stop_requested && sample < requested_samples) {
