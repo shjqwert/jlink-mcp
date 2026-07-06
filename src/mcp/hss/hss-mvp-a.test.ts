@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -85,7 +85,7 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -97,7 +97,7 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
     await writeFile(helper, fakeHelperSource(), "utf8");
 
-    const cap = await service.capabilityProbe({ dllPath: dll, device: "Z20K146MC", interface: "SWD", speedKhz: 4000 });
+    const cap = await service.capabilityProbe({ dllPath: dll, device: "Z20K146M", interface: "SWD", speedKhz: 4000 });
     assert.equal(cap.ok, true);
     assert.equal((cap.data?.helper as { exists?: boolean }).exists, true);
     assert.equal((cap.data?.hss as { getCapsValidated?: boolean }).getCapsValidated, true);
@@ -216,7 +216,7 @@ test("HSS capture plan records GetCaps maxFreq without gating requested rate", a
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -241,7 +241,7 @@ test("HSS capture start runs when GetCaps fails but helper and target are availa
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -277,7 +277,7 @@ test("HM_C095 validation rejects read-error captures", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -319,7 +319,7 @@ test("live HSS status counts read-error records as invalid", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -363,7 +363,7 @@ test("HSS metadata separates transport, payload quality, and HM_C095 semantic fa
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -428,7 +428,7 @@ test("HSS outputSubdir is a base directory and HM_C095 10-var payload can pass w
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
   const baseDir = join(root, ".jlink-mcp", "custom-captures");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -474,7 +474,7 @@ test("HSS export rejects non-terminal capture metadata", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -515,7 +515,7 @@ test("HSS export rejects captureId path traversal", async () => {
   const root = await tempProject();
   const captureId = "..\\evil";
   const metadataFile = join(root, ".jlink-mcp", "captures", "malicious.json");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, { cwd: root });
   try {
     await mkdir(join(root, ".jlink-mcp", "captures"), { recursive: true });
@@ -550,7 +550,7 @@ test("HSS export rejects captureId path traversal", async () => {
 
 test("HSS status reports stable error for unknown captureId", async () => {
   const root = await tempProject();
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, { cwd: root });
   try {
     const status = await service.captureStatus({ captureId: "missing-capture" });
@@ -565,7 +565,7 @@ test("HSS status reports stable error for unknown captureId", async () => {
 
 test("HSS status and stop reject captureId path traversal", async () => {
   const root = await tempProject();
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, { cwd: root });
   try {
     const status = await service.captureStatus({ captureId: "..\\escape" });
@@ -586,7 +586,7 @@ test("HSS stop is idempotent and returns finalized metadata details", async () =
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -628,7 +628,7 @@ test("HSS capture start rejects halted preflight", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -681,7 +681,7 @@ async function writeHmProject(root: string): Promise<string> {
   const list = join(root, "Appl", "Debug", "List");
   await mkdir(exe, { recursive: true });
   await mkdir(list, { recursive: true });
-  await writeFile(join(root, "Appl", "FOC_SCM.ewp"), "<project><name>Debug</name>Z20K146MC</project>", "utf8");
+  await writeFile(join(root, "Appl", "FOC_SCM.ewp"), "<project><name>Debug</name>Z20K146M</project>", "utf8");
   await writeFile(join(exe, "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
   const map = join(list, "FOC_SCM.map");
   await writeFile(map, [
@@ -818,3 +818,4 @@ async function readAuditText(root: string): Promise<string> {
 }
 
 void encodeHssRecord;
+

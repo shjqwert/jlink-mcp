@@ -1403,6 +1403,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   bool first_read_sample_prefix_changed = false;
   bool last_read_sample_prefix_changed = false;
   bool target_written = false;
+  bool stop_requested = false;
   int first_changed_offset = -1;
   std::string first_changed_bytes;
   int payload_first_changed_offset = -1;
@@ -1411,14 +1412,20 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (read_mode == "drain") {
     const int64_t drain_until_ns = started_ns + static_cast<int64_t>(duration_sec) * 1000000000LL;
     while (now_ns() < drain_until_ns) {
-      if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+      if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        stop_requested = true;
+        break;
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
   uint64_t sample = 0;
   const HssMemoryIpc memory_ipc{write_request_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32};
   for (uint64_t attempt = 0; attempt < requested_samples && sample < requested_samples; ++attempt) {
-    if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) break;
+    if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      stop_requested = true;
+      break;
+    }
     (void)handle_hss_memory_request(memory_ipc, &target_written);
     if (read_mode == "periodic") {
       while (true) {
@@ -1496,7 +1503,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     }
     if (crashed) break;
   }
-  while (sample < requested_samples) {
+  while (!stop_requested && sample < requested_samples) {
     std::vector<uint32_t> values(symbols.size(), 0);
     ++read_errors;
     write_record(out, sample++, now_ns(), 2U, values, &crc);
@@ -1513,11 +1520,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const uint64_t sample_count = valid_samples + read_errors;
   const double header_changed_ratio = read_attempts > 0 ? static_cast<double>(header_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const double payload_changed_ratio = read_attempts > 0 ? static_cast<double>(payload_changed_reads) / static_cast<double>(read_attempts) : 0.0;
-  const bool read_failed = hss_capture_failed(crashed, valid_samples, requested_samples);
+  const bool read_failed = !stop_requested && hss_capture_failed(crashed, valid_samples, requested_samples);
   std::ostringstream crc_hex;
   crc_hex << std::hex << crc;
   std::cout
-    << "{\"status\":\"" << (read_failed ? "error" : "ok") << "\"";
+    << "{\"status\":\"" << (read_failed ? "error" : stop_requested ? "stopped" : "ok") << "\"";
   if (read_failed) {
     std::cout << ",\"errorCode\":\"HSS_READ_FAILED\",\"reason\":\"JLINK_HSS_Read did not produce a complete valid sample set\"";
   }

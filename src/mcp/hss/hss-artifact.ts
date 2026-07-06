@@ -606,8 +606,9 @@ function eventWindowSelection(records: HssSampleRecord[], events: Array<Record<s
   const centerUs = Number(event.captureWriteStartUs ?? event.writeStartUs ?? 0);
   const requestedStartUs = centerUs - (input.windowBeforeMs ?? 100) * 1000;
   const requestedEndUs = centerUs + (input.windowAfterMs ?? 100) * 1000;
-  const firstSampleUs = records.length ? sampleTimeUs(records[0], firstTicks) : null;
-  const lastSampleUs = records.length ? sampleTimeUs(records.at(-1)!, firstTicks) : null;
+  const sampleTimesUs = records.map((record) => sampleTimeUs(record, firstTicks));
+  const firstSampleUs = sampleTimesUs.length ? Math.min(...sampleTimesUs) : null;
+  const lastSampleUs = sampleTimesUs.length ? Math.max(...sampleTimesUs) : null;
   const startUs = Math.max(0, requestedStartUs);
   const endUs = requestedEndUs;
   const beforeCandidates = records.filter((record) => {

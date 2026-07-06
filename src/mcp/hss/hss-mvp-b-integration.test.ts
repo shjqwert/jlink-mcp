@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -20,7 +20,7 @@ test("MVP-B fake/injected memoryIo covers scalar write and draft array write pat
   memory.set(0x20000000, encodeHssValues("int32", [0], "little"));
   memory.set(0x20000010 + 4, encodeHssValues("int16", [0], "little"));
   memory.set(0x20000020 + 8, encodeHssValues("int16", [0, 0, 0, 0], "little"));
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -91,7 +91,7 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -136,7 +136,7 @@ test("variable_write_execute supports outside-capture scalar writes and rejects 
   const dll = join(root, "JLink_x64.dll");
   const memory = new FakeMemory();
   memory.set(0x20000000, encodeHssValues("int32", [0], "little"));
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -184,7 +184,7 @@ test("hss_capture_stop timeout kills helper and finalizes failed metadata", asyn
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: {},
@@ -229,7 +229,7 @@ test("hss_session_recover marks abandoned local capture metadata", async () => {
   const captureId = "11111111-1111-4111-8111-111111111111";
   const captureDir = join(root, ".jlink-mcp", "captures", captureId);
   const metadataFile = join(captureDir, "capture.json");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, { cwd: root });
   try {
     await mkdir(captureDir, { recursive: true });
@@ -239,7 +239,7 @@ test("hss_session_recover marks abandoned local capture metadata", async () => {
       sessionName: "abandoned",
       projectRoot: root,
       artifact: { file: join(root, "FOC_SCM.out"), sha256: "0", resolver: "iar-map" },
-      target: { device: "Z20K146MC", interface: "SWD", speedKhz: 4000 },
+      target: { device: "Z20K146M", interface: "SWD", speedKhz: 4000 },
       symbols: [{ name: "Debug_IqRef", type: "int32", address: "0x20000000", size: 4, source: "iar-map" }],
       requestedRateHz: 100,
     });
@@ -349,3 +349,4 @@ async function tempProject(): Promise<string> {
   await mkdir(root, { recursive: true });
   return root;
 }
+

@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
@@ -67,7 +67,7 @@ async function writeMetadata(root: string, metadataFile: string, captureId: stri
     semanticValidationStatus: "not_run",
     payloadValidationStatus: "pass",
     artifact: { file: join(root, "FOC_SCM.out"), sha256: "sha", resolver: "iar-map" },
-    target: { device: "Z20K146MC", interface: "SWD", speedKhz: 4000 },
+    target: { device: "Z20K146M", interface: "SWD", speedKhz: 4000 },
     probe: {},
     symbols: [{ name: "Debug_IqRef", address: "0x20000000", size: 4, type: "int32", source: "iar-map" }],
     sampling: { requestedRateHz: 100000, actualRateHz: 1000, hssIndexRateHz: 1000, hostObservedRateHz: 1000, helperReportedRateHz: 1000, helperActualRateHz: 1000, readMode: "periodic", durationSec: 0.005, timestampSource: "qpc", timestampFrequency: "1000000000" },
@@ -135,3 +135,4 @@ async function tempProject(): Promise<string> {
   await mkdir(root, { recursive: true });
   return root;
 }
+

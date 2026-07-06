@@ -20,9 +20,10 @@ const target = options.target ?? (options.fake ? "Debug_IqRef" : "g_hssDbgWriteP
 const value = Number(options.value ?? 1);
 const rateHz = Number(options.rateHz ?? 100);
 const durationSec = Number(options.durationSec ?? 3);
-const minSamples = Number(options.minSamples ?? 3);
+const minSamples = Number(options.minSamples ?? 10);
 const pollMs = Number(options.pollMs ?? 100);
-const dllPath = options.dllPath ?? (options.fake ? join(root, "JLink_x64.dll") : undefined);
+const hmC095Dll = "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll";
+const dllPath = options.dllPath ?? (options.fake ? join(root, "JLink_x64.dll") : existsSync(hmC095Dll) ? hmC095Dll : undefined);
 const symbols = options.fake
   ? [{ name: "Debug_IqRef", type: "int32" }]
   : undefined;
@@ -61,10 +62,11 @@ try {
 
   const writePlan = await service.variableWritePlan({ captureId, targetRef: { kind: "scalar", path: target }, value });
   const writeExec = writePlan.ok ? await service.variableWriteExecute({ writePlanId: writePlan.data.writePlanId }) : null;
+  await new Promise((resolve) => setTimeout(resolve, 200));
   const stop = await service.captureStop({ captureId });
   const eventId = writeExec?.data?.eventId;
-  const query = eventId ? await service.captureQuery({ captureId, mode: "event_window", eventId, windowBeforeMs: 50, windowAfterMs: 50, includeRawSamples: true, hmC095Profile: !options.fake }) : null;
-  const exported = eventId ? await service.captureExport({ captureId, eventAware: true, eventId, windowBeforeMs: 50, windowAfterMs: 50 }) : null;
+  const query = eventId ? await service.captureQuery({ captureId, mode: "event_window", eventId, windowBeforeMs: 100, windowAfterMs: 100, includeRawSamples: true, hmC095Profile: !options.fake }) : null;
+  const exported = eventId ? await service.captureExport({ captureId, eventAware: true, eventId, windowBeforeMs: 100, windowAfterMs: 100 }) : null;
   finalResult = classify({ start, readiness, writePlan, writeExec, stop, query, exported });
   }
   }
@@ -94,8 +96,12 @@ function classify(run) {
     && (stopData.quality?.readErrors ?? 0) === 0
     && (stopData.quality?.droppedSamples ?? 0) === 0
     && (stopData.quality?.sampleCount ?? 0) >= minSamples;
-  const eventSampleCount = run.query?.data?.eventWindow?.sampleCount ?? 0;
-  const eventOk = run.query?.ok === true && eventSampleCount > 0;
+  const eventWindow = run.query?.data?.eventWindow;
+  const beforeSampleCount = eventWindow?.before?.sampleCount ?? 0;
+  const afterSampleCount = eventWindow?.after?.sampleCount ?? 0;
+  const deltaAvailable = Object.keys(eventWindow?.delta ?? {}).length > 0;
+  const eventSampleCount = eventWindow?.sampleCount ?? 0;
+  const eventOk = run.query?.ok === true && eventSampleCount > 0 && beforeSampleCount > 0 && afterSampleCount > 0 && deltaAvailable;
   const csvOk = run.exported?.ok === true && (run.exported.data?.rows ?? 0) > 0 && existsSync(run.exported.data?.csvFile ?? "");
   const captureQualityStatus = qualityPass ? "pass" : run.stop ? "fail" : "not_run";
   const eventWindowStatus = eventOk ? "pass" : run.query ? "fail" : "not_run";
@@ -116,6 +122,28 @@ function classify(run) {
     eventWindowStatus,
     csvExportStatus,
     readbackMismatch,
+    write: {
+      planOk: run.writePlan?.ok === true,
+      executeOk: run.writeExec?.ok === true,
+      readbackOk: run.writeExec?.data?.readbackOk === true,
+      eventId: run.writeExec?.data?.eventId,
+    },
+    capture: {
+      state: stopData.state,
+      transportStatus: stopData.transportStatus,
+      dataQualityStatus: stopData.dataQualityStatus,
+      sampleCount: stopData.quality?.sampleCount ?? 0,
+      readErrors: stopData.quality?.readErrors ?? 0,
+      timeouts: stopData.quality?.timeouts ?? 0,
+      droppedSamples: stopData.quality?.droppedSamples ?? 0,
+      actualRateHz: stopData.quality?.actualRateHz ?? 0,
+    },
+    eventWindow: {
+      beforeSampleCount,
+      afterSampleCount,
+      deltaAvailable,
+      warnings: eventWindow?.quality?.warnings ?? [],
+    },
     elapsedMs: Date.now() - startedAt,
     artifacts: {
       metadataFile: run.start?.data?.metadataFile,
@@ -130,15 +158,15 @@ function classify(run) {
       dataQualityStatus: stopData.dataQualityStatus,
       failures: stopData.failures,
       helperResult: stopData.helperResult,
-      eventWindow: run.query?.data?.eventWindow,
-      warnings: [
+      eventWindow,
+      warnings: [...new Set([
         ...(run.start?.warnings ?? []),
         ...(run.stop?.warnings ?? []),
         ...(run.query?.warnings ?? []),
         ...(run.query?.data?.warnings ?? []),
         ...(run.exported?.warnings ?? []),
         ...(run.exported?.data?.warnings ?? []),
-      ],
+      ])],
     },
   };
 }
