@@ -16,6 +16,16 @@ test("HSS write queue allows one job and rejects concurrent jobs", async () => {
   assert.equal(await queue.run(async () => "next"), "next");
 });
 
+test("HSS write queue records scalar write stages", async () => {
+  const queue = new HssCaptureWriteQueue();
+  await queue.run(async () => {
+    queue.setStage("PRE_READ_OLD");
+    queue.setStage("WRITING");
+    queue.setStage("READBACK");
+  });
+  assert.deepEqual(queue.history().map((record) => record.stage), ["QUEUED", "PRE_READ_OLD", "WRITING", "READBACK", "DONE"]);
+});
+
 test("HSS write queue releases lock after failure and rejects when stopping", async () => {
   const queue = new HssCaptureWriteQueue();
   await assert.rejects(() => queue.run(async () => { throw new Error("boom"); }), /boom/);

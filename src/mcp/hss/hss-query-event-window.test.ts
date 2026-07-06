@@ -26,7 +26,15 @@ test("hss_capture_query supports event_window with effective flags and summary",
     const metadataFile = join(captureDir, "capture.json");
     await writeMetadata(root, metadataFile, captureId, await crc32File(segmentFile));
     const plan = writePlan(captureId);
-    const result = writeResult(captureId, { writeStartUs: 50_000, writeEndUs: 55_000 });
+    const result = writeResult(captureId, {
+      hostWriteStartUs: 10_000_050_000,
+      hostWriteEndUs: 10_000_055_000,
+      captureWriteStartUs: 50_000,
+      captureWriteEndUs: 55_000,
+      writeStartUs: 10_000_050_000,
+      writeEndUs: 10_000_055_000,
+      sampleIndexNear: 9,
+    });
     await appendHssWriteEvent(metadataFile, plan, result, true);
     await appendHssWriteFlagIntervals(metadataFile, { eventId: result.eventId, writeStartUs: 50_000, writeEndUs: 55_000, requestedRateHz: 100 });
     await materializeHssCaptureEvents(metadataFile);
@@ -41,13 +49,68 @@ test("hss_capture_query supports event_window with effective flags and summary",
       includeRawSamples: true,
       flagFilter: { exclude: ["write_in_progress"] },
     }, root);
-    const window = query.eventWindow as { sampleCount: number; summary: Record<string, { first: number; last: number; delta: number }> };
+    const window = query.eventWindow as {
+      sampleCount: number;
+      summary: Record<string, { first: number; last: number; delta: number }>;
+      before: { sampleStart: number; sampleEnd: number; sampleCount: number; summary: Record<string, { first: number; last: number }> };
+      after: { sampleStart: number; sampleEnd: number; sampleCount: number; summary: Record<string, { first: number; last: number }> };
+      delta: Record<string, { before: number; after: number; delta: number }>;
+      quality: { warnings: string[] };
+    };
     assert.equal(window.sampleCount, 4);
     assert.equal(window.summary.Debug_IqRef.first, 3);
     assert.equal(window.summary.Debug_IqRef.last, 7);
     assert.equal(window.summary.Debug_IqRef.delta, 4);
+    assert.equal(window.before.sampleStart, 3);
+    assert.equal(window.before.sampleEnd, 4);
+    assert.equal(window.before.sampleCount, 2);
+    assert.equal(window.after.sampleStart, 6);
+    assert.equal(window.after.sampleEnd, 7);
+    assert.equal(window.after.sampleCount, 2);
+    assert.deepEqual(window.delta.Debug_IqRef, { before: 4, after: 6, delta: 2 });
+    assert.deepEqual(window.quality.warnings, []);
     const raw = query.rawSamples as Array<{ effectiveStatusFlags: number }>;
     assert.equal(raw.some((sample) => (sample.effectiveStatusFlags & HSS_STATUS_FLAGS.write_in_progress) !== 0), false);
+
+    const withoutNearby = await queryHssCapture({
+      captureId,
+      metadataFile,
+      mode: "event_window",
+      eventId: result.eventId,
+      windowBeforeMs: 20,
+      windowAfterMs: 20,
+      flagFilter: { includeNearby: false },
+    }, root);
+    assert.equal((withoutNearby.eventWindow as { sampleCount: number }).sampleCount, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("hss_capture_query event_window reports warnings when windows have no samples", async () => {
+  const root = await tempProject();
+  try {
+    const captureId = "11111111-1111-4111-8111-111111111112";
+    const captureDir = join(root, ".jlink-mcp", "captures", captureId);
+    await mkdir(captureDir, { recursive: true });
+    const segmentFile = join(captureDir, "capture_0001.bin");
+    await writeFile(segmentFile, Buffer.concat([encodeHssRecord({
+      sampleIndex: 0n,
+      timestampTicks: 0n,
+      statusFlags: HSS_STATUS_FLAGS.valid,
+      rawValues: [0],
+    }, 1)]));
+    const metadataFile = join(captureDir, "capture.json");
+    await writeMetadata(root, metadataFile, captureId, await crc32File(segmentFile));
+    const plan = writePlan(captureId);
+    const result = writeResult(captureId, { captureWriteStartUs: 50_000, captureWriteEndUs: 55_000, writeStartUs: 50_000, writeEndUs: 55_000 });
+    await appendHssWriteEvent(metadataFile, plan, result, true);
+    await materializeHssCaptureEvents(metadataFile);
+    const query = await queryHssCapture({ captureId, metadataFile, mode: "event_window", eventId: result.eventId, windowBeforeMs: 1, windowAfterMs: 1 }, root);
+    const warnings = (query.eventWindow as { quality: { warnings: string[] } }).quality.warnings;
+    assert.equal(warnings.includes("event window contains no samples"), true);
+    assert.equal(warnings.includes("before window contains no samples"), true);
+    assert.equal(warnings.includes("after window contains no samples"), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

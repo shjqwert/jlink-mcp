@@ -12,7 +12,7 @@ import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { encodeHssValues } from "./hss-typed-value";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 
-test("MVP-B fake backend completes scalar, array element, and array slice write workflow", async () => {
+test("MVP-B fake/injected memoryIo covers scalar write and draft array write paths", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -45,6 +45,16 @@ test("MVP-B fake backend completes scalar, array element, and array slice write 
     const scalarExec = await service.variableWriteExecute({ writePlanId: scalarPlan.data!.writePlanId });
     assert.equal(scalarExec.ok, true);
     assert.equal(scalarExec.data!.readback, 120);
+    assert.deepEqual(scalarExec.data!.queueStages?.map((record) => record.stage).filter((stage) => ["PRE_READ_OLD", "WRITING", "READBACK"].includes(stage)), ["PRE_READ_OLD", "WRITING", "READBACK"]);
+    const r3Plan = await service.variableWritePlan({ captureId, targetRef: { kind: "scalar", path: "Debug_R3" }, value: 1 });
+    assert.equal(r3Plan.ok, true);
+    assert.equal(r3Plan.data!.risk, "R3");
+    assert.equal(r3Plan.data!.executable, false);
+    const r3Execute = await service.variableWriteExecute({ writePlanId: r3Plan.data!.writePlanId });
+    assert.equal(r3Execute.ok, false);
+    assert.equal(r3Execute.error?.code, HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE);
+    assert.equal(r3Execute.error?.details.operationPlanRequired, true);
+    assert.deepEqual([...memory.get(0x20000008, 4)], [...Buffer.alloc(4)]);
     const elementPlan = await service.variableWritePlan({ captureId, targetRef: { kind: "array_element", path: "Debug_TargetTable", index: 2 }, value: 120 });
     const elementExec = await service.variableWriteExecute({ writePlanId: elementPlan.data!.writePlanId });
     assert.equal(elementExec.data!.readback, 120);
@@ -68,6 +78,8 @@ test("MVP-B fake backend completes scalar, array element, and array slice write 
     const audit = await readAudit(root);
     assert.match(audit, /variable_write_plan/);
     assert.match(audit, /variable_write_execute/);
+    assert.match(audit, /operationPlanRequired/);
+    assert.match(audit, /PRE_READ_OLD/);
   } finally {
     await service.dispose();
     probe.dispose();
@@ -262,6 +274,7 @@ async function writeProject(root: string): Promise<void> {
   await writeFile(join(exe, "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
   await writeFile(join(list, "FOC_SCM.map"), [
     "Debug_IqRef              0x2000'0000     0x4  Data  Gb  app.o [1]",
+    "Debug_R3                 0x2000'0008     0x4  Data  Gb  app.o [1]",
     "Debug_TargetTable        0x2000'0010     0x8  Data  Gb  app.o [1]",
     "Debug_ProfileTable       0x2000'0020     0x20 Data  Gb  app.o [1]",
   ].join("\n"), "utf8");
@@ -274,6 +287,7 @@ async function writePolicy(root: string): Promise<void> {
     requireReadback: true,
     variableWriteAllowlist: [
       { path: "Debug_IqRef", kind: "scalar", type: "int32", min: -1000, max: 1000, maxWriteOps: 3 },
+      { path: "Debug_R3", kind: "scalar", type: "int32", risk: "R3", min: -1000, max: 1000, maxWriteOps: 1 },
       { path: "Debug_TargetTable", kind: "fixed_array", elementType: "int16", arrayLength: 4, allowedIndices: [2], min: -1000, max: 1000, maxWriteOps: 3 },
       { path: "Debug_ProfileTable", kind: "fixed_array", elementType: "int16", arrayLength: 16, allowedIndexRange: { start: 4, end: 7 }, min: -1000, max: 1000, allowArraySliceWrite: true, maxElementsPerWrite: 4, maxElementsTotal: 4, maxWriteOps: 3 },
     ],

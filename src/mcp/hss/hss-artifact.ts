@@ -13,6 +13,7 @@ export interface HssSampleRecord {
   sampleIndex: bigint;
   timestampTicks: bigint;
   statusFlags: number;
+  effectiveStatusFlags?: number;
   rawValues: number[];
 }
 
@@ -231,7 +232,7 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
   const selected = selectSymbols(metadata.symbols, input.variables);
   const eventWindow = input.mode === "event_window" ? eventWindowSelection(records, metadata.events, input) : undefined;
   const filteredByTime = eventWindow ? eventWindow.records : filterByTime(records, input.startSec, input.endSec);
-  const filtered = filterByFlags(filteredByTime, input.flagFilter);
+  const filtered = eventWindow ? filteredByTime : filterByFlags(filteredByTime, input.flagFilter);
   const buckets = bucketRecords(filtered, selected, metadata.sampling.actualRateHz, input.buckets ?? 100);
   const rawSamples = input.includeRawSamples ? decimateRaw(filtered, selected, input.maxSamples ?? 10000) : undefined;
   const warnings = input.includeRawSamples && rawSamples && rawSamples.length < filtered.length
@@ -250,13 +251,7 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
     semanticValidationStatus: metadata.semanticValidationStatus,
     payloadValidationStatus: metadata.payloadValidationStatus,
     layout: metadata.layout,
-    eventWindow: eventWindow ? {
-      eventId: input.eventId,
-      startSec: eventWindow.startUs / 1_000_000,
-      endSec: eventWindow.endUs / 1_000_000,
-      sampleCount: filtered.length,
-      summary: summarizeRecords(filtered, selected),
-    } : undefined,
+    eventWindow: eventWindow ? eventWindowView(eventWindow, selected) : undefined,
     warnings,
     hmC095: input.hmC095Profile === false ? undefined : hmC095Validation(records, metadata.symbols, metadata.sampling.hssIndexRateHz || metadata.sampling.actualRateHz || metadata.sampling.requestedRateHz, metadata),
   };
@@ -278,8 +273,15 @@ export async function exportHssCapture(input: { captureId: string; metadataFile?
   if (await crc32File(segmentFile) !== segment.crc32) throw new HssError(HSS_ERROR.HSS_CRC_MISMATCH, "capture segment CRC mismatch");
   const intervals = await readHssFlagIntervals(metadataFile);
   const records = input.eventAware ? applyFlagOverlays(await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize), intervals) : await readHssRecords(segmentFile, metadata.symbols.length, segment.recordSize);
-  const exportRecords = input.eventAware && input.eventId
-    ? eventWindowSelection(records, metadata.events, { captureId: input.captureId, eventId: input.eventId, mode: "event_window", windowBeforeMs: input.windowBeforeMs, windowAfterMs: input.windowAfterMs }).records
+  const exportWindow = input.eventAware && input.eventId
+    ? eventWindowSelection(records, metadata.events, { captureId: input.captureId, eventId: input.eventId, mode: "event_window", windowBeforeMs: input.windowBeforeMs, windowAfterMs: input.windowAfterMs })
+    : undefined;
+  const firstTicksForExport = records[0]?.timestampTicks ?? 0n;
+  const exportRecords = exportWindow
+    ? records.filter((record) => {
+      const timeUs = sampleTimeUs(record, firstTicksForExport);
+      return timeUs >= exportWindow.startUs && timeUs <= exportWindow.endUs;
+    })
     : records;
   const selected = selectSymbols(metadata.symbols, input.variables);
   const csvFile = nextCsvFile(paths.exportsDir, input.captureId);
@@ -292,15 +294,16 @@ export async function exportHssCapture(input: { captureId: string; metadataFile?
       await writeLine(stream, ["sampleIndex", "timeUs", "statusFlags", "effectiveStatusFlags", "eventMarker", "eventId", ...selected.map(({ symbol }) => symbol.name)].join(",") + "\n");
       const firstTicks = records[0]?.timestampTicks ?? 0n;
       for (const record of exportRecords) {
-        const timeUs = Number(record.timestampTicks - firstTicks) / 1000;
-        const marker = eventMarker(record.statusFlags);
+        const timeUs = sampleTimeUs(record, firstTicks);
+        const marker = eventMarker(record, timeUs, metadata.events, intervals, exportWindow?.event);
+        const eventId = eventIdForTime(timeUs, metadata.events, intervals, exportWindow?.event);
         await writeLine(stream, [
           record.sampleIndex.toString(),
           String(timeUs),
           String(record.statusFlags),
-          String(record.statusFlags),
+          String(effectiveFlags(record)),
           marker,
-          eventIdForTime(timeUs, intervals) ?? "",
+          eventId ?? "",
           ...selected.map(({ index, symbol }) => String(decodeValue(symbol.type, record.rawValues[index]))),
         ].join(",") + "\n");
       }
@@ -540,7 +543,7 @@ function decimateRaw(records: HssSampleRecord[], selected: Array<{ symbol: HssRe
     sampleIndex: record.sampleIndex.toString(),
     timeSec: Number(record.timestampTicks - first) / 1_000_000_000,
     statusFlags: record.statusFlags,
-    effectiveStatusFlags: record.statusFlags,
+    effectiveStatusFlags: effectiveFlags(record),
     values: Object.fromEntries(selected.map(({ symbol, index }) => [symbol.name, decodeValue(symbol.type, record.rawValues[index])])),
   }));
 }
@@ -550,39 +553,92 @@ function applyFlagOverlays(records: HssSampleRecord[], intervals: NonNullable<Hs
   const firstTicks = records[0].timestampTicks;
   return records.map((record) => ({
     ...record,
-    statusFlags: effectiveHssStatusFlags(record.statusFlags, Number(record.timestampTicks - firstTicks) / 1000, intervals),
+    effectiveStatusFlags: effectiveHssStatusFlags(record.statusFlags, sampleTimeUs(record, firstTicks), intervals),
   }));
 }
 
-function eventWindowSelection(records: HssSampleRecord[], events: Array<Record<string, unknown>>, input: HssQueryInput): { records: HssSampleRecord[]; startUs: number; endUs: number; warnings: string[] } {
+function effectiveFlags(record: HssSampleRecord): number {
+  return record.effectiveStatusFlags ?? record.statusFlags;
+}
+
+function sampleTimeUs(record: HssSampleRecord, firstTicks: bigint): number {
+  return Number(record.timestampTicks - firstTicks) / 1000;
+}
+
+function countFlag(records: HssSampleRecord[], flag: number): number {
+  return records.filter((record) => (effectiveFlags(record) & flag) !== 0).length;
+}
+
+interface EventWindowSelection {
+  event: Record<string, unknown>;
+  records: HssSampleRecord[];
+  beforeRecords: HssSampleRecord[];
+  afterRecords: HssSampleRecord[];
+  startUs: number;
+  eventUs: number;
+  endUs: number;
+  quality: {
+    excludedSamples: number;
+    writeNearbySamples: number;
+    writeInProgressSamples: number;
+    backendBusySamples: number;
+    warnings: string[];
+  };
+  warnings: string[];
+}
+
+function eventWindowSelection(records: HssSampleRecord[], events: Array<Record<string, unknown>>, input: HssQueryInput): EventWindowSelection {
   if (!input.eventId) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "eventId is required for event_window query");
   const event = events.find((candidate) => candidate.type === "variable_write" && candidate.eventId === input.eventId);
   if (!event) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture event was not found", { eventId: input.eventId });
   const firstTicks = records[0]?.timestampTicks ?? 0n;
-  const bySampleIndex = typeof event.sampleIndexNear === "number"
-    ? records.find((record) => Number(record.sampleIndex) === event.sampleIndexNear)
-    : undefined;
-  const centerUs = bySampleIndex
-    ? Number(bySampleIndex.timestampTicks - firstTicks) / 1000
-    : Number(event.writeStartUs ?? 0);
+  const centerUs = Number(event.captureWriteStartUs ?? event.writeStartUs ?? 0);
   const startUs = Math.max(0, centerUs - (input.windowBeforeMs ?? 100) * 1000);
   const endUs = centerUs + (input.windowAfterMs ?? 100) * 1000;
-  const selected = records.filter((record) => {
-    const timeUs = Number(record.timestampTicks - firstTicks) / 1000;
-    return timeUs >= startUs && timeUs <= endUs;
+  const beforeCandidates = records.filter((record) => {
+    const timeUs = sampleTimeUs(record, firstTicks);
+    return timeUs >= startUs && timeUs < centerUs;
   });
+  const afterCandidates = records.filter((record) => {
+    const timeUs = sampleTimeUs(record, firstTicks);
+    return timeUs > centerUs && timeUs <= endUs;
+  });
+  const beforeRecords = filterByFlags(beforeCandidates, input.flagFilter);
+  const afterRecords = filterByFlags(afterCandidates, input.flagFilter);
+  const selected = [...beforeRecords, ...afterRecords];
+  const candidates = [...beforeCandidates, ...afterCandidates];
   const warnings: string[] = [];
   if (!selected.length) warnings.push("event window contains no samples");
-  if (records.length && startUs < Number(records[0].timestampTicks - firstTicks) / 1000) warnings.push("before window is incomplete");
-  if (records.length && endUs > Number(records.at(-1)!.timestampTicks - firstTicks) / 1000) warnings.push("after window is incomplete");
-  return { records: selected, startUs, endUs, warnings };
+  if (!beforeRecords.length) warnings.push("before window contains no samples");
+  if (!afterRecords.length) warnings.push("after window contains no samples");
+  if (records.length && startUs < sampleTimeUs(records[0], firstTicks)) warnings.push("before window is incomplete");
+  if (records.length && endUs > sampleTimeUs(records.at(-1)!, firstTicks)) warnings.push("after window is incomplete");
+  const qualityWarnings = [...warnings];
+  return {
+    event,
+    records: selected,
+    beforeRecords,
+    afterRecords,
+    startUs,
+    eventUs: centerUs,
+    endUs,
+    warnings,
+    quality: {
+      excludedSamples: candidates.length - selected.length,
+      writeNearbySamples: countFlag(candidates, HSS_STATUS_FLAGS.write_nearby),
+      writeInProgressSamples: countFlag(candidates, HSS_STATUS_FLAGS.write_in_progress),
+      backendBusySamples: countFlag(candidates, HSS_STATUS_FLAGS.backend_busy),
+      warnings: qualityWarnings,
+    },
+  };
 }
 
 function filterByFlags(records: HssSampleRecord[], flagFilter?: HssQueryInput["flagFilter"]): HssSampleRecord[] {
-  const exclude = flagFilter?.exclude ?? [];
+  const exclude = [...(flagFilter?.exclude ?? [])];
+  if (flagFilter?.includeNearby === false && !exclude.includes("write_nearby")) exclude.push("write_nearby");
   if (!exclude.length) return records;
   const mask = exclude.reduce((flags, name) => flags | HSS_STATUS_FLAGS[name], 0);
-  return records.filter((record) => (record.statusFlags & mask) === 0);
+  return records.filter((record) => (effectiveFlags(record) & mask) === 0);
 }
 
 function summarizeRecords(records: HssSampleRecord[], selected: Array<{ symbol: HssResolvedSymbol; index: number }>): Record<string, unknown> {
@@ -601,15 +657,65 @@ function summarizeRecords(records: HssSampleRecord[], selected: Array<{ symbol: 
   }));
 }
 
-function eventMarker(flags: number): string {
+function eventWindowView(window: EventWindowSelection, selected: Array<{ symbol: HssResolvedSymbol; index: number }>): Record<string, unknown> {
+  const before = windowSide(window.beforeRecords, selected, window.startUs, window.eventUs);
+  const after = windowSide(window.afterRecords, selected, window.eventUs, window.endUs);
+  return {
+    event: window.event,
+    before,
+    after,
+    delta: eventWindowDelta(window.beforeRecords, window.afterRecords, selected),
+    quality: window.quality,
+    eventId: window.event.eventId,
+    startSec: window.startUs / 1_000_000,
+    endSec: window.endUs / 1_000_000,
+    sampleCount: window.records.length,
+    summary: summarizeRecords(window.records, selected),
+  };
+}
+
+function windowSide(records: HssSampleRecord[], selected: Array<{ symbol: HssResolvedSymbol; index: number }>, startUs: number, endUs: number): Record<string, unknown> {
+  return {
+    sampleStart: records.length ? Number(records[0].sampleIndex) : -1,
+    sampleEnd: records.length ? Number(records.at(-1)!.sampleIndex) : -1,
+    sampleCount: records.length,
+    durationMs: Math.max(0, endUs - startUs) / 1000,
+    summary: summarizeRecords(records, selected),
+  };
+}
+
+function eventWindowDelta(beforeRecords: HssSampleRecord[], afterRecords: HssSampleRecord[], selected: Array<{ symbol: HssResolvedSymbol; index: number }>): Record<string, unknown> {
+  if (!beforeRecords.length || !afterRecords.length) return {};
+  return Object.fromEntries(selected.map(({ symbol, index }) => {
+    const beforeValue = decodeValue(symbol.type, beforeRecords.at(-1)!.rawValues[index]);
+    const afterValue = decodeValue(symbol.type, afterRecords[0].rawValues[index]);
+    return [symbol.name, { before: beforeValue, after: afterValue, delta: afterValue - beforeValue }];
+  }));
+}
+
+function eventMarker(record: HssSampleRecord, timeUs: number, events: Array<Record<string, unknown>>, intervals: NonNullable<HssCaptureMetadata["flagIntervals"]>, selectedEvent?: Record<string, unknown>): string {
+  const event = selectedEvent ?? events.find((candidate) => candidate.type === "variable_write" && Number(candidate.captureWriteStartUs ?? candidate.writeStartUs ?? -1) === timeUs);
+  const flags = effectiveFlags(record);
+  if (event && Number(event.captureWriteStartUs ?? event.writeStartUs ?? -1) === timeUs) return "variable_write";
   if ((flags & HSS_STATUS_FLAGS.backend_busy) !== 0) return "backend_busy";
   if ((flags & HSS_STATUS_FLAGS.write_in_progress) !== 0) return "write_in_progress";
   if ((flags & HSS_STATUS_FLAGS.write_nearby) !== 0) return "write_nearby";
+  if (selectedEvent) {
+    const eventUs = Number(selectedEvent.captureWriteStartUs ?? selectedEvent.writeStartUs ?? 0);
+    if (timeUs < eventUs) return "before_window";
+    if (timeUs > eventUs) return "after_window";
+  }
+  void intervals;
   return "none";
 }
 
-function eventIdForTime(timeUs: number, intervals: NonNullable<HssCaptureMetadata["flagIntervals"]>): string | undefined {
-  return intervals.find((interval) => timeUs >= interval.startUs && timeUs <= interval.endUs)?.eventId;
+function eventIdForTime(timeUs: number, events: Array<Record<string, unknown>>, intervals: NonNullable<HssCaptureMetadata["flagIntervals"]>, selectedEvent?: Record<string, unknown>): string | undefined {
+  if (selectedEvent) {
+    void timeUs;
+    return String(selectedEvent.eventId ?? "");
+  }
+  const direct = events.find((event) => event.type === "variable_write" && Number(event.captureWriteStartUs ?? event.writeStartUs ?? -1) === timeUs);
+  return direct?.eventId as string | undefined ?? intervals.find((interval) => timeUs >= interval.startUs && timeUs <= interval.endUs)?.eventId;
 }
 
 function decodeValue(type: HssScalarType, raw: number): number {

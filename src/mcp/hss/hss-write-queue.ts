@@ -1,25 +1,31 @@
 import { HSS_ERROR, HssError } from "./hss-errors";
 
-export type HssWriteQueueState = "IDLE" | "QUEUED" | "DONE" | "FAILED";
+export type HssWriteQueueState = "IDLE" | "QUEUED" | "PRE_READ_OLD" | "WRITING" | "READBACK" | "EVENT_APPEND" | "FLAG_APPEND" | "AUDIT_APPEND" | "DONE" | "FAILED";
+export interface HssWriteQueueStageRecord {
+  stage: HssWriteQueueState;
+  timeUs: number;
+}
 
 export class HssCaptureWriteQueue {
   private busy = false;
   private stopping = false;
   private inFlight: Promise<unknown> | null = null;
+  private readonly stageHistory: HssWriteQueueStageRecord[] = [];
   state: HssWriteQueueState = "IDLE";
 
   async run<T>(job: () => Promise<T>): Promise<T> {
     if (this.stopping) throw new HssError(HSS_ERROR.CAPTURE_STOPPING, "capture is stopping; new writes are rejected");
     if (this.busy) throw new HssError(HSS_ERROR.CAPTURE_WRITE_BUSY, "capture write queue is busy");
     this.busy = true;
-    this.state = "QUEUED";
+    this.stageHistory.length = 0;
+    this.setStage("QUEUED");
     const inFlight = job()
       .then((value) => {
-        this.state = "DONE";
+        this.setStage("DONE");
         return value;
       })
       .catch((error) => {
-        this.state = "FAILED";
+        this.setStage("FAILED");
         throw error;
       })
       .finally(() => {
@@ -28,6 +34,15 @@ export class HssCaptureWriteQueue {
       });
     this.inFlight = inFlight;
     return inFlight;
+  }
+
+  setStage(stage: HssWriteQueueState): void {
+    this.state = stage;
+    this.stageHistory.push({ stage, timeUs: Date.now() * 1000 });
+  }
+
+  history(): HssWriteQueueStageRecord[] {
+    return this.stageHistory.map((record) => ({ ...record }));
   }
 
   beginStopping(): void {

@@ -18,6 +18,7 @@ test("HSS audit records MVP-B write fields at top level", async () => {
         targetRef: { kind: "scalar", path: "Debug_IqRef" },
         writeId: "wr",
         eventId: "evt",
+        queueStages: [{ stage: "PRE_READ_OLD", timeUs: 1 }, { stage: "WRITING", timeUs: 2 }, { stage: "READBACK", timeUs: 3 }],
         policyHash: "policy",
         symbolLayoutHash: "layout",
       },
@@ -31,6 +32,7 @@ test("HSS audit records MVP-B write fields at top level", async () => {
     assert.equal(record.risk, "R2");
     assert.equal(record.writeId, "wr");
     assert.equal(record.eventId, "evt");
+    assert.deepEqual(record.queueStages.map((stage: { stage: string }) => stage.stage), ["PRE_READ_OLD", "WRITING", "READBACK"]);
     assert.equal(record.policyHash, "policy");
     assert.equal(record.symbolLayoutHash, "layout");
     assert.equal(typeof record.timeUs, "number");

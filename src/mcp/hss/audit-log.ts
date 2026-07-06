@@ -35,6 +35,7 @@ function auditRecord(sessionId: string, operation: HssToolOperation, input: unkn
     errorCode: field(error, "code") ?? field(details, "errorCode"),
     writeId: field(data, "writeId") ?? field(details, "writeId"),
     eventId: field(data, "eventId") ?? field(details, "eventId"),
+    queueStages: field(data, "queueStages") ?? field(details, "queueStages"),
     policyHash: field(data, "policyHash") ?? field(details, "policyHash"),
     symbolLayoutHash: field(data, "symbolLayoutHash") ?? field(details, "symbolLayoutHash"),
     input,

@@ -21,6 +21,29 @@ test("capture write events append to jsonl and materialize into capture.json", a
     assert.equal(metadata.events[0].eventId, second.eventId);
     assert.equal(metadata.events[0].ok, false);
     assert.equal(metadata.events[0].errorCode, "READBACK_MISMATCH");
+    assert.equal(metadata.events[0].hostWriteStartUs, 1000);
+    assert.equal(metadata.events[0].captureWriteStartUs, 1000);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("capture write events store host and capture write time separately", async () => {
+  const root = await tempProject();
+  try {
+    const metadataFile = await writeMetadata(root);
+    const event = await appendHssWriteEvent(metadataFile, plan("Debug_IqRef"), result({
+      hostWriteStartUs: 10_000_050_000,
+      hostWriteEndUs: 10_000_055_000,
+      captureWriteStartUs: 50_000,
+      captureWriteEndUs: 55_000,
+      writeStartUs: 10_000_050_000,
+      writeEndUs: 10_000_055_000,
+    }), true);
+    assert.equal(event.hostWriteStartUs, 10_000_050_000);
+    assert.equal(event.hostWriteEndUs, 10_000_055_000);
+    assert.equal(event.captureWriteStartUs, 50_000);
+    assert.equal(event.captureWriteEndUs, 55_000);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -55,7 +55,10 @@ export async function appendHssWriteEvent(metadataFile: string, plan: HssVariabl
     readbackValues: result?.readbackValues,
     readbackOk: result?.readbackOk ?? false,
     mismatches: result?.mismatches ?? [],
-    recovery: result?.recovery,
+    hostWriteStartUs: result?.hostWriteStartUs ?? result?.writeStartUs ?? Date.now() * 1000,
+    hostWriteEndUs: result?.hostWriteEndUs ?? result?.writeEndUs ?? Date.now() * 1000,
+    captureWriteStartUs: result?.captureWriteStartUs ?? result?.writeStartUs ?? 0,
+    captureWriteEndUs: result?.captureWriteEndUs ?? result?.writeEndUs ?? result?.writeStartUs ?? 0,
     writeStartUs: result?.writeStartUs ?? Date.now() * 1000,
     writeEndUs: result?.writeEndUs ?? Date.now() * 1000,
     sampleIndexNear: result?.sampleIndexNear ?? null,
@@ -80,7 +83,7 @@ export async function readHssCaptureEvents(metadataFile: string): Promise<HssWri
   return text.split(/\r?\n/)
     .filter(Boolean)
     .map((line) => JSON.parse(line) as HssWriteEvent)
-    .sort((left, right) => Number(left.writeStartUs ?? 0) - Number(right.writeStartUs ?? 0));
+    .sort((left, right) => Number(left.captureWriteStartUs ?? left.writeStartUs ?? 0) - Number(right.captureWriteStartUs ?? right.writeStartUs ?? 0));
 }
 
 export async function materializeHssCaptureEvents(metadataFile: string): Promise<void> {

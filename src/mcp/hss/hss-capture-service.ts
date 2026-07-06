@@ -344,25 +344,31 @@ export class HssCaptureService {
       return active.writeQueue.run(async () => {
         const io = this.options.memoryIo ?? new HelperHssVariableMemoryIo(active.writeRequestFile, active.writeResponseFile, active.captureId);
         try {
-          const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun));
+          const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun), (stage) => active.writeQueue.setStage(stage));
           this.attachSampleIndex(active, result);
           if (!input.dryRun) {
+            active.writeQueue.setStage("EVENT_APPEND");
             await appendHssWriteEvent(active.metadataFile, plan, result, true);
+            active.writeQueue.setStage("FLAG_APPEND");
             await appendHssWriteFlagIntervals(active.metadataFile, { eventId: result.eventId, writeStartUs: this.captureTimeUs(active, result), writeEndUs: this.captureTimeUs(active, result) + Math.max(1, result.writeEndUs - result.writeStartUs), requestedRateHz: active.plan.sampling.requestedRateHz });
             await materializeHssCaptureEvents(active.metadataFile);
             await materializeHssFlagIntervals(active.metadataFile);
             this.consumeWrite(plan);
             this.writePlans.markExecuted(writePlanId);
           }
+          result.queueStages = active.writeQueue.history();
           return result;
         } catch (error) {
           if (error instanceof HssError && error.details.writeIssued === true) {
             const maybeResult = "writeId" in error.details ? error.details as unknown as HssVariableWriteExecuteResult : undefined;
             if (maybeResult) this.attachSampleIndex(active, maybeResult);
+            active.writeQueue.setStage("EVENT_APPEND");
             await appendHssWriteEvent(active.metadataFile, plan, maybeResult, false, error.code);
+            active.writeQueue.setStage("FLAG_APPEND");
             if (maybeResult) await appendHssWriteFlagIntervals(active.metadataFile, { eventId: maybeResult.eventId, writeStartUs: this.captureTimeUs(active, maybeResult), writeEndUs: this.captureTimeUs(active, maybeResult) + Math.max(1, maybeResult.writeEndUs - maybeResult.writeStartUs), requestedRateHz: active.plan.sampling.requestedRateHz, backendBusy: error.code === HSS_ERROR.UNKNOWN_WRITE_STATE });
             await materializeHssCaptureEvents(active.metadataFile);
             await materializeHssFlagIntervals(active.metadataFile);
+            if (maybeResult) maybeResult.queueStages = active.writeQueue.history();
             this.consumeWrite(plan);
             this.writePlans.markExecuted(writePlanId);
           }
@@ -516,12 +522,15 @@ export class HssCaptureService {
   }
 
   private attachSampleIndex(active: ActiveCapture, result: HssVariableWriteExecuteResult): void {
-    const elapsedUs = Math.max(0, result.writeStartUs - active.startTimeUs);
-    result.sampleIndexNear = Math.max(0, Math.round(elapsedUs * active.plan.sampling.requestedRateHz / 1_000_000));
+    const hostStartUs = result.hostWriteStartUs ?? result.writeStartUs;
+    const hostEndUs = result.hostWriteEndUs ?? result.writeEndUs;
+    result.captureWriteStartUs = Math.max(0, hostStartUs - active.startTimeUs);
+    result.captureWriteEndUs = Math.max(result.captureWriteStartUs, hostEndUs - active.startTimeUs);
+    result.sampleIndexNear = Math.max(0, Math.round(result.captureWriteStartUs * active.plan.sampling.requestedRateHz / 1_000_000));
   }
 
   private captureTimeUs(active: ActiveCapture, result: HssVariableWriteExecuteResult): number {
-    return result.sampleIndexNear === null ? Math.max(0, result.writeStartUs - active.startTimeUs) : result.sampleIndexNear * 1_000_000 / active.plan.sampling.requestedRateHz;
+    return result.captureWriteStartUs ?? Math.max(0, (result.hostWriteStartUs ?? result.writeStartUs) - active.startTimeUs);
   }
 
   private async wrap<T>(operation: Parameters<typeof hssOk<T>>[0], input: unknown, fn: () => Promise<T> | T): Promise<HssEnvelope<T>> {

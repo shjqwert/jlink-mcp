@@ -18,7 +18,7 @@ test("hss_capture_export writes event-aware CSV without changing normal export",
     const segmentFile = join(captureDir, "capture_0001.bin");
     await writeFile(segmentFile, Buffer.concat(Array.from({ length: 6 }, (_, index) => encodeHssRecord({
       sampleIndex: BigInt(index),
-      timestampTicks: BigInt(index * 10_000),
+      timestampTicks: BigInt(index * 1_000_000),
       statusFlags: HSS_STATUS_FLAGS.valid,
       rawValues: [index],
     }, 1))));
@@ -26,15 +26,25 @@ test("hss_capture_export writes event-aware CSV without changing normal export",
     await writeMetadata(root, metadataFile, captureId, await crc32File(segmentFile));
     const result = writeResult(captureId);
     await appendHssWriteEvent(metadataFile, writePlan(captureId), result, true);
-    await appendHssWriteFlagIntervals(metadataFile, { eventId: result.eventId, writeStartUs: 20, writeEndUs: 30, requestedRateHz: 100000 });
+    await appendHssWriteFlagIntervals(metadataFile, { eventId: result.eventId, writeStartUs: 2000, writeEndUs: 3000, requestedRateHz: 100000 });
     await materializeHssCaptureEvents(metadataFile);
     await materializeHssFlagIntervals(metadataFile);
     const normal = await exportHssCapture({ captureId, metadataFile }, root);
     assert.match(await readFile(normal.csvFile as string, "utf8"), /^sampleIndex,timeSec,timestampTicks,statusFlags,Debug_IqRef/m);
-    const exported = await exportHssCapture({ captureId, metadataFile, eventAware: true, eventId: result.eventId, windowBeforeMs: 1, windowAfterMs: 1 }, root);
+    const exported = await exportHssCapture({ captureId, metadataFile, eventAware: true, eventId: result.eventId, windowBeforeMs: 5, windowAfterMs: 5 }, root);
     const csv = await readFile(exported.csvFile as string, "utf8");
     assert.match(csv, /^sampleIndex,timeUs,statusFlags,effectiveStatusFlags,eventMarker,eventId,Debug_IqRef/m);
-    assert.match(csv, /write_in_progress|write_nearby/);
+    const rows = csv.trim().split(/\r?\n/).slice(1).map((line) => {
+      const [sampleIndex, timeUs, statusFlags, effectiveStatusFlags, eventMarker, eventId] = line.split(",");
+      return { sampleIndex, timeUs, statusFlags, effectiveStatusFlags, eventMarker, eventId };
+    });
+    assert.equal(rows.some((row) => row.statusFlags !== row.effectiveStatusFlags), true);
+    assert.equal(rows.some((row) => row.eventMarker === "variable_write"), true);
+    assert.equal(rows.some((row) => row.eventMarker === "before_window"), true);
+    assert.equal(rows.some((row) => row.eventMarker === "after_window"), true);
+    assert.equal(rows.some((row) => row.eventMarker === "write_in_progress"), true);
+    assert.equal(rows.some((row) => row.eventMarker === "write_nearby"), true);
+    assert.equal(rows.every((row) => row.eventId === result.eventId), true);
     assert.notEqual(exported.csvFile, normal.csvFile);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -58,7 +68,7 @@ async function writeMetadata(root: string, metadataFile: string, captureId: stri
     target: { device: "Z20K146MC", interface: "SWD", speedKhz: 4000 },
     probe: {},
     symbols: [{ name: "Debug_IqRef", address: "0x20000000", size: 4, type: "int32", source: "iar-map" }],
-    sampling: { requestedRateHz: 100000, actualRateHz: 100000, hssIndexRateHz: 100000, hostObservedRateHz: 100000, helperReportedRateHz: 100000, helperActualRateHz: 100000, readMode: "periodic", durationSec: 0.00005, timestampSource: "qpc", timestampFrequency: "1000000000" },
+    sampling: { requestedRateHz: 100000, actualRateHz: 1000, hssIndexRateHz: 1000, hostObservedRateHz: 1000, helperReportedRateHz: 1000, helperActualRateHz: 1000, readMode: "periodic", durationSec: 0.005, timestampSource: "qpc", timestampFrequency: "1000000000" },
     layout: {},
     targetState: {},
     segments: [{ file: "capture_0001.bin", sampleStart: 0, sampleCount: 6, recordSize: 28, crc32 }],
@@ -107,8 +117,10 @@ function writeResult(captureId: string): HssVariableWriteExecuteResult {
     newValue: 2,
     readbackOk: true,
     mismatches: [],
-    writeStartUs: 20,
-    writeEndUs: 30,
+    captureWriteStartUs: 2000,
+    captureWriteEndUs: 3000,
+    writeStartUs: 2000,
+    writeEndUs: 3000,
     sampleIndexNear: null,
     risk: "R2",
     consumedWriteOps: 1,

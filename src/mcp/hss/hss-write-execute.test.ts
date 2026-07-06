@@ -32,14 +32,27 @@ test("variable_write_execute supports dryRun without memory changes", async () =
   assert.deepEqual([...memory.get(0x20000000, 4)], [...encodeHssValues("int32", [7], "little")]);
 });
 
-test("variable_write_execute reports old read, write, readback, and mismatch failures", async () => {
-  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), new FakeMemory({ failRead: true }), "little"), hssError(HSS_ERROR.OLD_VALUE_READ_FAILED));
+test("variable_write_execute reports old read, write, readback, and mismatch failures without rollback", async () => {
+  const oldReadFailed = new FakeMemory({ failRead: true });
+  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), oldReadFailed, "little"), hssError(HSS_ERROR.OLD_VALUE_READ_FAILED));
+  assert.equal(oldReadFailed.writeCount(), 0);
   await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), seeded({ failWrite: true }), "little"), hssError(HSS_ERROR.UNKNOWN_WRITE_STATE));
-  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), seeded({ failReadback: true }), "little"), hssError(HSS_ERROR.WRITE_RESTORE_FAILED));
+
+  const readbackFailed = seeded({ failReadback: true });
+  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), readbackFailed, "little"), hssError(HSS_ERROR.READBACK_FAILED, (details) => {
+    assert.equal(details.writeIssued, true);
+    assert.deepEqual(details.mismatches, []);
+  }));
+  assert.equal(readbackFailed.writeCount(), 1);
+  assert.deepEqual([...readbackFailed.get(0x20000000, 4)], [...encodeHssValues("int32", [1], "little")]);
+
   const mismatch = seeded({ corruptFirstReadback: true });
-  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), mismatch, "little"), hssError(HSS_ERROR.READBACK_MISMATCH));
-  assert.deepEqual([...mismatch.get(0x20000000, 4)], [...encodeHssValues("int32", [7], "little")]);
-  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), seeded({ corruptFirstReadback: true, failRestoreWrite: true }), "little"), hssError(HSS_ERROR.WRITE_RESTORE_FAILED));
+  await assert.rejects(() => executeHssVariableWritePlan(plan({ address: 0x20000000, dataType: "int32", byteSize: 4, newValue: 1, writeByteCount: 4 }), mismatch, "little"), hssError(HSS_ERROR.READBACK_MISMATCH, (details) => {
+    assert.equal(details.writeIssued, true);
+    assert.deepEqual(details.mismatches, [{ index: 0, expected: 1, readback: 254 }]);
+  }));
+  assert.equal(mismatch.writeCount(), 1);
+  assert.deepEqual([...mismatch.get(0x20000000, 4)], [...encodeHssValues("int32", [1], "little")]);
 });
 
 class FakeMemory implements HssVariableMemoryIo {
@@ -48,6 +61,7 @@ class FakeMemory implements HssVariableMemoryIo {
   constructor(private readonly options: { failRead?: boolean; failWrite?: boolean; failReadback?: boolean; corruptFirstReadback?: boolean; failRestoreWrite?: boolean } = {}) {}
   set(address: number, bytes: Buffer): void { this.memory.set(address, Buffer.from(bytes)); }
   get(address: number, length: number): Buffer { return Buffer.from(this.memory.get(address) ?? Buffer.alloc(length)); }
+  writeCount(): number { return this.writes; }
   async read(address: number, length: number): Promise<Buffer> {
     if (this.options.failRead || (this.options.failReadback && this.writes > 0)) throw new Error("read failed");
     const bytes = this.get(address, length);
@@ -92,6 +106,10 @@ function plan(overrides: Partial<HssVariableWritePlan>): HssVariableWritePlan {
   };
 }
 
-function hssError(code: string): (error: unknown) => boolean {
-  return (error: unknown) => error instanceof HssError && error.code === code;
+function hssError(code: string, inspect?: (details: Record<string, unknown>) => void): (error: unknown) => boolean {
+  return (error: unknown) => {
+    if (!(error instanceof HssError) || error.code !== code) return false;
+    inspect?.(error.details);
+    return true;
+  };
 }
