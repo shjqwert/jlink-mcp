@@ -40,6 +40,8 @@ test("hss_capture_export writes event-aware CSV without changing normal export",
     });
     assert.equal(rows.some((row) => row.statusFlags !== row.effectiveStatusFlags), true);
     assert.equal(rows.some((row) => row.eventMarker === "variable_write"), true);
+    assert.equal(rows.find((row) => row.eventMarker === "variable_write")?.sampleIndex, "3");
+    assert.equal(rows.some((row) => row.timeUs === "2500"), false);
     assert.equal(rows.some((row) => row.eventMarker === "before_window"), true);
     assert.equal(rows.some((row) => row.eventMarker === "after_window"), true);
     assert.equal(rows.some((row) => row.eventMarker === "write_in_progress"), true);
@@ -117,11 +119,11 @@ function writeResult(captureId: string): HssVariableWriteExecuteResult {
     newValue: 2,
     readbackOk: true,
     mismatches: [],
-    captureWriteStartUs: 2000,
+    captureWriteStartUs: 2500,
     captureWriteEndUs: 3000,
-    writeStartUs: 2000,
+    writeStartUs: 2500,
     writeEndUs: 3000,
-    sampleIndexNear: null,
+    sampleIndexNear: 3,
     risk: "R2",
     consumedWriteOps: 1,
     consumedElements: 1,

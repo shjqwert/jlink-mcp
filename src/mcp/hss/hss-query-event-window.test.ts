@@ -56,6 +56,11 @@ test("hss_capture_query supports event_window with effective flags and summary",
       after: { sampleStart: number; sampleEnd: number; sampleCount: number; summary: Record<string, { first: number; last: number }> };
       delta: Record<string, { before: number; after: number; delta: number }>;
       quality: { warnings: string[] };
+      requestedStartSec: number;
+      eventSec: number;
+      requestedEndSec: number;
+      firstSampleSec: number | null;
+      lastSampleSec: number | null;
     };
     assert.equal(window.sampleCount, 4);
     assert.equal(window.summary.Debug_IqRef.first, 3);
@@ -69,6 +74,11 @@ test("hss_capture_query supports event_window with effective flags and summary",
     assert.equal(window.after.sampleCount, 2);
     assert.deepEqual(window.delta.Debug_IqRef, { before: 4, after: 6, delta: 2 });
     assert.deepEqual(window.quality.warnings, []);
+    assert.equal(window.requestedStartSec, 0.03);
+    assert.equal(window.eventSec, 0.05);
+    assert.equal(window.requestedEndSec, 0.07);
+    assert.equal(window.firstSampleSec, 0);
+    assert.equal(window.lastSampleSec, 0.09);
     const raw = query.rawSamples as Array<{ effectiveStatusFlags: number }>;
     assert.equal(raw.some((sample) => (sample.effectiveStatusFlags & HSS_STATUS_FLAGS.write_in_progress) !== 0), false);
 
@@ -111,6 +121,7 @@ test("hss_capture_query event_window reports warnings when windows have no sampl
     assert.equal(warnings.includes("event window contains no samples"), true);
     assert.equal(warnings.includes("before window contains no samples"), true);
     assert.equal(warnings.includes("after window contains no samples"), true);
+    assert.equal(warnings.includes("event is after last captured sample"), true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

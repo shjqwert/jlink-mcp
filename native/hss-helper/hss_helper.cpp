@@ -1213,7 +1213,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string write_request_file = json_string(plan, "writeRequestFile");
   const std::string write_response_file = json_string(plan, "writeResponseFile");
   const std::string capture_id = json_string(plan, "captureId");
-  const std::string device = json_string(plan, "device", "Z20K146MC");
+  const std::string device = json_string(plan, "device", "");
   const std::string iface = json_string(plan, "interface", "SWD");
   const std::string serial_text = json_string(plan, "serial");
   const std::string read_mode = json_string(plan, "readMode", "periodic");
@@ -1224,6 +1224,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const auto symbols = json_symbols(plan);
   if (dll_utf8.empty() || output_file.empty() || capture_id.empty() || symbols.empty() || symbols.size() > 10 || requested_rate < 1 || duration_sec < 1) {
     error_json("HSS_PLAN_INVALID", "plan is missing required fields");
+    return 0;
+  }
+  if (device.empty() || device == "Unspecified") {
+    error_json("HSS_DEVICE_REQUIRED", "HSS capture requires an explicit concrete J-Link target device");
     return 0;
   }
   if (read_mode != "periodic" && read_mode != "drain") {

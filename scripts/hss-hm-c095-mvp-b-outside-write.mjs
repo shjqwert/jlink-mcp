@@ -5,13 +5,18 @@ import { HssCaptureService } from "../out/mcp/hss/hss-capture-service.js";
 
 const target = process.argv[2] ?? "g_hssDbgWriteProbe";
 const value = Number(process.argv[3] ?? 1);
+const device = process.env.JLINK_DEVICE ?? "Z20K146M";
 
 if (!Number.isFinite(value)) {
   console.error("value must be numeric");
   process.exit(2);
 }
+if (device !== "Z20K146M") {
+  console.error(`HM_C095 outside write requires JLINK_DEVICE=Z20K146M, got ${device}`);
+  process.exit(2);
+}
 
-const probe = new JLinkBackend({ device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+const probe = new JLinkBackend({ device, interface: "SWD", speed: 4000 }, new ProcessManager());
 const service = new HssCaptureService(probe, { cwd: process.cwd() });
 
 try {

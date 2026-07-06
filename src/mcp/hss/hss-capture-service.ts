@@ -57,6 +57,7 @@ interface ActiveCapture {
   startTimeUs: number;
   done: Promise<void>;
   stopTimedOut?: boolean;
+  helperExited?: boolean;
 }
 
 export class HssCaptureService {
@@ -82,9 +83,10 @@ export class HssCaptureService {
     return this.wrap("hss_capture_plan", input, async () => {
       await ensureHssProjectDirs(this.cwd());
       const probe = this.probe.getCaptureConfig();
+      const device = requireConcreteDevice(input.device ?? probe?.device, "hss_capture_plan");
       const capability = await hssCapabilityProbe({
         dllPath: input.dllPath,
-        device: input.device ?? probe?.device,
+        device,
         interface: input.interface ?? (probe?.interface as "SWD" | "JTAG" | undefined),
         speedKhz: input.speedKhz ?? probe?.speed,
         serial: input.serial ?? probe?.serialNumber,
@@ -107,8 +109,11 @@ export class HssCaptureService {
       const helperPath = resolveHssHelperPath(env, this.options.helperPath);
       if (!existsSync(helperPath)) throw new HssError(HSS_ERROR.HSS_HELPER_MISSING, "native HSS helper was not found", { helperPath });
       const probe = this.probe.getCaptureConfig();
+      const device = requireConcreteDevice(input.device ?? probe?.device, "hss_capture_start");
       const target = {
-        device: input.device ?? probe?.device ?? "Z20K146MC",
+        device,
+        requestedDevice: input.device ?? probe?.device,
+        resolvedDevice: device,
         interface: input.interface ?? probe?.interface ?? "SWD",
         speedKhz: input.speedKhz ?? probe?.speed ?? 4000,
       } as const;
@@ -118,10 +123,17 @@ export class HssCaptureService {
       const hss = capability.hss as {
         getCapsOk?: boolean;
         targetWasHalted?: boolean;
+        targetWasHaltedRaw?: number;
       };
       const targetWasHaltedBeforeCapture = Boolean(hss.targetWasHalted);
       if (targetWasHaltedBeforeCapture) {
-        throw new HssError(HSS_ERROR.HSS_TARGET_HALTED, "target is halted before HSS capture start", { targetWasHaltedBeforeCapture });
+        throw new HssError(HSS_ERROR.HSS_TARGET_HALTED, "target is halted before HSS capture start; resumeBeforeStart is disabled for MVP-B scalar stabilization", {
+          targetWasHaltedBeforeCapture,
+          targetWasHaltedRaw: hss.targetWasHaltedRaw,
+          resumeBeforeStart: Boolean(input.resumeBeforeStart),
+          requestedDevice: target.requestedDevice,
+          resolvedDevice: target.resolvedDevice,
+        });
       }
       const warnings: string[] = [];
 
@@ -146,6 +158,7 @@ export class HssCaptureService {
         readMode: input.readMode ?? plan.readMode,
         resumeBeforeStart: input.resumeBeforeStart ?? plan.resumeBeforeStart,
         targetWasHaltedBeforeCapture,
+        targetWasHaltedRaw: hss.targetWasHaltedRaw,
         warnings,
       });
       this.metadataFiles.set(plan.output.captureId, plan.output.metadataFile);
@@ -194,10 +207,12 @@ export class HssCaptureService {
         child.stdout.on("data", (data: Buffer) => { active.stdout += data.toString(); });
         child.stderr.on("data", (data: Buffer) => { active.stderr += data.toString(); });
         child.once("exit", (code) => {
+          active.helperExited = true;
           void this.finishActive(active, code).finally(resolveDone);
         });
         child.once("error", (error) => {
           active.stderr += error.message;
+          active.helperExited = true;
           void this.finishActive(active, -1).finally(resolveDone);
         });
       });
@@ -214,6 +229,7 @@ export class HssCaptureService {
         segments: [plan.output.firstSegmentFile],
         safety: HSS_SAFETY_FALSE,
         targetWasHaltedBeforeCapture,
+        targetWasHaltedRaw: hss.targetWasHaltedRaw,
         warnings,
       };
     });
@@ -310,6 +326,7 @@ export class HssCaptureService {
       }
       const active = this.active?.captureId === input.captureId ? this.active : null;
       if (!active) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "active HSS capture was not found", { captureId: input.captureId });
+      assertActiveWritable(active);
       if (!active.plan.artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "active HSS capture has no map file");
       const policy = await loadHssPolicy(this.cwd());
       return this.writePlans.put(createHssVariableWritePlan(input, {
@@ -329,6 +346,7 @@ export class HssCaptureService {
       if (!active) return this.executeOutsideWrite(input);
       const writePlanId = input.writePlanId;
       if (!writePlanId) throw new HssError(HSS_ERROR.ACTIVE_CAPTURE_WRITE_REQUIRES_CAPTURE_QUEUE, "active HSS capture writes require a queued write plan");
+      assertActiveWritable(active);
       if (!active.plan.artifact.mapFile) throw new HssError(HSS_ERROR.MAP_NOT_FOUND, "active HSS capture has no map file");
       const policy = await loadHssPolicy(this.cwd());
       const plan = this.writePlans.get(writePlanId, {
@@ -342,6 +360,7 @@ export class HssCaptureService {
         throw new HssError(HSS_ERROR.SYMBOL_KIND_UNSUPPORTED, "native helper capture-time writes support scalar targets only", { targetRef: plan.targetRef });
       }
       return active.writeQueue.run(async () => {
+        assertActiveWritable(active);
         const io = this.options.memoryIo ?? new HelperHssVariableMemoryIo(active.writeRequestFile, active.writeResponseFile, active.captureId);
         try {
           const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun), (stage) => active.writeQueue.setStage(stage));
@@ -578,6 +597,20 @@ function warningList(data: unknown): string[] {
 function enforceCapabilityRate(capability: Record<string, unknown>, requestedRateHz: number): void {
   void capability;
   void requestedRateHz;
+}
+
+function requireConcreteDevice(device: string | undefined, operation: string): string {
+  const trimmed = device?.trim();
+  if (!trimmed || trimmed === "Unspecified") {
+    throw new HssError(HSS_ERROR.HSS_DEVICE_REQUIRED, "HSS capture requires an explicit concrete J-Link target device", { operation, requestedDevice: device });
+  }
+  return trimmed;
+}
+
+function assertActiveWritable(active: ActiveCapture): void {
+  if (active.helperExited || active.child.exitCode !== null || active.child.killed) {
+    throw new HssError(HSS_ERROR.CAPTURE_NOT_ACTIVE, "active HSS capture helper is no longer running; writes after helper completion are rejected", { captureId: active.captureId });
+  }
 }
 
 interface LiveQuality {

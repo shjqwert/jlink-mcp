@@ -38,6 +38,7 @@ const durationSec = Number(args[1] ?? 3);
 const dllPath = args[2];
 const readMode = args[3] ?? "periodic";
 const resumeBeforeStart = args[4] === "resume";
+const device = process.env.JLINK_DEVICE ?? "Z20K146M";
 if (!Number.isInteger(rateHz) || rateHz < 1 || !Number.isInteger(durationSec) || durationSec < 1) {
   console.error("rateHz and durationSec must be positive integers");
   process.exit(2);
@@ -46,13 +47,18 @@ if (!["periodic", "drain"].includes(readMode)) {
   console.error("readMode must be periodic or drain");
   process.exit(2);
 }
+if (device !== "Z20K146M") {
+  console.error(`HM_C095 smoke requires JLINK_DEVICE=Z20K146M, got ${device}`);
+  process.exit(2);
+}
 
-const probe = new JLinkBackend({ device: "Z20K146MC", interface: "SWD", speed: 4000 }, new ProcessManager());
+const probe = new JLinkBackend({ device, interface: "SWD", speed: 4000 }, new ProcessManager());
 const service = new HssCaptureService(probe);
 
 try {
   const plan = await service.capturePlan({
     dllPath,
+    device,
     readMode,
     resumeBeforeStart,
     symbols: symbolSets[mode],
@@ -61,7 +67,7 @@ try {
   });
   console.log(JSON.stringify(plan, null, 2));
   if (!plan.ok) process.exit(1);
-  const start = await service.captureStart({ planId: plan.data.planId, dllPath, readMode, resumeBeforeStart });
+  const start = await service.captureStart({ planId: plan.data.planId, dllPath, device, readMode, resumeBeforeStart });
   console.log(JSON.stringify(start, null, 2));
   if (!start.ok) process.exit(1);
   const captureId = start.data.captureId;

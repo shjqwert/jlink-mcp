@@ -97,6 +97,8 @@ export interface HssCaptureMetadata {
   };
   target: {
     device: string;
+    requestedDevice?: string;
+    resolvedDevice?: string;
     interface: "SWD" | "JTAG";
     speedKhz: number;
   };
@@ -135,6 +137,7 @@ export interface HssCaptureMetadata {
   };
   targetState: {
     targetWasHaltedBeforeCapture: boolean;
+    targetWasHaltedRaw?: number;
     resumeBeforeStart: boolean;
     resumeIssued: boolean;
     targetWasHaltedAfterResume: boolean | null;

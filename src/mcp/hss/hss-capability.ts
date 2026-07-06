@@ -18,8 +18,10 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
   const getCapsAllowed = discovery.exportsFound;
   const getCaps = getCapsAllowed ? await hssDllGetCaps(input, options) : undefined;
   const caps = getCaps && getCaps.status === "ok" ? getCaps.caps as Record<string, unknown> : undefined;
-  const connectPreflight = preflight.connectPreflight as { targetWasHalted?: unknown } | undefined;
+  const connectPreflight = preflight.connectPreflight as { targetWasHalted?: unknown; targetWasHaltedRaw?: unknown } | undefined;
   const targetWasHalted = connectPreflight?.targetWasHalted === true;
+  const targetWasHaltedRaw = typeof connectPreflight?.targetWasHaltedRaw === "number" ? connectPreflight.targetWasHaltedRaw : undefined;
+  const requestedDevice = input.device ?? env.JLINK_DEVICE;
   const startReadStopCandidate = preflight.status === "candidate"
     && discovery.exportsFound
     && Boolean(preflight.helperExists);
@@ -30,7 +32,9 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
       dllPath: discovery.selectedDllPath,
       dllExists: discovery.dllExists,
       dllVersion: getCaps && getCaps.status === "ok" ? getCaps.dllVersion : undefined,
-      device: input.device ?? env.JLINK_DEVICE ?? "Z20K146MC",
+      device: requestedDevice,
+      requestedDevice,
+      resolvedDevice: requestedDevice,
       interface: input.interface ?? "SWD",
       speedKhz: input.speedKhz ?? Number(env.JLINK_MCP_HSS_SPEED_KHZ ?? 4000),
       probeSerial: input.serial,
@@ -44,6 +48,7 @@ export async function hssCapabilityProbe(input: HssDllPreflightInput = {}, optio
       maxBlocks: Number(caps?.maxBlocks ?? 0),
       maxFreqHz: Number(caps?.maxFreq ?? 0),
       targetWasHalted,
+      targetWasHaltedRaw,
       getCapsValidated,
       startReadStopValidated: false,
       startReadStopAttemptAllowed: startReadStopCandidate,
