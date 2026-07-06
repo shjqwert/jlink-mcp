@@ -655,6 +655,20 @@ static void write_text_file_a(const std::string& path, const std::string& text) 
   MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
+static void write_hss_diag(const std::string& path, const std::string& capture_id, const std::string& stage, uint64_t read_attempts = 0, uint64_t valid_samples = 0, int last_read_rc = 0) {
+  if (path.empty()) return;
+  std::ostringstream out;
+  out
+    << "{\"captureId\":\"" << escape(capture_id)
+    << "\",\"stage\":\"" << escape(stage)
+    << "\",\"timeNs\":" << now_ns()
+    << ",\"readAttempts\":" << read_attempts
+    << ",\"validSamples\":" << valid_samples
+    << ",\"lastReadReturnCode\":" << last_read_rc
+    << "}";
+  write_text_file_a(path, out.str());
+}
+
 static int connect_preflight(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
   HMODULE dll = LoadLibraryW(dll_path.c_str());
   const std::string dll_utf8 = narrow(dll_path);
@@ -1210,6 +1224,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string dll_utf8 = json_string(plan, "dllPath");
   const std::string output_file = json_string(plan, "outputFile");
   const std::string stop_file = json_string(plan, "stopFile");
+  const std::string diagnostic_file = json_string(plan, "diagnosticFile");
   const std::string write_request_file = json_string(plan, "writeRequestFile");
   const std::string write_response_file = json_string(plan, "writeResponseFile");
   const std::string capture_id = json_string(plan, "captureId");
@@ -1235,6 +1250,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
 
+  write_hss_diag(diagnostic_file, capture_id, "load_dll");
   const std::wstring dll_path(dll_utf8.begin(), dll_utf8.end());
   HMODULE dll = LoadLibraryW(dll_path.c_str());
   if (!dll) {
@@ -1276,7 +1292,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       return 0;
     }
   }
+  write_hss_diag(diagnostic_file, capture_id, "before_jlink_open");
   int open_rc = call_int0(arm_open, &crashed);
+  write_hss_diag(diagnostic_file, capture_id, "after_jlink_open");
   if (crashed || open_rc < 0) {
     FreeLibrary(dll);
     error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
@@ -1284,7 +1302,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   }
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
+  write_hss_diag(diagnostic_file, capture_id, "before_exec_device");
   (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  write_hss_diag(diagnostic_file, capture_id, "after_exec_device");
   if (crashed) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
@@ -1292,9 +1312,15 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
   const int tif = iface == "JTAG" ? 0 : 1;
+  write_hss_diag(diagnostic_file, capture_id, "before_tif_select");
   (void)call_int1(arm_tif, tif, &crashed);
+  write_hss_diag(diagnostic_file, capture_id, "after_tif_select");
+  write_hss_diag(diagnostic_file, capture_id, "before_set_speed");
   call_void1(arm_speed, speed, &crashed);
+  write_hss_diag(diagnostic_file, capture_id, "after_set_speed");
+  write_hss_diag(diagnostic_file, capture_id, "before_jlink_connect");
   int connect_rc = call_int0(arm_connect, &crashed);
+  write_hss_diag(diagnostic_file, capture_id, "after_jlink_connect");
   if (crashed || connect_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
@@ -1335,7 +1361,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const U32 hss_sample_header_bytes = 4;
   const U32 hss_sample_stride_bytes = hss_sample_header_bytes + bytes_per_sample;
   const U32 period_us = static_cast<U32>((1000000 / requested_rate) > 1 ? (1000000 / requested_rate) : 1);
+  write_hss_diag(diagnostic_file, capture_id, "before_hss_start");
   int start_rc = call_hss_start(hss_start, blocks.data(), static_cast<U32>(blocks.size()), period_us, &crashed);
+  write_hss_diag(diagnostic_file, capture_id, "after_hss_start");
   if (crashed || start_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
@@ -1400,8 +1428,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       }
     }
     std::fill(read_buffer.begin(), read_buffer.end(), 0xA5);
+    write_hss_diag(diagnostic_file, capture_id, "before_hss_read", read_attempts, valid_samples, last_read_rc);
     int read_rc = call_hss_read(hss_read, read_buffer.data(), read_buffer_bytes, &crashed);
     ++read_attempts;
+    write_hss_diag(diagnostic_file, capture_id, "after_hss_read", read_attempts, valid_samples, read_rc);
     const bool buffer_changed = hss_buffer_overwritten(read_buffer, 0xA5);
     const bool sample_prefix_changed = hss_sample_prefix_overwritten(read_buffer, hss_sample_stride_bytes, 0xA5);
     const bool header_changed = hss_range_overwritten(read_buffer, 0, hss_sample_header_bytes, 0xA5);
@@ -1472,7 +1502,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     write_record(out, sample++, now_ns(), 2U, values, &crc);
   }
   out.close();
+  write_hss_diag(diagnostic_file, capture_id, "before_hss_stop", read_attempts, valid_samples, last_read_rc);
   int stop_rc = call_hss_stop(hss_stop, &crashed);
+  write_hss_diag(diagnostic_file, capture_id, "after_hss_stop", read_attempts, valid_samples, last_read_rc);
   call_void0(arm_close, &crashed);
   FreeLibrary(dll);
   crc ^= 0xFFFFFFFFU;

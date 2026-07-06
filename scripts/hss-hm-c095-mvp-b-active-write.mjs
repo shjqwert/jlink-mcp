@@ -97,13 +97,13 @@ function classify(run) {
   const eventSampleCount = run.query?.data?.eventWindow?.sampleCount ?? 0;
   const eventOk = run.query?.ok === true && eventSampleCount > 0;
   const csvOk = run.exported?.ok === true && (run.exported.data?.rows ?? 0) > 0 && existsSync(run.exported.data?.csvFile ?? "");
-  const captureQualityStatus = qualityPass ? "pass" : run.stop ? "degraded" : "not_run";
-  const eventWindowStatus = eventOk ? "pass" : run.query ? "degraded" : "not_run";
-  const csvExportStatus = csvOk ? "pass" : run.exported ? "failed" : "not_run";
-  const writePathStatus = writeOk ? "pass" : "failed";
+  const captureQualityStatus = qualityPass ? "pass" : run.stop ? "fail" : "not_run";
+  const eventWindowStatus = eventOk ? "pass" : run.query ? "fail" : "not_run";
+  const csvExportStatus = csvOk ? "pass" : run.exported ? "fail" : "not_run";
+  const writePathStatus = writeOk ? "pass" : "fail";
   const overallStatus = writePathStatus === "pass" && captureQualityStatus === "pass" && eventWindowStatus === "pass" && csvExportStatus === "pass"
     ? "pass"
-    : writePathStatus === "pass" ? "degraded" : "failed";
+    : writePathStatus === "pass" && captureQualityStatus === "fail" ? "blocked_by_capture_quality" : "failed";
   return {
     fake: Boolean(options.fake),
     device,
@@ -128,6 +128,8 @@ function classify(run) {
       captureQuality: stopData.quality,
       transportStatus: stopData.transportStatus,
       dataQualityStatus: stopData.dataQualityStatus,
+      failures: stopData.failures,
+      helperResult: stopData.helperResult,
       eventWindow: run.query?.data?.eventWindow,
       warnings: [
         ...(run.start?.warnings ?? []),

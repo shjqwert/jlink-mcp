@@ -200,6 +200,7 @@ export async function hssCaptureStopFromMetadata(metadataFile: string): Promise<
   if (!existsSync(metadataFile)) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture metadata was not found", { metadataFile });
   const metadata = await readHssMetadata(metadataFile);
   const captureDir = dirname(metadataFile);
+  const helperResult = [...metadata.events].reverse().find((event) => event.type === "helperResult")?.helperResult;
   return {
     captureId: metadata.captureId,
     state: metadata.state,
@@ -212,6 +213,8 @@ export async function hssCaptureStopFromMetadata(metadataFile: string): Promise<
     quality: metadata.quality,
     safety: metadata.safety,
     targetState: metadata.targetState,
+    failures: metadata.failures,
+    helperResult,
     warnings: metadata.warnings,
   };
 }

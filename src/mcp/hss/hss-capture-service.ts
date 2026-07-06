@@ -48,6 +48,7 @@ interface ActiveCapture {
   metadataFile: string;
   segmentFile: string;
   stopFile: string;
+  diagnosticFile: string;
   writeRequestFile: string;
   writeResponseFile: string;
   child: ChildProcessWithoutNullStreams;
@@ -143,6 +144,7 @@ export class HssCaptureService {
       const owner = `hss:${plan.output.captureId}`;
       if (!this.probe.acquireExclusive(owner)) throw new HssError(HSS_ERROR.HSS_CAPTURE_ACTIVE, `probe is already owned by ${this.probe.getExclusiveOwner() ?? "another operation"}`);
       const stopFile = join(plan.output.outputDir, "stop.request");
+      const diagnosticFile = join(plan.output.outputDir, "capture.diag.json");
       const writeRequestFile = join(plan.output.outputDir, "write.request.json");
       const writeResponseFile = join(plan.output.outputDir, "write.response.json");
       await writeInitialMetadata({
@@ -176,6 +178,7 @@ export class HssCaptureService {
         resumeBeforeStart: input.resumeBeforeStart ?? plan.resumeBeforeStart,
         outputFile: plan.output.firstSegmentFile,
         stopFile,
+        diagnosticFile,
         writeRequestFile,
         writeResponseFile,
         requestedRateHz: plan.sampling.requestedRateHz,
@@ -194,6 +197,7 @@ export class HssCaptureService {
         metadataFile: plan.output.metadataFile,
         segmentFile: plan.output.firstSegmentFile,
         stopFile,
+        diagnosticFile,
         writeRequestFile,
         writeResponseFile,
         child,
@@ -479,6 +483,8 @@ export class HssCaptureService {
         helperResult = { status: "error", errorCode: HSS_ERROR.HSS_HELPER_BAD_JSON, exitCode: code, stdout: active.stdout, stderr: active.stderr, reason: failure };
       }
     }
+    const diagnostic = await readHelperDiagnostic(active.diagnosticFile);
+    if (diagnostic) helperResult = { ...helperResult, diagnostic };
     try {
       await finalizeMetadata({ metadataFile: active.metadataFile, state, segmentFile: active.segmentFile, helperResult, failure });
     } catch (error) {
@@ -674,5 +680,13 @@ async function raceWithTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+async function readHelperDiagnostic(file: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    return JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+  } catch {
+    return undefined;
   }
 }
