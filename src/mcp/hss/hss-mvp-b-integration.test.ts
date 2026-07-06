@@ -180,6 +180,30 @@ test("variable_write_execute supports outside-capture scalar writes and rejects 
   }
 });
 
+test("variable_write_plan rejects active capture after helper exit", async () => {
+  const root = await tempProject();
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, { cwd: root });
+  try {
+    const internals = service as unknown as { active: unknown };
+    internals.active = {
+      captureId: "exited-capture",
+      helperExited: true,
+    };
+
+    const plan = await service.variableWritePlan({ captureId: "exited-capture", targetRef: { kind: "scalar", path: "Debug_IqRef" }, value: 120 });
+
+    assert.equal(plan.ok, false);
+    assert.equal(plan.error?.code, HSS_ERROR.CAPTURE_NOT_ACTIVE);
+    internals.active = null;
+  } finally {
+    (service as unknown as { active: unknown }).active = null;
+    await service.dispose();
+    probe.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("hss_capture_stop timeout kills helper and finalizes failed metadata", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
