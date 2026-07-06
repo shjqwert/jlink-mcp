@@ -1,0 +1,27 @@
+{
+  "captureId": "aff3c4ca-ec18-48bd-b686-b8f176e39f90",
+  "dllPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\.tmp\\hss-active-write-1783352609065-6fd71b90f3ce58\\JLink_x64.dll",
+  "getCapsValidated": true,
+  "startReadStopValidated": false,
+  "targetWasHaltedBeforeCapture": false,
+  "device": "Z20K146M",
+  "interface": "SWD",
+  "speedKhz": 4000,
+  "readMode": "periodic",
+  "resumeBeforeStart": false,
+  "outputFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\.tmp\\hss-active-write-1783352609065-6fd71b90f3ce58\\.jlink-mcp\\captures\\aff3c4ca-ec18-48bd-b686-b8f176e39f90\\capture_0001.bin",
+  "stopFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\.tmp\\hss-active-write-1783352609065-6fd71b90f3ce58\\.jlink-mcp\\captures\\aff3c4ca-ec18-48bd-b686-b8f176e39f90\\stop.request",
+  "writeRequestFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\.tmp\\hss-active-write-1783352609065-6fd71b90f3ce58\\.jlink-mcp\\captures\\aff3c4ca-ec18-48bd-b686-b8f176e39f90\\write.request.json",
+  "writeResponseFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\.tmp\\hss-active-write-1783352609065-6fd71b90f3ce58\\.jlink-mcp\\captures\\aff3c4ca-ec18-48bd-b686-b8f176e39f90\\write.response.json",
+  "requestedRateHz": 100,
+  "durationSec": 3,
+  "symbols": [
+    {
+      "name": "Debug_IqRef",
+      "address": "0x20000000",
+      "size": 4,
+      "type": "int32",
+      "source": "iar-map"
+    }
+  ]
+}
