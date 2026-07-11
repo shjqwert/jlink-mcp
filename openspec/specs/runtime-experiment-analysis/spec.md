@@ -274,3 +274,50 @@ Fixtures SHALL cover:
 - **WHEN** tests run on the synthetic overshoot fixture
 - **THEN** the reported overshoot metric remains stable within the test tolerance.
 
+---
+
+### Requirement: Post-capture analysis returns actionable evidence
+
+Jlink-MCP SHALL provide post-capture analysis output that includes dynamic findings, evidence windows, confidence, and recommended next actions.
+
+#### Scenario: finding produced
+
+- **GIVEN** a saved capture contains enough evidence for an anomaly
+- **WHEN** post-capture analysis runs
+- **THEN** the result includes the finding type, involved signals, evidence time window, supporting values, confidence, and explanation.
+
+#### Scenario: next action recommended
+
+- **GIVEN** analysis finds an unresolved root-cause candidate
+- **WHEN** another workflow round is allowed
+- **THEN** the result recommends the next capture variables, write experiment, or stop condition.
+
+---
+
+### Requirement: BLDC analysis profile is optional and evidence-based
+
+Jlink-MCP SHALL provide an optional BLDC analysis profile for current-loop, speed-loop, and Hall/encoder angle and speed checks.
+
+#### Scenario: BLDC profile runs
+
+- **GIVEN** a saved capture has BLDC signal definitions
+- **WHEN** analysis runs with the `motor_bldc` profile
+- **THEN** Jlink-MCP analyzes current-loop tracking, speed-loop tracking, Hall/encoder angle consistency, Hall/encoder speed consistency, state, and fault signals where available.
+
+#### Scenario: missing BLDC signals
+
+- **GIVEN** a saved capture does not contain enough BLDC signals for one check
+- **WHEN** analysis runs with the `motor_bldc` profile
+- **THEN** Jlink-MCP returns a quality warning for that check
+- **AND** still runs checks that have enough evidence.
+
+---
+
+### Requirement: Analysis does not mutate hardware
+
+Post-capture analysis SHALL remain read-only with respect to hardware.
+
+#### Scenario: analysis after capture
+
+- **WHEN** post-capture analysis runs for a saved capture
+- **THEN** it does not connect to hardware, write variables, reset, halt, resume, flash, or start a new capture.

@@ -1,1 +1,0 @@
-{"version":2,"requireReadback":true,"variableWriteAllowlist":[{"path":"Debug_IqRef","kind":"scalar","type":"int32","min":-1000,"max":1000,"maxWriteOps":3}]}

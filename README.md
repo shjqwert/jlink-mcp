@@ -284,6 +284,10 @@ Windows x64 builds can capture ELF-resolved RAM scalars through the official J-L
 
 Saved fixtures and terminal capture artifacts can also be analyzed offline with generic experiment profiles and Runtime Evidence. See [docs/runtime-experiment-analysis.md](docs/runtime-experiment-analysis.md).
 
+### HSS MVP-B Scalar baseline
+
+MVP-B Scalar is the current release baseline for HM_C095 HSS capture-time writes: 1kHz read-only capture and 1kHz scalar active write/readback have passing evidence in [docs/hss-hm-c095-1khz-fix-verification.md](docs/hss-hm-c095-1khz-fix-verification.md). Production array writes are intentionally deferred to the next phase; keep generated `.tmp/` and `.jlink-mcp/captures|exports` artifacts out of git.
+
 ## Environment Variables
 
 ### J-Link

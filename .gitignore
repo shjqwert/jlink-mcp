@@ -1,8 +1,14 @@
 out/
 node_modules/
+.tmp/
+.jlink-mcp/captures/
+.jlink-mcp/exports/
+*.log
 native/capture-helper/build/
 native/capture-helper/bin/
 native/hss-helper/build/
 native/hss-helper/bin/
 *.vsix
 .vscode-test/
+.agent/runtime/
+.agent/REGISTRY.md
