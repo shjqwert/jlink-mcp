@@ -76,6 +76,20 @@ export async function appendHssWriteEvent(metadataFile: string, plan: HssVariabl
   return event;
 }
 
+export async function appendHssTargetControlEvent(metadataFile: string, event: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const normalized = {
+    eventId: event.eventId ?? `evt_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    type: "target_control",
+    ...event,
+  };
+  try {
+    await appendFile(hssEventsFile(metadataFile), JSON.stringify(normalized) + "\n", "utf8");
+  } catch (error) {
+    throw new HssError(HSS_ERROR.WRITE_EVENT_APPEND_FAILED, "failed to append capture target-control event", { metadataFile, reason: error instanceof Error ? error.message : String(error) });
+  }
+  return normalized;
+}
+
 export async function readHssCaptureEvents(metadataFile: string): Promise<HssWriteEvent[]> {
   const file = hssEventsFile(metadataFile);
   if (!existsSync(file)) return [];

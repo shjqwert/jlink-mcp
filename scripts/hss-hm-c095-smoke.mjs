@@ -77,7 +77,17 @@ try {
     console.log(JSON.stringify(status, null, 2));
     if (status.data && status.data.state !== "capturing") break;
   }
-  console.log(JSON.stringify(await service.captureQuery({ captureId, hmC095Profile: true }), null, 2));
+  const query = await service.captureQuery({ captureId, hmC095Profile: true });
+  console.log(JSON.stringify(query, null, 2));
+  const semantics = query.data?.hmC095;
+  if (!query.ok
+      || semantics?.counterPresent !== true
+      || semantics?.counterMonotonic !== true
+      || !(Number(semantics?.counterChangedRatio) > 0)
+      || semantics?.semanticPass !== true) {
+    console.error("HM_C095 HSS semantic acceptance requires a changing monotonic g_hssDbgCounterFocIsr");
+    process.exitCode = 1;
+  }
   console.log(JSON.stringify(await service.captureExport({ captureId }), null, 2));
 } finally {
   await service.dispose();

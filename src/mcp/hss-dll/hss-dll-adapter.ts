@@ -1,4 +1,5 @@
-import { spawn } from "child_process";
+import { execFileSync, spawn } from "child_process";
+import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import { HSS_CANDIDATE_FUNCTIONS, hssApiCandidateReport } from "./hss-api-candidate";
@@ -7,18 +8,42 @@ import { requireHssReadOnlyVariables } from "./hss-symbols";
 export interface HssDllDiscovery {
   searchPaths: string[];
   selectedDllPath?: string;
+  resolutionSource?: HssDllResolutionSource;
   dllExists: boolean;
+  runtimePlatform: string;
+  runtimeArchitecture: string;
+  architecture?: "x64" | "x86" | "unknown";
+  sha256?: string;
   exports: Record<string, boolean>;
   exportsFound: boolean;
+  identityValidated: boolean;
+  availability: "candidate" | "unavailable";
+  unavailableCode?: "HSS_PLATFORM_UNSUPPORTED" | "HSS_DLL_NOT_FOUND" | "HSS_DLL_INVALID_FILE" | "HSS_DLL_ARCH_UNSUPPORTED" | "HSS_DLL_EXPORTS_MISSING" | "HSS_DLL_IDENTITY_UNVALIDATED";
   officialSdkHeaderFound: false;
   publicPrototypeCandidate: true;
 }
 
-export interface HssHelperOptions {
+export type HssDllResolutionSource = "explicit" | "environment" | "registry" | "path" | "common";
+
+export interface HssDllResolverOptions {
+  registryInstallDirs?: string[];
+  commonInstallDirs?: string[];
+  validatedDllSha256?: readonly string[];
+  validatedRuntimeIdentitySha256?: readonly string[];
+  runtimePlatform?: string;
+  runtimeArchitecture?: string;
+  adapterPath?: string;
+  cwd?: string;
+  validatedJlinkScriptSha256?: readonly string[];
+  scriptIdentity?: HssScriptIdentity;
+}
+
+export interface HssHelperOptions extends HssDllResolverOptions {
   env?: Record<string, string | undefined>;
   helperPath?: string;
   helperArgsPrefix?: string[];
   timeoutMs?: number;
+  deferConnectPreflight?: boolean;
 }
 
 export interface HssDllPreflightInput {
@@ -27,6 +52,8 @@ export interface HssDllPreflightInput {
   interface?: "SWD" | "JTAG";
   speedKhz?: number;
   serial?: string;
+  jlinkScriptFile?: string;
+  approvedJlinkScriptSha256?: string;
 }
 
 export interface HssDllVariable {
@@ -36,69 +63,496 @@ export interface HssDllVariable {
   type?: string;
 }
 
-export function hssDllSearchPaths(env: Record<string, string | undefined> = process.env, explicit?: string): string[] {
-  const paths = [
-    explicit,
-    env.JLINK_MCP_HSS_DLL_PATH,
-    env.JLINK_INSTALL_DIR ? path.join(env.JLINK_INSTALL_DIR, "JLink_x64.dll") : undefined,
-    "C:\\Program Files\\SEGGER\\JLink\\JLink_x64.dll",
-    "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
-  ].filter((candidate): candidate is string => Boolean(candidate));
-  return [...new Set(paths)];
+export interface HssRuntimeIdentity {
+  dllPath?: string;
+  dllSha256?: string;
+  dllVersion?: string;
+  helperPath: string;
+  helperVersion?: string;
+  helperProtocolVersion?: number;
+  helperSha256?: string;
+  adapterPath: string;
+  adapterVersion: string;
+  adapterSha256?: string;
+  jlinkScriptFile?: string;
+  jlinkScriptSha256?: string;
+  jlinkScriptApprovalSha256?: string;
+  sha256?: string;
+  validated: boolean;
 }
 
-export function discoverHssDll(input: HssDllPreflightInput = {}, env: Record<string, string | undefined> = process.env): HssDllDiscovery {
-  const searchPaths = hssDllSearchPaths(env, input.dllPath);
-  const selectedDllPath = searchPaths.find((candidate) => fs.existsSync(candidate));
-  const text = selectedDllPath ? fs.readFileSync(selectedDllPath).toString("latin1") : "";
+export interface HssScriptIdentity {
+  path?: string;
+  sha256?: string;
+  approvalSha256?: string;
+  approvalSource?: "project-config" | "trusted-allowlist";
+  validated: boolean;
+  errorCode?: "HSS_JLINK_SCRIPT_REQUIRED" | "HSS_JLINK_SCRIPT_PATH_INVALID" | "HSS_JLINK_SCRIPT_MISSING" | "HSS_JLINK_SCRIPT_IDENTITY_UNVALIDATED" | "HSS_JLINK_SCRIPT_IDENTITY_CHANGED";
+  reason?: string;
+}
+
+export interface HssRuntimeVersions {
+  dllVersion: string;
+  helperVersion: string;
+  helperProtocolVersion: number;
+}
+
+interface HssDllCandidate {
+  path: string;
+  source: HssDllResolutionSource;
+}
+
+const VALIDATED_HSS_DLL_SHA256: readonly string[] = [];
+const VALIDATED_HSS_RUNTIME_IDENTITY_SHA256: readonly string[] = [];
+const VALIDATED_JLINK_SCRIPT_SHA256: readonly string[] = [];
+const HSS_ADAPTER_VERSION = "1";
+const fileHashes = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; sha256: string }>();
+
+export function hssDllSearchPaths(
+  env: Record<string, string | undefined> = process.env,
+  explicit?: string,
+  options: HssDllResolverOptions = {},
+): string[] {
+  return hssDllCandidates(env, explicit, options).map((candidate) => candidate.path);
+}
+
+export function discoverHssDll(
+  input: HssDllPreflightInput = {},
+  env: Record<string, string | undefined> = process.env,
+  options: HssDllResolverOptions = {},
+): HssDllDiscovery {
+  const candidates = hssDllCandidates(env, input.dllPath, options);
+  const selected = candidates.find((candidate) => fs.existsSync(candidate.path));
+  const selectedDllPath = selected?.path;
+  let invalidFile = false;
+  let data = Buffer.alloc(0);
+  if (selectedDllPath) {
+    try {
+      if (!fs.statSync(selectedDllPath).isFile()) invalidFile = true;
+      else data = fs.readFileSync(selectedDllPath);
+    } catch {
+      invalidFile = true;
+    }
+  }
+  const text = data.toString("latin1");
   const exports = Object.fromEntries(HSS_CANDIDATE_FUNCTIONS.map((name) => [name, text.includes(name)]));
+  const exportsFound = HSS_CANDIDATE_FUNCTIONS.every((name) => exports[name]);
+  const architecture = selectedDllPath ? peArchitecture(data) : undefined;
+  const sha256 = selectedDllPath && !invalidFile ? createHash("sha256").update(data).digest("hex") : undefined;
+  const validatedHashes = options.validatedDllSha256 ?? VALIDATED_HSS_DLL_SHA256;
+  const identityValidated = Boolean(sha256 && validatedHashes.some((hash) => hash.toLowerCase() === sha256));
+  const runtimePlatform = options.runtimePlatform ?? process.platform;
+  const runtimeArchitecture = options.runtimeArchitecture ?? process.arch;
+  const unavailableCode = runtimePlatform !== "win32" || runtimeArchitecture !== "x64"
+    ? "HSS_PLATFORM_UNSUPPORTED"
+    : !selectedDllPath
+      ? "HSS_DLL_NOT_FOUND"
+      : invalidFile
+        ? "HSS_DLL_INVALID_FILE"
+        : architecture !== "x64"
+          ? "HSS_DLL_ARCH_UNSUPPORTED"
+          : !exportsFound
+            ? "HSS_DLL_EXPORTS_MISSING"
+            : !identityValidated
+              ? "HSS_DLL_IDENTITY_UNVALIDATED"
+              : undefined;
   return {
-    searchPaths,
+    searchPaths: candidates.map((candidate) => candidate.path),
     selectedDllPath,
+    resolutionSource: selected?.source,
     dllExists: Boolean(selectedDllPath),
+    runtimePlatform,
+    runtimeArchitecture,
+    architecture,
+    sha256,
     exports,
-    exportsFound: HSS_CANDIDATE_FUNCTIONS.every((name) => exports[name]),
+    exportsFound,
+    identityValidated,
+    availability: unavailableCode ? "unavailable" : "candidate",
+    unavailableCode,
     officialSdkHeaderFound: false,
     publicPrototypeCandidate: true,
   };
 }
 
+export function resolveHssRuntimeIdentity(
+  discovery: Pick<HssDllDiscovery, "selectedDllPath" | "sha256">,
+  env: Record<string, string | undefined> = process.env,
+  options: HssHelperOptions = {},
+  versions: Partial<HssRuntimeVersions> = {},
+  fresh = false,
+): HssRuntimeIdentity {
+  const helperPath = resolveHssHelperPath(env, options.helperPath);
+  const adapterPath = options.adapterPath ?? __filename;
+  const dllSha256 = discovery.selectedDllPath && fresh ? fileSha256(discovery.selectedDllPath, true) : discovery.sha256;
+  const helperSha256 = fileSha256(helperPath, fresh);
+  const adapterSha256 = fileSha256(adapterPath, fresh);
+  const script = options.scriptIdentity;
+  const jlinkScriptSha256 = script?.path && fresh ? fileSha256(script.path, true) : script?.sha256;
+  const helperVersion = validVersion(versions.helperVersion);
+  const helperProtocolVersion = validProtocolVersion(versions.helperProtocolVersion);
+  const dllVersion = validVersion(versions.dllVersion);
+  const sha256 = dllSha256 && helperSha256 && adapterSha256 && helperVersion && helperProtocolVersion && dllVersion
+    && (!script || (script.validated && script.path && jlinkScriptSha256 && script.approvalSha256))
+    ? createHash("sha256").update(JSON.stringify({
+      dllSha256,
+      dllVersion,
+      helperVersion,
+      helperProtocolVersion,
+      helperSha256,
+      adapterVersion: HSS_ADAPTER_VERSION,
+      adapterSha256,
+      ...(script ? {
+        jlinkScriptFile: script.path,
+        jlinkScriptSha256,
+        jlinkScriptApprovalSha256: script.approvalSha256,
+      } : {}),
+    })).digest("hex")
+    : undefined;
+  const validatedHashes = options.validatedRuntimeIdentitySha256 ?? VALIDATED_HSS_RUNTIME_IDENTITY_SHA256;
+  return {
+    dllPath: discovery.selectedDllPath,
+    dllSha256,
+    dllVersion,
+    helperPath,
+    helperVersion,
+    helperProtocolVersion,
+    helperSha256,
+    adapterPath,
+    adapterVersion: HSS_ADAPTER_VERSION,
+    adapterSha256,
+    jlinkScriptFile: script?.path,
+    jlinkScriptSha256,
+    jlinkScriptApprovalSha256: script?.approvalSha256,
+    sha256,
+    validated: Boolean(sha256 && validatedHashes.some((hash) => hash.toLowerCase() === sha256)),
+  };
+}
+
+export function refreshHssRuntimeIdentity(identity: HssRuntimeIdentity, options: HssHelperOptions = {}): HssRuntimeIdentity {
+  return resolveHssRuntimeIdentity({
+    selectedDllPath: identity.dllPath,
+    sha256: identity.dllSha256,
+  }, options.env ?? process.env, {
+    ...options,
+    helperPath: identity.helperPath,
+    adapterPath: identity.adapterPath,
+    scriptIdentity: identity.jlinkScriptFile ? {
+      path: identity.jlinkScriptFile,
+      sha256: identity.jlinkScriptSha256,
+      approvalSha256: identity.jlinkScriptApprovalSha256,
+      validated: true,
+    } : undefined,
+  }, {
+    dllVersion: identity.dllVersion ?? "",
+    helperVersion: identity.helperVersion ?? "",
+    helperProtocolVersion: identity.helperProtocolVersion ?? 0,
+  }, true);
+}
+
+export function resolveHssScriptIdentity(
+  input: Pick<HssDllPreflightInput, "jlinkScriptFile" | "approvedJlinkScriptSha256">,
+  env: Record<string, string | undefined> = process.env,
+  options: HssHelperOptions = {},
+): HssScriptIdentity {
+  const config = readScriptApprovalConfig(options.cwd ?? process.cwd());
+  const requestedPath = input.jlinkScriptFile ?? env.JLINK_SCRIPT_FILE ?? config?.path;
+  if (!requestedPath) return { validated: false, errorCode: "HSS_JLINK_SCRIPT_REQUIRED", reason: "a trusted absolute J-Link ScriptFile is required" };
+  if (!path.isAbsolute(requestedPath) || /[\0\r\n]/.test(requestedPath) || Buffer.from(requestedPath, "utf8").toString("utf8") !== requestedPath) {
+    return { path: requestedPath, validated: false, errorCode: "HSS_JLINK_SCRIPT_PATH_INVALID", reason: "J-Link ScriptFile path must be absolute, canonical, and lossless UTF-8" };
+  }
+  let canonicalPath: string;
+  let actualSha256: string;
+  try {
+    const stat = fs.lstatSync(requestedPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular non-reparse file");
+    canonicalPath = fs.realpathSync.native(requestedPath);
+    const expectedCanonical = path.resolve(requestedPath);
+    if (normalizePath(canonicalPath) !== normalizePath(expectedCanonical)) throw new Error("path is not canonical");
+    actualSha256 = fileSha256(canonicalPath, true)!;
+  } catch (error) {
+    return { path: requestedPath, validated: false, errorCode: "HSS_JLINK_SCRIPT_MISSING", reason: error instanceof Error ? error.message : "J-Link ScriptFile is unavailable" };
+  }
+  const claimedSha256 = (input.approvedJlinkScriptSha256 ?? env.JLINK_SCRIPT_SHA256 ?? (config && normalizePath(config.path) === normalizePath(canonicalPath) ? config.sha256 : undefined))?.toLowerCase();
+  if (!claimedSha256 || claimedSha256 !== actualSha256) {
+    return { path: canonicalPath, sha256: actualSha256, validated: false, errorCode: "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", reason: "J-Link ScriptFile SHA-256 does not match the selected identity" };
+  }
+  const trusted = new Set([
+    ...(options.validatedJlinkScriptSha256 ?? VALIDATED_JLINK_SCRIPT_SHA256),
+    ...String(env.JLINK_SCRIPT_SHA256_ALLOWLIST ?? "").split(/[;,\s]+/).filter(Boolean),
+    ...(config && normalizePath(config.path) === normalizePath(canonicalPath) ? [config.sha256] : []),
+  ].map((value) => value.toLowerCase()));
+  if (!trusted.has(actualSha256)) {
+    return { path: canonicalPath, sha256: actualSha256, validated: false, errorCode: "HSS_JLINK_SCRIPT_IDENTITY_UNVALIDATED", reason: "caller-provided ScriptFile digest is not a trusted approval" };
+  }
+  const approvalSource = config && normalizePath(config.path) === normalizePath(canonicalPath) ? "project-config" : "trusted-allowlist";
+  return {
+    path: canonicalPath,
+    sha256: actualSha256,
+    approvalSha256: createHash("sha256").update(JSON.stringify({ approvalSource, path: canonicalPath, sha256: actualSha256 })).digest("hex"),
+    approvalSource,
+    validated: true,
+  };
+}
+
+export function hssRuntimeIdentityMatches(expected: HssRuntimeIdentity, actual: HssRuntimeIdentity): boolean {
+  return Boolean(expected.validated && actual.validated && expected.sha256 && expected.sha256 === actual.sha256);
+}
+
+export function isValidatedHssGetCapsResult(result: Record<string, unknown>, identity?: HssRuntimeIdentity): boolean {
+  const caps = result.caps as Record<string, unknown> | undefined;
+  const returnCode = result.returnCode;
+  return result.status === "ok"
+    && typeof returnCode === "number"
+    && Number.isInteger(returnCode)
+    && returnCode === 0
+    && typeof caps?.maxBlocks === "number"
+    && Number.isInteger(caps.maxBlocks)
+    && caps.maxBlocks > 0
+    && typeof caps?.maxFreq === "number"
+    && Number.isInteger(caps.maxFreq)
+    && caps.maxFreq > 0
+    && (!identity || (
+      result.helperVersion === identity.helperVersion
+      && result.helperProtocolVersion === identity.helperProtocolVersion
+      && validVersion(result.dllVersion) === identity.dllVersion
+      && result.jlinkScriptFile === identity.jlinkScriptFile
+      && result.jlinkScriptSha256 === identity.jlinkScriptSha256
+      && result.jlinkScriptReturnCode === 0
+    ));
+}
+
+function fileSha256(file: string, fresh = false): string | undefined {
+  try {
+    const stat = fs.statSync(file);
+    if (!stat.isFile()) return undefined;
+    const resolved = path.resolve(file);
+    const cached = fileHashes.get(resolved);
+    if (!fresh && cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs && cached.ctimeMs === stat.ctimeMs) return cached.sha256;
+    const sha256 = createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
+    fileHashes.set(resolved, { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, sha256 });
+    return sha256;
+  } catch {
+    return undefined;
+  }
+}
+
+function validVersion(value: unknown): string | undefined {
+  const normalized = typeof value === "number" && Number.isFinite(value) ? String(value) : typeof value === "string" ? value.trim() : "";
+  return normalized && normalized.toLowerCase() !== "unknown" ? normalized : undefined;
+}
+
+function validProtocolVersion(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+async function inspectRuntimeIdentity(
+  discovery: HssDllDiscovery,
+  env: Record<string, string | undefined>,
+  options: HssHelperOptions,
+): Promise<{
+  status: "ok" | "unavailable";
+  errorCode?: string;
+  reason?: string;
+  helperVersion: Record<string, unknown>;
+  helperPreflight: Record<string, unknown>;
+  runtimeIdentity: HssRuntimeIdentity;
+}> {
+  const helperVersion = await runHssHelperCommand("version", [], options);
+  const helperPreflight = discovery.selectedDllPath
+    ? await runHssHelperCommand("preflight", ["--dll", discovery.selectedDllPath], options)
+    : { status: "error", errorCode: "HSS_DLL_NOT_FOUND" };
+  const versions = {
+    helperVersion: validVersion(helperVersion.helperVersion) ?? "",
+    helperProtocolVersion: validProtocolVersion(helperVersion.helperProtocolVersion) ?? 0,
+    dllVersion: validVersion(helperPreflight.dllVersion) ?? "",
+  };
+  const runtimeIdentity = resolveHssRuntimeIdentity(discovery, env, options, versions, true);
+  if (helperVersion.status !== "ok" || !versions.helperVersion || !versions.helperProtocolVersion) {
+    return { status: "unavailable", errorCode: "HSS_HELPER_VERSION_INVALID", reason: "native helper did not report a valid version and protocol", helperVersion, helperPreflight, runtimeIdentity };
+  }
+  if (helperPreflight.status !== "ok" || helperPreflight.exportsFound !== true || !versions.dllVersion) {
+    return { status: "unavailable", errorCode: String(helperPreflight.errorCode ?? "HSS_DLL_EXPORTS_MISSING"), reason: String(helperPreflight.reason ?? "native preflight did not report valid exports and DLL version"), helperVersion, helperPreflight, runtimeIdentity };
+  }
+  if (!runtimeIdentity.validated) {
+    return { status: "unavailable", errorCode: "HSS_RUNTIME_IDENTITY_UNVALIDATED", reason: "the reported DLL/helper/adapter identity tuple has not passed the validation suite", helperVersion, helperPreflight, runtimeIdentity };
+  }
+  return { status: "ok", helperVersion, helperPreflight, runtimeIdentity };
+}
+
+function runtimeIdentityChanged(
+  base: Record<string, unknown>,
+  runtimeIdentity: HssRuntimeIdentity,
+  helperPreflight?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...base,
+    status: "unavailable",
+    hssStatus: "unavailable",
+    errorCode: "HSS_RUNTIME_IDENTITY_CHANGED",
+    reason: "DLL/helper/adapter identity changed across an execution boundary",
+    runtimeIdentity,
+    ...(helperPreflight ? { helperPreflight } : {}),
+  };
+}
+
+function hssDllCandidates(
+  env: Record<string, string | undefined>,
+  explicit: string | undefined,
+  options: HssDllResolverOptions,
+): HssDllCandidate[] {
+  const registryInstallDirs = options.registryInstallDirs ?? seggerRegistryInstallDirs();
+  const commonInstallDirs = options.commonInstallDirs ?? commonSeggerInstallDirs(env);
+  const candidates: HssDllCandidate[] = [
+    ...(explicit ? [{ path: explicit, source: "explicit" as const }] : []),
+    ...(env.JLINK_DLL_PATH ? [{ path: env.JLINK_DLL_PATH, source: "environment" as const }] : []),
+    ...registryInstallDirs.map((installDir) => ({ path: dllUnder(installDir), source: "registry" as const })),
+    ...pathJLinkInstallDirs(env).map((installDir) => ({ path: dllUnder(installDir), source: "path" as const })),
+    ...commonInstallDirs.map((installDir) => ({ path: dllUnder(installDir), source: "common" as const })),
+  ];
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = candidate.path.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function dllUnder(installDirOrDll: string): string {
+  return installDirOrDll.toLowerCase().endsWith(".dll")
+    ? installDirOrDll
+    : path.join(installDirOrDll, "JLink_x64.dll");
+}
+
+function seggerRegistryInstallDirs(): string[] {
+  if (process.platform !== "win32") return [];
+  const keys = [
+    "HKLM\\SOFTWARE\\SEGGER\\J-Link",
+    "HKCU\\SOFTWARE\\SEGGER\\J-Link",
+    "HKLM\\SOFTWARE\\WOW6432Node\\SEGGER\\J-Link",
+  ];
+  return keys.flatMap((key) => {
+    try {
+      const output = execFileSync("reg.exe", ["query", key, "/v", "InstallPath"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      const match = output.match(/^\s*InstallPath\s+REG_\w+\s+(.+?)\s*$/im);
+      return match?.[1] ? [match[1]] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function pathJLinkInstallDirs(env: Record<string, string | undefined>): string[] {
+  const pathValue = env.Path ?? env.PATH ?? "";
+  return pathValue.split(path.delimiter)
+    .map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+    .filter((entry) => entry.length > 0 && fs.existsSync(path.join(entry, "JLink.exe")));
+}
+
+function commonSeggerInstallDirs(env: Record<string, string | undefined>): string[] {
+  const programRoots = [
+    env.ProgramFiles ?? "C:\\Program Files",
+    env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
+  ];
+  return programRoots.flatMap((programRoot) => {
+    const seggerRoot = path.join(programRoot, "SEGGER");
+    const current = path.join(seggerRoot, "JLink");
+    let versioned: string[] = [];
+    try {
+      versioned = fs.readdirSync(seggerRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && /^JLink_/i.test(entry.name))
+        .map((entry) => path.join(seggerRoot, entry.name))
+        .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+    } catch {
+      // Missing common installation roots are expected.
+    }
+    return [current, ...versioned];
+  });
+}
+
+function peArchitecture(data: Buffer): "x64" | "x86" | "unknown" {
+  if (data.length < 0x40 || data.toString("ascii", 0, 2) !== "MZ") return "unknown";
+  const peOffset = data.readUInt32LE(0x3c);
+  if (peOffset < 0 || peOffset + 6 > data.length || data.toString("ascii", peOffset, peOffset + 4) !== "PE\0\0") return "unknown";
+  const machine = data.readUInt16LE(peOffset + 4);
+  return machine === 0x8664 ? "x64" : machine === 0x014c ? "x86" : "unknown";
+}
+
 export async function hssDllPreflight(input: HssDllPreflightInput = {}, options: HssHelperOptions = {}): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
-  const discovery = discoverHssDll(input, env);
+  const scriptIdentity = resolveHssScriptIdentity(input, env, options);
+  const identityOptions = { ...options, scriptIdentity };
+  const discovery = discoverHssDll(input, env, options);
   const helperPath = resolveHssHelperPath(env, options.helperPath);
   const helperExists = fs.existsSync(helperPath);
   const device = input.device ?? env.JLINK_DEVICE;
-  const runConnectPreflight = Boolean(device)
-    && discovery.dllExists
-    && discovery.exportsFound
-    && helperExists;
+  const initialIdentity = resolveHssRuntimeIdentity(discovery, env, options);
   const base = {
-    status: discovery.dllExists && discovery.exportsFound ? "candidate" : "blocked",
-    hssStatus: "blocked_missing_adapter",
-    reason: "HSS DLL candidate found; benchmark remains blocked until GetCaps/Read/Benchmark evidence passes",
+    status: discovery.availability,
+    hssStatus: discovery.availability,
+    errorCode: discovery.unavailableCode,
+    reason: discovery.unavailableCode ?? "HSS DLL candidate found; GetCaps and lifecycle validation remain required",
     candidateApi: hssApiCandidateReport(false),
     discovery,
-    getcapsAllowed: discovery.dllExists && discovery.exportsFound,
+    runtimeIdentity: initialIdentity,
+    getcapsAllowed: false,
     helperPath,
     helperExists,
     benchmarkReady: false,
     jscopeUsed: false,
+    scriptIdentity,
   };
-  if (!discovery.selectedDllPath || !helperExists) return base;
-  const helperPreflight = await runHssHelperCommand("preflight", ["--dll", discovery.selectedDllPath], options);
-  const connectPreflight = runConnectPreflight
-    ? await runHssHelperCommand("connect-preflight", [
+  if (!discovery.selectedDllPath || !helperExists || discovery.availability !== "candidate") return base;
+  if (!scriptIdentity.validated) return { ...base, status: "unavailable", hssStatus: "unavailable", errorCode: scriptIdentity.errorCode, reason: scriptIdentity.reason };
+  const inspection = await inspectRuntimeIdentity(discovery, env, identityOptions);
+  const runtimeIdentity = inspection.runtimeIdentity;
+  const helperPreflight = inspection.helperPreflight;
+  const exportsValidated = inspection.status === "ok";
+  if (!exportsValidated || !runtimeIdentity.validated) {
+    return {
+      ...base,
+      status: "unavailable",
+      hssStatus: "unavailable",
+      errorCode: inspection.errorCode ?? "HSS_RUNTIME_IDENTITY_UNVALIDATED",
+      reason: inspection.reason ?? "the DLL/helper/adapter identity tuple has not passed the validation suite",
+      helperVersion: inspection.helperVersion,
+      helperPreflight,
+      runtimeIdentity,
+      exportsValidated: false,
+    };
+  }
+  let connectPreflight: Record<string, unknown> | undefined;
+  if (device && !options.deferConnectPreflight) {
+    const before = refreshHssRuntimeIdentity(runtimeIdentity, identityOptions);
+    if (!hssRuntimeIdentityMatches(runtimeIdentity, before)) return runtimeIdentityChanged(base, before, helperPreflight);
+    connectPreflight = await runHssHelperCommand("connect-preflight", [
       "--dll", discovery.selectedDllPath,
       "--device", device!,
       "--interface", input.interface ?? "SWD",
       "--speed", String(input.speedKhz ?? Number(env.JLINK_MCP_HSS_SPEED_KHZ ?? 4000)),
       ...(input.serial ? ["--serial", input.serial] : []),
-    ], options)
-    : undefined;
+      "--jlink-script-file", scriptIdentity.path!,
+      "--approved-jlink-script-sha256", scriptIdentity.sha256!,
+    ], identityOptions);
+    const after = refreshHssRuntimeIdentity(runtimeIdentity, identityOptions);
+    if (!hssRuntimeIdentityMatches(runtimeIdentity, after)) return runtimeIdentityChanged(base, after, helperPreflight);
+  }
   return {
     ...base,
+    status: exportsValidated ? base.status : "unavailable",
+    hssStatus: exportsValidated ? base.hssStatus : "unavailable",
+    errorCode: exportsValidated ? base.errorCode : String(helperPreflight.errorCode ?? "HSS_DLL_EXPORTS_MISSING"),
+    reason: exportsValidated ? base.reason : String(helperPreflight.reason ?? "native preflight did not validate required HSS exports"),
     helperPreflight,
+    helperVersion: inspection.helperVersion,
+    runtimeIdentity,
+    getcapsAllowed: true,
+    exportsValidated,
     connectPreflight,
     safetyStatus: connectPreflight && connectPreflight.targetWasHalted === true ? "HSS_SAFETY_FAIL" : "not_evaluated",
   };
@@ -106,21 +560,99 @@ export async function hssDllPreflight(input: HssDllPreflightInput = {}, options:
 
 export async function hssDllGetCaps(input: HssDllPreflightInput = {}, options: HssHelperOptions = {}): Promise<Record<string, unknown>> {
   const env = options.env ?? process.env;
-  const discovery = discoverHssDll(input, env);
-  if (!discovery.selectedDllPath || !discovery.exportsFound) {
-    return { status: "error", errorCode: "HSS_DLL_EXPORTS_MISSING", reason: "JLink_x64.dll or required JLINK_HSS_* exports were not found", discovery };
+  const discovery = discoverHssDll(input, env, options);
+  const dllPath = discovery.selectedDllPath;
+  if (discovery.availability !== "candidate" || !dllPath) {
+    return {
+      status: "unavailable",
+      errorCode: discovery.unavailableCode ?? "HSS_DLL_EXPORTS_MISSING",
+      reason: "the resolved Windows x64 J-Link DLL is unavailable for HSS",
+      discovery,
+    };
+  }
+  const scriptIdentity = resolveHssScriptIdentity(input, env, options);
+  if (!scriptIdentity.validated) return { status: "unavailable", errorCode: scriptIdentity.errorCode, reason: scriptIdentity.reason, scriptIdentity };
+  const identityOptions = { ...options, scriptIdentity };
+  const inspection = await inspectRuntimeIdentity(discovery, env, identityOptions);
+  const runtimeIdentity = inspection.runtimeIdentity;
+  if (!runtimeIdentity.validated) {
+    return {
+      status: "unavailable",
+      errorCode: inspection.errorCode ?? "HSS_RUNTIME_IDENTITY_UNVALIDATED",
+      reason: inspection.reason ?? "the DLL/helper/adapter identity tuple has not passed the validation suite",
+      discovery,
+      runtimeIdentity,
+      helperVersion: inspection.helperVersion,
+      helperPreflight: inspection.helperPreflight,
+    };
   }
   const device = input.device ?? env.JLINK_DEVICE;
   if (!device) {
     return { status: "error", errorCode: "HSS_GETCAPS_DEVICE_REQUIRED", reason: "JLINK_HSS_GetCaps requires a configured target device", discovery };
   }
-  return runHssHelperCommand("getcaps", [
-    "--dll", discovery.selectedDllPath,
+  const before = refreshHssRuntimeIdentity(runtimeIdentity, identityOptions);
+  if (!hssRuntimeIdentityMatches(runtimeIdentity, before)) return runtimeIdentityChanged({ discovery }, before, inspection.helperPreflight);
+  const result = await runHssHelperCommand("getcaps", [
+    "--dll", dllPath,
     "--device", device,
     "--interface", input.interface ?? "SWD",
     "--speed", String(input.speedKhz ?? Number(env.JLINK_MCP_HSS_SPEED_KHZ ?? 4000)),
     ...(input.serial ? ["--serial", input.serial] : []),
-  ], options);
+    "--jlink-script-file", scriptIdentity.path!,
+    "--approved-jlink-script-sha256", scriptIdentity.sha256!,
+  ], identityOptions);
+  const after = refreshHssRuntimeIdentity(runtimeIdentity, identityOptions);
+  if (!hssRuntimeIdentityMatches(runtimeIdentity, after)) return runtimeIdentityChanged({ discovery }, after, inspection.helperPreflight);
+  const withIdentity = { ...result, runtimeIdentity: after };
+  if (result.status !== "ok") return withIdentity;
+  if (!isValidatedHssGetCapsResult(withIdentity, after)) {
+    return {
+      ...withIdentity,
+      status: "error",
+      errorCode: Number(result.returnCode) < 0 ? "HSS_GETCAPS_FAILED" : "HSS_GETCAPS_INVALID",
+      reason: "JLINK_HSS_GetCaps returned an error or invalid capabilities",
+    };
+  }
+  return withIdentity;
+}
+
+export async function hssDllTargetState(
+  input: HssDllPreflightInput,
+  expectedIdentity: HssRuntimeIdentity,
+  options: HssHelperOptions = {},
+): Promise<Record<string, unknown>> {
+  const env = options.env ?? process.env;
+  const scriptIdentity = resolveHssScriptIdentity(input, env, options);
+  if (!scriptIdentity.validated
+      || scriptIdentity.path !== expectedIdentity.jlinkScriptFile
+      || scriptIdentity.sha256 !== expectedIdentity.jlinkScriptSha256
+      || scriptIdentity.approvalSha256 !== expectedIdentity.jlinkScriptApprovalSha256) {
+    return { status: "unavailable", errorCode: "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", reason: "target-state ScriptFile identity does not match GetCaps", scriptIdentity };
+  }
+  const identityOptions = { ...options, scriptIdentity };
+  const before = refreshHssRuntimeIdentity(expectedIdentity, identityOptions);
+  if (!hssRuntimeIdentityMatches(expectedIdentity, before)) return runtimeIdentityChanged({}, before);
+  const result = await runHssHelperCommand("target-state", [
+    "--dll", expectedIdentity.dllPath ?? "",
+    "--approved-dll-sha256", expectedIdentity.dllSha256 ?? "",
+    "--device", input.device ?? env.JLINK_DEVICE ?? "",
+    "--interface", input.interface ?? "SWD",
+    "--speed", String(input.speedKhz ?? Number(env.JLINK_MCP_HSS_SPEED_KHZ ?? 4000)),
+    ...(input.serial ? ["--serial", input.serial] : []),
+    "--jlink-script-file", scriptIdentity.path!,
+    "--approved-jlink-script-sha256", scriptIdentity.sha256!,
+  ], identityOptions);
+  const after = refreshHssRuntimeIdentity(expectedIdentity, identityOptions);
+  if (!hssRuntimeIdentityMatches(expectedIdentity, after)) return runtimeIdentityChanged({}, after);
+  if (result.status === "ok" && (result.helperVersion !== expectedIdentity.helperVersion
+      || result.helperProtocolVersion !== expectedIdentity.helperProtocolVersion
+      || String(result.dllVersion ?? "") !== expectedIdentity.dllVersion
+      || result.jlinkScriptFile !== expectedIdentity.jlinkScriptFile
+      || result.jlinkScriptSha256 !== expectedIdentity.jlinkScriptSha256
+      || result.jlinkScriptReturnCode !== 0)) {
+    return runtimeIdentityChanged({ result }, after);
+  }
+  return { ...result, runtimeIdentity: after };
 }
 
 export async function hssDllSmoke(input: HssDllPreflightInput & {
@@ -135,7 +667,7 @@ export async function hssDllSmoke(input: HssDllPreflightInput & {
   const gate = await requireExperimentalDllReady(input, options);
   if (gate) return gate;
   return runHssHelperCommand("hss-smoke", [
-    "--dll", discoverHssDll(input, options.env ?? process.env).selectedDllPath!,
+    "--dll", discoverHssDll(input, options.env ?? process.env, options).selectedDllPath!,
     "--device", input.device ?? process.env.JLINK_DEVICE ?? "",
     "--interface", input.interface ?? "SWD",
     "--speed", String(input.speedKhz ?? Number(process.env.JLINK_MCP_HSS_SPEED_KHZ ?? 4000)),
@@ -157,7 +689,7 @@ export async function hssDllBenchmark(input: HssDllPreflightInput & {
   const gate = await requireExperimentalDllReady(input, options);
   if (gate) return gate;
   return runHssHelperCommand("hss-benchmark", [
-    "--dll", discoverHssDll(input, options.env ?? process.env).selectedDllPath!,
+    "--dll", discoverHssDll(input, options.env ?? process.env, options).selectedDllPath!,
     "--device", input.device ?? process.env.JLINK_DEVICE ?? "",
     "--interface", input.interface ?? "SWD",
     "--speed", String(input.speedKhz ?? Number(process.env.JLINK_MCP_HSS_SPEED_KHZ ?? 4000)),
@@ -209,7 +741,43 @@ export function runHssHelperCommand(command: string, args: string[], options: Hs
 
 async function requireExperimentalDllReady(input: HssDllPreflightInput, options: HssHelperOptions): Promise<Record<string, unknown> | null> {
   const env = options.env ?? process.env;
-  const discovery = discoverHssDll(input, env);
-  if (!discovery.selectedDllPath || !discovery.exportsFound) return { status: "error", errorCode: "HSS_DLL_EXPORTS_MISSING", reason: "JLink_x64.dll or required JLINK_HSS_* exports were not found", discovery };
+  const discovery = discoverHssDll(input, env, options);
+  if (discovery.availability !== "candidate") {
+    return {
+      status: "unavailable",
+      errorCode: discovery.unavailableCode,
+      reason: "the resolved Windows x64 HSS DLL identity is not ready for supported capture",
+      discovery,
+    };
+  }
+  const inspection = await inspectRuntimeIdentity(discovery, env, options);
+  const runtimeIdentity = inspection.runtimeIdentity;
+  if (!runtimeIdentity.validated) {
+    return {
+      status: "unavailable",
+      errorCode: inspection.errorCode ?? "HSS_RUNTIME_IDENTITY_UNVALIDATED",
+      reason: inspection.reason ?? "the DLL/helper/adapter identity tuple has not passed the validation suite",
+      discovery,
+      runtimeIdentity,
+    };
+  }
   return null;
+}
+
+function readScriptApprovalConfig(cwd: string): { path: string; sha256: string } | undefined {
+  try {
+    const file = path.join(cwd, ".jlink-mcp", "hss-script-approval.json");
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+    const configuredPath = typeof parsed.path === "string" ? parsed.path : "";
+    const sha256 = typeof parsed.sha256 === "string" ? parsed.sha256.toLowerCase() : "";
+    if (!configuredPath || !/^[0-9a-f]{64}$/.test(sha256)) return undefined;
+    return { path: configuredPath, sha256 };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizePath(value: string): string {
+  const normalized = path.normalize(value);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }

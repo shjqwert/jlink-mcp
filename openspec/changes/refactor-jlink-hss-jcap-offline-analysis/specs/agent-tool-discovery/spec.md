@@ -39,3 +39,28 @@ The reference Agent skill/client SHALL review structured risk metadata before pr
 - **WHEN** an Agent plans a write, CPU control, flash, erase, or raw command
 - **THEN** it reviews risk, policy, preconditions, reversibility, confirmation requirement, and validation steps before execution
 - **AND** the user does not need to remind it to perform that review.
+
+#### Scenario: normal verified RAM write is considered
+
+- **WHEN** a policy-allowlisted RAM write has a current layout and `targetArtifactMatch=verified`
+- **THEN** discovery identifies `variable_write_plan` as R2 with budget, old-value/readback, capture queue, event and audit requirements
+- **AND** it does not request an R3 operation plan or user approval.
+
+#### Scenario: CPU control is considered
+
+- **WHEN** the Agent considers `halt`, `resume`, or `reset`
+- **THEN** discovery identifies the unchanged tool as R3 and explains that its single call internally creates, revalidates, consumes and audits a deterministic plan
+- **AND** `halt`/`reset` disclose the default active-capture conflict.
+
+#### Scenario: R4 action is considered
+
+- **WHEN** the Agent considers Flash/Erase, raw GDB, raw probe, or an unverified-target write exception
+- **THEN** discovery directs it to the action-specific planning companion and retained execution tool (`flash_plan→flash`, `erase_plan→erase`, `gdb_command_plan→gdb_command`, `probe_command_plan→probe_command`, or `variable_write_plan→variable_write_execute`)
+- **AND** states that only the trusted local host/CLI can obtain user confirmation and issue the approval token; the Agent and offline UI cannot self-approve.
+
+#### Scenario: capture plan includes resetBeforeCapture
+
+- **WHEN** a resolved HSS plan sets `resetBeforeCapture=true`
+- **THEN** discovery identifies capture start as a composite R3 operation and exposes the reset binding, trusted ScriptFile identity, stabilization policy, expected reset/capture events, and failure modes
+- **AND** it does not present the flow as ordinary read-only R1 capture or as permission for the ScriptFile selector/HSS path to issue Raw/general ExecCommand
+- **AND** it separately preserves the existing explicit raw probe/GDB tools as R4 auxiliaries that HSS never invokes as fallback.

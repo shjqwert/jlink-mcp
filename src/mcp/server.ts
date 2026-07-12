@@ -11,11 +11,9 @@ import { log } from "../utils/logger";
 import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } from "./analysis/tools";
 import { evidenceForCodegraphTool } from "./bridge/tools";
 import { CaptureService } from "./capture";
-import { captureBackendBenchmarkTool, captureBackendListTool, captureBackendProbeTool, captureBackendSelectTool, captureImportExperimentTool } from "./capture-backends/backend-router";
 import { HssCaptureService } from "./hss/hss-capture-service";
 import type { HssVariableWritePlanInput } from "./hss/hss-write-plan";
 import type { HssVariableWriteExecuteInput } from "./hss/hss-write-execute";
-import { hssDllBenchmark, hssDllGetCaps, hssDllPreflight, hssDllSmoke } from "./hss-dll/hss-dll-adapter";
 import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
 import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
 import { RspMemoryIo } from "./rtt-channel/rsp-memory-transport";
@@ -303,26 +301,23 @@ export class JLinkMcpServer {
 
     this.server.tool("halt", "Halt the target CPU", {},
       async () => {
-        const g = this.requireDevice(); if (g) return g;
-        const r = await probe.halt();
-        return { content: [{ type: "text", text: r.success ? "CPU halted" : `Failed: ${r.output}` }] };
+        const r = await this.hssCapture.cpuControl("halt");
+        return { content: [{ type: "text", text: r.ok ? "CPU halted" : `Failed: ${r.error?.code}: ${r.error?.message}` }] };
       }
     );
 
     this.server.tool("resume", "Resume the target CPU", {},
       async () => {
-        const g = this.requireDevice(); if (g) return g;
-        const r = await probe.resume();
-        return { content: [{ type: "text", text: r.success ? "CPU resumed" : `Failed: ${r.output}` }] };
+        const r = await this.hssCapture.cpuControl("resume");
+        return { content: [{ type: "text", text: r.ok ? "CPU resumed" : `Failed: ${r.error?.code}: ${r.error?.message}` }] };
       }
     );
 
     this.server.tool("reset", "Reset the target device",
       { halt: z.boolean().optional().describe("Halt after reset (default: false)") },
       async ({ halt }) => {
-        const g = this.requireDevice(); if (g) return g;
-        const r = await probe.reset(halt ?? false);
-        return { content: [{ type: "text", text: r.success ? `Device reset${halt ? " (halted)" : " (running)"}` : `Failed: ${r.output}` }] };
+        const r = await this.hssCapture.cpuControl("reset", { halt: halt ?? false });
+        return { content: [{ type: "text", text: r.ok ? `Device reset${halt ? " (halted)" : " (running)"}` : `Failed: ${r.error?.code}: ${r.error?.message}` }] };
       }
     );
 
@@ -557,7 +552,7 @@ export class JLinkMcpServer {
 
     this.registerAnalysisTools();
     this.registerCaptureTools();
-    this.registerCaptureBackendTools();
+    this.registerRttChannelTools();
     this.registerHssCaptureTools();
 
     // ═══════════════════════════════════════════════════════════════
@@ -815,7 +810,7 @@ export class JLinkMcpServer {
       async ({ sessionId }) => result(() => this.capture.delete(sessionId)));
   }
 
-  private registerCaptureBackendTools(): void {
+  private registerRttChannelTools(): void {
     const result = async (operation: () => Promise<unknown> | unknown) => {
       try {
         return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
@@ -823,60 +818,6 @@ export class JLinkMcpServer {
         return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", reason: error instanceof Error ? error.message : String(error) }, null, 2) }] };
       }
     };
-
-    this.server.tool("capture_backend_list", "List runtime capture backends and HSS-first priority order.", {},
-      async () => result(() => captureBackendListTool()));
-    this.server.tool("capture_backend_probe", "Probe capture backend availability without modifying MCU firmware.", {
-      preferredBackend: z.enum(["jlink-hss", "direct-rtt-channel", "memory-poll-rsp", "external-import"]).optional(),
-      mode: z.enum(["realtime", "offline-import"]).optional(),
-    }, async (input) => result(() => captureBackendProbeTool(input)));
-    this.server.tool("capture_backend_select", "Select the available backend that would be used for capture.", {
-      preferredBackend: z.enum(["jlink-hss", "direct-rtt-channel", "memory-poll-rsp", "external-import"]).optional(),
-      mode: z.enum(["realtime", "offline-import"]).optional(),
-    }, async (input) => result(() => captureBackendSelectTool(input)));
-    this.server.tool("capture_backend_benchmark", "Run backend benchmark when a configured adapter is available.", {
-      backendName: z.enum(["jlink-hss", "direct-rtt-channel", "memory-poll-rsp", "external-import"]).optional(),
-      variables: z.array(z.string()).optional(),
-      requestedRateHz: z.number().positive().optional(),
-      durationSec: z.number().positive().optional(),
-    }, async (input) => result(() => captureBackendBenchmarkTool(input)));
-    this.server.tool("capture_import_experiment", "Register an offline external capture import.", {
-      sourcePath: z.string(),
-      format: z.enum(["csv", "json", "experiment"]),
-    }, async (input) => result(() => captureImportExperimentTool(input)));
-
-    const hssDllPreflightSchema = {
-      dllPath: z.string().optional(),
-      device: z.string().optional(),
-      interface: z.enum(["SWD", "JTAG"]).optional(),
-      speedKhz: z.number().int().positive().optional(),
-      serial: z.string().optional(),
-    };
-    this.server.tool("hss_dll_preflight", "Probe experimental JLink_x64.dll HSS candidate symbols without using JScope.", hssDllPreflightSchema,
-      async (input) => result(() => hssDllPreflight(input)));
-    this.server.tool("hss_dll_getcaps", "Call JLINK_HSS_GetCaps for a candidate JLink_x64.dll.", {
-      dllPath: z.string().optional(),
-    }, async (input) => result(() => hssDllGetCaps(input)));
-    this.server.tool("hss_dll_smoke", "Run HSS Start/Read/Stop smoke for one read-only variable.", {
-      ...hssDllPreflightSchema,
-      elf: z.string().optional(),
-      symbol: z.string(),
-      address: z.string().optional(),
-      size: z.number().int().positive().optional(),
-      durationSec: z.number().positive().optional(),
-      periodUs: z.number().int().positive().optional(),
-    }, async (input) => result(() => hssDllSmoke(input)));
-    this.server.tool("hss_dll_benchmark", "Run HSS benchmark for read-only variables.", {
-      ...hssDllPreflightSchema,
-      variables: z.array(z.object({
-        name: z.string(),
-        address: z.string(),
-        size: z.number().int().positive(),
-        type: z.string().optional(),
-      }).strict()).min(1).max(10),
-      durationSec: z.number().positive().optional(),
-      periodUs: z.number().int().positive().optional(),
-    }, async (input) => result(() => hssDllBenchmark(input)));
 
     this.server.tool("rtt_channel_list", "List RTT channels from a provided control-block snapshot.", {
       controlBlockAddress: z.string().optional(),
@@ -987,9 +928,14 @@ export class JLinkMcpServer {
     const hssDllInput = {
       dllPath: z.string().optional(),
       device: z.string().optional(),
+      targetId: z.string().optional(),
+      projectRoot: z.string().optional(),
+      projectConfigFile: z.string().optional(),
       interface: z.enum(["SWD", "JTAG"]).optional(),
       speedKhz: z.number().int().positive().optional(),
       serial: z.string().optional(),
+      jlinkScriptFile: z.string().optional(),
+      approvedJlinkScriptSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
     };
     const scalarType = z.enum(["uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"]);
     const symbolSchema = z.object({
@@ -1010,6 +956,12 @@ export class JLinkMcpServer {
       dryRun: z.boolean().optional(),
       readMode: z.enum(["periodic", "drain"]).optional(),
       resumeBeforeStart: z.boolean().optional(),
+      resetBeforeCapture: z.boolean().optional(),
+      resetPlanTtlMs: z.number().int().min(1).max(3600000).optional(),
+      minimumRecoveryMs: z.number().int().min(0).max(60000).optional(),
+      timeoutMs: z.number().int().min(1).max(60000).optional(),
+      pollIntervalMs: z.number().int().min(10).max(1000).optional(),
+      requiredConsecutiveRunningChecks: z.number().int().min(2).max(100).optional(),
     };
     const captureId = { captureId: z.string().uuid() };
     const writeTargetRef = z.object({
@@ -1021,12 +973,12 @@ export class JLinkMcpServer {
 
     this.server.tool("hss_capability_probe", "Probe read-only J-Link HSS MVP-A availability without reset, halt, flash, raw-command, or target-memory writes.", hssDllInput,
       async (input) => result(() => this.hssCapture.capabilityProbe(input)));
-    this.server.tool("hss_capture_plan", "Resolve HM_C095 IAR variables and build a read-only HSS capture plan under process.cwd().", {
+    this.server.tool("hss_capture_plan", "Resolve an HSS plan with a trusted ScriptFile; resetBeforeCapture=true composes one bounded R3 reset before HSS Start.", {
       ...hssDllInput,
       ...planInput,
     },
       async (input) => result(() => this.hssCapture.capturePlan(input)));
-    this.server.tool("hss_capture_start", "Start one read-only HSS MVP-A capture from a planId or plan input. No RSP fallback.", {
+    this.server.tool("hss_capture_start", "Start one HSS capture from a plan; an enabled reset is bound, audited, stabilized, and completed before HSS Start.", {
       planId: z.string().uuid().optional(),
       ...hssDllInput,
       ...planInput,

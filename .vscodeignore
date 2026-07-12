@@ -3,6 +3,15 @@
 .claude/**
 src/**
 node_modules/**
+!node_modules/sqlite3/package.json
+!node_modules/sqlite3/lib/sqlite3.js
+!node_modules/sqlite3/lib/sqlite3-binding.js
+!node_modules/sqlite3/lib/trace.js
+!node_modules/sqlite3/build/Release/node_sqlite3.node
+!node_modules/bindings/package.json
+!node_modules/bindings/bindings.js
+!node_modules/file-uri-to-path/package.json
+!node_modules/file-uri-to-path/index.js
 .gitignore
 .npmignore
 .mcp.json
@@ -18,4 +27,9 @@ CLAUDE.md
 native/capture-helper/build/**
 native/capture-helper/*.cpp
 native/capture-helper/CMakeLists.txt
+native/hss-helper/build/**
+native/hss-helper/*.cpp
+native/hss-helper/CMakeLists.txt
+native/hss-helper/bin/**
+!native/hss-helper/bin/hss_helper.exe
 scripts/**

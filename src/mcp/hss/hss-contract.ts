@@ -9,7 +9,10 @@ export type HssToolOperation =
   | "hss_capture_export"
   | "hss_session_recover"
   | "variable_write_plan"
-  | "variable_write_execute";
+  | "variable_write_execute"
+  | "halt"
+  | "resume"
+  | "reset";
 
 export const HSS_TOOL_RISK: Record<HssToolOperation, HssRiskLevel> = {
   hss_capability_probe: "R0",
@@ -22,6 +25,9 @@ export const HSS_TOOL_RISK: Record<HssToolOperation, HssRiskLevel> = {
   hss_session_recover: "R0",
   variable_write_plan: "R2",
   variable_write_execute: "R2",
+  halt: "R3",
+  resume: "R3",
+  reset: "R3",
 };
 
 export interface HssSafety {
@@ -46,6 +52,20 @@ export type HssScalarType = "uint8" | "int8" | "uint16" | "int16" | "uint32" | "
 export type HssCaptureState = "planned" | "starting" | "capturing" | "stopping" | "completed" | "stopped" | "failed";
 export type HssTransportStatus = "pass" | "failed";
 export type HssValidationStatus = "pass" | "failed" | "warning" | "not_run";
+export type HssTargetSource = "explicit" | "project-config";
+export type HssTargetConfidence = "explicit" | "project-config";
+
+export interface HssTargetConfigurationSource {
+  file: string;
+  format: "iar-ewp" | "jlink";
+}
+
+export interface HssTargetIdentity {
+  targetId: string;
+  source: HssTargetSource;
+  confidence: HssTargetConfidence;
+  configurationSource?: HssTargetConfigurationSource;
+}
 
 export interface HssRequestedSymbol {
   name: string;
@@ -97,6 +117,10 @@ export interface HssCaptureMetadata {
   };
   target: {
     device: string;
+    targetId?: string;
+    source?: HssTargetSource;
+    confidence?: HssTargetConfidence;
+    configurationSource?: HssTargetConfigurationSource;
     requestedDevice?: string;
     resolvedDevice?: string;
     interface: "SWD" | "JTAG";
@@ -107,6 +131,16 @@ export interface HssCaptureMetadata {
     serial?: string;
     dllVersion?: string;
   };
+  script?: {
+    path: string;
+    sha256: string;
+    approvalSha256: string;
+    approvalSource: "project-config" | "trusted-allowlist";
+    getCapsSelectionReturnCode: number;
+    captureSelectionReturnCode?: number;
+    noDefaultFallback: true;
+  };
+  reset?: Record<string, unknown>;
   symbols: HssResolvedSymbol[];
   sampling: {
     requestedRateHz: number;

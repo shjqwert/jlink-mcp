@@ -1,10 +1,12 @@
 ﻿import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { ProcessManager } from "../../utils/process-manager";
 import { JLinkBackend } from "../../probe/jlink";
+import { resolveHssRuntimeIdentity } from "../hss-dll/hss-dll-adapter";
 import { HssCaptureService } from "./hss-capture-service";
 import { HSS_ERROR } from "./hss-errors";
 import { encodeHssRecord, writeInitialMetadata } from "./hss-artifact";
@@ -12,6 +14,30 @@ import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { encodeHssValues } from "./hss-typed-value";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
+
+const FAKE_HSS_DLL_SHA256 = createHash("sha256").update(fakeHssDllBuffer()).digest("hex");
+const FAKE_JLINK_SCRIPT_FILE = join(process.cwd(), ".tmp", "approved-hss-mvp-b.JLinkScript");
+const FAKE_JLINK_SCRIPT_CONTENT = "// deterministic trusted MVP-B ScriptFile fixture\n";
+const FAKE_JLINK_SCRIPT_SHA256 = createHash("sha256").update(FAKE_JLINK_SCRIPT_CONTENT).digest("hex");
+const FAKE_JLINK_SCRIPT_APPROVAL_SHA256 = createHash("sha256").update(JSON.stringify({
+  approvalSource: "project-config",
+  path: FAKE_JLINK_SCRIPT_FILE,
+  sha256: FAKE_JLINK_SCRIPT_SHA256,
+})).digest("hex");
+const FAKE_HSS_RUNTIME_IDENTITY_SHA256 = resolveHssRuntimeIdentity({
+  selectedDllPath: "JLink_x64.dll",
+  sha256: FAKE_HSS_DLL_SHA256,
+}, {}, { helperPath: process.execPath, scriptIdentity: {
+  path: FAKE_JLINK_SCRIPT_FILE,
+  sha256: FAKE_JLINK_SCRIPT_SHA256,
+  approvalSha256: FAKE_JLINK_SCRIPT_APPROVAL_SHA256,
+  approvalSource: "project-config",
+  validated: true,
+} }, {
+  helperVersion: "1",
+  helperProtocolVersion: 1,
+  dllVersion: "88400",
+}).sha256!;
 
 test("MVP-B fake/injected memoryIo covers scalar write and draft array write paths", async () => {
   const root = await tempProject();
@@ -27,20 +53,23 @@ test("MVP-B fake/injected memoryIo covers scalar write and draft array write pat
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
+    validatedDllSha256: [FAKE_HSS_DLL_SHA256],
+    validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256],
     memoryIo: memory,
   });
   try {
     await writeProject(root);
     await writePolicy(root);
-    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFakeHssDll(dll);
     await writeFile(helper, fakeHelperSource(), "utf8");
     const start = await service.captureStart({
+      device: "Z20K146M",
       dllPath: dll,
       symbols: [{ name: "Debug_IqRef", type: "int32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
-    assert.equal(start.ok, true);
+    assert.equal(start.ok, true, JSON.stringify(start));
     const captureId = (start.data as { captureId: string }).captureId;
     const scalarPlan = await service.variableWritePlan({ captureId, targetRef: { kind: "scalar", path: "Debug_IqRef" }, value: 120 });
     const scalarExec = await service.variableWriteExecute({ writePlanId: scalarPlan.data!.writePlanId });
@@ -98,19 +127,22 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
+    validatedDllSha256: [FAKE_HSS_DLL_SHA256],
+    validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256],
   });
   try {
     await writeProject(root);
     await writePolicy(root);
-    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFakeHssDll(dll);
     await writeFile(helper, fakeHelperSource(), "utf8");
     const start = await service.captureStart({
+      device: "Z20K146M",
       dllPath: dll,
       symbols: [{ name: "Debug_IqRef", type: "int32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
-    assert.equal(start.ok, true);
+    assert.equal(start.ok, true, JSON.stringify(start));
     const captureId = (start.data as { captureId: string }).captureId;
     const plan = await service.variableWritePlan({ captureId, targetRef: { kind: "scalar", path: "Debug_IqRef" }, value: 120 });
 
@@ -181,12 +213,14 @@ test("variable_write_execute supports outside-capture scalar writes and rejects 
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
+    validatedDllSha256: [FAKE_HSS_DLL_SHA256],
+    validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256],
     memoryIo: memory,
   });
   try {
     await writeProject(root);
     await writePolicy(root);
-    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFakeHssDll(dll);
     await writeFile(helper, fakeHelperSource(), "utf8");
 
     const plan = await service.variableWritePlan({ targetRef: { kind: "scalar", path: "Debug_IqRef" }, type: "int32", value: 120 });
@@ -202,12 +236,13 @@ test("variable_write_execute supports outside-capture scalar writes and rejects 
     assert.deepEqual([...memory.get(0x20000000, 4)], [...encodeHssValues("int32", [140], "little")]);
 
     const start = await service.captureStart({
+      device: "Z20K146M",
       dllPath: dll,
       symbols: [{ name: "Debug_IqRef", type: "int32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
-    assert.equal(start.ok, true);
+    assert.equal(start.ok, true, JSON.stringify(start));
     const bypass = await service.variableWriteExecute({ target: "Debug_IqRef", type: "int32", value: 160 });
     assert.equal(bypass.ok, false);
     assert.equal(bypass.error?.code, HSS_ERROR.ACTIVE_CAPTURE_WRITE_REQUIRES_CAPTURE_QUEUE);
@@ -253,20 +288,23 @@ test("hss_capture_stop timeout kills helper and finalizes failed metadata", asyn
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
+    validatedDllSha256: [FAKE_HSS_DLL_SHA256],
+    validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256],
     stopTimeoutMs: 50,
   });
   try {
     await writeProject(root);
     await writePolicy(root);
-    await writeFile(dll, "JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", "utf8");
+    await writeFakeHssDll(dll);
     await writeFile(helper, fakeHelperSource(), "utf8");
     const start = await service.captureStart({
+      device: "Z20K146M",
       dllPath: dll,
       symbols: [{ name: "Debug_IqRef", type: "int32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
-    assert.equal(start.ok, true);
+    assert.equal(start.ok, true, JSON.stringify(start));
     const captureId = (start.data as { captureId: string }).captureId;
 
     const stopped = await service.captureStop({ captureId });
@@ -351,11 +389,29 @@ function writeExecuteResult(overrides: Partial<HssVariableWriteExecuteResult>): 
   };
 }
 
+async function writeFakeHssDll(file: string): Promise<void> {
+  await writeFile(file, fakeHssDllBuffer());
+}
+
+function fakeHssDllBuffer(): Buffer {
+  const data = Buffer.alloc(1024);
+  data.write("MZ", 0, "ascii");
+  data.writeUInt32LE(0x80, 0x3c);
+  data.write("PE\0\0", 0x80, "ascii");
+  data.writeUInt16LE(0x8664, 0x84);
+  data.write("JLINK_HSS_GetCaps\0JLINK_HSS_Start\0JLINK_HSS_Read\0JLINK_HSS_Stop", 0x100, "ascii");
+  return data;
+}
+
 async function writeProject(root: string): Promise<void> {
   const exe = join(root, "Appl", "Debug", "Exe");
   const list = join(root, "Appl", "Debug", "List");
   await mkdir(exe, { recursive: true });
   await mkdir(list, { recursive: true });
+  await mkdir(join(root, ".jlink-mcp"), { recursive: true });
+  await mkdir(join(process.cwd(), ".tmp"), { recursive: true });
+  await writeFile(FAKE_JLINK_SCRIPT_FILE, FAKE_JLINK_SCRIPT_CONTENT, "utf8");
+  await writeFile(join(root, ".jlink-mcp", "hss-script-approval.json"), JSON.stringify({ path: FAKE_JLINK_SCRIPT_FILE, sha256: FAKE_JLINK_SCRIPT_SHA256 }), "utf8");
   await writeFile(join(exe, "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
   await writeFile(join(list, "FOC_SCM.map"), [
     "Debug_IqRef              0x2000'0000     0x4  Data  Gb  app.o [1]",
@@ -383,9 +439,12 @@ function fakeHelperSource(): string {
   return `
 const fs = require("fs");
 const command = process.argv[2];
-if (command === "preflight") { console.log(JSON.stringify({ status: "ok", exportsFound: true })); process.exit(0); }
+const option = (name) => { const index = process.argv.indexOf(name); return index >= 0 ? process.argv[index + 1] : undefined; };
+if (command === "version") { console.log(JSON.stringify({ status: "ok", helperVersion: "1", helperProtocolVersion: 1 })); process.exit(0); }
+if (command === "preflight") { console.log(JSON.stringify({ status: "ok", exportsFound: true, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1 })); process.exit(0); }
 if (command === "connect-preflight") { console.log(JSON.stringify({ status: "ok", targetWasHalted: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false })); process.exit(0); }
-if (command === "getcaps") { console.log(JSON.stringify({ status: "ok", caps: { maxBlocks: 16, maxFreq: 1000 } })); process.exit(0); }
+if (command === "getcaps") { console.log(JSON.stringify({ status: "ok", returnCode: 0, caps: { maxBlocks: 16, maxFreq: 1000 }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 })); process.exit(0); }
+if (command === "target-state") { console.log(JSON.stringify({ status: "ok", operation: "target-state", dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, targetWasHalted: false, targetWasHaltedRaw: 0, beforeState: "running", afterState: "running", jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false })); process.exit(0); }
 const plan = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
 const records = [];
 for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
@@ -418,7 +477,7 @@ function handleWriteRequest() {
   fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "error", reason: "bad op" }));
 }
 const timer = setInterval(handleWriteRequest, 5);
-setTimeout(() => { clearInterval(timer); console.log(JSON.stringify({ status: "ok", captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 8, bytesPerSample: 4, hssBlockCount: 1, readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: 1, payloadChangedRatio: 1, payloadFirstChangedOffset: 4, payloadFirstChangedBytes: "01000000" })); }, 1000);
+setTimeout(() => { clearInterval(timer); console.log(JSON.stringify({ status: "ok", helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: true, decoderSemanticsValidated: true, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, resetBeforeCapture: plan.resetBeforeCapture === true, captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 8, bytesPerSample: 4, hssBlockCount: 1, readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: 1, payloadChangedRatio: 1, payloadFirstChangedOffset: 4, payloadFirstChangedBytes: "01000000" })); }, 1000);
 `;
 }
 

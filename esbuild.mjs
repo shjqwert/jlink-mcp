@@ -17,15 +17,15 @@ const extensionBuild = esbuild.build({
   ...common,
   entryPoints: ["src/extension.ts"],
   outfile: "out/extension.js",
-  external: ["vscode"],
+  external: ["vscode", "sqlite3"],
 });
 
-// 2. Standalone MCP server — bundle everything (no external deps at runtime)
+// 2. Standalone MCP server — bundle JS dependencies; ship sqlite3's native binding separately
 const standaloneBuild = esbuild.build({
   ...common,
   entryPoints: ["src/mcp/standalone.ts"],
   outfile: "out/mcp/standalone.js",
-  external: [], // bundle all deps including MCP SDK and zod
+  external: ["sqlite3"],
 });
 
 await Promise.all([extensionBuild, standaloneBuild]);

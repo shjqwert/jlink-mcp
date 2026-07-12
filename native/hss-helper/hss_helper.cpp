@@ -1,7 +1,9 @@
 #include <windows.h>
+#include <bcrypt.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cwctype>
 #include <cstdint>
 #include <chrono>
 #include <fstream>
@@ -13,6 +15,14 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifndef HSS_HELPER_VERSION
+#define HSS_HELPER_VERSION "1"
+#endif
+
+#ifndef HSS_HELPER_PROTOCOL_VERSION
+#define HSS_HELPER_PROTOCOL_VERSION 1
+#endif
 
 using U8 = std::uint8_t;
 using U16 = std::uint16_t;
@@ -48,6 +58,8 @@ using JLINKARM_GetSN_Fn = U32 (*)();
 using JLINKARM_GetId_Fn = U32 (*)();
 using JLINKARM_IsHalted_Fn = int (*)();
 using JLINKARM_Go_Fn = void (*)();
+using JLINKARM_Halt_Fn = void (*)();
+using JLINKARM_Reset_Fn = void (*)();
 using JLINKARM_ReadMem_Fn = int (*)(U32, U32, void*);
 using JLINKARM_WriteMem_Fn = int (*)(U32, U32, const void*);
 using JLINKARM_ReadMemU8_Fn = int (*)(U32, U32, U8*, U8*);
@@ -61,10 +73,20 @@ static bool suppress_jlink_gui(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed);
 
 static std::string narrow(const std::wstring& input) {
   if (input.empty()) return "";
-  int size = WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, nullptr, 0, nullptr, nullptr);
-  std::string output(size > 0 ? size - 1 : 0, '\0');
-  if (size > 0) WideCharToMultiByte(CP_UTF8, 0, input.c_str(), -1, output.data(), size, nullptr, nullptr);
+  const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, input.c_str(), static_cast<int>(input.size()), nullptr, 0, nullptr, nullptr);
+  if (size <= 0) return "";
+  std::string output(static_cast<size_t>(size), '\0');
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, input.c_str(), static_cast<int>(input.size()), output.data(), size, nullptr, nullptr) != size) return "";
   return output;
+}
+
+static bool widen_utf8(const std::string& input, std::wstring* output) {
+  if (input.empty()) return false;
+  const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(), static_cast<int>(input.size()), nullptr, 0);
+  if (size <= 0) return false;
+  output->assign(static_cast<size_t>(size), L'\0');
+  return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.data(), static_cast<int>(input.size()), output->data(), size) == size
+    && narrow(*output) == input;
 }
 
 static std::string escape(const std::string& input) {
@@ -95,7 +117,62 @@ static void error_json(const std::string& code, const std::string& reason, const
     << "{\"status\":\"error\",\"errorCode\":\"" << escape(code)
     << "\",\"reason\":\"" << escape(reason)
     << "\",\"dll\":\"" << escape(dll)
-    << "\",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+    << "\",\"helperVersion\":\"" << HSS_HELPER_VERSION
+    << "\",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
+    << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+}
+
+static bool valid_sha256_hex(const std::string& value) {
+  return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; });
+}
+
+static bool sha256_handle(HANDLE input, std::string* sha256) {
+  if (input == INVALID_HANDLE_VALUE || SetFilePointer(input, 0, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR) return false;
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  DWORD object_bytes = 0;
+  DWORD hash_bytes = 0;
+  DWORD result_bytes = 0;
+  bool ok = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0
+    && BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&object_bytes), sizeof(object_bytes), &result_bytes, 0) >= 0
+    && BCryptGetProperty(algorithm, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hash_bytes), sizeof(hash_bytes), &result_bytes, 0) >= 0
+    && hash_bytes == 32;
+  std::vector<U8> object(object_bytes);
+  std::vector<U8> digest(hash_bytes);
+  if (ok) ok = BCryptCreateHash(algorithm, &hash, object.data(), object_bytes, nullptr, 0, 0) >= 0;
+  std::vector<U8> buffer(64 * 1024);
+  while (ok) {
+    DWORD bytes_read = 0;
+    if (!ReadFile(input, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, nullptr)) {
+      ok = false;
+      break;
+    }
+    if (bytes_read == 0) break;
+    ok = BCryptHashData(hash, buffer.data(), bytes_read, 0) >= 0;
+  }
+  if (ok) ok = BCryptFinishHash(hash, digest.data(), hash_bytes, 0) >= 0;
+  if (hash) BCryptDestroyHash(hash);
+  if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+  if (!ok) return false;
+  std::ostringstream out;
+  out << std::hex << std::setfill('0');
+  for (U8 byte : digest) out << std::setw(2) << static_cast<unsigned>(byte);
+  *sha256 = out.str();
+  return true;
+}
+
+static bool sha256_file(const std::wstring& file, std::string* sha256) {
+  HANDLE input = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+  if (input == INVALID_HANDLE_VALUE) return false;
+  const bool ok = sha256_handle(input, sha256);
+  CloseHandle(input);
+  return ok;
+}
+
+static int version() {
+  std::cout << "{\"status\":\"ok\",\"helperVersion\":\"" << HSS_HELPER_VERSION
+            << "\",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION << "}";
+  return 0;
 }
 
 static FARPROC required(HMODULE dll, const char* name) {
@@ -331,9 +408,32 @@ static std::string read_text_file(const std::wstring& path) {
 }
 
 static std::string json_string(const std::string& text, const char* name, const char* fallback = "") {
-  std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*\"([^\"]*)\"");
+  std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
   std::smatch match;
-  return std::regex_search(text, match, pattern) ? match[1].str() : std::string(fallback);
+  if (!std::regex_search(text, match, pattern)) return std::string(fallback);
+  const std::string encoded = match[1].str();
+  std::string decoded;
+  decoded.reserve(encoded.size());
+  for (size_t index = 0; index < encoded.size(); ++index) {
+    const char ch = encoded[index];
+    if (ch != '\\') {
+      decoded.push_back(ch);
+      continue;
+    }
+    if (++index >= encoded.size()) return std::string(fallback);
+    switch (encoded[index]) {
+      case '\"': decoded.push_back('\"'); break;
+      case '\\': decoded.push_back('\\'); break;
+      case '/': decoded.push_back('/'); break;
+      case 'b': decoded.push_back('\b'); break;
+      case 'f': decoded.push_back('\f'); break;
+      case 'n': decoded.push_back('\n'); break;
+      case 'r': decoded.push_back('\r'); break;
+      case 't': decoded.push_back('\t'); break;
+      default: return std::string(fallback);
+    }
+  }
+  return decoded;
 }
 
 static int json_int(const std::string& text, const char* name, int fallback = 0) {
@@ -428,8 +528,49 @@ static int hss_first_changed_offset_in_range(const std::vector<unsigned char>& b
   return it == buffer.begin() + end ? -1 : static_cast<int>(std::distance(buffer.begin(), it));
 }
 
-static bool hss_capture_failed(bool crashed, uint64_t valid_samples, uint64_t requested_samples) {
-  return crashed || valid_samples < requested_samples;
+static bool hss_capture_failed(bool crashed, uint64_t emitted_samples) {
+  return crashed || emitted_samples == 0;
+}
+
+enum class HssSampleDecision {
+  emit,
+  duplicate,
+  invalid,
+};
+
+struct HssRecordSequence {
+  bool hasSample = false;
+  bool invalid = false;
+  uint32_t firstSampleIndex = 0;
+  uint32_t lastSampleIndex = 0;
+  uint64_t emittedSamples = 0;
+  uint64_t duplicateSamples = 0;
+  uint64_t droppedSamples = 0;
+};
+
+static HssSampleDecision observe_hss_sample(HssRecordSequence* sequence, uint32_t sample_index, uint32_t* status_flags) {
+  *status_flags = 1U;
+  if (sequence->hasSample) {
+    if (sample_index == sequence->lastSampleIndex) {
+      ++sequence->duplicateSamples;
+      return HssSampleDecision::duplicate;
+    }
+    if (sample_index < sequence->lastSampleIndex) {
+      sequence->invalid = true;
+      return HssSampleDecision::invalid;
+    }
+    const uint64_t missing = static_cast<uint64_t>(sample_index) - static_cast<uint64_t>(sequence->lastSampleIndex) - 1U;
+    if (missing > 0) {
+      sequence->droppedSamples += missing;
+      *status_flags |= 1U << 4;
+    }
+  } else {
+    sequence->hasSample = true;
+    sequence->firstSampleIndex = sample_index;
+  }
+  sequence->lastSampleIndex = sample_index;
+  ++sequence->emittedSamples;
+  return HssSampleDecision::emit;
 }
 
 static void write_record(std::ofstream& out, uint64_t sample_index, int64_t timestamp_ticks, uint32_t status_flags, const std::vector<uint32_t>& values, uint32_t* crc) {
@@ -476,6 +617,9 @@ static int preflight(const std::wstring& dll_path) {
   const bool arm_tif = required(dll, "JLINKARM_TIF_Select") != nullptr;
   const bool arm_speed = required(dll, "JLINKARM_SetSpeed") != nullptr;
   const bool arm_connect = required(dll, "JLINKARM_Connect") != nullptr;
+  auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
+  bool version_crashed = false;
+  const int dll_version = arm_version ? call_int0(arm_version, &version_crashed) : 0;
   std::cout
     << "{\"status\":\"ok\",\"dll\":\"" << escape(dll_utf8)
     << "\",\"exports\":{\"JLINK_HSS_GetCaps\":" << (getcaps ? "true" : "false")
@@ -483,6 +627,9 @@ static int preflight(const std::wstring& dll_path) {
     << ",\"JLINK_HSS_Read\":" << (read ? "true" : "false")
     << ",\"JLINK_HSS_Stop\":" << (stop ? "true" : "false")
     << "},\"exportsFound\":" << (getcaps && start && read && stop ? "true" : "false")
+    << ",\"dllVersion\":" << (!version_crashed ? dll_version : 0)
+    << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
+    << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
     << ",";
   required_base_json(arm_open, arm_close, arm_exec, arm_tif, arm_speed, arm_connect);
   std::cout
@@ -494,11 +641,140 @@ static int preflight(const std::wstring& dll_path) {
 
 static std::string option_utf8(const std::map<std::wstring, std::wstring>& options, const wchar_t* name, const char* fallback);
 
+struct JlinkScriptSelection {
+  bool enabled = false;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  std::wstring path;
+  std::string pathUtf8;
+  std::string sha256;
+  ~JlinkScriptSelection() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
+  JlinkScriptSelection() = default;
+  JlinkScriptSelection(const JlinkScriptSelection&) = delete;
+  JlinkScriptSelection& operator=(const JlinkScriptSelection&) = delete;
+};
+
+static bool is_absolute_windows_path(const std::wstring& path) {
+  return (path.size() >= 3 && std::iswalpha(path[0]) != 0 && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/'))
+    || (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\');
+}
+
+static std::wstring canonical_windows_path(const std::wstring& path) {
+  std::vector<wchar_t> buffer(32768);
+  const DWORD length = GetFullPathNameW(path.c_str(), static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
+  if (length == 0 || length >= buffer.size()) return L"";
+  return std::wstring(buffer.data(), length);
+}
+
+static bool path_contains_reparse_point(const std::wstring& path) {
+  for (size_t index = 3; index <= path.size(); ++index) {
+    if (index != path.size() && path[index] != L'\\') continue;
+    const std::wstring component = path.substr(0, index);
+    const DWORD attributes = GetFileAttributesW(component.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return true;
+  }
+  return false;
+}
+
+static bool prepare_jlink_script(
+    const std::wstring& path,
+    const std::string& approved_sha256,
+    JlinkScriptSelection* selection,
+    std::string* error_code,
+    std::string* reason) {
+  if (path.empty() || !valid_sha256_hex(approved_sha256)) {
+    *error_code = "HSS_JLINK_SCRIPT_IDENTITY_UNVALIDATED";
+    *reason = "J-Link script selection requires an absolute path and approved SHA-256";
+    return false;
+  }
+  if (!is_absolute_windows_path(path) || path.find(L'\r') != std::wstring::npos || path.find(L'\n') != std::wstring::npos) {
+    *error_code = "HSS_JLINK_SCRIPT_PATH_INVALID";
+    *reason = "J-Link script path must be an absolute Windows path without control characters";
+    return false;
+  }
+  const std::wstring canonical = canonical_windows_path(path);
+  if (canonical.empty() || _wcsicmp(canonical.c_str(), path.c_str()) != 0 || path_contains_reparse_point(canonical)) {
+    *error_code = "HSS_JLINK_SCRIPT_PATH_INVALID";
+    *reason = "J-Link script path must be canonical and contain no reparse points";
+    return false;
+  }
+  const DWORD attributes = GetFileAttributesW(canonical.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+    *error_code = "HSS_JLINK_SCRIPT_MISSING";
+    *reason = "approved J-Link script file does not exist";
+    return false;
+  }
+  HANDLE handle = CreateFileW(canonical.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  FILE_ATTRIBUTE_TAG_INFO tag{};
+  if (handle == INVALID_HANDLE_VALUE || GetFileType(handle) != FILE_TYPE_DISK
+      || !GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag))
+      || (tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    *error_code = "HSS_JLINK_SCRIPT_PATH_INVALID";
+    *reason = "J-Link script must be a regular non-reparse file";
+    return false;
+  }
+  std::string actual_sha256;
+  if (!sha256_handle(handle, &actual_sha256)) {
+    CloseHandle(handle);
+    *error_code = "HSS_JLINK_SCRIPT_HASH_FAILED";
+    *reason = "approved J-Link script file could not be hashed";
+    return false;
+  }
+  std::string normalized_approved_sha256 = approved_sha256;
+  std::transform(normalized_approved_sha256.begin(), normalized_approved_sha256.end(), normalized_approved_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (actual_sha256 != normalized_approved_sha256) {
+    CloseHandle(handle);
+    *error_code = "HSS_JLINK_SCRIPT_IDENTITY_CHANGED";
+    *reason = "J-Link script SHA-256 does not match the approved identity";
+    return false;
+  }
+  selection->enabled = true;
+  selection->handle = handle;
+  selection->path = canonical;
+  selection->pathUtf8 = narrow(canonical);
+  if (selection->pathUtf8.empty()) {
+    *error_code = "HSS_JLINK_SCRIPT_PATH_INVALID";
+    *reason = "J-Link script path is not lossless UTF-8";
+    return false;
+  }
+  selection->sha256 = actual_sha256;
+  return true;
+}
+
+static bool apply_jlink_script(
+    JLINKARM_ExecCommand_Fn arm_exec,
+    const JlinkScriptSelection& selection,
+    int* return_code,
+    char* output,
+    int output_size,
+    bool* crashed) {
+  if (!selection.enabled || selection.handle == INVALID_HANDLE_VALUE) return false;
+  const std::string command = "ScriptFile = " + selection.pathUtf8;
+  *return_code = call_exec(arm_exec, command.c_str(), output, output_size, crashed);
+  if (*crashed || *return_code != 0) return false;
+  std::string actual_sha256;
+  return sha256_handle(selection.handle, &actual_sha256) && actual_sha256 == selection.sha256;
+}
+
 static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
   const std::string dll_utf8 = narrow(dll_path);
   const std::string device = option_utf8(options, L"--device", "");
   if (device.empty()) {
     error_json("HSS_GETCAPS_DEVICE_REQUIRED", "--device is required before JLINK_HSS_GetCaps candidate call", dll_utf8);
+    return 0;
+  }
+  const auto script_it = options.find(L"--jlink-script-file");
+  const std::wstring script_path = script_it == options.end() ? L"" : script_it->second;
+  JlinkScriptSelection script_selection;
+  std::string script_error_code;
+  std::string script_error_reason;
+  if (!prepare_jlink_script(
+      script_path,
+      option_utf8(options, L"--approved-jlink-script-sha256", ""),
+      &script_selection,
+      &script_error_code,
+      &script_error_reason)) {
+    error_json(script_error_code, script_error_reason, dll_utf8);
     return 0;
   }
   HMODULE dll = LoadLibraryW(dll_path.c_str());
@@ -513,8 +789,9 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
   auto fn = reinterpret_cast<JLINK_HSS_GetCaps_Fn>(required(dll, "JLINK_HSS_GetCaps"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !fn) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_version || !fn) {
     FreeLibrary(dll);
     error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS_GetCaps exports missing", dll_utf8);
     return 0;
@@ -526,6 +803,12 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   const int tif = iface == "JTAG" ? 0 : 1;
   JLINK_HSS_CAPS caps{};
   bool crashed = false;
+  const int dll_version = call_int0(arm_version, &crashed);
+  if (crashed || dll_version <= 0) {
+    FreeLibrary(dll);
+    error_json("HSS_DLL_VERSION_INVALID", "JLINKARM_GetDLLVersion failed", dll_utf8);
+    return 0;
+  }
   if (!serial_text.empty() && arm_select_sn) {
     (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
     if (crashed) {
@@ -555,6 +838,14 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
     return 0;
   }
+  char script_exec_out[512] = {};
+  int script_rc = 0;
+  if (!apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "approved J-Link script selection failed or changed before target connect", dll_utf8);
+    return 0;
+  }
   (void)call_int1(arm_tif, tif, &crashed);
   call_void1(arm_speed, speed, &crashed);
   int connect_rc = call_int0(arm_connect, &crashed);
@@ -573,14 +864,31 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     return 0;
   }
   call_void0(arm_close, &crashed);
+  if (return_code < 0 || caps.MaxBlocks == 0 || caps.MaxFreq == 0) {
+    std::cout
+      << "{\"status\":\"error\",\"errorCode\":\"" << (return_code < 0 ? "HSS_GETCAPS_FAILED" : "HSS_GETCAPS_INVALID")
+      << "\",\"reason\":\"JLINK_HSS_GetCaps returned an error or invalid capabilities\""
+      << ",\"returnCode\":" << return_code
+      << ",\"dllVersion\":" << dll_version
+      << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
+      << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION << "}";
+    FreeLibrary(dll);
+    return 0;
+  }
   std::cout
     << "{\"status\":\"ok\",\"api\":\"JLINK_HSS_GetCaps\",\"dll\":\"" << escape(dll_utf8)
-    << "\",\"dllVersion\":\"unknown\",\"returnCode\":" << return_code
+    << "\",\"dllVersion\":" << dll_version << ",\"returnCode\":" << return_code
+    << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
+    << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
     << ",\"device\":\"" << escape(device)
     << "\",\"interface\":\"" << escape(iface)
     << "\",\"speedKhz\":" << speed
     << ",\"connectReturnCode\":" << connect_rc
     << ",\"execOutput\":\"" << escape(exec_out) << "\""
+    << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
+    << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
+    << ",\"jlinkScriptReturnCode\":" << script_rc
+    << ",\"jlinkScriptExecOutput\":\"" << escape(script_exec_out) << "\""
     << ",\"caps\":{\"maxBlocks\":" << caps.MaxBlocks
     << ",\"maxFreq\":" << caps.MaxFreq
     << ",\"caps\":" << caps.Caps
@@ -747,7 +1055,6 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
     return 0;
   }
-
   int tif_rc = call_int1(arm_tif, tif, &crashed);
   if (crashed) {
     call_void0(arm_close, &crashed);
@@ -803,6 +1110,8 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     << ",\"serial\":\"" << escape(serial_text)
     << "\",\"dll\":\"" << escape(dll_utf8)
     << "\",\"dllVersion\":" << dll_version
+    << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
+    << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
     << ",\"firmware\":\"unknown\""
     << ",\"vtrefMv\":null"
     << ",\"targetId\":" << target_id
@@ -1052,8 +1361,34 @@ static int self_test() {
     error_json("HSS_SELF_TEST_CHANGED_WINDOW_FAILED", "HSS changed-window diagnostic failed");
     return 0;
   }
-  if (hss_capture_failed(false, 2, 2) || !hss_capture_failed(false, 1, 2) || !hss_capture_failed(false, 0, 2) || !hss_capture_failed(true, 2, 2)) {
+  if (hss_capture_failed(false, 2) || !hss_capture_failed(false, 0) || !hss_capture_failed(true, 2)) {
     error_json("HSS_SELF_TEST_CAPTURE_FAILURE_FAILED", "HSS capture failure classification failed");
+    return 0;
+  }
+  HssRecordSequence normal_sequence;
+  uint32_t normal_flags = 0;
+  if (observe_hss_sample(&normal_sequence, 84U, &normal_flags) != HssSampleDecision::emit || normal_flags != 1U
+      || observe_hss_sample(&normal_sequence, 85U, &normal_flags) != HssSampleDecision::emit || normal_flags != 1U
+      || observe_hss_sample(&normal_sequence, 86U, &normal_flags) != HssSampleDecision::emit || normal_flags != 1U
+      || normal_sequence.emittedSamples != 3 || normal_sequence.duplicateSamples != 0 || normal_sequence.droppedSamples != 0 || normal_sequence.invalid) {
+    error_json("HSS_SELF_TEST_RECORD_SEQUENCE_FAILED", "normal HSS record sequence classification failed");
+    return 0;
+  }
+  HssRecordSequence gap_sequence;
+  uint32_t gap_flags = 0;
+  if (observe_hss_sample(&gap_sequence, 86U, &gap_flags) != HssSampleDecision::emit || gap_flags != 1U
+      || observe_hss_sample(&gap_sequence, 88U, &gap_flags) != HssSampleDecision::emit || gap_flags != (1U | (1U << 4))
+      || observe_hss_sample(&gap_sequence, 88U, &gap_flags) != HssSampleDecision::duplicate
+      || gap_sequence.emittedSamples != 2 || gap_sequence.duplicateSamples != 1 || gap_sequence.droppedSamples != 1 || gap_sequence.invalid) {
+    error_json("HSS_SELF_TEST_RECORD_GAP_FAILED", "HSS gap and duplicate classification failed");
+    return 0;
+  }
+  HssRecordSequence decreasing_sequence;
+  uint32_t decreasing_flags = 0;
+  if (observe_hss_sample(&decreasing_sequence, 88U, &decreasing_flags) != HssSampleDecision::emit
+      || observe_hss_sample(&decreasing_sequence, 87U, &decreasing_flags) != HssSampleDecision::invalid
+      || !decreasing_sequence.invalid || decreasing_sequence.emittedSamples != 1) {
+    error_json("HSS_SELF_TEST_RECORD_DECREASING_FAILED", "decreasing HSS record sequence was not rejected");
     return 0;
   }
   const auto block_plan = build_hss_block_plan({
@@ -1082,7 +1417,12 @@ static int self_test() {
   std::cout
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"uint64,int64,uint32,uint32,uint32[]\""
     << ",\"sampleCount\":2,\"crc32\":\"" << std::hex << crc << std::dec
-    << "\",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+    << "\",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
+    << ",\"gapEmitted\":" << gap_sequence.emittedSamples
+    << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
+    << ",\"droppedSamples\":" << gap_sequence.droppedSamples
+    << ",\"decreasingRejected\":" << (decreasing_sequence.invalid ? "true" : "false") << "}"
+    << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
   return 0;
 }
 
@@ -1230,6 +1570,164 @@ static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_writ
   return true;
 }
 
+static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool state_only) {
+  const auto dll_it = options.find(L"--dll");
+  const auto script_it = options.find(L"--jlink-script-file");
+  const std::wstring dll_path = dll_it == options.end() ? L"" : dll_it->second;
+  const std::wstring script_path = script_it == options.end() ? L"" : script_it->second;
+  const std::string dll_utf8 = narrow(dll_path);
+  const std::string approved_dll_sha256 = option_utf8(options, L"--approved-dll-sha256", "");
+  const std::string approved_script_sha256 = option_utf8(options, L"--approved-jlink-script-sha256", "");
+  const std::string operation = state_only ? "target-state" : option_utf8(options, L"--operation", "");
+  const bool halt_after_reset = option_utf8(options, L"--halt", "false") == "true";
+  const std::string device = option_utf8(options, L"--device", "");
+  const std::string iface = option_utf8(options, L"--interface", "SWD");
+  const std::string serial_text = option_utf8(options, L"--serial", "");
+  int speed = 4000;
+  if (dll_path.empty() || device.empty() || !valid_sha256_hex(approved_dll_sha256)
+      || !parse_int_text(option_utf8(options, L"--speed", "4000"), &speed) || speed < 1
+      || (!state_only && operation != "halt" && operation != "resume" && operation != "reset")) {
+    error_json("HSS_CPU_CONTROL_PLAN_INVALID", "CPU control requires validated DLL, target, speed, and fixed operation", dll_utf8);
+    return 0;
+  }
+  JlinkScriptSelection script_selection;
+  std::string script_error_code;
+  std::string script_error_reason;
+  if (!prepare_jlink_script(script_path, approved_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
+    error_json(script_error_code, script_error_reason, dll_utf8);
+    return 0;
+  }
+  HMODULE dll = LoadLibraryW(dll_path.c_str());
+  if (!dll) {
+    error_json("HSS_DLL_LOAD_FAILED", "LoadLibraryW failed", dll_utf8);
+    return 0;
+  }
+  std::vector<wchar_t> loaded_path(32768);
+  const DWORD loaded_path_bytes = GetModuleFileNameW(dll, loaded_path.data(), static_cast<DWORD>(loaded_path.size()));
+  std::string loaded_dll_sha256;
+  std::string normalized_approved_sha256 = approved_dll_sha256;
+  std::transform(normalized_approved_sha256.begin(), normalized_approved_sha256.end(), normalized_approved_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (loaded_path_bytes == 0 || loaded_path_bytes >= loaded_path.size()
+      || !sha256_file(std::wstring(loaded_path.data(), loaded_path_bytes), &loaded_dll_sha256)
+      || loaded_dll_sha256 != normalized_approved_sha256) {
+    FreeLibrary(dll);
+    error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the approved CPU-control identity", dll_utf8);
+    return 0;
+  }
+  auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
+  auto arm_close = reinterpret_cast<JLINKARM_Close_Fn>(required(dll, "JLINKARM_Close"));
+  auto arm_exec = reinterpret_cast<JLINKARM_ExecCommand_Fn>(required(dll, "JLINKARM_ExecCommand"));
+  auto arm_tif = reinterpret_cast<JLINKARM_TIF_Select_Fn>(required(dll, "JLINKARM_TIF_Select"));
+  auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
+  auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
+  auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
+  auto arm_halt = reinterpret_cast<JLINKARM_Halt_Fn>(required(dll, "JLINKARM_Halt"));
+  auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
+  auto arm_reset = reinterpret_cast<JLINKARM_Reset_Fn>(required(dll, "JLINKARM_Reset"));
+  auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_halted || !arm_version
+      || (!state_only && ((operation == "halt" && !arm_halt) || (operation == "resume" && !arm_go)
+        || (operation == "reset" && (!arm_reset || (halt_after_reset ? !arm_halt : !arm_go)))))) {
+    FreeLibrary(dll);
+    error_json("HSS_CPU_CONTROL_EXPORT_MISSING", "required J-Link CPU-control export is missing", dll_utf8);
+    return 0;
+  }
+  bool crashed = false;
+  const int dll_version = call_int0(arm_version, &crashed);
+  if (crashed || dll_version <= 0) {
+    FreeLibrary(dll);
+    error_json("HSS_DLL_VERSION_INVALID", "JLINKARM_GetDLLVersion failed", dll_utf8);
+    return 0;
+  }
+  if (!serial_text.empty() && arm_select_sn) (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
+  const int open_rc = call_int0(arm_open, &crashed);
+  if (crashed || open_rc < 0 || !suppress_jlink_gui(arm_exec, &crashed)) {
+    if (open_rc >= 0) call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_OPEN_FAILED", "J-Link CPU-control open failed", dll_utf8);
+    return 0;
+  }
+  char exec_out[512] = {};
+  const std::string device_cmd = "device = " + device;
+  (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  char script_exec_out[512] = {};
+  int script_rc = -1;
+  if (crashed || !apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json(script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "trusted ScriptFile selection failed before CPU control", dll_utf8);
+    return 0;
+  }
+  (void)call_int1(arm_tif, iface == "JTAG" ? 0 : 1, &crashed);
+  call_void1(arm_speed, speed, &crashed);
+  const int connect_rc = call_int0(arm_connect, &crashed);
+  if (crashed || connect_rc < 0) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_CONNECT_FAILED", "J-Link CPU-control connect failed", dll_utf8);
+    return 0;
+  }
+  const int before_halted = call_int0(arm_halted, &crashed);
+  bool reset_issued = false;
+  bool halt_issued = false;
+  bool resume_issued = false;
+  if (!state_only) {
+    bool control_crashed = false;
+    if (operation == "halt") {
+      call_void0(arm_halt, &control_crashed);
+      halt_issued = !control_crashed;
+    } else if (operation == "resume") {
+      call_void0(arm_go, &control_crashed);
+      resume_issued = !control_crashed;
+    } else {
+      call_void0(arm_reset, &control_crashed);
+      reset_issued = !control_crashed;
+      if (!control_crashed) {
+        if (halt_after_reset) {
+          call_void0(arm_halt, &control_crashed);
+          halt_issued = !control_crashed;
+        } else {
+          call_void0(arm_go, &control_crashed);
+          resume_issued = !control_crashed;
+        }
+      }
+    }
+    if (control_crashed) {
+      call_void0(arm_close, &crashed);
+      FreeLibrary(dll);
+      error_json("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control export raised a structured exception", dll_utf8);
+      return 0;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  const int after_halted = call_int0(arm_halted, &crashed);
+  call_void0(arm_close, &crashed);
+  FreeLibrary(dll);
+  if (crashed || before_halted < 0 || after_halted < 0) {
+    error_json("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control operation or state check failed", dll_utf8);
+    return 0;
+  }
+  std::cout
+    << "{\"status\":\"ok\",\"operation\":\"" << operation << "\""
+    << ",\"dllVersion\":" << dll_version
+    << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
+    << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
+    << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
+    << ",\"jlinkScriptSha256\":\"" << script_selection.sha256 << "\""
+    << ",\"jlinkScriptReturnCode\":" << script_rc
+    << ",\"targetWasHalted\":" << (after_halted > 0 ? "true" : "false")
+    << ",\"targetWasHaltedRaw\":" << after_halted
+    << ",\"beforeState\":\"" << (before_halted > 0 ? "halted" : "running") << "\""
+    << ",\"afterState\":\"" << (after_halted > 0 ? "halted" : "running") << "\""
+    << ",\"targetReset\":" << (reset_issued ? "true" : "false")
+    << ",\"resetIssued\":" << (reset_issued ? "true" : "false")
+    << ",\"haltIssued\":" << (halt_issued ? "true" : "false")
+    << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
+    << ",\"targetWritten\":false,\"flashIssued\":false}";
+  return 0;
+}
+
 static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const auto plan_it = options.find(L"--plan");
   if (plan_it == options.end()) {
@@ -1242,6 +1740,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
   const std::string dll_utf8 = json_string(plan, "dllPath");
+  const std::string approved_dll_sha256 = json_string(plan, "approvedDllSha256");
+  const std::string jlink_script_utf8 = json_string(plan, "jlinkScriptFile");
+  const std::string approved_jlink_script_sha256 = json_string(plan, "approvedJlinkScriptSha256");
+  const bool runtime_identity_validated = json_bool(plan, "runtimeIdentityValidated", false);
   const std::string output_file = json_string(plan, "outputFile");
   const std::string stop_file = json_string(plan, "stopFile");
   const std::string diagnostic_file = json_string(plan, "diagnosticFile");
@@ -1253,6 +1755,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string serial_text = json_string(plan, "serial");
   const std::string read_mode = json_string(plan, "readMode", "periodic");
   const bool resume_before_start = json_bool(plan, "resumeBeforeStart", false);
+  const bool require_first_sample_index_zero = json_bool(plan, "requireFirstSampleIndexZero", false);
   const int speed = json_int(plan, "speedKhz", 4000);
   const int requested_rate = json_int(plan, "requestedRateHz", 1000);
   const int duration_sec = json_int(plan, "durationSec", 1);
@@ -1269,12 +1772,49 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("HSS_PLAN_INVALID", "readMode must be periodic or drain");
     return 0;
   }
+  if (!runtime_identity_validated || !valid_sha256_hex(approved_dll_sha256)) {
+    error_json("HSS_RUNTIME_IDENTITY_UNVALIDATED", "capture plan requires a validated DLL SHA-256 identity", dll_utf8);
+    return 0;
+  }
+  JlinkScriptSelection script_selection;
+  std::string script_error_code;
+  std::string script_error_reason;
+  std::wstring jlink_script_path;
+  if (!widen_utf8(jlink_script_utf8, &jlink_script_path)) {
+    error_json("HSS_JLINK_SCRIPT_PATH_INVALID", "J-Link script path is not valid lossless UTF-8", dll_utf8);
+    return 0;
+  }
+  if (!prepare_jlink_script(
+      jlink_script_path,
+      approved_jlink_script_sha256,
+      &script_selection,
+      &script_error_code,
+      &script_error_reason)) {
+    error_json(script_error_code, script_error_reason, dll_utf8);
+    return 0;
+  }
 
   write_hss_diag(diagnostic_file, capture_id, "load_dll");
-  const std::wstring dll_path(dll_utf8.begin(), dll_utf8.end());
+  std::wstring dll_path;
+  if (!widen_utf8(dll_utf8, &dll_path)) {
+    error_json("HSS_DLL_PATH_INVALID", "DLL path is not valid lossless UTF-8", dll_utf8);
+    return 0;
+  }
   HMODULE dll = LoadLibraryW(dll_path.c_str());
   if (!dll) {
     error_json("HSS_DLL_LOAD_FAILED", "LoadLibraryW failed", dll_utf8);
+    return 0;
+  }
+  std::vector<wchar_t> loaded_path(32768);
+  const DWORD loaded_path_bytes = GetModuleFileNameW(dll, loaded_path.data(), static_cast<DWORD>(loaded_path.size()));
+  std::string loaded_dll_sha256;
+  std::string normalized_approved_sha256 = approved_dll_sha256;
+  std::transform(normalized_approved_sha256.begin(), normalized_approved_sha256.end(), normalized_approved_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (loaded_path_bytes == 0 || loaded_path_bytes >= loaded_path.size()
+      || !sha256_file(std::wstring(loaded_path.data(), loaded_path_bytes), &loaded_dll_sha256)
+      || loaded_dll_sha256 != normalized_approved_sha256) {
+    FreeLibrary(dll);
+    error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the approved capture identity", dll_utf8);
     return 0;
   }
   auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
@@ -1294,16 +1834,23 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto arm_write_u8 = reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8"));
   auto arm_write_u16 = reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16"));
   auto arm_write_u32 = reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32"));
+  auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
   auto hss_start = reinterpret_cast<JLINK_HSS_Start_Fn>(required(dll, "JLINK_HSS_Start"));
   auto hss_read = reinterpret_cast<JLINK_HSS_Read_Fn>(required(dll, "JLINK_HSS_Read"));
   auto hss_stop = reinterpret_cast<JLINK_HSS_Stop_Fn>(required(dll, "JLINK_HSS_Stop"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !hss_start || !hss_read || !hss_stop) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_version || !hss_start || !hss_read || !hss_stop) {
     FreeLibrary(dll);
     error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS exports missing", dll_utf8);
     return 0;
   }
 
   bool crashed = false;
+  const int dll_version = call_int0(arm_version, &crashed);
+  if (crashed || dll_version <= 0) {
+    FreeLibrary(dll);
+    error_json("HSS_DLL_VERSION_INVALID", "JLINKARM_GetDLLVersion failed", dll_utf8);
+    return 0;
+  }
   if (!serial_text.empty() && arm_select_sn) {
     (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
     if (crashed) {
@@ -1339,6 +1886,16 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
     return 0;
   }
+  char script_exec_out[512] = {};
+  int script_rc = 0;
+  write_hss_diag(diagnostic_file, capture_id, "before_select_jlink_script");
+  if (!apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "approved J-Link script selection failed or changed before target connect", dll_utf8);
+    return 0;
+  }
+  write_hss_diag(diagnostic_file, capture_id, "after_select_jlink_script");
   const int tif = iface == "JTAG" ? 0 : 1;
   write_hss_diag(diagnostic_file, capture_id, "before_tif_select");
   (void)call_int1(arm_tif, tif, &crashed);
@@ -1447,9 +2004,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
-  uint64_t sample = 0;
+  HssRecordSequence record_sequence;
   const HssMemoryIpc memory_ipc{write_request_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32};
-  for (uint64_t attempt = 0; attempt < requested_samples && sample < requested_samples; ++attempt) {
+  for (uint64_t attempt = 0; attempt < requested_samples && record_sequence.emittedSamples < requested_samples && !record_sequence.invalid; ++attempt) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
       stop_requested = true;
       break;
@@ -1507,7 +2064,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     } else {
       ++short_reads;
     }
-    for (uint64_t batch_sample = 0; batch_sample < samples_in_read && sample < requested_samples; ++batch_sample) {
+    if (crashed || read_rc < 0 || (read_rc > 0 && read_rc < static_cast<int>(hss_sample_stride_bytes))) ++read_errors;
+    for (uint64_t batch_sample = 0; batch_sample < samples_in_read && record_sequence.emittedSamples < requested_samples; ++batch_sample) {
       std::vector<uint32_t> values;
       values.reserve(symbols.size());
       size_t offset = static_cast<size_t>(batch_sample) * hss_sample_stride_bytes;
@@ -1523,44 +2081,65 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
         }
         values.push_back(raw);
       }
-      ++valid_samples;
       ++decoded_samples;
+      uint32_t status_flags = 0;
+      if (require_first_sample_index_zero && !record_sequence.hasSample && hss_sample_index != 0U) {
+        record_sequence.invalid = true;
+        break;
+      }
+      const HssSampleDecision decision = observe_hss_sample(&record_sequence, hss_sample_index, &status_flags);
+      if (decision == HssSampleDecision::duplicate) continue;
+      if (decision == HssSampleDecision::invalid) break;
+      ++valid_samples;
       const int64_t sample_ns = started_ns + static_cast<int64_t>(static_cast<uint64_t>(hss_sample_index) * 1000000000ULL / static_cast<uint64_t>(requested_rate));
-      write_record(out, hss_sample_index, sample_ns, 1U, values, &crc);
-      ++sample;
+      write_record(out, hss_sample_index, sample_ns, status_flags, values, &crc);
     }
     if (samples_in_read > 0) out.flush();
-    if (crashed) break;
-  }
-  while (!stop_requested && sample < requested_samples) {
-    std::vector<uint32_t> values(symbols.size(), 0);
-    ++read_errors;
-    write_record(out, sample++, now_ns(), 2U, values, &crc);
+    if (crashed || record_sequence.invalid) break;
   }
   out.close();
   write_hss_diag(diagnostic_file, capture_id, "before_hss_stop", read_attempts, valid_samples, last_read_rc);
-  int stop_rc = call_hss_stop(hss_stop, &crashed);
+  const bool read_crashed = crashed;
+  bool stop_crashed = false;
+  int stop_rc = call_hss_stop(hss_stop, &stop_crashed);
   write_hss_diag(diagnostic_file, capture_id, "after_hss_stop", read_attempts, valid_samples, last_read_rc);
-  call_void0(arm_close, &crashed);
+  bool close_crashed = false;
+  call_void0(arm_close, &close_crashed);
   FreeLibrary(dll);
   crc ^= 0xFFFFFFFFU;
   const int64_t elapsed_ns = std::max<int64_t>(1, now_ns() - started_ns);
-  const double actual_rate = static_cast<double>(valid_samples) * 1000000000.0 / static_cast<double>(elapsed_ns);
-  const uint64_t sample_count = valid_samples + read_errors;
+  const double actual_rate = static_cast<double>(record_sequence.emittedSamples) * 1000000000.0 / static_cast<double>(elapsed_ns);
+  const uint64_t sample_count = record_sequence.emittedSamples;
   const double header_changed_ratio = read_attempts > 0 ? static_cast<double>(header_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const double payload_changed_ratio = read_attempts > 0 ? static_cast<double>(payload_changed_reads) / static_cast<double>(read_attempts) : 0.0;
-  const bool read_failed = !stop_requested && hss_capture_failed(crashed, valid_samples, requested_samples);
+  const bool read_failed = !stop_requested && hss_capture_failed(read_crashed, record_sequence.emittedSamples);
+  const bool lifecycle_validated = start_rc >= 0 && read_attempts > 0 && decoded_samples > 0 && stop_rc >= 0 && !read_crashed && !stop_crashed && !close_crashed;
+  const bool decoder_semantics_validated = !record_sequence.invalid
+    && record_sequence.emittedSamples > 0
+    && decoded_samples == record_sequence.emittedSamples + record_sequence.duplicateSamples
+    && (stop_requested || record_sequence.emittedSamples + record_sequence.droppedSamples >= requested_samples)
+    && read_errors == 0;
+  const bool validation_failed = read_failed || !lifecycle_validated || !decoder_semantics_validated;
   std::ostringstream crc_hex;
   crc_hex << std::hex << crc;
   std::cout
-    << "{\"status\":\"" << (read_failed ? "error" : stop_requested ? "stopped" : "ok") << "\"";
-  if (read_failed) {
-    std::cout << ",\"errorCode\":\"HSS_READ_FAILED\",\"reason\":\"JLINK_HSS_Read did not produce a complete valid sample set\"";
+    << "{\"status\":\"" << (validation_failed ? "error" : stop_requested ? "stopped" : "ok") << "\"";
+  if (validation_failed) {
+    std::cout << ",\"errorCode\":\"" << (record_sequence.invalid ? "HSS_SAMPLE_INDEX_INVALID" : !lifecycle_validated ? "HSS_LIFECYCLE_VALIDATION_FAILED" : !decoder_semantics_validated ? "HSS_DECODE_VALIDATION_FAILED" : "HSS_READ_FAILED")
+              << "\",\"reason\":\"JLINK_HSS Start/Read/Stop or decoded sample validation failed\"";
   }
   std::cout
+    << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
+    << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
+    << ",\"dllVersion\":" << dll_version
+    << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
+    << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
+    << ",\"jlinkScriptReturnCode\":" << script_rc
+    << ",\"jlinkScriptExecOutput\":\"" << escape(script_exec_out) << "\""
     << ",\"captureId\":\"" << escape(capture_id)
     << "\",\"backend\":\"jlink-hss\",\"requestedRateHz\":" << requested_rate
-    << ",\"readMode\":\"" << read_mode << "\""
+     << ",\"readMode\":\"" << read_mode << "\""
+     << ",\"resetBeforeCapture\":" << (require_first_sample_index_zero ? "true" : "false")
     << ",\"resumeBeforeStart\":" << (resume_before_start ? "true" : "false")
     << ",\"resumeIssued\":" << (resume_before_start ? "true" : "false")
     << ",\"targetWasHaltedBeforeResume\":" << (halted_before_resume > 0 ? "true" : "false")
@@ -1569,18 +2148,23 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"targetHaltedAfterResumeRaw\":" << halted_after_resume
     << ",\"actualRateHz\":" << actual_rate
     << ",\"durationSec\":" << (static_cast<double>(elapsed_ns) / 1000000000.0)
-    << ",\"sampleCount\":" << sample_count
-    << ",\"requestedSamples\":" << requested_samples
-    << ",\"validSamples\":" << valid_samples
-    << ",\"readErrors\":" << read_errors
+     << ",\"sampleCount\":" << sample_count
+     << ",\"requestedSamples\":" << requested_samples
+     << ",\"validSamples\":" << valid_samples
+     << ",\"emittedSamples\":" << record_sequence.emittedSamples
+     << ",\"duplicateSamples\":" << record_sequence.duplicateSamples
+     << ",\"readErrors\":" << read_errors
     << ",\"hssBlockCount\":" << blocks.size()
     << ",\"hssSampleHeaderBytes\":" << hss_sample_header_bytes
     << ",\"hssSampleStrideBytes\":" << hss_sample_stride_bytes
     << ",\"readAttempts\":" << read_attempts
     << ",\"decodedSamples\":" << decoded_samples
+    << ",\"startReturnCode\":" << start_rc
+    << ",\"lifecycleValidated\":" << (lifecycle_validated ? "true" : "false")
+    << ",\"decoderSemanticsValidated\":" << (decoder_semantics_validated ? "true" : "false")
     << ",\"emptyReads\":" << empty_reads
     << ",\"shortReads\":" << short_reads
-    << ",\"missingSamples\":" << read_errors
+     << ",\"missingSamples\":" << record_sequence.droppedSamples
     << ",\"bytesPerSample\":" << bytes_per_sample
     << ",\"readBufferBytes\":" << read_buffer_bytes
     << ",\"firstReadReturnCode\":" << first_read_rc
@@ -1613,10 +2197,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadChangedRatio\":" << payload_changed_ratio
     << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
-    << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":0"
+     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":" << record_sequence.droppedSamples
     << ",\"targetReset\":false,\"targetWritten\":" << (target_written ? "true" : "false")
     << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
-    << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":0,\"sampleCount\":" << sample_count
+     << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":" << (record_sequence.hasSample ? record_sequence.firstSampleIndex : 0)
+     << ",\"sampleCount\":" << sample_count
     << ",\"crc32\":\"" << crc_hex.str() << "\"},\"stopReturnCode\":" << stop_rc << "}";
   return 0;
 }
@@ -1630,6 +2215,7 @@ int wmain(int argc, wchar_t** argv) {
   const auto options = parse_options(argc, argv);
   const auto dll_it = options.find(L"--dll");
   const std::wstring dll_path = dll_it == options.end() ? L"" : dll_it->second;
+  if (command == L"version") return version();
   if ((command == L"preflight" || command == L"getcaps") && dll_path.empty()) {
     error_json("HSS_DLL_PATH_MISSING", "--dll is required");
     return 0;
@@ -1639,6 +2225,8 @@ int wmain(int argc, wchar_t** argv) {
   if (command == L"connect-preflight") return connect_preflight(dll_path, options);
   if (command == L"read-ram-probe") return read_ram_probe(dll_path, options);
   if (command == L"self-test") return self_test();
+  if (command == L"cpu-control") return cpu_control(options, false);
+  if (command == L"target-state") return cpu_control(options, true);
   if (command == L"hss-capture") return hss_capture(options);
   if (command == L"hss-smoke" || command == L"hss-benchmark") {
     error_json("HSS_START_READ_STOP_NOT_AUTHORIZED_YET", "connect-preflight must pass before enabling HSS Start/Read/Stop candidate calls", narrow(dll_path));

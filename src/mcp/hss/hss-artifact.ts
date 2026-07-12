@@ -56,6 +56,8 @@ export async function writeInitialMetadata(input: {
   targetWasHaltedBeforeCapture?: boolean;
   targetWasHaltedRaw?: number;
   warnings?: string[];
+  script?: HssCaptureMetadata["script"];
+  reset?: HssCaptureMetadata["reset"];
 }): Promise<void> {
   const metadata: HssCaptureMetadata = {
     version: 1,
@@ -71,6 +73,8 @@ export async function writeInitialMetadata(input: {
     artifact: input.artifact,
     target: input.target,
     probe: input.probe ?? {},
+    ...(input.script ? { script: input.script } : {}),
+    ...(input.reset ? { reset: input.reset } : {}),
     symbols: input.symbols,
     sampling: {
       requestedRateHz: input.requestedRateHz,
@@ -138,19 +142,22 @@ export async function finalizeMetadata(input: {
     recordSize,
     crc32: segmentCrc,
   }];
-  metadata.quality = qualityFromRecords(records, hssIndexRateHz);
+  metadata.quality = qualityFromRecords(records, hssIndexRateHz, helperResult);
   metadata.layout = layoutFromRecords(records, metadata.symbols, helperResult);
   metadata.payloadValidationStatus = payloadValidationStatus(metadata.quality, metadata.layout);
   metadata.transportStatus = transportStatus(input.state, metadata.quality);
   metadata.dataQualityStatus = dataQualityStatus(metadata.quality, metadata.payloadValidationStatus, decodeFailure);
+  const resetSucceeded = metadata.reset?.status === "completed";
   metadata.safety = {
-    targetReset: boolField(helperResult, "targetReset"),
+    targetReset: boolField(helperResult, "targetReset") || resetSucceeded,
     targetWritten: boolField(helperResult, "targetWritten"),
     flashIssued: boolField(helperResult, "flashIssued"),
-    resetIssued: boolField(helperResult, "resetIssued"),
+    resetIssued: boolField(helperResult, "resetIssued") || resetSucceeded,
     haltIssued: boolField(helperResult, "haltIssued"),
     resumeIssued: boolField(helperResult, "resumeIssued"),
   };
+  if (metadata.script) metadata.script.captureSelectionReturnCode = numberField(helperResult, "jlinkScriptReturnCode") ?? -1;
+  if (metadata.reset) metadata.reset = { ...metadata.reset, status: boolField(helperResult, "resetBeforeCapture") ? "completed" : (metadata.reset.status ?? "not_run") };
   metadata.targetState = {
     targetWasHaltedBeforeCapture: boolField(helperResult, "targetWasHaltedBeforeResume") || metadata.targetState.targetWasHaltedBeforeCapture,
     targetWasHaltedRaw: numberField(helperResult, "targetWasHaltedRaw") ?? metadata.targetState.targetWasHaltedRaw,
@@ -162,7 +169,7 @@ export async function finalizeMetadata(input: {
     targetHaltedAfterResumeRaw: numberField(helperResult, "targetHaltedAfterResumeRaw"),
   };
   metadata.hmC095 = hmC095Validation(records, metadata.symbols, hssIndexRateHz || metadata.sampling.requestedRateHz, metadata);
-  metadata.semanticValidationStatus = semanticValidationStatus(metadata.hmC095);
+  metadata.semanticValidationStatus = semanticValidationStatus(metadata.hmC095, helperResult, records.length, metadata.quality.droppedSamples);
   if (decodeFailure) metadata.failures.push(decodeFailure);
   if (input.failure) metadata.failures.push(input.failure);
   metadata.events = [...await readHssCaptureEvents(input.metadataFile), ...(input.helperResult ? [{ type: "helperResult", helperResult: input.helperResult }] : [])];
@@ -174,6 +181,7 @@ export async function finalizeMetadata(input: {
 export async function hssCaptureStatusFromMetadata(metadataFile: string): Promise<Record<string, unknown>> {
   if (!existsSync(metadataFile)) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture metadata was not found", { metadataFile });
   const metadata = await readHssMetadata(metadataFile);
+  const helperResult = [...metadata.events].reverse().find((event) => event.type === "helperResult")?.helperResult as Record<string, unknown> | undefined;
   return {
     captureId: metadata.captureId,
     state: metadata.state,
@@ -191,6 +199,8 @@ export async function hssCaptureStatusFromMetadata(metadataFile: string): Promis
     timeouts: metadata.quality.timeouts,
     overflows: metadata.quality.overflows,
     droppedSamples: metadata.quality.droppedSamples,
+    emittedSamples: helperResult ? numberField(helperResult, "emittedSamples") ?? metadata.quality.sampleCount : metadata.quality.sampleCount,
+    duplicateSamples: helperResult ? numberField(helperResult, "duplicateSamples") ?? 0 : 0,
     currentSegment: metadata.segments[0]?.file ?? "capture_0001.bin",
     warnings: metadata.warnings,
   };
@@ -367,20 +377,63 @@ function metadataPathForCapture(captureId: string, metadataFile: string | undefi
 }
 
 export async function readHssRecords(file: string, symbolCount: number, recordSize: number): Promise<HssSampleRecord[]> {
+  const expectedRecordSize = 24 + symbolCount * 4;
+  if (!Number.isInteger(symbolCount) || symbolCount < 0 || recordSize !== expectedRecordSize) {
+    throw new HssError(HSS_ERROR.HSS_RECORD_SIZE_INVALID, "capture segment record size is invalid", {
+      symbolCount,
+      recordSize,
+      expectedRecordSize,
+    });
+  }
   const chunks: Buffer[] = [];
   for await (const chunk of createReadStream(file)) chunks.push(chunk as Buffer);
   const data = Buffer.concat(chunks);
-  if (data.length % recordSize !== 0) throw new Error("capture segment has partial record");
+  if (data.length % recordSize !== 0) {
+    throw new HssError(HSS_ERROR.HSS_RECORD_TRUNCATED, "capture segment has a partial record", {
+      byteLength: data.length,
+      recordSize,
+      partialBytes: data.length % recordSize,
+    });
+  }
+  // ponytail: validation is segment-local until a multi-segment reader carries the prior terminal record.
   const records: HssSampleRecord[] = [];
   for (let offset = 0; offset < data.length; offset += recordSize) {
     const statusFlags = data.readUInt32LE(offset + 16);
     assertNoMvpAWriteFlags(statusFlags);
-    records.push({
+    const record: HssSampleRecord = {
       sampleIndex: data.readBigUInt64LE(offset),
-      timestampTicks: data.readBigInt64LE(offset + 8),
+      timestampTicks: data.readBigUInt64LE(offset + 8),
       statusFlags,
       rawValues: Array.from({ length: symbolCount }, (_, index) => data.readUInt32LE(offset + 24 + index * 4)),
-    });
+    };
+    const previous = records.at(-1);
+    if (previous && record.sampleIndex <= previous.sampleIndex) {
+      throw new HssError(HSS_ERROR.HSS_SAMPLE_INDEX_INVALID, "capture sample indexes must strictly increase", {
+        reason: record.sampleIndex === previous.sampleIndex ? "duplicate" : "decreasing",
+        previousSampleIndex: previous.sampleIndex.toString(),
+        sampleIndex: record.sampleIndex.toString(),
+        offset,
+      });
+    }
+    if (previous && record.timestampTicks < previous.timestampTicks) {
+      throw new HssError(HSS_ERROR.HSS_TIMESTAMP_INVALID, "capture timestamps must not decrease", {
+        reason: "decreasing",
+        previousTimestampTicks: previous.timestampTicks.toString(),
+        timestampTicks: record.timestampTicks.toString(),
+        offset,
+      });
+    }
+    if (previous
+      && record.sampleIndex > previous.sampleIndex + 1n
+      && (record.statusFlags & HSS_STATUS_FLAGS.dropped_before_this_sample) === 0) {
+      throw new HssError(HSS_ERROR.HSS_SAMPLE_GAP_UNMARKED, "capture sample index gap is missing dropped_before_this_sample", {
+        previousSampleIndex: previous.sampleIndex.toString(),
+        sampleIndex: record.sampleIndex.toString(),
+        missingSamples: (record.sampleIndex - previous.sampleIndex - 1n).toString(),
+        offset,
+      });
+    }
+    records.push(record);
   }
   return records;
 }
@@ -388,7 +441,7 @@ export async function readHssRecords(file: string, symbolCount: number, recordSi
 export function encodeHssRecord(record: HssSampleRecord, symbolCount: number): Buffer {
   const buffer = Buffer.alloc(24 + symbolCount * 4);
   buffer.writeBigUInt64LE(record.sampleIndex, 0);
-  buffer.writeBigInt64LE(record.timestampTicks, 8);
+  buffer.writeBigUInt64LE(record.timestampTicks, 8);
   buffer.writeUInt32LE(record.statusFlags, 16);
   buffer.writeUInt32LE(0, 20);
   record.rawValues.forEach((value, index) => buffer.writeUInt32LE(value >>> 0, 24 + index * 4));
@@ -406,14 +459,18 @@ export async function crc32File(file: string): Promise<string> {
   return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0");
 }
 
-function qualityFromRecords(records: HssSampleRecord[], actualRateHz: number): HssCaptureMetadata["quality"] {
+function qualityFromRecords(records: HssSampleRecord[], actualRateHz: number, helperResult: Record<string, unknown>): HssCaptureMetadata["quality"] {
+  let indexedDroppedSamples = 0;
+  for (let index = 1; index < records.length; index += 1) {
+    indexedDroppedSamples += Number(records[index].sampleIndex - records[index - 1].sampleIndex - 1n);
+  }
   return {
     sampleCount: records.length,
     validSamples: records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.valid) !== 0).length,
-    readErrors: records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.read_error) !== 0).length,
+    readErrors: numberField(helperResult, "readErrors") ?? records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.read_error) !== 0).length,
     timeouts: records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.timeout) !== 0).length,
     overflows: records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.overflow) !== 0).length,
-    droppedSamples: records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0).length,
+    droppedSamples: indexedDroppedSamples,
     targetHaltedSamples: records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.target_halted) !== 0).length,
     actualRateHz,
   };
@@ -481,11 +538,16 @@ function dataQualityStatus(quality: HssCaptureMetadata["quality"], payloadStatus
   if (decodeFailure || quality.sampleCount === 0 || quality.validSamples === 0 || payloadStatus === "failed") return "failed";
   const readErrorRatio = quality.readErrors / quality.sampleCount;
   if (readErrorRatio > READ_ERROR_FAILED_RATIO) return "failed";
-  if (quality.readErrors > 0 || payloadStatus === "warning" || quality.validSamples / quality.sampleCount < 0.99) return "warning";
+  if (quality.readErrors > 0 || quality.droppedSamples > 0 || payloadStatus === "warning" || quality.validSamples / quality.sampleCount < 0.99) return "warning";
   return "pass";
 }
 
-function semanticValidationStatus(hmC095: Record<string, unknown> | undefined): HssValidationStatus {
+function semanticValidationStatus(hmC095: Record<string, unknown> | undefined, helperResult: Record<string, unknown>, recordCount: number, droppedSamples: number): HssValidationStatus {
+  if (helperResult.decoderSemanticsValidated === false) return "failed";
+  const emittedSamples = numberField(helperResult, "emittedSamples");
+  if (emittedSamples !== undefined && emittedSamples !== recordCount) return "failed";
+  const reportedDroppedSamples = numberField(helperResult, "droppedSamples");
+  if (reportedDroppedSamples !== undefined && reportedDroppedSamples !== droppedSamples) return "failed";
   if (!hmC095 || hmC095.counterPresent === false || hmC095.counterDeltaPass === undefined) return "not_run";
   return hmC095.semanticPass === true ? "pass" : "failed";
 }
@@ -870,7 +932,8 @@ function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol
   const sawIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgSawFocIsr");
   const toggleIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgToggleFocIsr");
   const patternIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgPatternFocIsr");
-  const validRecords = validPayloadRecords(records);
+  const errorMask = HSS_STATUS_FLAGS.read_error | HSS_STATUS_FLAGS.timeout | HSS_STATUS_FLAGS.overflow;
+  const validRecords = records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.valid) !== 0 && (record.statusFlags & errorMask) === 0);
   const counter = counterIndex >= 0 ? validRecords.map((record) => record.rawValues[counterIndex] >>> 0) : [];
   const deltas: number[] = [];
   for (let index = 1; index < counter.length; index += 1) deltas.push((counter[index] - counter[index - 1]) >>> 0);
@@ -879,20 +942,17 @@ function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol
   const nonZeroDeltaRatio = deltas.length ? deltas.filter((value) => value > 0).length / deltas.length : 0;
   const counterChangedRatio = ratioOfChanges(counter);
   const counterAllConstant = counter.length > 0 && counterChangedRatio === 0;
+  const counterMonotonic = counter.length > 1 && counter.every((value, index) => index === 0 || value >= counter[index - 1]);
   const sawPass = sawIndex < 0 || counterIndex < 0 || (validRecords.length > 0 && validRecords.every((record) => (record.rawValues[sawIndex] & 0xffff) === (record.rawValues[counterIndex] & 0xffff)));
   const toggleValues = toggleIndex >= 0 ? new Set(validRecords.map((record) => record.rawValues[toggleIndex])) : new Set<number>();
   const patternValues = patternIndex >= 0 ? new Set(validRecords.map((record) => record.rawValues[patternIndex])) : new Set<number>();
   const allSamplesValid = records.length > 1 && validRecords.length === records.length;
-  const highRateCounterPass = mean !== null && mean >= 0.5 && mean <= 1.5 && nonZeroDeltaRatio >= 0.5;
-  const lowRateCounterPass = expected !== null && mean !== null && Math.abs(mean - expected) <= Math.max(1, expected * 0.25) && nonZeroDeltaRatio >= 0.8;
   const counterDeltaPass = allSamplesValid
     && counterIndex >= 0
-    && mean !== null
-    && mean > 0
-    && !counterAllConstant
-    && (actualRateHz >= 12000 ? highRateCounterPass : lowRateCounterPass);
+    && counterMonotonic
+    && !counterAllConstant;
   const patternChanges = patternIndex < 0 ? undefined : patternValues.size > 1;
-  const semanticPass = counterDeltaPass && sawPass && (patternChanges ?? true);
+  const semanticPass = counterDeltaPass;
   return {
     focIsrFreqHz: 16000,
     counterPresent: counterIndex >= 0,
@@ -908,6 +968,7 @@ function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol
     nonZeroDeltaRatio,
     counterChangedRatio,
     counterAllConstant,
+    counterMonotonic,
     counterDeltaPass,
     sawFollowsCounterLow16: sawPass,
     toggleAliasWarning: toggleIndex >= 0 && toggleValues.size <= 1,

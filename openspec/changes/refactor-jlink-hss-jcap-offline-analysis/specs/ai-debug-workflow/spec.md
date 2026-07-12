@@ -18,7 +18,7 @@
 
 ### Requirement: Workflow writes are symbol-derived experiments
 **Reason**: Writes are governed directly by Symbol Catalog and risk-policy contracts.
-**Migration**: Use variable write plan/execute with bound approval, readback, event, and audit evidence.
+**Migration**: Use the R2 `variable_write_plan`/execute flow with policy, readback, event, and audit evidence for verified targets; only the explicit R4 unverified-target exception uses trusted user approval.
 
 ### Requirement: Workflow output is evidence-backed and dynamic
 **Reason**: MCP does not produce semantic workflow conclusions.
