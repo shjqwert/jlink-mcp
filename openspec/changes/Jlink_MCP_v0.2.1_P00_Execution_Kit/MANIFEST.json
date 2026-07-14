@@ -1,0 +1,29 @@
+{
+  "packageName": "Jlink_MCP_v0.2.1_P00_Execution_Kit",
+  "packageVersion": "1.0.0",
+  "generatedAt": "2026-07-14T13:30:00Z",
+  "specVersion": "0.2.1",
+  "specRevision": 1,
+  "requirementCount": 144,
+  "plannedTestCount": 144,
+  "primaryFixture": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+  "jlinkExpectedVersion": "V8.84",
+  "entryFiles": [
+    "README_START_HERE.md",
+    "MASTER_RUNBOOK.md",
+    "OPERATIONS_GUIDE.md",
+    "spec/Jlink_MCP_v0.2.1_Functional_Spec_Rev1_Frozen.md",
+    "spec/requirement-traceability.json",
+    "prompts/00_START_P00_ORCHESTRATOR.md",
+    "prompts/04_GPT56PRO_P00_REVIEW.md"
+  ],
+  "validation": {
+    "jsonSchemas": "pass",
+    "uniqueRequirementIds": "pass",
+    "phaseTemplate": "pass",
+    "proReviewTemplate": "pass",
+    "orchestratorInitRegisterPrepareDispatch": "pass",
+    "powershellRuntime": "not_run_no_powershell_in_validation_host",
+    "hardware": "not_run_designated_windows_host_required"
+  }
+}

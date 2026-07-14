@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "jlink-mcp.hardware-environment/v1",
+  "fixtureId": "HM_C095_LOCAL_JLINK_V884",
+  "purpose": "primary-hardware-acceptance",
+  "status": "unverified",
+  "host": {
+    "os": null,
+    "architecture": "x64",
+    "nodeVersion": null,
+    "npmVersion": null,
+    "powershellVersion": null
+  },
+  "jlink": {
+    "expectedSoftwareVersion": "V8.84",
+    "installDir": null,
+    "dllPath": null,
+    "dllVersion": null,
+    "dllSha256": null,
+    "probeModel": null,
+    "probeSerial": null
+  },
+  "connection": {
+    "interface": "SWD",
+    "speedKhz": null,
+    "targetId": null,
+    "historicalTargetHint": "Z20K146M",
+    "targetIdSource": null
+  },
+  "project": {
+    "root": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+    "gitRequired": false,
+    "sourceModificationAllowed": false,
+    "buildAllowed": false,
+    "projectConfigFile": null,
+    "sourceFingerprintBefore": null,
+    "sourceFingerprintAfter": null
+  },
+  "artifacts": {
+    "debugArtifact": null,
+    "debugArtifactSha256": null,
+    "mapFile": null,
+    "mapFileSha256": null,
+    "flashArtifact": null,
+    "flashArtifactSha256": null,
+    "svdFile": null,
+    "svdFileSha256": null
+  },
+  "p00Authorization": {
+    "allowedRiskLevels": [
+      "R0",
+      "R1"
+    ],
+    "allowedOperations": [
+      "capability_query",
+      "artifact_probe",
+      "symbol_inventory",
+      "read_only_hss_capability",
+      "read_only_baseline"
+    ],
+    "forbiddenOperations": [
+      "variable_write",
+      "svd_write",
+      "halt",
+      "resume",
+      "step",
+      "reset",
+      "flash_write",
+      "erase",
+      "raw_gdb",
+      "raw_probe"
+    ],
+    "r4ApprovalGranted": false
+  },
+  "fingerprints": {
+    "capturedAt": null,
+    "fixtureFingerprint": null,
+    "notes": [
+      "P00 必须通过实际探测填充 null 字段。",
+      "historicalTargetHint 不是已验证 targetId，不得直接用于生产默认。"
+    ]
+  }
+}

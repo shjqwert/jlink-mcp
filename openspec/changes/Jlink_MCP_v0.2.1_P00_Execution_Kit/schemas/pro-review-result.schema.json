@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/jlink-mcp/schemas/pro-review-result.schema.json",
+  "title": "Jlink_MCP GPT-5.6 Pro phase review result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "phaseId",
+    "decision",
+    "baselineConsistency",
+    "requirementsReviewed",
+    "findings",
+    "testAssessment",
+    "hardwareAssessment",
+    "timingCorrection",
+    "corrections",
+    "acceptedEvidence",
+    "unresolvedRisks"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "jlink-mcp.pro-review/v1"
+    },
+    "phaseId": {
+      "type": "string",
+      "pattern": "^P[0-9]{2}$"
+    },
+    "decision": {
+      "enum": [
+        "accepted",
+        "conditional",
+        "correction_required",
+        "rejected"
+      ]
+    },
+    "baselineConsistency": {
+      "enum": [
+        "pass",
+        "fail",
+        "insufficient_evidence"
+      ]
+    },
+    "requirementsReviewed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "severity",
+          "blocking",
+          "requirementId",
+          "location",
+          "evidence",
+          "correction",
+          "retestScope"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "high",
+              "critical"
+            ]
+          },
+          "blocking": {
+            "type": "boolean"
+          },
+          "requirementId": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "correction": {
+            "type": "string"
+          },
+          "retestScope": {
+            "enum": [
+              "affected",
+              "module",
+              "phase",
+              "release"
+            ]
+          }
+        }
+      }
+    },
+    "testAssessment": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "status",
+        "notes"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "insufficient_evidence"
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "hardwareAssessment": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "status",
+        "notes"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pass",
+            "conditional",
+            "fail",
+            "not_applicable",
+            "insufficient_evidence"
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "timingCorrection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plannedMinutes",
+        "actualExecutionMinutes",
+        "comparableRatios",
+        "recommendedMultiplier",
+        "nextPhaseBudgetMinutes",
+        "rationale"
+      ],
+      "properties": {
+        "plannedMinutes": {
+          "type": "number",
+          "minimum": 0
+        },
+        "actualExecutionMinutes": {
+          "type": "number",
+          "minimum": 0
+        },
+        "comparableRatios": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "recommendedMultiplier": {
+          "type": "number",
+          "minimum": 0.7,
+          "maximum": 1.8
+        },
+        "nextPhaseBudgetMinutes": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rationale": {
+          "type": "string"
+        }
+      }
+    },
+    "corrections": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "acceptedEvidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolvedRisks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

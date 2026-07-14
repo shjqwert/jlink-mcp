@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "capturedAt": "2026-07-14",
+  "fixture": {
+    "targetProject": "D:/FOC_Project/Trunk/ProJect/HM_C095_SCM_App-e8f80a2-mcal-config",
+    "target": "Z20K146M",
+    "targetSource": "Appl/settings/FOC_SCM.Debug.driver.xcl",
+    "artifact": {
+      "path": "Appl/Debug/Exe/FOC_SCM.out",
+      "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6"
+    },
+    "map": {
+      "path": "Appl/Debug/List/FOC_SCM.map",
+      "sha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf"
+    }
+  },
+  "jlink": {
+    "expectedVersion": "V8.84",
+    "commanderPath": "C:/Program Files/SEGGER/JLink_V884/JLink.exe",
+    "dllPath": "C:/Program Files/SEGGER/JLink_V884/JLink_x64.dll",
+    "dllVersion": "V8.84",
+    "dllSha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+    "probe": {
+      "model": "J-Link CE",
+      "serialNumber": "69401227",
+      "hardwareVersion": "V9.40",
+      "firmware": "J-Link V9 compiled May 7 2021 16:26:12",
+      "vtrefVolts": 4.708
+    }
+  },
+  "safety": {
+    "level": "R0",
+    "targetConnected": false,
+    "cpuControlPerformed": false,
+    "memoryOrFlashWritePerformed": false,
+    "note": "J-Link Commander probe enumeration stopped before the offered connect command."
+  }
+}

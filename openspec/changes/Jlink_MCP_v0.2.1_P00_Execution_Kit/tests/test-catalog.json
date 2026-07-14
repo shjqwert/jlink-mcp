@@ -1,0 +1,1447 @@
+{
+  "schemaVersion": "jlink-mcp.test-catalog/v1",
+  "specVersion": "0.2.1",
+  "generatedAt": "2026-07-14T00:00:00Z",
+  "tests": [
+    {
+      "id": "TEST-REQ-GEN-001",
+      "kind": "contract",
+      "level": "release",
+      "description": "生产代码在不依赖 HM_C095、FOC_SCM、固定目标 ID 或固定绝对路径的情况下可启动并完成能力发现。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-GEN-001",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-GEN-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "server instructions、resources 和 prompts 不宣称 MCP 自动理解业务或生成项目语义结论。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-GEN-002",
+      "ownerPhase": "P08"
+    },
+    {
+      "id": "TEST-REQ-GEN-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "核心工具返回统一 envelope，包含 operation、risk、backend、artifacts、warnings 和结果状态。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-GEN-003",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-GEN-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "静态检查和集成测试证明运行时 project context 不调用 Git。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-GEN-004",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-GEN-005",
+      "kind": "integration",
+      "level": "release",
+      "description": "硬件验收前后目标源码 fingerprint 一致，sourceModified=false。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-GEN-005",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-ROLE-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "Agent workflow 文档明确 MCP 只提供能力与证据，Agent 负责决策。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ROLE-001",
+      "ownerPhase": "P08"
+    },
+    {
+      "id": "TEST-REQ-ROLE-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "mcu_capabilities 和 mcu_tool_catalog 能枚举公共能力及其风险。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ROLE-002",
+      "ownerPhase": "P08"
+    },
+    {
+      "id": "TEST-REQ-ROLE-003",
+      "kind": "integration",
+      "level": "phase",
+      "description": "R4 execute 无可信 approval receipt 时稳定拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ROLE-003",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-PATH-001",
+      "kind": "integration",
+      "level": "module",
+      "description": "在不同 cwd 启动时 projectRoot 精确等于对应规范化 cwd。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-PATH-001",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-PATH-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "无 Git 环境测试通过，且静态检查未发现运行时 Git root 探测。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-PATH-002",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-PATH-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "公共 tool schema 中不存在必填 projectRoot 参数；project context 来自 server cwd。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-PATH-003",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-PATH-004",
+      "kind": "integration",
+      "level": "module",
+      "description": "初始化后只在 cwd 下创建 `.jlink-mcp` 及规定子目录。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-PATH-004",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-PATH-005",
+      "kind": "unit",
+      "level": "phase",
+      "description": "Windows 路径、大小写、UNC、符号链接/junction 和 TOCTOU 相关边界测试通过。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-PATH-005",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-PATH-006",
+      "kind": "contract",
+      "level": "module",
+      "description": "显式 sessionName 被规范化保存；缺省时生成符合命名规则的唯一名称。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-PATH-006",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-PATH-007",
+      "kind": "unit",
+      "level": "module",
+      "description": "cwd 内合法子目录通过；cwd 外、链接逃逸和路径歧义被拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-PATH-007",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-ART-001",
+      "kind": "unit",
+      "level": "module",
+      "description": "ELF 内容配合不同扩展名均被识别；伪造扩展名但非 ELF 内容被拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ART-001",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-ART-002",
+      "kind": "integration",
+      "level": "module",
+      "description": "含 DWARF 的 fixture 可解析地址、类型和 struct member offset。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ART-002",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-ART-003",
+      "kind": "unit",
+      "level": "module",
+      "description": "IAR map fixture 可解析唯一 global/static symbol；重复或缺失符号产生结构化错误。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ART-003",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-ART-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "将这些文件传给 symbol/artifact resolver 时稳定返回 unsupported，而 Flash probe 可接受。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ART-004",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-ART-005",
+      "kind": "integration",
+      "level": "module",
+      "description": "多候选 fixture 返回 selection-required 与候选列表；不自动选择最新 FOC_SCM 文件。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ART-005",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-ART-006",
+      "kind": "contract",
+      "level": "module",
+      "description": "artifact SHA-256 在 catalog、plan、capture metadata 和 phase evidence 中一致。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ART-006",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-ART-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "生产源码静态检查无专用默认名；相关名称仅存在于 tests/fixtures、examples 或硬件 profile。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ART-007",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-VREAD-001",
+      "kind": "integration",
+      "level": "module",
+      "description": "离线解析和模拟 memory backend 返回正确类型和值。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VREAD-001",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-VREAD-002",
+      "kind": "integration",
+      "level": "module",
+      "description": "同名 static 未限定时返回歧义；限定后读取正确地址和值。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VREAD-002",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-VREAD-003",
+      "kind": "integration",
+      "level": "module",
+      "description": "member offset 来自 DWARF/受验证布局，读取值与 fixture 一致。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VREAD-003",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-VREAD-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "local selector 返回明确 unsupported，不退化为地址猜测。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VREAD-004",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-VREAD-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "含 `*`、`->` 或隐式指针遍历的 selector 被拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VREAD-005",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-VREAD-006",
+      "kind": "contract",
+      "level": "module",
+      "description": "动态对象 selector 返回 unsupported，且不进行 target memory chase。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VREAD-006",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-VREAD-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "多镜像/多核输入返回 unsupported 或 selection-required，不默选 core/image。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VREAD-007",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-001",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "允许目标通过 plan→execute→readback，非 RAM 目标被拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-001",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-002",
+      "kind": "integration",
+      "level": "module",
+      "description": "member 地址由 catalog 解析，写后 readback 与目标值一致。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-002",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "execute 缺少有效 plan 时拒绝；plan 包含 target、类型、范围、risk、policy 和验证步骤。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-003",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-004",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "readback mismatch 返回失败/未知状态并写入 audit；不得报告成功。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-004",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "目标 A 超限后 A 被拒绝，目标 B 仍可按 policy 执行；session 不被整体关闭。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-005",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-006",
+      "kind": "contract",
+      "level": "module",
+      "description": "dryRun 返回计划、旧值读取意图和验证步骤；目标值与写计数均不变。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-006",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "公共 schema 不接受裸 address；legacy write_memory 被隐藏、迁移或纳入 R4 raw 边界。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-007",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-008",
+      "kind": "contract",
+      "level": "module",
+      "description": "地址域校验分别拒绝 Flash、Peripheral、Core/Debug 范围。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-008",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-VWRITE-009",
+      "kind": "contract",
+      "level": "module",
+      "description": "公共 schemas/resources/prompts 不暴露 array_element/array_slice；生产默认流程不会调用。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-VWRITE-009",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-RISK-001",
+      "kind": "contract",
+      "level": "phase",
+      "description": "R0 工具风险元数据正确且不要求 approval。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-001",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-RISK-002",
+      "kind": "contract",
+      "level": "phase",
+      "description": "R1 工具风险元数据正确且不改变目标状态。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-002",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-RISK-003",
+      "kind": "contract",
+      "level": "phase",
+      "description": "R2 缺少 allowlist/readback 时拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-003",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-RISK-004",
+      "kind": "contract",
+      "level": "phase",
+      "description": "R3 execute 重新验证 operationPlan 并产生 audit。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-004",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-RISK-005",
+      "kind": "contract",
+      "level": "phase",
+      "description": "无 receipt、过期 receipt、错 plan receipt 和重放 receipt 均拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-005",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-RISK-006",
+      "kind": "contract",
+      "level": "phase",
+      "description": "R5 plan/execute 均返回 prohibited，任何 override 都不能放行。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-006",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-RISK-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "任一绑定字段变化、过期、跨 session 或二次执行均拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-007",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-RISK-008",
+      "kind": "integration",
+      "level": "phase",
+      "description": "伪造布尔批准无效；receipt 可验证、不可跨计划使用、不可重放。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RISK-008",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-POL-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "非 Git fixture 初始化并加载规定路径的 policy。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-POL-001",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-POL-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "schema 对必需/可选字段、类型、范围和未知字段执行严格校验。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-POL-002",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-POL-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "riskOverride 不能把 R4 降为无需确认，也不能放行 R5。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-POL-003",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-POL-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "非 allowlist 目标、越界值、类型不匹配和次数超限分别被拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-POL-004",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-POL-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "plan 与 execute 间修改 policy 后返回 binding mismatch。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-POL-005",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-DRY-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "tool catalog/schema 标记上述操作支持 dryRun。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-DRY-001",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-DRY-002",
+      "kind": "integration",
+      "level": "phase",
+      "description": "模拟/硬件观察证明 dryRun 前后目标状态一致，audit 标记 dryRun。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-DRY-002",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-JLINK-001",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "本机 V8.84 fixture 能完成只读 capability probe。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-JLINK-001",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-JLINK-002",
+      "kind": "hardware",
+      "level": "module",
+      "description": "capabilities/backend status 返回探针型号、序列号和目标 ID 或结构化 unknown。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-JLINK-002",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-JLINK-003",
+      "kind": "hardware",
+      "level": "module",
+      "description": "V8.84 DLL 身份字段完整；路径/哈希变化可被检测。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-JLINK-003",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-JLINK-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "能力查询不写目标，且能区分 unsupported、unavailable、misconfigured。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-JLINK-004",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-JLINK-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "公共 catalog 不宣称远程/复杂调度能力；相关配置返回 unsupported。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-JLINK-005",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-HSS-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "workflow 优先推荐 HSS；不适用时才返回 BMA/RSP 建议。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-001",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSS-002",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "probe 不 reset/halt/write/flash，返回结构化 availability 与限制。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-002",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSS-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "plan 不启动采样，且包含估算、限制、risk、artifact/catalog/runtime identities。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-003",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSS-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "第二组并发 start 被拒绝并返回 active owner；catalog 不暴露多组计划。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-004",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSS-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "超限计划不触碰硬件并返回可执行的减变量/降频/分轮建议。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-005",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSS-006",
+      "kind": "integration",
+      "level": "phase",
+      "description": "并发、异常退出、stop timeout 和 session recover 有确定状态和审计。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-006",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSS-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "错误 envelope 包含当前限制、请求量和至少一个合法调整方案。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-007",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSS-008",
+      "kind": "contract",
+      "level": "module",
+      "description": "项目专用 counter/profile 失败不能把零错误的通用 transport 判定为失败；profile 仅位于测试目录。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSS-008",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSSW-001",
+      "kind": "integration",
+      "level": "phase",
+      "description": "直接抢占写被拒绝；带 captureId 的队列写串行执行。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-001",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-HSSW-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "status/query 等操作不抢占探针或破坏采样。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-002",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSSW-003",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "1 kHz capture 中安全 R2 写成功、readback 匹配且 capture 继续。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-003",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-HSSW-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "缺 plan 或非 allowlist R3 写被拒绝；成功路径生成 audit/event。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-004",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-HSSW-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "active capture 下各操作稳定拒绝且不改变 capture metadata。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-005",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-HSSW-006",
+      "kind": "contract",
+      "level": "module",
+      "description": "普通 reset 在 active capture 下拒绝；R4 复合流程要求人工 receipt，并明确结束/重建 capture。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-006",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-HSSW-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "capture.json event 字段完整并能与 audit writeId/planId 关联。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-007",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-HSSW-008",
+      "kind": "contract",
+      "level": "module",
+      "description": "事件窗口查询返回边界、前后样本和缺口 warnings；不要求 Agent 解析 raw BIN。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-008",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSSW-009",
+      "kind": "contract",
+      "level": "module",
+      "description": "写事件附近对应样本/区间能够查询到有效 flags。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-009",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-HSSW-010",
+      "kind": "contract",
+      "level": "module",
+      "description": "模拟 write/readback 失败后 capture 可停止/查询，metadata 和 audit 包含失败证据。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-HSSW-010",
+      "ownerPhase": "P04"
+    },
+    {
+      "id": "TEST-REQ-BMA-001",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "模拟/硬件读取返回时间戳、值、backend 和质量状态。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-BMA-001",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-BMA-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "已 halted fixture 读取不自动 resume。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-BMA-002",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-BMA-003",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "故障注入后 haltIssued=false，返回 fallback suggestion。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-BMA-003",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-BMA-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "backend envelope 明确 fallbackFrom、selected/reason，且不自动执行 halt。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-BMA-004",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-RSP-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "RSP 模拟/集成测试读取正确字节和值。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RSP-001",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-RSP-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "envelope 的 backend.selected、fallbackFrom、reason 一致。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RSP-002",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-RSP-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "高速 capture workflow 不选择 RSP；超速请求返回 HSS 建议。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RSP-003",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-RTT-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "capabilities 标记 RTT optional；默认 workflow 不要求 RTT。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RTT-001",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-RTT-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "无 RTT 的 fixture 仍可完成核心读取/采样流程。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RTT-002",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-RTT-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "公共 tool catalog 明确 experimental 或默认隐藏。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RTT-003",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-RTT-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "公共 catalog/server source 不注册 TraceAgent 主线工具。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RTT-004",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-SVD-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "CMSIS-SVD fixture 可加载并稳定列出 peripheral/register。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-001",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-SVD-002",
+      "kind": "integration",
+      "level": "module",
+      "description": "模拟 memory backend 的 register/field 值与解码结果正确。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-002",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-SVD-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "允许 field 通过 plan/execute/readback；plan 与 execute 绑定。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-003",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-SVD-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "公共 execute schema 不提供任意 register value 写，或将其归入 R4 raw。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-004",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-SVD-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "reserved/unknown fixture 无法通过 plan 或 policy override。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-005",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-SVD-006",
+      "kind": "contract",
+      "level": "module",
+      "description": "special-access fixture 的 write mask/值正确；缺语义时拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-006",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-SVD-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "风险分类测试覆盖名称/地址/显式 policy；不得降为 R3。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-007",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-SVD-008",
+      "kind": "integration",
+      "level": "phase",
+      "description": "GPIO output fixture 计划为 R3，缺 plan 时拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SVD-008",
+      "ownerPhase": "P06"
+    },
+    {
+      "id": "TEST-REQ-FLASH-001",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "verify 不擦写、不 reset（除非明确协议要求并报告），结果含 artifact hash 和匹配状态。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-FLASH-001",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-FLASH-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "无有效 receipt 时不调用烧录命令；dryRun 可生成计划。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-FLASH-002",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-FLASH-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "catalog 标记 destructive；无 receipt 永不执行。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-FLASH-003",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-FLASH-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "Flash artifact probe 接受支持格式并记录 base address/format；symbol resolver 拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-FLASH-004",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-CPU-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "模拟 backend 和经授权硬件路径返回 before/after state。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CPU-001",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-CPU-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "风险元数据为 R3，execute 依赖 operationPlan/audit 而非用户布尔确认。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CPU-002",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-CPU-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "错 target/过期/重放 plan 拒绝；成功与失败均有 audit。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CPU-003",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-CPU-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "active capture 冲突测试不破坏 capture；复合 reset 遵循 REQ-HSSW-006。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CPU-004",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-CPU-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "组合 plan 风险为 R4，需人工 receipt。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CPU-005",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-RAW-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "execute 不接受未计划的任意命令。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RAW-001",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-RAW-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "无 receipt 或 receipt 不匹配时命令未发送到 backend。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RAW-002",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-RAW-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "缺少任一说明字段的 plan 不可执行。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RAW-003",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-RAW-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "active capture 冲突返回拒绝且 command backend 未调用。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-RAW-004",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-CAP-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "capture metadata 能唯一列出所有二进制段；不依赖 JCAP/SQLite。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CAP-001",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-CAP-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "导出不替代原始 capture/metadata，且记录源 capture hash。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CAP-002",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-CAP-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "metadata compression 标记为 none，读取无需压缩库。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CAP-003",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-CAP-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "边界值通过；低于 16 或高于 512 被拒绝。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CAP-004",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-CAP-005",
+      "kind": "contract",
+      "level": "module",
+      "description": "编码/解码 golden test 字节级一致，并验证单调 index/time。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CAP-005",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-CAP-006",
+      "kind": "contract",
+      "level": "module",
+      "description": "每个 flag 有固定 bit、编码/解码测试和查询过滤行为。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CAP-006",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-CAP-007",
+      "kind": "contract",
+      "level": "module",
+      "description": "resources/workflows 只引导 list/summary/query/export；query 验证 segment 路径和 CRC。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CAP-007",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-SEG-001",
+      "kind": "integration",
+      "level": "phase",
+      "description": "使用小测试阈值触发至少三段，sampleIndex 无重叠/缺口且各段不超过允许边界。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SEG-001",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-SEG-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "metadata schema 校验通过；篡改段内容时 query 检测 CRC mismatch。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SEG-002",
+      "ownerPhase": "P05"
+    },
+    {
+      "id": "TEST-REQ-AUD-001",
+      "kind": "integration",
+      "level": "phase",
+      "description": "压力测试下操作延迟不等待磁盘逐条 fsync；队列失败产生 warning 而不伪造成功。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-AUD-001",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-AUD-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "不同 session 记录隔离且路径受 cwd 防逃逸保护。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-AUD-002",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-AUD-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "可按 operation/risk/ok/time range 查询，并返回计数汇总。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-AUD-003",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-AUD-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "每种操作至少一个成功/拒绝/失败 fixture 记录，包含 plan/risk/result。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-AUD-004",
+      "ownerPhase": "P07"
+    },
+    {
+      "id": "TEST-REQ-SES-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "合法名称保留语义并经过路径安全规范化。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SES-001",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-SES-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "固定时钟测试验证格式和碰撞处理。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SES-002",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-SES-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "R0 session init 自动完成且不触碰硬件。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SES-003",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-SES-004",
+      "kind": "contract",
+      "level": "module",
+      "description": "session 文件路径位于 cwd 内并可恢复读取。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-SES-004",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-DISC-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "AGENTS 指向 mcu_capabilities/workflow resources，内容保持精简。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-DISC-001",
+      "ownerPhase": "P08"
+    },
+    {
+      "id": "TEST-REQ-DISC-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "四个工具在 Codex、Claude/OpenCode MCP inspection 中可发现，输出一致。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-DISC-002",
+      "ownerPhase": "P08"
+    },
+    {
+      "id": "TEST-REQ-DISC-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "至少覆盖只读调试、变量写、HSS 激励采样、SVD、Flash verify 和 R4 流程。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-DISC-003",
+      "ownerPhase": "P08"
+    },
+    {
+      "id": "TEST-REQ-DISC-004",
+      "kind": "integration",
+      "level": "phase",
+      "description": "三个客户端接入测试中模型能发现首步和风险边界。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-DISC-004",
+      "ownerPhase": "P08"
+    },
+    {
+      "id": "TEST-REQ-ENV-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "所有核心 tool output schema 通过统一 contract test。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ENV-001",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-ENV-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "HSS/BMA/RSP/RTT 各路由场景返回一致字段。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ENV-002",
+      "ownerPhase": "P03"
+    },
+    {
+      "id": "TEST-REQ-ENV-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "MCP inspector/客户端 contract test 验证 structuredContent 与 text JSON 一致。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-ENV-003",
+      "ownerPhase": "P01"
+    },
+    {
+      "id": "TEST-REQ-OOS-001",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-001",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-OOS-002",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-002",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-OOS-003",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-003",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-OOS-004",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-004",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-OOS-005",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-005",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-OOS-006",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-006",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-OOS-007",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-007",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-OOS-008",
+      "kind": "static",
+      "level": "release",
+      "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-OOS-008",
+      "ownerPhase": "P09"
+    },
+    {
+      "id": "TEST-REQ-CLR-001",
+      "kind": "contract",
+      "level": "module",
+      "description": "阶段报告同时记录 specVersion 与 packageVersion，不因规格号修改 package 版本。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CLR-001",
+      "ownerPhase": "P00"
+    },
+    {
+      "id": "TEST-REQ-CLR-002",
+      "kind": "contract",
+      "level": "module",
+      "description": "traceability、hardware-environment 与测试 profile 明确 target-specific；生产源码无默认绑定。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CLR-002",
+      "ownerPhase": "P00"
+    },
+    {
+      "id": "TEST-REQ-CLR-003",
+      "kind": "contract",
+      "level": "module",
+      "description": "没有 artifact/map 证据时 resolver 不输出可执行地址。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CLR-003",
+      "ownerPhase": "P02"
+    },
+    {
+      "id": "TEST-REQ-CLR-004",
+      "kind": "hardware",
+      "level": "phase",
+      "description": "hardware evidence 记录 old/new/readback/restore，restored=true；未识别安全变量时测试 not_run 而非猜测。",
+      "status": "planned",
+      "evidence": [],
+      "requirementId": "REQ-CLR-004",
+      "ownerPhase": "P04"
+    }
+  ]
+}

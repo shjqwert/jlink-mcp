@@ -1,0 +1,33 @@
+{
+  "hardGoals": [
+    "以 docs/spec/v0.2.1/Jlink_MCP_v0.2.1_Functional_Spec_Rev1_Frozen.md 作为唯一功能权威，验证 144 条 requirement 均可追踪",
+    "在不改变产品运行时行为的前提下，完成 current repository → requirement → phase → planned test → evidence 的 P00 基线",
+    "建立可复现的软件、J-Link V8.84 和 HM_C095 只读硬件环境身份",
+    "冻结公共 tools/resources/prompts inventory、报告 Schema、Handoff 与 GPT-5.6 Pro 验收格式"
+  ],
+  "hardConstraints": [
+    "P00 不实施运行时功能变更，不重构生产代码",
+    "Orchestrator project root 必须是 Jlink_MCP Git 仓库；HM_C095 工程只是 runtime/hardware fixture",
+    "不得修改、构建或烧录目标工程；只允许在目标根读取文件，P00 不向目标根写入新的运行时产物",
+    "P00 只允许 R0/R1 只读硬件操作；禁止 variable/SVD write、halt、resume、step、reset、flash write、erase、raw GDB/raw probe",
+    "v0.2.1 Rev1 Frozen Spec 是最高权威；旧 JCAP/offline-analysis OpenSpec 仅作非权威参考",
+    "不得根据 FOC_SCM、g_hssDbg、目录名或历史 target hint 猜测 artifact、变量、地址、类型或安全性",
+    "不得伪造 Token、宿主模型实际生效值、未运行测试或硬件结果"
+  ],
+  "exitCriteria": [
+    "记录 base commit、branch、clean/dirty 状态、workspace fingerprint 和 package version",
+    "144 条 requirement 均具有 owner phase、planned test、current implementation status 和初始 code mapping/缺口",
+    "当前所有 MCP tools/resources/prompts 均被分类为 keep/refactor/hide/remove/test-only，并绑定 requirement IDs",
+    "npm ci、compile 和当前必需测试具有精确 command、cwd、duration、exitCode、passed/failed/skipped 证据",
+    "hardware-environment.json 的可探测字段已由实际结果填充；不可用字段明确 null/blocker",
+    "设备可用时完成 V8.84 R0/R1 只读 capability/HSS baseline；不可用时记录 blocker，不伪造通过",
+    "phase-result.json 通过 Schema，hardware safety 中 targetWritten/flashIssued/eraseIssued/resetIssued/haltIssued/sourceModified 全为 false",
+    "GPT-5.6 Pro Review 输出通过 pro-review-result.schema.json；只有 accepted 才进入 P01"
+  ],
+  "assumptions": [
+    "开发宿主为 Windows x64，Node/npm 可用；实际版本由 P00 探测",
+    "J-Link V8.84 预计存在；实际 DLL 路径、版本、hash、probe model/serial 必须探测",
+    "historicalTargetHint=Z20K146M 不是已验证 targetId",
+    "目标根可能存在多个 debug artifact/map/config 候选；P00 必须报告歧义而不是猜测"
+  ]
+}

@@ -1,0 +1,2027 @@
+{
+  "schemaVersion": "1.0",
+  "specVersion": "0.2.1",
+  "packageVersion": "0.3.2",
+  "frozenSpecSha256": "12e46eda65d07e29eee67fd4e783093190c8ecdf8e2cd170b6eb5ef7e62b173b",
+  "generatedAt": "2026-07-14",
+  "requirementCount": 144,
+  "requirements": [
+    {
+      "id": "REQ-CLR-001",
+      "ownerPhase": "P00",
+      "requirement": "功能规格版本 v0.2.1 与 npm/package 版本独立管理，不要求 package 降级或与 Spec 同号。",
+      "acceptance": "阶段报告同时记录 specVersion 与 packageVersion，不因规格号修改 package 版本。",
+      "plannedTest": "P00 acceptance test: REQ-CLR-001",
+      "code": [
+        "planned:P00 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P00/evidence/requirement-status.json"
+      ],
+      "status": "verified"
+    },
+    {
+      "id": "REQ-CLR-002",
+      "ownerPhase": "P00",
+      "requirement": "J-Link V8.84 与 HM_C095 目标工程只作为主要硬件验收 fixture，不得成为生产默认或通用语义。",
+      "acceptance": "traceability、hardware-environment 与测试 profile 明确 target-specific；生产源码无默认绑定。",
+      "plannedTest": "P00 acceptance test: REQ-CLR-002",
+      "code": [
+        "planned:P00 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P00/evidence/requirement-status.json"
+      ],
+      "status": "gap_found"
+    },
+    {
+      "id": "REQ-CLR-003",
+      "ownerPhase": "P02",
+      "requirement": "目标工程源码扫描只能发现候选和声明上下文；地址、尺寸、类型和 member offset 必须由 debug artifact/map 验证。",
+      "acceptance": "没有 artifact/map 证据时 resolver 不输出可执行地址。",
+      "plannedTest": "P02 acceptance test: REQ-CLR-003",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CLR-004",
+      "ownerPhase": "P04",
+      "requirement": "硬件变量写验收只能使用用户/policy 明确选择的非执行器 RAM 调试变量，并执行 old→new→readback→restore→readback。",
+      "acceptance": "hardware evidence 记录 old/new/readback/restore，restored=true；未识别安全变量时测试 not_run 而非猜测。",
+      "plannedTest": "P04 acceptance test: REQ-CLR-004",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-GEN-001",
+      "ownerPhase": "P09",
+      "requirement": "Jlink_MCP 必须作为供 Codex/Agent 调用的通用本机 MCU Runtime Access MCP，而不是单一目标工程或单一 MCU 的专用工具。",
+      "acceptance": "生产代码在不依赖 HM_C095、FOC_SCM、固定目标 ID 或固定绝对路径的情况下可启动并完成能力发现。 至少一个非 HM_C095 的离线/模拟 fixture 通过公共合同测试。",
+      "plannedTest": "P09 acceptance test: REQ-GEN-001",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-GEN-002",
+      "ownerPhase": "P08",
+      "requirement": "Jlink_MCP 不负责理解业务逻辑或决定调试结论；Agent 负责理解项目、选择工具和解释证据。",
+      "acceptance": "server instructions、resources 和 prompts 不宣称 MCP 自动理解业务或生成项目语义结论。",
+      "plannedTest": "P08 acceptance test: REQ-GEN-002",
+      "code": [
+        "planned:P08 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P08/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-GEN-003",
+      "ownerPhase": "P01",
+      "requirement": "所有核心运行时访问必须输出可靠、可追溯、结构化的数据和证据引用。",
+      "acceptance": "核心工具返回统一 envelope，包含 operation、risk、backend、artifacts、warnings 和结果状态。 改变目标状态的操作能够关联 plan、audit 和验证结果。",
+      "plannedTest": "P01 acceptance test: REQ-GEN-003",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-GEN-004",
+      "ownerPhase": "P01",
+      "requirement": "MCP 产品运行时不得依赖目标工程使用 Git，也不得通过 Git 命令确定 projectRoot。",
+      "acceptance": "静态检查和集成测试证明运行时 project context 不调用 Git。 非 Git fixture 可正常初始化 `.jlink-mcp`。",
+      "plannedTest": "P01 acceptance test: REQ-GEN-004",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-GEN-005",
+      "ownerPhase": "P09",
+      "requirement": "第一版不得要求目标 MCU 工程为使用 MCP 而修改、插桩或新增运行时代码。",
+      "acceptance": "硬件验收前后目标源码 fingerprint 一致，sourceModified=false。 HSS、Background Memory、RSP 和 SVD 主流程不依赖新增目标端代码。",
+      "plannedTest": "P09 acceptance test: REQ-GEN-005",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ROLE-001",
+      "ownerPhase": "P08",
+      "requirement": "Agent/Codex 必须负责理解项目、判断问题、选择调试流程和选择 MCP 工具。",
+      "acceptance": "Agent workflow 文档明确 MCP 只提供能力与证据，Agent 负责决策。",
+      "plannedTest": "P08 acceptance test: REQ-ROLE-001",
+      "code": [
+        "planned:P08 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P08/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ROLE-002",
+      "ownerPhase": "P08",
+      "requirement": "Jlink_MCP 必须提供 J-Link、HSS、SVD、变量读写、采样、Flash 和审计能力，不越权替代 Agent。",
+      "acceptance": "mcu_capabilities 和 mcu_tool_catalog 能枚举公共能力及其风险。",
+      "plannedTest": "P08 acceptance test: REQ-ROLE-002",
+      "code": [
+        "planned:P08 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P08/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ROLE-003",
+      "ownerPhase": "P07",
+      "requirement": "用户只在 R4 高风险执行时提供人工确认；R0-R3 按 policy 和 operationPlan 自动治理，R5 永久拒绝。",
+      "acceptance": "R4 execute 无可信 approval receipt 时稳定拒绝。 R0-R3 不要求裸人工确认；R5 无任何执行路径。",
+      "plannedTest": "P07 acceptance test: REQ-ROLE-003",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-PATH-001",
+      "ownerPhase": "P01",
+      "requirement": "projectRoot 必须等于 MCP 进程启动时的 process.cwd()。",
+      "acceptance": "在不同 cwd 启动时 projectRoot 精确等于对应规范化 cwd。",
+      "plannedTest": "P01 acceptance test: REQ-PATH-001",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-PATH-002",
+      "ownerPhase": "P01",
+      "requirement": "MCP 运行时不得调用 Git 命令或查找 Git 根目录来确定 projectRoot。",
+      "acceptance": "无 Git 环境测试通过，且静态检查未发现运行时 Git root 探测。",
+      "plannedTest": "P01 acceptance test: REQ-PATH-002",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-PATH-003",
+      "ownerPhase": "P01",
+      "requirement": "公共工具不得要求用户重复传入 projectRoot。",
+      "acceptance": "公共 tool schema 中不存在必填 projectRoot 参数；project context 来自 server cwd。",
+      "plannedTest": "P01 acceptance test: REQ-PATH-003",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-PATH-004",
+      "ownerPhase": "P01",
+      "requirement": "默认输出必须位于 `<cwd>/.jlink-mcp/`。",
+      "acceptance": "初始化后只在 cwd 下创建 `.jlink-mcp` 及规定子目录。",
+      "plannedTest": "P01 acceptance test: REQ-PATH-004",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-PATH-005",
+      "ownerPhase": "P01",
+      "requirement": "MCP 必须拒绝任何通过绝对路径、`..`、符号链接、junction、reparse point 或规范化差异逃逸 cwd 的读写。",
+      "acceptance": "Windows 路径、大小写、UNC、符号链接/junction 和 TOCTOU 相关边界测试通过。",
+      "plannedTest": "P01 acceptance test: REQ-PATH-005",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-PATH-006",
+      "ownerPhase": "P01",
+      "requirement": "Agent 可以传 sessionName；未传时由 MCP 生成。",
+      "acceptance": "显式 sessionName 被规范化保存；缺省时生成符合命名规则的唯一名称。",
+      "plannedTest": "P01 acceptance test: REQ-PATH-006",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-PATH-007",
+      "ownerPhase": "P01",
+      "requirement": "Agent 可以传 outputSubdir，但解析后的目录必须位于 cwd 内部。",
+      "acceptance": "cwd 内合法子目录通过；cwd 外、链接逃逸和路径歧义被拒绝。",
+      "plannedTest": "P01 acceptance test: REQ-PATH-007",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ART-001",
+      "ownerPhase": "P02",
+      "requirement": "用于变量解析的 `.elf`、`.out` 和预留 `.axf` 必须按文件内容识别，而不是只按扩展名。",
+      "acceptance": "ELF 内容配合不同扩展名均被识别；伪造扩展名但非 ELF 内容被拒绝。",
+      "plannedTest": "P02 acceptance test: REQ-ART-001",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ART-002",
+      "ownerPhase": "P02",
+      "requirement": "变量地址、尺寸和类型必须优先来自 ELF 调试信息或符号表。",
+      "acceptance": "含 DWARF 的 fixture 可解析地址、类型和 struct member offset。",
+      "plannedTest": "P02 acceptance test: REQ-ART-002",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ART-003",
+      "ownerPhase": "P02",
+      "requirement": "第一版必须支持 IAR `.map` 作为变量解析补充来源。",
+      "acceptance": "IAR map fixture 可解析唯一 global/static symbol；重复或缺失符号产生结构化错误。",
+      "plannedTest": "P02 acceptance test: REQ-ART-003",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ART-004",
+      "ownerPhase": "P02",
+      "requirement": "`.hex`、`.bin`、`.srec`/`.s19` 只能用于 Flash/校验，不得参与变量解析。",
+      "acceptance": "将这些文件传给 symbol/artifact resolver 时稳定返回 unsupported，而 Flash probe 可接受。",
+      "plannedTest": "P02 acceptance test: REQ-ART-004",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ART-005",
+      "ownerPhase": "P02",
+      "requirement": "发现多个 debug artifact、map 或配置候选时，MCP 必须返回候选及歧义原因，不得按工程名或历史文件名自动猜测。",
+      "acceptance": "多候选 fixture 返回 selection-required 与候选列表；不自动选择最新 FOC_SCM 文件。",
+      "plannedTest": "P02 acceptance test: REQ-ART-005",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ART-006",
+      "ownerPhase": "P02",
+      "requirement": "Agent 显式选择的 artifact 必须被规范化、哈希并绑定到后续 Symbol Catalog、plan 和证据。",
+      "acceptance": "artifact SHA-256 在 catalog、plan、capture metadata 和 phase evidence 中一致。",
+      "plannedTest": "P02 acceptance test: REQ-ART-006",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ART-007",
+      "ownerPhase": "P02",
+      "requirement": "生产 resolver 不得默认搜索或优先选择 `FOC_SCM.out`、`FOC_SCM.map` 或其他 HM_C095 专用名称。",
+      "acceptance": "生产源码静态检查无专用默认名；相关名称仅存在于 tests/fixtures、examples 或硬件 profile。",
+      "plannedTest": "P02 acceptance test: REQ-ART-007",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VREAD-001",
+      "ownerPhase": "P03",
+      "requirement": "第一版必须支持通过 Symbol Catalog 读取 global scalar。",
+      "acceptance": "离线解析和模拟 memory backend 返回正确类型和值。",
+      "plannedTest": "P03 acceptance test: REQ-VREAD-001",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VREAD-002",
+      "ownerPhase": "P03",
+      "requirement": "第一版必须支持带编译单元/作用域消歧的 static scalar 读取。",
+      "acceptance": "同名 static 未限定时返回歧义；限定后读取正确地址和值。",
+      "plannedTest": "P03 acceptance test: REQ-VREAD-002",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VREAD-003",
+      "ownerPhase": "P03",
+      "requirement": "第一版必须支持具有固定布局的 struct member 读取。",
+      "acceptance": "member offset 来自 DWARF/受验证布局，读取值与 fixture 一致。",
+      "plannedTest": "P03 acceptance test: REQ-VREAD-003",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VREAD-004",
+      "ownerPhase": "P02",
+      "requirement": "第一版不得解析或读取局部变量。",
+      "acceptance": "local selector 返回明确 unsupported，不退化为地址猜测。",
+      "plannedTest": "P02 acceptance test: REQ-VREAD-004",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VREAD-005",
+      "ownerPhase": "P02",
+      "requirement": "第一版不得自动解引用指针选择器。",
+      "acceptance": "含 `*`、`->` 或隐式指针遍历的 selector 被拒绝。",
+      "plannedTest": "P02 acceptance test: REQ-VREAD-005",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VREAD-006",
+      "ownerPhase": "P02",
+      "requirement": "第一版不得解析动态数组、malloc 对象或运行时长度对象。",
+      "acceptance": "动态对象 selector 返回 unsupported，且不进行 target memory chase。",
+      "plannedTest": "P02 acceptance test: REQ-VREAD-006",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VREAD-007",
+      "ownerPhase": "P02",
+      "requirement": "第一版不得提供多核或多镜像变量解析。",
+      "acceptance": "多镜像/多核输入返回 unsupported 或 selection-required，不默选 core/image。",
+      "plannedTest": "P02 acceptance test: REQ-VREAD-007",
+      "code": [
+        "planned:P02 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P02/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-001",
+      "ownerPhase": "P04",
+      "requirement": "第一版必须支持 policy allowlist 内的 RAM scalar 写入。",
+      "acceptance": "允许目标通过 plan→execute→readback，非 RAM 目标被拒绝。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-001",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-002",
+      "ownerPhase": "P04",
+      "requirement": "第一版必须支持 policy allowlist 内的 struct fixed member 写入。",
+      "acceptance": "member 地址由 catalog 解析，写后 readback 与目标值一致。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-002",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-003",
+      "ownerPhase": "P04",
+      "requirement": "任何变量写执行前必须生成可检查的 variable_write_plan。",
+      "acceptance": "execute 缺少有效 plan 时拒绝；plan 包含 target、类型、范围、risk、policy 和验证步骤。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-003",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-004",
+      "ownerPhase": "P04",
+      "requirement": "所有实际变量写必须执行 readback 并报告匹配结果。",
+      "acceptance": "readback mismatch 返回失败/未知状态并写入 audit；不得报告成功。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-004",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-005",
+      "ownerPhase": "P04",
+      "requirement": "变量写必须执行按 policy 配置的 maxWrites 限制，超限只拒绝该目标后续写入。",
+      "acceptance": "目标 A 超限后 A 被拒绝，目标 B 仍可按 policy 执行；session 不被整体关闭。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-005",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-006",
+      "ownerPhase": "P04",
+      "requirement": "variable write plan/execute 必须支持 dryRun，dryRun 不得写目标。",
+      "acceptance": "dryRun 返回计划、旧值读取意图和验证步骤；目标值与写计数均不变。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-006",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-007",
+      "ownerPhase": "P04",
+      "requirement": "公共变量写 API 不得允许调用方绕过 Symbol Catalog 直接提供任意地址。",
+      "acceptance": "公共 schema 不接受裸 address；legacy write_memory 被隐藏、迁移或纳入 R4 raw 边界。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-007",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-008",
+      "ownerPhase": "P04",
+      "requirement": "Flash、Peripheral、Debug/Core register 区不得通过变量写 API 写入。",
+      "acceptance": "地址域校验分别拒绝 Flash、Peripheral、Core/Debug 范围。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-008",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-VWRITE-009",
+      "ownerPhase": "P04",
+      "requirement": "数组元素或数组切片写入不得出现在 v0.2.1 公共 tool catalog；已有实验实现只能隔离为 test-only/experimental。",
+      "acceptance": "公共 schemas/resources/prompts 不暴露 array_element/array_slice；生产默认流程不会调用。",
+      "plannedTest": "P04 acceptance test: REQ-VWRITE-009",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-001",
+      "ownerPhase": "P01",
+      "requirement": "R0 纯只读与能力查询可由 Agent 自动执行。",
+      "acceptance": "R0 工具风险元数据正确且不要求 approval。",
+      "plannedTest": "P01 acceptance test: REQ-RISK-001",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-002",
+      "ownerPhase": "P01",
+      "requirement": "R1 变量读取、SVD 读、artifact probe 和 HSS plan 可由 Agent 自动执行。",
+      "acceptance": "R1 工具风险元数据正确且不改变目标状态。",
+      "plannedTest": "P01 acceptance test: REQ-RISK-002",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-003",
+      "ownerPhase": "P04",
+      "requirement": "R2 仅允许 policy 允许的 RAM 变量写，且必须 readback。",
+      "acceptance": "R2 缺少 allowlist/readback 时拒绝。",
+      "plannedTest": "P04 acceptance test: REQ-RISK-003",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-004",
+      "ownerPhase": "P07",
+      "requirement": "R3 halt/resume/step/reset、GPIO 输出写和普通 SVD field 写必须有 operationPlan 与 audit，可由 Agent 自主判断执行。",
+      "acceptance": "R3 execute 重新验证 operationPlan 并产生 audit。",
+      "plannedTest": "P07 acceptance test: REQ-RISK-004",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-005",
+      "ownerPhase": "P07",
+      "requirement": "R4 Flash 写、erase、raw GDB/raw probe 和关键外设写必须获得可信人工确认后执行。",
+      "acceptance": "无 receipt、过期 receipt、错 plan receipt 和重放 receipt 均拒绝。",
+      "plannedTest": "P07 acceptance test: REQ-RISK-005",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-006",
+      "ownerPhase": "P07",
+      "requirement": "R5 option byte、security、reserved bit、未知寄存器和危险系统区写必须永久禁止。",
+      "acceptance": "R5 plan/execute 均返回 prohibited，任何 override 都不能放行。",
+      "plannedTest": "P07 acceptance test: REQ-RISK-006",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-007",
+      "ownerPhase": "P01",
+      "requirement": "R3/R4 operationPlan 必须绑定 operation、规范化参数、target identity、artifact/catalog identity、policy hash、runtime identity、session、TTL 和单次执行状态。",
+      "acceptance": "任一绑定字段变化、过期、跨 session 或二次执行均拒绝。",
+      "plannedTest": "P01 acceptance test: REQ-RISK-007",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RISK-008",
+      "ownerPhase": "P07",
+      "requirement": "R4 人工确认不得使用裸 `approved:true`；必须由可信 approval provider 产生绑定 planDigest、target、artifact、policy、TTL 和 nonce 的单次 receipt。",
+      "acceptance": "伪造布尔批准无效；receipt 可验证、不可跨计划使用、不可重放。",
+      "plannedTest": "P07 acceptance test: REQ-RISK-008",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-POL-001",
+      "ownerPhase": "P01",
+      "requirement": "policy 必须保存于 `<projectRoot>/.jlink-mcp/policy.json`。",
+      "acceptance": "非 Git fixture 初始化并加载规定路径的 policy。",
+      "plannedTest": "P01 acceptance test: REQ-POL-001",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-POL-002",
+      "ownerPhase": "P01",
+      "requirement": "policy 必须支持 variableWriteAllowlist、svdWriteAllowlist、riskOverrides、maxWrites、value range、requireReadback 和 allowBurstWrite。",
+      "acceptance": "schema 对必需/可选字段、类型、范围和未知字段执行严格校验。",
+      "plannedTest": "P01 acceptance test: REQ-POL-002",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-POL-003",
+      "ownerPhase": "P01",
+      "requirement": "第一版 policy 允许配置 R0-R3；R4 仍需人工确认，R5 不可被 policy 放行。",
+      "acceptance": "riskOverride 不能把 R4 降为无需确认，也不能放行 R5。",
+      "plannedTest": "P01 acceptance test: REQ-POL-003",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-POL-004",
+      "ownerPhase": "P04",
+      "requirement": "variable/SVD allowlist 必须精确绑定目标路径/field、类型、值域、写次数和 readback 要求。",
+      "acceptance": "非 allowlist 目标、越界值、类型不匹配和次数超限分别被拒绝。",
+      "plannedTest": "P04 acceptance test: REQ-POL-004",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-POL-005",
+      "ownerPhase": "P01",
+      "requirement": "执行计划和审计必须记录规范化 policy hash；执行时 policy 变化必须使旧计划失效。",
+      "acceptance": "plan 与 execute 间修改 policy 后返回 binding mismatch。",
+      "plannedTest": "P01 acceptance test: REQ-POL-005",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-DRY-001",
+      "ownerPhase": "P07",
+      "requirement": "variable_write、svd_write_field、flash、erase、halt、resume、step、reset 和 raw_command 必须支持 `dryRun:true`。",
+      "acceptance": "tool catalog/schema 标记上述操作支持 dryRun。",
+      "plannedTest": "P07 acceptance test: REQ-DRY-001",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-DRY-002",
+      "ownerPhase": "P07",
+      "requirement": "dryRun 必须完成解析、风险、policy、plan 和预期影响检查，但不得改变目标、Flash、CPU 状态或写计数。",
+      "acceptance": "模拟/硬件观察证明 dryRun 前后目标状态一致，audit 标记 dryRun。",
+      "plannedTest": "P07 acceptance test: REQ-DRY-002",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-JLINK-001",
+      "ownerPhase": "P03",
+      "requirement": "第一版必须支持本机直接连接 SEGGER J-Link。",
+      "acceptance": "本机 V8.84 fixture 能完成只读 capability probe。",
+      "plannedTest": "P03 acceptance test: REQ-JLINK-001",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-JLINK-002",
+      "ownerPhase": "P03",
+      "requirement": "MCP 必须识别连接的 J-Link 型号、序列号和目标设备选择状态。",
+      "acceptance": "capabilities/backend status 返回探针型号、序列号和目标 ID 或结构化 unknown。",
+      "plannedTest": "P03 acceptance test: REQ-JLINK-002",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-JLINK-003",
+      "ownerPhase": "P03",
+      "requirement": "MCP 必须识别 J-Link 软件/DLL 路径、版本、架构和 SHA-256。",
+      "acceptance": "V8.84 DLL 身份字段完整；路径/哈希变化可被检测。",
+      "plannedTest": "P03 acceptance test: REQ-JLINK-003",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-JLINK-004",
+      "ownerPhase": "P03",
+      "requirement": "MCP 必须提供 J-Link 与 HSS 能力查询并返回限制和不可用原因。",
+      "acceptance": "能力查询不写目标，且能区分 unsupported、unavailable、misconfigured。",
+      "plannedTest": "P03 acceptance test: REQ-JLINK-004",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-JLINK-005",
+      "ownerPhase": "P09",
+      "requirement": "第一版不得实现远程 Agent、远程硬件或复杂多探针调度。",
+      "acceptance": "公共 catalog 不宣称远程/复杂调度能力；相关配置返回 unsupported。",
+      "plannedTest": "P09 acceptance test: REQ-JLINK-005",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-001",
+      "ownerPhase": "P05",
+      "requirement": "HSS 必须是第一版高速变量采样主路径。",
+      "acceptance": "workflow 优先推荐 HSS；不适用时才返回 BMA/RSP 建议。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-001",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-002",
+      "ownerPhase": "P05",
+      "requirement": "必须提供只读 `hss_capability_probe`，报告 DLL、helper、target、limits 和 safety 状态。",
+      "acceptance": "probe 不 reset/halt/write/flash，返回结构化 availability 与限制。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-002",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-003",
+      "ownerPhase": "P05",
+      "requirement": "必须提供 `hss_capture_plan`，由 Agent 选择 catalog 变量、采样率、时长和分段大小。",
+      "acceptance": "plan 不启动采样，且包含估算、限制、risk、artifact/catalog/runtime identities。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-003",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-004",
+      "ownerPhase": "P05",
+      "requirement": "第一版只支持单组 HSS capture；不支持并行多组或多频率 HSS。",
+      "acceptance": "第二组并发 start 被拒绝并返回 active owner；catalog 不暴露多组计划。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-004",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-005",
+      "ownerPhase": "P05",
+      "requirement": "计划和启动前必须校验 J-Link 版本/型号、HSS maxBlocks/maxFreq、变量数量、布局和请求速率。",
+      "acceptance": "超限计划不触碰硬件并返回可执行的减变量/降频/分轮建议。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-005",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-006",
+      "ownerPhase": "P05",
+      "requirement": "capture start/status/stop 必须形成可恢复的单会话生命周期并保证探针所有权。",
+      "acceptance": "并发、异常退出、stop timeout 和 session recover 有确定状态和审计。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-006",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-007",
+      "ownerPhase": "P05",
+      "requirement": "HSS 请求超限时必须返回 Agent 可选择的降低采样率、减少变量数量或分多轮采样建议，不得自动做业务优先级判断。",
+      "acceptance": "错误 envelope 包含当前限制、请求量和至少一个合法调整方案。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-007",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSS-008",
+      "ownerPhase": "P05",
+      "requirement": "HSS transport/data quality 判定必须与 HM_C095 或其他项目专用 semantic profile 分离。",
+      "acceptance": "项目专用 counter/profile 失败不能把零错误的通用 transport 判定为失败；profile 仅位于测试目录。",
+      "plannedTest": "P05 acceptance test: REQ-HSS-008",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-001",
+      "ownerPhase": "P04",
+      "requirement": "HSS capture 拥有 probe 时，允许的变量写必须作为 capture session 子操作进入统一硬件队列，普通写不得绕过。",
+      "acceptance": "直接抢占写被拒绝；带 captureId 的队列写串行执行。",
+      "plannedTest": "P04 acceptance test: REQ-HSSW-001",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-002",
+      "ownerPhase": "P05",
+      "requirement": "HSS 运行中可执行不破坏 capture 的 R0/R1 读和查询操作。",
+      "acceptance": "status/query 等操作不抢占探针或破坏采样。",
+      "plannedTest": "P05 acceptance test: REQ-HSSW-002",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-003",
+      "ownerPhase": "P04",
+      "requirement": "HSS 运行中允许 policy 允许的 R2 RAM scalar/struct member 写，必须 readback。",
+      "acceptance": "1 kHz capture 中安全 R2 写成功、readback 匹配且 capture 继续。",
+      "plannedTest": "P04 acceptance test: REQ-HSSW-003",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-004",
+      "ownerPhase": "P06",
+      "requirement": "HSS 运行中的 R3 RAM/SVD field 写必须有 operationPlan、policy、队列和 audit。",
+      "acceptance": "缺 plan 或非 allowlist R3 写被拒绝；成功路径生成 audit/event。",
+      "plannedTest": "P06 acceptance test: REQ-HSSW-004",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-005",
+      "ownerPhase": "P07",
+      "requirement": "HSS 运行中必须禁止 flash、erase、raw GDB/raw probe、halt、step 和直接 reset。",
+      "acceptance": "active capture 下各操作稳定拒绝且不改变 capture metadata。",
+      "plannedTest": "P07 acceptance test: REQ-HSSW-005",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-006",
+      "ownerPhase": "P07",
+      "requirement": "需要 reset 时应先停止 capture；只有显式 R4 复合操作计划可在重启采样流程中执行 reset，不能作为普通 R3 capture 子操作。",
+      "acceptance": "普通 reset 在 active capture 下拒绝；R4 复合流程要求人工 receipt，并明确结束/重建 capture。",
+      "plannedTest": "P07 acceptance test: REQ-HSSW-006",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-007",
+      "ownerPhase": "P04",
+      "requirement": "HSS 运行中写入必须记录 variable_write event，至少包含 timeUs、sampleIndexNear、target、oldValue、newValue、readback、risk 和 ok。",
+      "acceptance": "capture.json event 字段完整并能与 audit writeId/planId 关联。",
+      "plannedTest": "P04 acceptance test: REQ-HSSW-007",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-008",
+      "ownerPhase": "P05",
+      "requirement": "Agent 必须能按写入 event 查询写前/写后的有界采样窗口。",
+      "acceptance": "事件窗口查询返回边界、前后样本和缺口 warnings；不要求 Agent 解析 raw BIN。",
+      "plannedTest": "P05 acceptance test: REQ-HSSW-008",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-009",
+      "ownerPhase": "P05",
+      "requirement": "采样记录必须支持 write_nearby、write_in_progress 和 backend_busy 状态标记。",
+      "acceptance": "写事件附近对应样本/区间能够查询到有效 flags。",
+      "plannedTest": "P05 acceptance test: REQ-HSSW-009",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-HSSW-010",
+      "ownerPhase": "P04",
+      "requirement": "capture-time write 失败不得破坏 capture metadata；写入是否已发出、readback 和未知状态必须保留。",
+      "acceptance": "模拟 write/readback 失败后 capture 可停止/查询，metadata 和 audit 包含失败证据。",
+      "plannedTest": "P04 acceptance test: REQ-HSSW-010",
+      "code": [
+        "planned:P04 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P04/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-BMA-001",
+      "ownerPhase": "P03",
+      "requirement": "必须提供 Background Memory/Live Watch，用于少量变量的低侵入周期读取和 Agent 验证。",
+      "acceptance": "模拟/硬件读取返回时间戳、值、backend 和质量状态。",
+      "plannedTest": "P03 acceptance test: REQ-BMA-001",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-BMA-002",
+      "ownerPhase": "P03",
+      "requirement": "Background Memory 路径必须支持 target 已 halted 状态下的读取并如实报告状态。",
+      "acceptance": "已 halted fixture 读取不自动 resume。",
+      "plannedTest": "P03 acceptance test: REQ-BMA-002",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-BMA-003",
+      "ownerPhase": "P03",
+      "requirement": "Background Memory 失败后 MCP 不得自动 halt target。",
+      "acceptance": "故障注入后 haltIssued=false，返回 fallback suggestion。",
+      "plannedTest": "P03 acceptance test: REQ-BMA-003",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-BMA-004",
+      "ownerPhase": "P03",
+      "requirement": "Background Memory 不适用或失败时必须返回结构化 fallback reason 和 HSS/RSP/Agent-R3-halt 建议。",
+      "acceptance": "backend envelope 明确 fallbackFrom、selected/reason，且不自动执行 halt。",
+      "plannedTest": "P03 acceptance test: REQ-BMA-004",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RSP-001",
+      "ownerPhase": "P03",
+      "requirement": "必须提供 RSP Memory 作为 HSS/Background Memory 不适用时的少量变量和小范围 memory read fallback。",
+      "acceptance": "RSP 模拟/集成测试读取正确字节和值。",
+      "plannedTest": "P03 acceptance test: REQ-RSP-001",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RSP-002",
+      "ownerPhase": "P03",
+      "requirement": "选择 RSP 时必须返回为何未选 HSS/BMA 的结构化原因。",
+      "acceptance": "envelope 的 backend.selected、fallbackFrom、reason 一致。",
+      "plannedTest": "P03 acceptance test: REQ-RSP-002",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RSP-003",
+      "ownerPhase": "P03",
+      "requirement": "RSP 不得被宣传或自动用于高速采样。",
+      "acceptance": "高速 capture workflow 不选择 RSP；超速请求返回 HSS 建议。",
+      "plannedTest": "P03 acceptance test: REQ-RSP-003",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RTT-001",
+      "ownerPhase": "P03",
+      "requirement": "RTT 必须保留为 optional 能力，不作为默认变量读取或高速采样主路径。",
+      "acceptance": "capabilities 标记 RTT optional；默认 workflow 不要求 RTT。",
+      "plannedTest": "P03 acceptance test: REQ-RTT-001",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RTT-002",
+      "ownerPhase": "P09",
+      "requirement": "第一版不得要求目标工程新增 RTT 代码。",
+      "acceptance": "无 RTT 的 fixture 仍可完成核心读取/采样流程。",
+      "plannedTest": "P09 acceptance test: REQ-RTT-002",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RTT-003",
+      "ownerPhase": "P03",
+      "requirement": "Direct RTT Channel 只能标记为 optional/experimental，不进入冻结主线承诺。",
+      "acceptance": "公共 tool catalog 明确 experimental 或默认隐藏。",
+      "plannedTest": "P03 acceptance test: REQ-RTT-003",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RTT-004",
+      "ownerPhase": "P03",
+      "requirement": "TraceAgent 必须从 v0.2.1 主线公共工具、prompts 和 workflow 中删除或隐藏。",
+      "acceptance": "公共 catalog/server source 不注册 TraceAgent 主线工具。",
+      "plannedTest": "P03 acceptance test: REQ-RTT-004",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-001",
+      "ownerPhase": "P06",
+      "requirement": "必须提供 `svd_load`、`svd_list_peripherals` 和 `svd_list_registers`。",
+      "acceptance": "CMSIS-SVD fixture 可加载并稳定列出 peripheral/register。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-001",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-002",
+      "ownerPhase": "P06",
+      "requirement": "必须提供 `svd_read_register`、`svd_read_field` 和 `svd_decode_register`。",
+      "acceptance": "模拟 memory backend 的 register/field 值与解码结果正确。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-002",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-003",
+      "ownerPhase": "P06",
+      "requirement": "必须提供 `svd_write_field_plan`、`svd_write_field_execute` 和 `svd_write_field_readback`。",
+      "acceptance": "允许 field 通过 plan/execute/readback；plan 与 execute 绑定。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-003",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-004",
+      "ownerPhase": "P06",
+      "requirement": "SVD 写默认只允许 field-level，register-level 默认禁止。",
+      "acceptance": "公共 execute schema 不提供任意 register value 写，或将其归入 R4 raw。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-004",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-005",
+      "ownerPhase": "P06",
+      "requirement": "reserved bit 和 unknown register/field 写必须归为 R5 并禁止。",
+      "acceptance": "reserved/unknown fixture 无法通过 plan 或 policy override。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-005",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-006",
+      "ownerPhase": "P06",
+      "requirement": "W1C、W0C 和 toggle field 必须由 SVD 或显式 policy 识别并使用正确写入算法；未知语义不得猜测。",
+      "acceptance": "special-access fixture 的 write mask/值正确；缺语义时拒绝。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-006",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-007",
+      "ownerPhase": "P06",
+      "requirement": "clock、reset、watchdog、flash、security 等关键外设 field 必须默认分类为 R4 或 R5。",
+      "acceptance": "风险分类测试覆盖名称/地址/显式 policy；不得降为 R3。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-007",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SVD-008",
+      "ownerPhase": "P06",
+      "requirement": "明确 GPIO 输出电平 field 写必须分类为 R3，并要求 operationPlan、audit 和 readback。",
+      "acceptance": "GPIO output fixture 计划为 R3，缺 plan 时拒绝。",
+      "plannedTest": "P06 acceptance test: REQ-SVD-008",
+      "code": [
+        "planned:P06 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P06/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-FLASH-001",
+      "ownerPhase": "P07",
+      "requirement": "flash verify 必须作为只读/校验能力允许 Agent 自动执行。",
+      "acceptance": "verify 不擦写、不 reset（除非明确协议要求并报告），结果含 artifact hash 和匹配状态。",
+      "plannedTest": "P07 acceptance test: REQ-FLASH-001",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-FLASH-002",
+      "ownerPhase": "P07",
+      "requirement": "flash write 必须分类为 R4，执行需人工 approval receipt。",
+      "acceptance": "无有效 receipt 时不调用烧录命令；dryRun 可生成计划。",
+      "plannedTest": "P07 acceptance test: REQ-FLASH-002",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-FLASH-003",
+      "ownerPhase": "P07",
+      "requirement": "erase 必须分类为 R4，并默认隐藏或要求强确认。",
+      "acceptance": "catalog 标记 destructive；无 receipt 永不执行。",
+      "plannedTest": "P07 acceptance test: REQ-FLASH-003",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-FLASH-004",
+      "ownerPhase": "P07",
+      "requirement": "`.hex`、`.bin`、`.srec`/`.s19` 可用于 verify/write，但不得进入变量 resolver。",
+      "acceptance": "Flash artifact probe 接受支持格式并记录 base address/format；symbol resolver 拒绝。",
+      "plannedTest": "P07 acceptance test: REQ-FLASH-004",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CPU-001",
+      "ownerPhase": "P07",
+      "requirement": "第一版必须支持 halt、resume、step 和 reset。",
+      "acceptance": "模拟 backend 和经授权硬件路径返回 before/after state。",
+      "plannedTest": "P07 acceptance test: REQ-CPU-001",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CPU-002",
+      "ownerPhase": "P07",
+      "requirement": "普通 halt/resume/step/reset 为 R3，Agent 可自主判断执行，不要求每次人工确认。",
+      "acceptance": "风险元数据为 R3，execute 依赖 operationPlan/audit 而非用户布尔确认。",
+      "plannedTest": "P07 acceptance test: REQ-CPU-002",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CPU-003",
+      "ownerPhase": "P07",
+      "requirement": "每个实际 CPU 控制必须绑定 operationPlan、记录 audit，并验证执行后状态。",
+      "acceptance": "错 target/过期/重放 plan 拒绝；成功与失败均有 audit。",
+      "plannedTest": "P07 acceptance test: REQ-CPU-003",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CPU-004",
+      "ownerPhase": "P07",
+      "requirement": "halt/step/reset 在活跃 HSS capture 中不得作为普通 R3 直接执行；resume 仅在明确安全路径中执行并报告连续性影响。",
+      "acceptance": "active capture 冲突测试不破坏 capture；复合 reset 遵循 REQ-HSSW-006。",
+      "plannedTest": "P07 acceptance test: REQ-CPU-004",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CPU-005",
+      "ownerPhase": "P07",
+      "requirement": "reset 与 flash/raw 组合操作必须升级为 R4。",
+      "acceptance": "组合 plan 风险为 R4，需人工 receipt。",
+      "plannedTest": "P07 acceptance test: REQ-CPU-005",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RAW-001",
+      "ownerPhase": "P07",
+      "requirement": "必须使用 `raw_command_plan` 与 `raw_command_execute` 分离计划和执行。",
+      "acceptance": "execute 不接受未计划的任意命令。",
+      "plannedTest": "P07 acceptance test: REQ-RAW-001",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RAW-002",
+      "ownerPhase": "P07",
+      "requirement": "raw GDB/raw probe execute 必须分类为 R4 并要求人工 approval receipt。",
+      "acceptance": "无 receipt 或 receipt 不匹配时命令未发送到 backend。",
+      "plannedTest": "P07 acceptance test: REQ-RAW-002",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RAW-003",
+      "ownerPhase": "P07",
+      "requirement": "raw plan 必须说明使用原因、预期影响、目标状态变化、可恢复性和后续验证步骤。",
+      "acceptance": "缺少任一说明字段的 plan 不可执行。",
+      "plannedTest": "P07 acceptance test: REQ-RAW-003",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-RAW-004",
+      "ownerPhase": "P07",
+      "requirement": "活跃 HSS capture 中不得执行 raw command。",
+      "acceptance": "active capture 冲突返回拒绝且 command backend 未调用。",
+      "plannedTest": "P07 acceptance test: REQ-RAW-004",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CAP-001",
+      "ownerPhase": "P05",
+      "requirement": "采样主格式必须为分段 `.capture.bin` 数据和 `.capture.json` metadata（物理文件名可为 `capture_0001.bin` 等）。",
+      "acceptance": "capture metadata 能唯一列出所有二进制段；不依赖 JCAP/SQLite。",
+      "plannedTest": "P05 acceptance test: REQ-CAP-001",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CAP-002",
+      "ownerPhase": "P05",
+      "requirement": "CSV 和 JSONL 只能作为辅助导出格式。",
+      "acceptance": "导出不替代原始 capture/metadata，且记录源 capture hash。",
+      "plannedTest": "P05 acceptance test: REQ-CAP-002",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CAP-003",
+      "ownerPhase": "P05",
+      "requirement": "第一版 capture 二进制不得压缩。",
+      "acceptance": "metadata compression 标记为 none，读取无需压缩库。",
+      "plannedTest": "P05 acceptance test: REQ-CAP-003",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CAP-004",
+      "ownerPhase": "P05",
+      "requirement": "默认 segmentSize 必须为 64 MB，可配置范围 16–512 MB。",
+      "acceptance": "边界值通过；低于 16 或高于 512 被拒绝。",
+      "plannedTest": "P05 acceptance test: REQ-CAP-004",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CAP-005",
+      "ownerPhase": "P05",
+      "requirement": "每个 sample 必须包含 sampleIndex、timestampTicks、statusFlags 和 values[]。",
+      "acceptance": "编码/解码 golden test 字节级一致，并验证单调 index/time。",
+      "plannedTest": "P05 acceptance test: REQ-CAP-005",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CAP-006",
+      "ownerPhase": "P05",
+      "requirement": "statusFlags 必须支持 valid、read_error、timeout、overflow、dropped_before_this_sample、target_halted、write_nearby、write_in_progress、backend_busy。",
+      "acceptance": "每个 flag 有固定 bit、编码/解码测试和查询过滤行为。",
+      "plannedTest": "P05 acceptance test: REQ-CAP-006",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-CAP-007",
+      "ownerPhase": "P05",
+      "requirement": "Agent 必须通过 capture index/metadata 查询数据，不得猜测 segment 文件名或直接解析 raw BIN。",
+      "acceptance": "resources/workflows 只引导 list/summary/query/export；query 验证 segment 路径和 CRC。",
+      "plannedTest": "P05 acceptance test: REQ-CAP-007",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SEG-001",
+      "ownerPhase": "P05",
+      "requirement": "capture 必须按配置文件大小自动生成 `capture_0001.bin`、`capture_0002.bin` 等连续分段。",
+      "acceptance": "使用小测试阈值触发至少三段，sampleIndex 无重叠/缺口且各段不超过允许边界。",
+      "plannedTest": "P05 acceptance test: REQ-SEG-001",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SEG-002",
+      "ownerPhase": "P05",
+      "requirement": "capture.json 必须包含 captureId、backend、symbols、sampling、segment list、每段 CRC、sampleStart、sampleCount 和 quality summary。",
+      "acceptance": "metadata schema 校验通过；篡改段内容时 query 检测 CRC mismatch。",
+      "plannedTest": "P05 acceptance test: REQ-SEG-002",
+      "code": [
+        "planned:P05 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P05/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-AUD-001",
+      "ownerPhase": "P01",
+      "requirement": "审计必须通过异步、非阻塞队列追加 JSONL，不能阻塞主要调试/采样路径。",
+      "acceptance": "压力测试下操作延迟不等待磁盘逐条 fsync；队列失败产生 warning 而不伪造成功。",
+      "plannedTest": "P01 acceptance test: REQ-AUD-001",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-AUD-002",
+      "ownerPhase": "P01",
+      "requirement": "每个 session 必须在 `<projectRoot>/.jlink-mcp/audit/<session>/audit.jsonl` 维护审计。",
+      "acceptance": "不同 session 记录隔离且路径受 cwd 防逃逸保护。",
+      "plannedTest": "P01 acceptance test: REQ-AUD-002",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-AUD-003",
+      "ownerPhase": "P01",
+      "requirement": "必须提供有界 audit query 和 summary。",
+      "acceptance": "可按 operation/risk/ok/time range 查询，并返回计数汇总。",
+      "plannedTest": "P01 acceptance test: REQ-AUD-003",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-AUD-004",
+      "ownerPhase": "P07",
+      "requirement": "audit 必须覆盖 variable/SVD write、CPU control、flash、erase、raw、policy change、backend fallback 和 capture start/stop。",
+      "acceptance": "每种操作至少一个成功/拒绝/失败 fixture 记录，包含 plan/risk/result。",
+      "plannedTest": "P07 acceptance test: REQ-AUD-004",
+      "code": [
+        "planned:P07 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P07/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SES-001",
+      "ownerPhase": "P01",
+      "requirement": "Agent 可以传 sessionName。",
+      "acceptance": "合法名称保留语义并经过路径安全规范化。",
+      "plannedTest": "P01 acceptance test: REQ-SES-001",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SES-002",
+      "ownerPhase": "P01",
+      "requirement": "未传 sessionName 时必须生成 `YYYYMMDD_HHMMSS_<short-task-name>` 形式的唯一名称。",
+      "acceptance": "固定时钟测试验证格式和碰撞处理。",
+      "plannedTest": "P01 acceptance test: REQ-SES-002",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SES-003",
+      "ownerPhase": "P01",
+      "requirement": "session 创建不得要求用户确认。",
+      "acceptance": "R0 session init 自动完成且不触碰硬件。",
+      "plannedTest": "P01 acceptance test: REQ-SES-003",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-SES-004",
+      "ownerPhase": "P01",
+      "requirement": "session metadata 必须保存在 `<projectRoot>/.jlink-mcp/sessions/` 下。",
+      "acceptance": "session 文件路径位于 cwd 内并可恢复读取。",
+      "plannedTest": "P01 acceptance test: REQ-SES-004",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-DISC-001",
+      "ownerPhase": "P08",
+      "requirement": "AGENTS.md 只保留最小入口和安全原则，不复制完整 MCP 手册。",
+      "acceptance": "AGENTS 指向 mcu_capabilities/workflow resources，内容保持精简。",
+      "plannedTest": "P08 acceptance test: REQ-DISC-001",
+      "code": [
+        "planned:P08 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P08/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-DISC-002",
+      "ownerPhase": "P08",
+      "requirement": "必须提供 mcu_capabilities、mcu_tool_catalog、mcu_backend_status 和 mcu_risk_policy。",
+      "acceptance": "四个工具在 Codex、Claude/OpenCode MCP inspection 中可发现，输出一致。",
+      "plannedTest": "P08 acceptance test: REQ-DISC-002",
+      "code": [
+        "planned:P08 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P08/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-DISC-003",
+      "ownerPhase": "P08",
+      "requirement": "MCP 必须提供按任务组织的 resources、prompts 和 workflow playbook。",
+      "acceptance": "至少覆盖只读调试、变量写、HSS 激励采样、SVD、Flash verify 和 R4 流程。",
+      "plannedTest": "P08 acceptance test: REQ-DISC-003",
+      "code": [
+        "planned:P08 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P08/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-DISC-004",
+      "ownerPhase": "P08",
+      "requirement": "server instructions 必须明确建议 Agent 先调用 mcu_capabilities，再读取对应 workflow。",
+      "acceptance": "三个客户端接入测试中模型能发现首步和风险边界。",
+      "plannedTest": "P08 acceptance test: REQ-DISC-004",
+      "code": [
+        "planned:P08 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P08/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ENV-001",
+      "ownerPhase": "P01",
+      "requirement": "所有核心工具必须返回统一 JSON envelope，至少包含 ok、operation、data、risk、backend、artifacts、warnings 和 message。",
+      "acceptance": "所有核心 tool output schema 通过统一 contract test。",
+      "plannedTest": "P01 acceptance test: REQ-ENV-001",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ENV-002",
+      "ownerPhase": "P03",
+      "requirement": "envelope 必须用 backend.selected、fallbackFrom 和 reason 说明实际后端及降级原因。",
+      "acceptance": "HSS/BMA/RSP/RTT 各路由场景返回一致字段。",
+      "plannedTest": "P03 acceptance test: REQ-ENV-002",
+      "code": [
+        "planned:P03 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P03/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-ENV-003",
+      "ownerPhase": "P01",
+      "requirement": "核心工具必须提供 outputSchema/structuredContent；为兼容旧客户端，可同时返回相同 JSON 的 TextContent，业务失败设置 isError。",
+      "acceptance": "MCP inspector/客户端 contract test 验证 structuredContent 与 text JSON 一致。",
+      "plannedTest": "P01 acceptance test: REQ-ENV-003",
+      "code": [
+        "planned:P01 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P01/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-001",
+      "ownerPhase": "P09",
+      "requirement": "多核、多镜像和复杂项目根识别不得进入第一版。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-001",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-002",
+      "ownerPhase": "P09",
+      "requirement": "GCC map parser 不得作为 v0.2.1 必需能力；GCC/IAR ELF 仍按内容支持。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-002",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-003",
+      "ownerPhase": "P09",
+      "requirement": "远程 Agent、远程硬件和复杂多探针调度不得进入第一版。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-003",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-004",
+      "ownerPhase": "P09",
+      "requirement": "TraceAgent、Runtime Evidence、CodeGraph Bridge 和离线实验诊断不得进入主线。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-004",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-005",
+      "ownerPhase": "P09",
+      "requirement": "采样压缩、JCAP/SQLite 和离线 UI 不得进入冻结实现。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-005",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-006",
+      "ownerPhase": "P09",
+      "requirement": "多组/多频率 HSS 并行采样不得进入第一版。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-006",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-007",
+      "ownerPhase": "P09",
+      "requirement": "任意地址默认写、SVD register-level 默认写和 MCU 端代码修改依赖不得进入第一版。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-007",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    },
+    {
+      "id": "REQ-OOS-008",
+      "ownerPhase": "P09",
+      "requirement": "HSS 运行中的复杂事务写入不得进入第一版。",
+      "acceptance": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+      "plannedTest": "P09 acceptance test: REQ-OOS-008",
+      "code": [
+        "planned:P09 implementation lane"
+      ],
+      "evidence": [
+        "reports/phases/P09/evidence/requirement-status.json"
+      ],
+      "status": "planned"
+    }
+  ]
+}
+

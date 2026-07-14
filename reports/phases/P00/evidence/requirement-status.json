@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0",
+  "phase": "P00",
+  "requirementCount": 144,
+  "summary": {
+    "verified": [
+      "REQ-CLR-001"
+    ],
+    "gapFound": [
+      "REQ-CLR-002"
+    ],
+    "planned": 142
+  },
+  "evidence": [
+    {
+      "id": "spec-integrity",
+      "status": "verified",
+      "detail": "Frozen Rev1 requirement table parsed: 144 unique IDs."
+    },
+    {
+      "id": "package-version",
+      "status": "verified",
+      "detail": "package.json version is 0.3.2; Spec version remains 0.2.1."
+    },
+    {
+      "id": "production-coupling",
+      "status": "gap_found",
+      "detail": "Production source contains FOC_SCM/g_hssDbg defaults and HM_C095 semantic wording."
+    }
+  ]
+}
+

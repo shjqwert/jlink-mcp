@@ -1,0 +1,404 @@
+{
+  "schemaVersion": "1.0",
+  "source": "src/mcp/server.ts",
+  "generatedAt": "2026-07-14",
+  "counts": {
+    "tool": 69,
+    "resource": 3,
+    "prompt": 4
+  },
+  "classificationCounts": {
+    "keep": 0,
+    "refactor": 44,
+    "hide": 16,
+    "remove": 16,
+    "test-only": 0
+  },
+  "publicSurface": [
+    {
+      "kind": "tool",
+      "name": "list_devices",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "set_device",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "start_debug_session",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "snapshot",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "diagnose_crash",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "device_info",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "halt",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "resume",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "reset",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "step",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "read_memory",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "write_memory",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "read_registers",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "read_register",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "flash",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "erase",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "set_breakpoint",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "clear_breakpoints",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_server_start",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_server_stop",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_server_status",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_connect",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_command",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_wait",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_load",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_backtrace",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "gdb_disconnect",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_connect",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_disconnect",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_read",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_search",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_send",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_clear",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "telnet_proxy_start",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "telnet_proxy_stop",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "telnet_proxy_status",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "telnet_proxy_read",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "probe_command",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "get_config",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "analysis_profiles",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "experiment_analyze",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "experiment_compare",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "evidence_for_codegraph",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_prepare",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_start",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_status",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_stop",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_control",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_query",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_export",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_list",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "capture_delete",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_channel_list",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_channel_read",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_channel_write",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_stream_capture",
+      "classification": "hide"
+    },
+    {
+      "kind": "tool",
+      "name": "rtt_stream_decode",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "traceagent_decode_stream",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "traceagent_write_signal",
+      "classification": "remove"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_capability_probe",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_capture_plan",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_capture_start",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_capture_status",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_capture_stop",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_capture_query",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_capture_export",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "hss_session_recover",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "variable_write_plan",
+      "classification": "refactor"
+    },
+    {
+      "kind": "tool",
+      "name": "variable_write_execute",
+      "classification": "refactor"
+    },
+    {
+      "kind": "resource",
+      "name": "rtt-output",
+      "classification": "refactor"
+    },
+    {
+      "kind": "resource",
+      "name": "gdb-server-log",
+      "classification": "refactor"
+    },
+    {
+      "kind": "resource",
+      "name": "system-status",
+      "classification": "refactor"
+    },
+    {
+      "kind": "prompt",
+      "name": "debug-embedded",
+      "classification": "refactor"
+    },
+    {
+      "kind": "prompt",
+      "name": "crash-analysis",
+      "classification": "refactor"
+    },
+    {
+      "kind": "prompt",
+      "name": "analyze-rtt-output",
+      "classification": "refactor"
+    },
+    {
+      "kind": "prompt",
+      "name": "peripheral-inspect",
+      "classification": "refactor"
+    }
+  ],
+  "notes": [
+    "No current public item is classified keep: every retained capability requires v0.2.1 envelope, risk, or discovery-contract work.",
+    "test-only is reserved for implementation symbols, not currently registered public MCP items."
+  ]
+}
+

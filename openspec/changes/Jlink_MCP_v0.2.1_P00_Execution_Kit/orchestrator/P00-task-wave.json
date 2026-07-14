@@ -1,0 +1,127 @@
+[
+  {
+    "id": "p00-contract-inventory",
+    "controllerTask": "P00",
+    "roleId": "architecture-contract",
+    "role": "规格与合同岗位",
+    "assessment": {
+      "stage": "module",
+      "factors": [
+        "public-interface-or-data-compatibility"
+      ]
+    },
+    "required": true,
+    "dependsOn": [],
+    "objective": "验证 Frozen Spec 与 requirement-traceability 完整性；扫描当前仓库，建立 requirement、工具公共面和 target-specific 耦合 inventory，不改变运行时行为",
+    "authoritativeInputs": [
+      "docs/spec/v0.2.1/Jlink_MCP_v0.2.1_Functional_Spec_Rev1_Frozen.md",
+      "reports/governance/requirement-traceability.json",
+      "docs/project/v0.2.1/DEVELOPMENT_PLAN.md",
+      "current repository HEAD"
+    ],
+    "ownedScope": [
+      "reports/governance/requirement-traceability.json",
+      "reports/phases/P00/evidence/requirement-status.json",
+      "reports/phases/P00/evidence/catalog-snapshot.json",
+      "reports/phases/P00/evidence/gap-analysis.md"
+    ],
+    "acceptanceCriteria": [
+      "144 条 requirement 全部被检查且无重复/遗漏 ID",
+      "每条 requirement 具有 current implementation status、code mapping 或明确 missing 结论",
+      "所有现有 tools/resources/prompts 被标记 keep/refactor/hide/remove/test-only",
+      "所有 HM_C095/FOC_SCM/g_hssDbg/Z20K146M 生产耦合位置被列出"
+    ],
+    "contextProfile": {
+      "codegraph": true,
+      "ponytail": false
+    },
+    "cwd": "<JLINK_MCP_REPO>",
+    "worktree": "<JLINK_MCP_REPO_OR_WORKTREE>",
+    "readOnly": false,
+    "useGoal": true
+  },
+  {
+    "id": "p00-baseline-regression",
+    "controllerTask": "P00",
+    "roleId": "verification",
+    "role": "基线验证岗位",
+    "assessment": {
+      "stage": "module",
+      "factors": [
+        "concurrency-timing-state-or-hardware-protocol"
+      ]
+    },
+    "required": true,
+    "dependsOn": [
+      "p00-contract-inventory"
+    ],
+    "objective": "在不修改生产代码和目标工程的 baseline 上执行安装、编译、现有测试和仅 R0/R1 的 J-Link V8.84 只读硬件基线，并只在 ownedScope 内写入可复现证据",
+    "authoritativeInputs": [
+      "package.json",
+      "reports/environment/hardware-environment.json",
+      ".agent/orchestrator/P00-goal-contract.json",
+      "existing hardware verification docs"
+    ],
+    "ownedScope": [
+      "reports/phases/P00/evidence/test-runs.jsonl",
+      "reports/phases/P00/evidence/hardware-runs.jsonl",
+      "reports/phases/P00/evidence/hashes.sha256"
+    ],
+    "acceptanceCriteria": [
+      "每条命令在 evidence 中记录 command、cwd、startedAt、durationMs、exitCode 和 counts",
+      "实际 J-Link/DLL/probe/target/artifact 身份被记录或明确 unavailable",
+      "目标工程 sourceModified=false、buildTriggered=false",
+      "未执行任何 R2/R3/R4/R5 操作"
+    ],
+    "contextProfile": {
+      "codegraph": false,
+      "ponytail": false
+    },
+    "cwd": "<JLINK_MCP_REPO>",
+    "worktree": "<JLINK_MCP_REPO>",
+    "readOnly": false,
+    "useGoal": true
+  },
+  {
+    "id": "p00-reporting-scaffold",
+    "controllerTask": "P00",
+    "roleId": "reporting",
+    "role": "报告与证据岗位",
+    "assessment": {
+      "stage": "task",
+      "factors": [
+        "public-interface-or-data-compatibility"
+      ]
+    },
+    "required": true,
+    "dependsOn": [
+      "p00-contract-inventory",
+      "p00-baseline-regression"
+    ],
+    "objective": "汇总 P00 inventory 与 baseline，生成 Schema-valid 的 phase-result、phase-summary 和 Pro Review 输入，不隐藏失败或 blocker",
+    "authoritativeInputs": [
+      "reports/schemas/phase-result.schema.json",
+      "reports/templates/phase-result.template.json",
+      "前置任务 Handoff 与 evidence"
+    ],
+    "ownedScope": [
+      "reports/phases/P00",
+      "reports/environment/hardware-environment.json",
+      "reports/governance/requirement-traceability.json"
+    ],
+    "acceptanceCriteria": [
+      "phase-result.json 通过 JSON Schema 2020-12 校验",
+      "phase-summary.md 与 machine result 一致",
+      "所有 mandatory not-run、失败、硬件不可用和未知字段被明确记录",
+      "安全字段全部证明 P00 无目标副作用"
+    ],
+    "contextProfile": {
+      "codegraph": false,
+      "ponytail": true
+    },
+    "cwd": "<JLINK_MCP_REPO>",
+    "worktree": "<JLINK_MCP_REPO_OR_WORKTREE>",
+    "readOnly": false,
+    "useGoal": true
+  }
+]

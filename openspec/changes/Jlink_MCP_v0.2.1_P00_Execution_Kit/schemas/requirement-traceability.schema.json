@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/jlink-mcp/schemas/requirement-traceability.schema.json",
+  "title": "Jlink_MCP requirement traceability",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "specVersion",
+    "revision",
+    "status",
+    "scopeChange",
+    "authoritativeSpec",
+    "generatedAt",
+    "requirements"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "jlink-mcp.requirement-traceability/v1"
+    },
+    "specVersion": {
+      "const": "0.2.1"
+    },
+    "revision": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "frozen",
+        "superseded"
+      ]
+    },
+    "scopeChange": {
+      "enum": [
+        "none",
+        "clarification-only",
+        "approved-change"
+      ]
+    },
+    "authoritativeSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "sourceFile",
+        "sourceSha256"
+      ],
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceFile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "section",
+          "heading",
+          "title",
+          "statement",
+          "normative",
+          "category",
+          "priority",
+          "ownerPhase",
+          "implementationStatus",
+          "acceptanceStatus",
+          "codeMapping",
+          "plannedTests",
+          "acceptanceCriteria",
+          "notes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^REQ-[A-Z0-9]+-[0-9]{3}$"
+          },
+          "section": {
+            "type": "string",
+            "minLength": 1
+          },
+          "heading": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "statement": {
+            "type": "string",
+            "minLength": 1
+          },
+          "normative": {
+            "enum": [
+              "MUST",
+              "MUST_NOT",
+              "SHOULD"
+            ]
+          },
+          "category": {
+            "enum": [
+              "architecture",
+              "contract",
+              "negative",
+              "safety",
+              "functional",
+              "out-of-scope",
+              "nonfunctional",
+              "governance"
+            ]
+          },
+          "priority": {
+            "enum": [
+              "required",
+              "recommended"
+            ]
+          },
+          "ownerPhase": {
+            "type": "string",
+            "pattern": "^P[0-9]{2}$"
+          },
+          "implementationStatus": {
+            "enum": [
+              "unassessed",
+              "missing",
+              "partial",
+              "implemented",
+              "hidden",
+              "removed",
+              "test-only",
+              "not-applicable"
+            ]
+          },
+          "acceptanceStatus": {
+            "enum": [
+              "not_run",
+              "pass",
+              "fail",
+              "conditional",
+              "blocked"
+            ]
+          },
+          "codeMapping": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "plannedTests": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "kind",
+                "level",
+                "description",
+                "status",
+                "evidence"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "enum": [
+                    "static",
+                    "unit",
+                    "contract",
+                    "integration",
+                    "hardware"
+                  ]
+                },
+                "level": {
+                  "enum": [
+                    "affected",
+                    "task",
+                    "module",
+                    "phase",
+                    "release"
+                  ]
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "enum": [
+                    "planned",
+                    "implemented",
+                    "passed",
+                    "failed",
+                    "skipped",
+                    "blocked"
+                  ]
+                },
+                "evidence": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "acceptanceCriteria": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "uniqueItems": false
+    }
+  }
+}

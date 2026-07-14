@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "jlink-mcp.requirement-status/v1",
+  "phaseId": "P00",
+  "generatedAt": null,
+  "total": 144,
+  "counts": {
+    "unassessed": 144,
+    "missing": 0,
+    "partial": 0,
+    "implemented": 0,
+    "hidden": 0,
+    "removed": 0,
+    "testOnly": 0,
+    "notApplicable": 0
+  },
+  "requirements": [],
+  "blockingGaps": []
+}

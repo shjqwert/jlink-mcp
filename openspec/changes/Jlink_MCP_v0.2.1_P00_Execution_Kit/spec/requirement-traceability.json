@@ -1,0 +1,4052 @@
+{
+  "schemaVersion": "jlink-mcp.requirement-traceability/v1",
+  "specVersion": "0.2.1",
+  "revision": 1,
+  "status": "frozen",
+  "scopeChange": "none",
+  "authoritativeSpec": {
+    "file": "spec/Jlink_MCP_v0.2.1_Functional_Spec_Rev1_Frozen.md",
+    "sourceFile": "Jlink_MCP_v0.2.1_Function_List_Updated.md",
+    "sourceSha256": "12e46eda65d07e29eee67fd4e783093190c8ecdf8e2cd170b6eb5ef7e62b173b"
+  },
+  "generatedAt": "2026-07-14T00:00:00Z",
+  "requirements": [
+    {
+      "id": "REQ-GEN-001",
+      "section": "1",
+      "heading": "项目定位",
+      "title": "通用 MCU Runtime Access MCP",
+      "statement": "Jlink_MCP 必须作为供 Codex/Agent 调用的通用本机 MCU Runtime Access MCP，而不是单一目标工程或单一 MCU 的专用工具。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-GEN-001",
+          "kind": "contract",
+          "level": "release",
+          "description": "生产代码在不依赖 HM_C095、FOC_SCM、固定目标 ID 或固定绝对路径的情况下可启动并完成能力发现。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "生产代码在不依赖 HM_C095、FOC_SCM、固定目标 ID 或固定绝对路径的情况下可启动并完成能力发现。",
+        "至少一个非 HM_C095 的离线/模拟 fixture 通过公共合同测试。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-GEN-002",
+      "section": "1",
+      "heading": "项目定位",
+      "title": "职责边界",
+      "statement": "Jlink_MCP 不负责理解业务逻辑或决定调试结论；Agent 负责理解项目、选择工具和解释证据。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P08",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-GEN-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "server instructions、resources 和 prompts 不宣称 MCP 自动理解业务或生成项目语义结论。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "server instructions、resources 和 prompts 不宣称 MCP 自动理解业务或生成项目语义结论。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-GEN-003",
+      "section": "1",
+      "heading": "项目定位",
+      "title": "结构化与可追溯输出",
+      "statement": "所有核心运行时访问必须输出可靠、可追溯、结构化的数据和证据引用。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-GEN-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "核心工具返回统一 envelope，包含 operation、risk、backend、artifacts、warnings 和结果状态。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "核心工具返回统一 envelope，包含 operation、risk、backend、artifacts、warnings 和结果状态。",
+        "改变目标状态的操作能够关联 plan、audit 和验证结果。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-GEN-004",
+      "section": "1",
+      "heading": "项目定位",
+      "title": "运行时不依赖 Git",
+      "statement": "MCP 产品运行时不得依赖目标工程使用 Git，也不得通过 Git 命令确定 projectRoot。",
+      "normative": "MUST",
+      "category": "negative",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-GEN-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "静态检查和集成测试证明运行时 project context 不调用 Git。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "静态检查和集成测试证明运行时 project context 不调用 Git。",
+        "非 Git fixture 可正常初始化 `.jlink-mcp`。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-GEN-005",
+      "section": "1",
+      "heading": "项目定位",
+      "title": "不强制修改 MCU 代码",
+      "statement": "第一版不得要求目标 MCU 工程为使用 MCP 而修改、插桩或新增运行时代码。",
+      "normative": "MUST",
+      "category": "negative",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-GEN-005",
+          "kind": "integration",
+          "level": "release",
+          "description": "硬件验收前后目标源码 fingerprint 一致，sourceModified=false。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "硬件验收前后目标源码 fingerprint 一致，sourceModified=false。",
+        "HSS、Background Memory、RSP 和 SVD 主流程不依赖新增目标端代码。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ROLE-001",
+      "section": "2",
+      "heading": "主从关系",
+      "title": "Agent 决策责任",
+      "statement": "Agent/Codex 必须负责理解项目、判断问题、选择调试流程和选择 MCP 工具。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P08",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ROLE-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "Agent workflow 文档明确 MCP 只提供能力与证据，Agent 负责决策。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "Agent workflow 文档明确 MCP 只提供能力与证据，Agent 负责决策。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ROLE-002",
+      "section": "2",
+      "heading": "主从关系",
+      "title": "MCP 工具层责任",
+      "statement": "Jlink_MCP 必须提供 J-Link、HSS、SVD、变量读写、采样、Flash 和审计能力，不越权替代 Agent。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P08",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ROLE-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "mcu_capabilities 和 mcu_tool_catalog 能枚举公共能力及其风险。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "mcu_capabilities 和 mcu_tool_catalog 能枚举公共能力及其风险。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ROLE-003",
+      "section": "2",
+      "heading": "主从关系",
+      "title": "用户确认边界",
+      "statement": "用户只在 R4 高风险执行时提供人工确认；R0-R3 按 policy 和 operationPlan 自动治理，R5 永久拒绝。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ROLE-003",
+          "kind": "integration",
+          "level": "phase",
+          "description": "R4 execute 无可信 approval receipt 时稳定拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "R4 execute 无可信 approval receipt 时稳定拒绝。",
+        "R0-R3 不要求裸人工确认；R5 无任何执行路径。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-PATH-001",
+      "section": "3",
+      "heading": "项目路径策略",
+      "title": "projectRoot 等于 cwd",
+      "statement": "projectRoot 必须等于 MCP 进程启动时的 process.cwd()。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-PATH-001",
+          "kind": "integration",
+          "level": "module",
+          "description": "在不同 cwd 启动时 projectRoot 精确等于对应规范化 cwd。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "在不同 cwd 启动时 projectRoot 精确等于对应规范化 cwd。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-PATH-002",
+      "section": "3",
+      "heading": "项目路径策略",
+      "title": "不调用 Git 定位根目录",
+      "statement": "MCP 运行时不得调用 Git 命令或查找 Git 根目录来确定 projectRoot。",
+      "normative": "MUST",
+      "category": "negative",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-PATH-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "无 Git 环境测试通过，且静态检查未发现运行时 Git root 探测。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "无 Git 环境测试通过，且静态检查未发现运行时 Git root 探测。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-PATH-003",
+      "section": "3",
+      "heading": "项目路径策略",
+      "title": "工具不要求 projectRoot 参数",
+      "statement": "公共工具不得要求用户重复传入 projectRoot。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-PATH-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "公共 tool schema 中不存在必填 projectRoot 参数；project context 来自 server cwd。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 tool schema 中不存在必填 projectRoot 参数；project context 来自 server cwd。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-PATH-004",
+      "section": "3",
+      "heading": "项目路径策略",
+      "title": "默认输出目录",
+      "statement": "默认输出必须位于 `<cwd>/.jlink-mcp/`。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-PATH-004",
+          "kind": "integration",
+          "level": "module",
+          "description": "初始化后只在 cwd 下创建 `.jlink-mcp` 及规定子目录。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "初始化后只在 cwd 下创建 `.jlink-mcp` 及规定子目录。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-PATH-005",
+      "section": "3",
+      "heading": "项目路径策略",
+      "title": "路径逃逸防护",
+      "statement": "MCP 必须拒绝任何通过绝对路径、`..`、符号链接、junction、reparse point 或规范化差异逃逸 cwd 的读写。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-PATH-005",
+          "kind": "unit",
+          "level": "phase",
+          "description": "Windows 路径、大小写、UNC、符号链接/junction 和 TOCTOU 相关边界测试通过。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "Windows 路径、大小写、UNC、符号链接/junction 和 TOCTOU 相关边界测试通过。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-PATH-006",
+      "section": "3",
+      "heading": "项目路径策略",
+      "title": "sessionName",
+      "statement": "Agent 可以传 sessionName；未传时由 MCP 生成。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-PATH-006",
+          "kind": "contract",
+          "level": "module",
+          "description": "显式 sessionName 被规范化保存；缺省时生成符合命名规则的唯一名称。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "显式 sessionName 被规范化保存；缺省时生成符合命名规则的唯一名称。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-PATH-007",
+      "section": "3",
+      "heading": "项目路径策略",
+      "title": "outputSubdir 限制",
+      "statement": "Agent 可以传 outputSubdir，但解析后的目录必须位于 cwd 内部。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-PATH-007",
+          "kind": "unit",
+          "level": "module",
+          "description": "cwd 内合法子目录通过；cwd 外、链接逃逸和路径歧义被拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "cwd 内合法子目录通过；cwd 外、链接逃逸和路径歧义被拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ART-001",
+      "section": "4",
+      "heading": "Debug Artifact 支持",
+      "title": "内容驱动的调试产物识别",
+      "statement": "用于变量解析的 `.elf`、`.out` 和预留 `.axf` 必须按文件内容识别，而不是只按扩展名。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ART-001",
+          "kind": "unit",
+          "level": "module",
+          "description": "ELF 内容配合不同扩展名均被识别；伪造扩展名但非 ELF 内容被拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "ELF 内容配合不同扩展名均被识别；伪造扩展名但非 ELF 内容被拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ART-002",
+      "section": "4",
+      "heading": "Debug Artifact 支持",
+      "title": "ELF/DWARF 优先",
+      "statement": "变量地址、尺寸和类型必须优先来自 ELF 调试信息或符号表。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ART-002",
+          "kind": "integration",
+          "level": "module",
+          "description": "含 DWARF 的 fixture 可解析地址、类型和 struct member offset。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "含 DWARF 的 fixture 可解析地址、类型和 struct member offset。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ART-003",
+      "section": "4",
+      "heading": "Debug Artifact 支持",
+      "title": "IAR map 补充解析",
+      "statement": "第一版必须支持 IAR `.map` 作为变量解析补充来源。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ART-003",
+          "kind": "unit",
+          "level": "module",
+          "description": "IAR map fixture 可解析唯一 global/static symbol；重复或缺失符号产生结构化错误。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "IAR map fixture 可解析唯一 global/static symbol；重复或缺失符号产生结构化错误。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ART-004",
+      "section": "4",
+      "heading": "Debug Artifact 支持",
+      "title": "Flash 产物不参与变量解析",
+      "statement": "`.hex`、`.bin`、`.srec`/`.s19` 只能用于 Flash/校验，不得参与变量解析。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ART-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "将这些文件传给 symbol/artifact resolver 时稳定返回 unsupported，而 Flash probe 可接受。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "将这些文件传给 symbol/artifact resolver 时稳定返回 unsupported，而 Flash probe 可接受。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ART-005",
+      "section": "4",
+      "heading": "Debug Artifact 支持",
+      "title": "候选歧义不得猜测",
+      "statement": "发现多个 debug artifact、map 或配置候选时，MCP 必须返回候选及歧义原因，不得按工程名或历史文件名自动猜测。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ART-005",
+          "kind": "integration",
+          "level": "module",
+          "description": "多候选 fixture 返回 selection-required 与候选列表；不自动选择最新 FOC_SCM 文件。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "多候选 fixture 返回 selection-required 与候选列表；不自动选择最新 FOC_SCM 文件。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ART-006",
+      "section": "4",
+      "heading": "Debug Artifact 支持",
+      "title": "显式选择与身份记录",
+      "statement": "Agent 显式选择的 artifact 必须被规范化、哈希并绑定到后续 Symbol Catalog、plan 和证据。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ART-006",
+          "kind": "contract",
+          "level": "module",
+          "description": "artifact SHA-256 在 catalog、plan、capture metadata 和 phase evidence 中一致。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "artifact SHA-256 在 catalog、plan、capture metadata 和 phase evidence 中一致。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ART-007",
+      "section": "4",
+      "heading": "Debug Artifact 支持",
+      "title": "不使用项目专用默认文件名",
+      "statement": "生产 resolver 不得默认搜索或优先选择 `FOC_SCM.out`、`FOC_SCM.map` 或其他 HM_C095 专用名称。",
+      "normative": "MUST",
+      "category": "negative",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ART-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "生产源码静态检查无专用默认名；相关名称仅存在于 tests/fixtures、examples 或硬件 profile。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "生产源码静态检查无专用默认名；相关名称仅存在于 tests/fixtures、examples 或硬件 profile。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VREAD-001",
+      "section": "5",
+      "heading": "变量读取范围",
+      "title": "global scalar 读取",
+      "statement": "第一版必须支持通过 Symbol Catalog 读取 global scalar。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VREAD-001",
+          "kind": "integration",
+          "level": "module",
+          "description": "离线解析和模拟 memory backend 返回正确类型和值。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "离线解析和模拟 memory backend 返回正确类型和值。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VREAD-002",
+      "section": "5",
+      "heading": "变量读取范围",
+      "title": "static scalar 读取",
+      "statement": "第一版必须支持带编译单元/作用域消歧的 static scalar 读取。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VREAD-002",
+          "kind": "integration",
+          "level": "module",
+          "description": "同名 static 未限定时返回歧义；限定后读取正确地址和值。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "同名 static 未限定时返回歧义；限定后读取正确地址和值。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VREAD-003",
+      "section": "5",
+      "heading": "变量读取范围",
+      "title": "struct fixed member 读取",
+      "statement": "第一版必须支持具有固定布局的 struct member 读取。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VREAD-003",
+          "kind": "integration",
+          "level": "module",
+          "description": "member offset 来自 DWARF/受验证布局，读取值与 fixture 一致。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "member offset 来自 DWARF/受验证布局，读取值与 fixture 一致。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VREAD-004",
+      "section": "5",
+      "heading": "变量读取范围",
+      "title": "拒绝局部变量",
+      "statement": "第一版不得解析或读取局部变量。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VREAD-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "local selector 返回明确 unsupported，不退化为地址猜测。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "local selector 返回明确 unsupported，不退化为地址猜测。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VREAD-005",
+      "section": "5",
+      "heading": "变量读取范围",
+      "title": "拒绝指针自动解引用",
+      "statement": "第一版不得自动解引用指针选择器。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VREAD-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "含 `*`、`->` 或隐式指针遍历的 selector 被拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "含 `*`、`->` 或隐式指针遍历的 selector 被拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VREAD-006",
+      "section": "5",
+      "heading": "变量读取范围",
+      "title": "拒绝动态对象",
+      "statement": "第一版不得解析动态数组、malloc 对象或运行时长度对象。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VREAD-006",
+          "kind": "contract",
+          "level": "module",
+          "description": "动态对象 selector 返回 unsupported，且不进行 target memory chase。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "动态对象 selector 返回 unsupported，且不进行 target memory chase。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VREAD-007",
+      "section": "5",
+      "heading": "变量读取范围",
+      "title": "单核单镜像边界",
+      "statement": "第一版不得提供多核或多镜像变量解析。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VREAD-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "多镜像/多核输入返回 unsupported 或 selection-required，不默选 core/image。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "多镜像/多核输入返回 unsupported 或 selection-required，不默选 core/image。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-001",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "RAM scalar 写入",
+      "statement": "第一版必须支持 policy allowlist 内的 RAM scalar 写入。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-001",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "允许目标通过 plan→execute→readback，非 RAM 目标被拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "允许目标通过 plan→execute→readback，非 RAM 目标被拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-002",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "struct fixed member 写入",
+      "statement": "第一版必须支持 policy allowlist 内的 struct fixed member 写入。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-002",
+          "kind": "integration",
+          "level": "module",
+          "description": "member 地址由 catalog 解析，写后 readback 与目标值一致。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "member 地址由 catalog 解析，写后 readback 与目标值一致。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-003",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "写入前 plan",
+      "statement": "任何变量写执行前必须生成可检查的 variable_write_plan。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "execute 缺少有效 plan 时拒绝；plan 包含 target、类型、范围、risk、policy 和验证步骤。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "execute 缺少有效 plan 时拒绝；plan 包含 target、类型、范围、risk、policy 和验证步骤。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-004",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "写后 readback",
+      "statement": "所有实际变量写必须执行 readback 并报告匹配结果。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-004",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "readback mismatch 返回失败/未知状态并写入 audit；不得报告成功。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "readback mismatch 返回失败/未知状态并写入 audit；不得报告成功。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-005",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "maxWrites",
+      "statement": "变量写必须执行按 policy 配置的 maxWrites 限制，超限只拒绝该目标后续写入。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "目标 A 超限后 A 被拒绝，目标 B 仍可按 policy 执行；session 不被整体关闭。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "目标 A 超限后 A 被拒绝，目标 B 仍可按 policy 执行；session 不被整体关闭。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-006",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "变量写 dry-run",
+      "statement": "variable write plan/execute 必须支持 dryRun，dryRun 不得写目标。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-006",
+          "kind": "contract",
+          "level": "module",
+          "description": "dryRun 返回计划、旧值读取意图和验证步骤；目标值与写计数均不变。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "dryRun 返回计划、旧值读取意图和验证步骤；目标值与写计数均不变。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-007",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "禁止任意地址默认写",
+      "statement": "公共变量写 API 不得允许调用方绕过 Symbol Catalog 直接提供任意地址。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "公共 schema 不接受裸 address；legacy write_memory 被隐藏、迁移或纳入 R4 raw 边界。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 schema 不接受裸 address；legacy write_memory 被隐藏、迁移或纳入 R4 raw 边界。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-008",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "禁止非 RAM 变量写",
+      "statement": "Flash、Peripheral、Debug/Core register 区不得通过变量写 API 写入。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-008",
+          "kind": "contract",
+          "level": "module",
+          "description": "地址域校验分别拒绝 Flash、Peripheral、Core/Debug 范围。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "地址域校验分别拒绝 Flash、Peripheral、Core/Debug 范围。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-VWRITE-009",
+      "section": "6",
+      "heading": "变量写入范围",
+      "title": "数组写不进入公共 v0.2.1",
+      "statement": "数组元素或数组切片写入不得出现在 v0.2.1 公共 tool catalog；已有实验实现只能隔离为 test-only/experimental。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-VWRITE-009",
+          "kind": "contract",
+          "level": "module",
+          "description": "公共 schemas/resources/prompts 不暴露 array_element/array_slice；生产默认流程不会调用。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 schemas/resources/prompts 不暴露 array_element/array_slice；生产默认流程不会调用。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-001",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "R0",
+      "statement": "R0 纯只读与能力查询可由 Agent 自动执行。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-001",
+          "kind": "contract",
+          "level": "phase",
+          "description": "R0 工具风险元数据正确且不要求 approval。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "R0 工具风险元数据正确且不要求 approval。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-002",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "R1",
+      "statement": "R1 变量读取、SVD 读、artifact probe 和 HSS plan 可由 Agent 自动执行。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-002",
+          "kind": "contract",
+          "level": "phase",
+          "description": "R1 工具风险元数据正确且不改变目标状态。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "R1 工具风险元数据正确且不改变目标状态。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-003",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "R2",
+      "statement": "R2 仅允许 policy 允许的 RAM 变量写，且必须 readback。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-003",
+          "kind": "contract",
+          "level": "phase",
+          "description": "R2 缺少 allowlist/readback 时拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "R2 缺少 allowlist/readback 时拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-004",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "R3",
+      "statement": "R3 halt/resume/step/reset、GPIO 输出写和普通 SVD field 写必须有 operationPlan 与 audit，可由 Agent 自主判断执行。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-004",
+          "kind": "contract",
+          "level": "phase",
+          "description": "R3 execute 重新验证 operationPlan 并产生 audit。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "R3 execute 重新验证 operationPlan 并产生 audit。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-005",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "R4",
+      "statement": "R4 Flash 写、erase、raw GDB/raw probe 和关键外设写必须获得可信人工确认后执行。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-005",
+          "kind": "contract",
+          "level": "phase",
+          "description": "无 receipt、过期 receipt、错 plan receipt 和重放 receipt 均拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "无 receipt、过期 receipt、错 plan receipt 和重放 receipt 均拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-006",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "R5",
+      "statement": "R5 option byte、security、reserved bit、未知寄存器和危险系统区写必须永久禁止。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-006",
+          "kind": "contract",
+          "level": "phase",
+          "description": "R5 plan/execute 均返回 prohibited，任何 override 都不能放行。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "R5 plan/execute 均返回 prohibited，任何 override 都不能放行。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-007",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "operationPlan 绑定",
+      "statement": "R3/R4 operationPlan 必须绑定 operation、规范化参数、target identity、artifact/catalog identity、policy hash、runtime identity、session、TTL 和单次执行状态。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "任一绑定字段变化、过期、跨 session 或二次执行均拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "任一绑定字段变化、过期、跨 session 或二次执行均拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RISK-008",
+      "section": "7",
+      "heading": "风险等级策略",
+      "title": "R4 approval receipt",
+      "statement": "R4 人工确认不得使用裸 `approved:true`；必须由可信 approval provider 产生绑定 planDigest、target、artifact、policy、TTL 和 nonce 的单次 receipt。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RISK-008",
+          "kind": "integration",
+          "level": "phase",
+          "description": "伪造布尔批准无效；receipt 可验证、不可跨计划使用、不可重放。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "伪造布尔批准无效；receipt 可验证、不可跨计划使用、不可重放。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-POL-001",
+      "section": "8",
+      "heading": "Policy 文件",
+      "title": "policy 文件位置",
+      "statement": "policy 必须保存于 `<projectRoot>/.jlink-mcp/policy.json`。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-POL-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "非 Git fixture 初始化并加载规定路径的 policy。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "非 Git fixture 初始化并加载规定路径的 policy。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-POL-002",
+      "section": "8",
+      "heading": "Policy 文件",
+      "title": "policy 内容",
+      "statement": "policy 必须支持 variableWriteAllowlist、svdWriteAllowlist、riskOverrides、maxWrites、value range、requireReadback 和 allowBurstWrite。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-POL-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "schema 对必需/可选字段、类型、范围和未知字段执行严格校验。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "schema 对必需/可选字段、类型、范围和未知字段执行严格校验。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-POL-003",
+      "section": "8",
+      "heading": "Policy 文件",
+      "title": "允许风险范围",
+      "statement": "第一版 policy 允许配置 R0-R3；R4 仍需人工确认，R5 不可被 policy 放行。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-POL-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "riskOverride 不能把 R4 降为无需确认，也不能放行 R5。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "riskOverride 不能把 R4 降为无需确认，也不能放行 R5。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-POL-004",
+      "section": "8",
+      "heading": "Policy 文件",
+      "title": "精确目标与范围约束",
+      "statement": "variable/SVD allowlist 必须精确绑定目标路径/field、类型、值域、写次数和 readback 要求。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-POL-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "非 allowlist 目标、越界值、类型不匹配和次数超限分别被拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "非 allowlist 目标、越界值、类型不匹配和次数超限分别被拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-POL-005",
+      "section": "8",
+      "heading": "Policy 文件",
+      "title": "policy 身份",
+      "statement": "执行计划和审计必须记录规范化 policy hash；执行时 policy 变化必须使旧计划失效。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-POL-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "plan 与 execute 间修改 policy 后返回 binding mismatch。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "plan 与 execute 间修改 policy 后返回 binding mismatch。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-DRY-001",
+      "section": "9",
+      "heading": "dry-run 模式",
+      "title": "风险操作统一 dryRun",
+      "statement": "variable_write、svd_write_field、flash、erase、halt、resume、step、reset 和 raw_command 必须支持 `dryRun:true`。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-DRY-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "tool catalog/schema 标记上述操作支持 dryRun。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "tool catalog/schema 标记上述操作支持 dryRun。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-DRY-002",
+      "section": "9",
+      "heading": "dry-run 模式",
+      "title": "dryRun 无副作用",
+      "statement": "dryRun 必须完成解析、风险、policy、plan 和预期影响检查，但不得改变目标、Flash、CPU 状态或写计数。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-DRY-002",
+          "kind": "integration",
+          "level": "phase",
+          "description": "模拟/硬件观察证明 dryRun 前后目标状态一致，audit 标记 dryRun。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "模拟/硬件观察证明 dryRun 前后目标状态一致，audit 标记 dryRun。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-JLINK-001",
+      "section": "10",
+      "heading": "J-Link 能力",
+      "title": "本机 J-Link",
+      "statement": "第一版必须支持本机直接连接 SEGGER J-Link。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-JLINK-001",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "本机 V8.84 fixture 能完成只读 capability probe。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "本机 V8.84 fixture 能完成只读 capability probe。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-JLINK-002",
+      "section": "10",
+      "heading": "J-Link 能力",
+      "title": "探针与目标识别",
+      "statement": "MCP 必须识别连接的 J-Link 型号、序列号和目标设备选择状态。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-JLINK-002",
+          "kind": "hardware",
+          "level": "module",
+          "description": "capabilities/backend status 返回探针型号、序列号和目标 ID 或结构化 unknown。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "capabilities/backend status 返回探针型号、序列号和目标 ID 或结构化 unknown。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-JLINK-003",
+      "section": "10",
+      "heading": "J-Link 能力",
+      "title": "软件与 DLL 身份",
+      "statement": "MCP 必须识别 J-Link 软件/DLL 路径、版本、架构和 SHA-256。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-JLINK-003",
+          "kind": "hardware",
+          "level": "module",
+          "description": "V8.84 DLL 身份字段完整；路径/哈希变化可被检测。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "V8.84 DLL 身份字段完整；路径/哈希变化可被检测。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-JLINK-004",
+      "section": "10",
+      "heading": "J-Link 能力",
+      "title": "J-Link/HSS 能力查询",
+      "statement": "MCP 必须提供 J-Link 与 HSS 能力查询并返回限制和不可用原因。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-JLINK-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "能力查询不写目标，且能区分 unsupported、unavailable、misconfigured。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "能力查询不写目标，且能区分 unsupported、unavailable、misconfigured。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-JLINK-005",
+      "section": "10",
+      "heading": "J-Link 能力",
+      "title": "不支持远程和复杂多探针",
+      "statement": "第一版不得实现远程 Agent、远程硬件或复杂多探针调度。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-JLINK-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "公共 catalog 不宣称远程/复杂调度能力；相关配置返回 unsupported。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog 不宣称远程/复杂调度能力；相关配置返回 unsupported。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-001",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "HSS 主高速路径",
+      "statement": "HSS 必须是第一版高速变量采样主路径。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "workflow 优先推荐 HSS；不适用时才返回 BMA/RSP 建议。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "workflow 优先推荐 HSS；不适用时才返回 BMA/RSP 建议。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-002",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "hss_capability_probe",
+      "statement": "必须提供只读 `hss_capability_probe`，报告 DLL、helper、target、limits 和 safety 状态。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-002",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "probe 不 reset/halt/write/flash，返回结构化 availability 与限制。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "probe 不 reset/halt/write/flash，返回结构化 availability 与限制。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-003",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "hss_capture_plan",
+      "statement": "必须提供 `hss_capture_plan`，由 Agent 选择 catalog 变量、采样率、时长和分段大小。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "plan 不启动采样，且包含估算、限制、risk、artifact/catalog/runtime identities。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "plan 不启动采样，且包含估算、限制、risk、artifact/catalog/runtime identities。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-004",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "单组 capture",
+      "statement": "第一版只支持单组 HSS capture；不支持并行多组或多频率 HSS。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "第二组并发 start 被拒绝并返回 active owner；catalog 不暴露多组计划。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "第二组并发 start 被拒绝并返回 active owner；catalog 不暴露多组计划。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-005",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "能力限制校验",
+      "statement": "计划和启动前必须校验 J-Link 版本/型号、HSS maxBlocks/maxFreq、变量数量、布局和请求速率。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "超限计划不触碰硬件并返回可执行的减变量/降频/分轮建议。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "超限计划不触碰硬件并返回可执行的减变量/降频/分轮建议。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-006",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "HSS 生命周期",
+      "statement": "capture start/status/stop 必须形成可恢复的单会话生命周期并保证探针所有权。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-006",
+          "kind": "integration",
+          "level": "phase",
+          "description": "并发、异常退出、stop timeout 和 session recover 有确定状态和审计。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "并发、异常退出、stop timeout 和 session recover 有确定状态和审计。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-007",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "超限建议",
+      "statement": "HSS 请求超限时必须返回 Agent 可选择的降低采样率、减少变量数量或分多轮采样建议，不得自动做业务优先级判断。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "错误 envelope 包含当前限制、请求量和至少一个合法调整方案。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "错误 envelope 包含当前限制、请求量和至少一个合法调整方案。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSS-008",
+      "section": "11",
+      "heading": "HSS 高速采样",
+      "title": "通用质量与项目语义分离",
+      "statement": "HSS transport/data quality 判定必须与 HM_C095 或其他项目专用 semantic profile 分离。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSS-008",
+          "kind": "contract",
+          "level": "module",
+          "description": "项目专用 counter/profile 失败不能把零错误的通用 transport 判定为失败；profile 仅位于测试目录。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "项目专用 counter/profile 失败不能把零错误的通用 transport 判定为失败；profile 仅位于测试目录。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-001",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "capture 子操作队列",
+      "statement": "HSS capture 拥有 probe 时，允许的变量写必须作为 capture session 子操作进入统一硬件队列，普通写不得绕过。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-001",
+          "kind": "integration",
+          "level": "phase",
+          "description": "直接抢占写被拒绝；带 captureId 的队列写串行执行。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "直接抢占写被拒绝；带 captureId 的队列写串行执行。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-002",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "R0/R1 读操作",
+      "statement": "HSS 运行中可执行不破坏 capture 的 R0/R1 读和查询操作。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "status/query 等操作不抢占探针或破坏采样。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "status/query 等操作不抢占探针或破坏采样。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-003",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "R2 RAM 写",
+      "statement": "HSS 运行中允许 policy 允许的 R2 RAM scalar/struct member 写，必须 readback。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-003",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "1 kHz capture 中安全 R2 写成功、readback 匹配且 capture 继续。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "1 kHz capture 中安全 R2 写成功、readback 匹配且 capture 继续。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-004",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "R3 写治理",
+      "statement": "HSS 运行中的 R3 RAM/SVD field 写必须有 operationPlan、policy、队列和 audit。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "缺 plan 或非 allowlist R3 写被拒绝；成功路径生成 audit/event。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "缺 plan 或非 allowlist R3 写被拒绝；成功路径生成 audit/event。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-005",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "禁止危险并发操作",
+      "statement": "HSS 运行中必须禁止 flash、erase、raw GDB/raw probe、halt、step 和直接 reset。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "active capture 下各操作稳定拒绝且不改变 capture metadata。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "active capture 下各操作稳定拒绝且不改变 capture metadata。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-006",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "reset during capture 澄清",
+      "statement": "需要 reset 时应先停止 capture；只有显式 R4 复合操作计划可在重启采样流程中执行 reset，不能作为普通 R3 capture 子操作。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-006",
+          "kind": "contract",
+          "level": "module",
+          "description": "普通 reset 在 active capture 下拒绝；R4 复合流程要求人工 receipt，并明确结束/重建 capture。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "普通 reset 在 active capture 下拒绝；R4 复合流程要求人工 receipt，并明确结束/重建 capture。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-007",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "Capture Event",
+      "statement": "HSS 运行中写入必须记录 variable_write event，至少包含 timeUs、sampleIndexNear、target、oldValue、newValue、readback、risk 和 ok。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "capture.json event 字段完整并能与 audit writeId/planId 关联。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "capture.json event 字段完整并能与 audit writeId/planId 关联。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-008",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "事件窗口查询",
+      "statement": "Agent 必须能按写入 event 查询写前/写后的有界采样窗口。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-008",
+          "kind": "contract",
+          "level": "module",
+          "description": "事件窗口查询返回边界、前后样本和缺口 warnings；不要求 Agent 解析 raw BIN。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "事件窗口查询返回边界、前后样本和缺口 warnings；不要求 Agent 解析 raw BIN。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-009",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "写入质量标记",
+      "statement": "采样记录必须支持 write_nearby、write_in_progress 和 backend_busy 状态标记。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-009",
+          "kind": "contract",
+          "level": "module",
+          "description": "写事件附近对应样本/区间能够查询到有效 flags。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "写事件附近对应样本/区间能够查询到有效 flags。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-HSSW-010",
+      "section": "11A",
+      "heading": "HSS 采样中变量写入",
+      "title": "失败保持 metadata",
+      "statement": "capture-time write 失败不得破坏 capture metadata；写入是否已发出、readback 和未知状态必须保留。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-HSSW-010",
+          "kind": "contract",
+          "level": "module",
+          "description": "模拟 write/readback 失败后 capture 可停止/查询，metadata 和 audit 包含失败证据。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "模拟 write/readback 失败后 capture 可停止/查询，metadata 和 audit 包含失败证据。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-BMA-001",
+      "section": "12",
+      "heading": "Background Memory Access / Live Watch",
+      "title": "低速通用读取",
+      "statement": "必须提供 Background Memory/Live Watch，用于少量变量的低侵入周期读取和 Agent 验证。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-BMA-001",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "模拟/硬件读取返回时间戳、值、backend 和质量状态。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "模拟/硬件读取返回时间戳、值、backend 和质量状态。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-BMA-002",
+      "section": "12",
+      "heading": "Background Memory Access / Live Watch",
+      "title": "halted 读取",
+      "statement": "Background Memory 路径必须支持 target 已 halted 状态下的读取并如实报告状态。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-BMA-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "已 halted fixture 读取不自动 resume。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "已 halted fixture 读取不自动 resume。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-BMA-003",
+      "section": "12",
+      "heading": "Background Memory Access / Live Watch",
+      "title": "失败不自动 halt",
+      "statement": "Background Memory 失败后 MCP 不得自动 halt target。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-BMA-003",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "故障注入后 haltIssued=false，返回 fallback suggestion。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "故障注入后 haltIssued=false，返回 fallback suggestion。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-BMA-004",
+      "section": "12",
+      "heading": "Background Memory Access / Live Watch",
+      "title": "fallback suggestion",
+      "statement": "Background Memory 不适用或失败时必须返回结构化 fallback reason 和 HSS/RSP/Agent-R3-halt 建议。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-BMA-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "backend envelope 明确 fallbackFrom、selected/reason，且不自动执行 halt。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "backend envelope 明确 fallbackFrom、selected/reason，且不自动执行 halt。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RSP-001",
+      "section": "13",
+      "heading": "RSP Memory fallback",
+      "title": "低速 fallback",
+      "statement": "必须提供 RSP Memory 作为 HSS/Background Memory 不适用时的少量变量和小范围 memory read fallback。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RSP-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "RSP 模拟/集成测试读取正确字节和值。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "RSP 模拟/集成测试读取正确字节和值。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RSP-002",
+      "section": "13",
+      "heading": "RSP Memory fallback",
+      "title": "fallback reason",
+      "statement": "选择 RSP 时必须返回为何未选 HSS/BMA 的结构化原因。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RSP-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "envelope 的 backend.selected、fallbackFrom、reason 一致。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "envelope 的 backend.selected、fallbackFrom、reason 一致。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RSP-003",
+      "section": "13",
+      "heading": "RSP Memory fallback",
+      "title": "非高速主路径",
+      "statement": "RSP 不得被宣传或自动用于高速采样。",
+      "normative": "MUST",
+      "category": "negative",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RSP-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "高速 capture workflow 不选择 RSP；超速请求返回 HSS 建议。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "高速 capture workflow 不选择 RSP；超速请求返回 HSS 建议。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RTT-001",
+      "section": "14",
+      "heading": "RTT",
+      "title": "RTT optional",
+      "statement": "RTT 必须保留为 optional 能力，不作为默认变量读取或高速采样主路径。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RTT-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "capabilities 标记 RTT optional；默认 workflow 不要求 RTT。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "capabilities 标记 RTT optional；默认 workflow 不要求 RTT。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RTT-002",
+      "section": "14",
+      "heading": "RTT",
+      "title": "不要求目标端配合",
+      "statement": "第一版不得要求目标工程新增 RTT 代码。",
+      "normative": "MUST",
+      "category": "negative",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RTT-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "无 RTT 的 fixture 仍可完成核心读取/采样流程。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "无 RTT 的 fixture 仍可完成核心读取/采样流程。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RTT-003",
+      "section": "14",
+      "heading": "RTT",
+      "title": "Direct RTT experimental",
+      "statement": "Direct RTT Channel 只能标记为 optional/experimental，不进入冻结主线承诺。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RTT-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "公共 tool catalog 明确 experimental 或默认隐藏。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 tool catalog 明确 experimental 或默认隐藏。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RTT-004",
+      "section": "14",
+      "heading": "RTT",
+      "title": "TraceAgent 删除主线",
+      "statement": "TraceAgent 必须从 v0.2.1 主线公共工具、prompts 和 workflow 中删除或隐藏。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RTT-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "公共 catalog/server source 不注册 TraceAgent 主线工具。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog/server source 不注册 TraceAgent 主线工具。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-001",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "SVD 加载与目录",
+      "statement": "必须提供 `svd_load`、`svd_list_peripherals` 和 `svd_list_registers`。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "CMSIS-SVD fixture 可加载并稳定列出 peripheral/register。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "CMSIS-SVD fixture 可加载并稳定列出 peripheral/register。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-002",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "SVD 读取与解码",
+      "statement": "必须提供 `svd_read_register`、`svd_read_field` 和 `svd_decode_register`。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-002",
+          "kind": "integration",
+          "level": "module",
+          "description": "模拟 memory backend 的 register/field 值与解码结果正确。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "模拟 memory backend 的 register/field 值与解码结果正确。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-003",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "field 写计划与执行",
+      "statement": "必须提供 `svd_write_field_plan`、`svd_write_field_execute` 和 `svd_write_field_readback`。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "允许 field 通过 plan/execute/readback；plan 与 execute 绑定。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "允许 field 通过 plan/execute/readback；plan 与 execute 绑定。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-004",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "默认仅 field-level 写",
+      "statement": "SVD 写默认只允许 field-level，register-level 默认禁止。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "公共 execute schema 不提供任意 register value 写，或将其归入 R4 raw。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 execute schema 不提供任意 register value 写，或将其归入 R4 raw。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-005",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "reserved/unknown 禁止",
+      "statement": "reserved bit 和 unknown register/field 写必须归为 R5 并禁止。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "reserved/unknown fixture 无法通过 plan 或 policy override。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "reserved/unknown fixture 无法通过 plan 或 policy override。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-006",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "W1C/W0C/toggle 语义",
+      "statement": "W1C、W0C 和 toggle field 必须由 SVD 或显式 policy 识别并使用正确写入算法；未知语义不得猜测。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-006",
+          "kind": "contract",
+          "level": "module",
+          "description": "special-access fixture 的 write mask/值正确；缺语义时拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "special-access fixture 的 write mask/值正确；缺语义时拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-007",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "关键外设风险",
+      "statement": "clock、reset、watchdog、flash、security 等关键外设 field 必须默认分类为 R4 或 R5。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "风险分类测试覆盖名称/地址/显式 policy；不得降为 R3。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "风险分类测试覆盖名称/地址/显式 policy；不得降为 R3。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SVD-008",
+      "section": "15",
+      "heading": "SVD 功能",
+      "title": "GPIO 输出 R3",
+      "statement": "明确 GPIO 输出电平 field 写必须分类为 R3，并要求 operationPlan、audit 和 readback。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P06",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SVD-008",
+          "kind": "integration",
+          "level": "phase",
+          "description": "GPIO output fixture 计划为 R3，缺 plan 时拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "GPIO output fixture 计划为 R3，缺 plan 时拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-FLASH-001",
+      "section": "16",
+      "heading": "Flash 能力",
+      "title": "flash verify 自动",
+      "statement": "flash verify 必须作为只读/校验能力允许 Agent 自动执行。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-FLASH-001",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "verify 不擦写、不 reset（除非明确协议要求并报告），结果含 artifact hash 和匹配状态。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "verify 不擦写、不 reset（除非明确协议要求并报告），结果含 artifact hash 和匹配状态。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-FLASH-002",
+      "section": "16",
+      "heading": "Flash 能力",
+      "title": "flash write R4",
+      "statement": "flash write 必须分类为 R4，执行需人工 approval receipt。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-FLASH-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "无有效 receipt 时不调用烧录命令；dryRun 可生成计划。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "无有效 receipt 时不调用烧录命令；dryRun 可生成计划。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-FLASH-003",
+      "section": "16",
+      "heading": "Flash 能力",
+      "title": "erase R4",
+      "statement": "erase 必须分类为 R4，并默认隐藏或要求强确认。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-FLASH-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "catalog 标记 destructive；无 receipt 永不执行。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "catalog 标记 destructive；无 receipt 永不执行。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-FLASH-004",
+      "section": "16",
+      "heading": "Flash 能力",
+      "title": "Flash 文件边界",
+      "statement": "`.hex`、`.bin`、`.srec`/`.s19` 可用于 verify/write，但不得进入变量 resolver。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-FLASH-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "Flash artifact probe 接受支持格式并记录 base address/format；symbol resolver 拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "Flash artifact probe 接受支持格式并记录 base address/format；symbol resolver 拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CPU-001",
+      "section": "17",
+      "heading": "CPU 控制",
+      "title": "CPU 工具",
+      "statement": "第一版必须支持 halt、resume、step 和 reset。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CPU-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "模拟 backend 和经授权硬件路径返回 before/after state。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "模拟 backend 和经授权硬件路径返回 before/after state。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CPU-002",
+      "section": "17",
+      "heading": "CPU 控制",
+      "title": "R3 自主执行",
+      "statement": "普通 halt/resume/step/reset 为 R3，Agent 可自主判断执行，不要求每次人工确认。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CPU-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "风险元数据为 R3，execute 依赖 operationPlan/audit 而非用户布尔确认。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "风险元数据为 R3，execute 依赖 operationPlan/audit 而非用户布尔确认。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CPU-003",
+      "section": "17",
+      "heading": "CPU 控制",
+      "title": "operationPlan 与 audit",
+      "statement": "每个实际 CPU 控制必须绑定 operationPlan、记录 audit，并验证执行后状态。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CPU-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "错 target/过期/重放 plan 拒绝；成功与失败均有 audit。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "错 target/过期/重放 plan 拒绝；成功与失败均有 audit。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CPU-004",
+      "section": "17",
+      "heading": "CPU 控制",
+      "title": "capture 冲突",
+      "statement": "halt/step/reset 在活跃 HSS capture 中不得作为普通 R3 直接执行；resume 仅在明确安全路径中执行并报告连续性影响。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CPU-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "active capture 冲突测试不破坏 capture；复合 reset 遵循 REQ-HSSW-006。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "active capture 冲突测试不破坏 capture；复合 reset 遵循 REQ-HSSW-006。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CPU-005",
+      "section": "17",
+      "heading": "CPU 控制",
+      "title": "组合风险升级",
+      "statement": "reset 与 flash/raw 组合操作必须升级为 R4。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CPU-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "组合 plan 风险为 R4，需人工 receipt。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "组合 plan 风险为 R4，需人工 receipt。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RAW-001",
+      "section": "18",
+      "heading": "Raw GDB / Raw Probe Command",
+      "title": "plan/execute 分离",
+      "statement": "必须使用 `raw_command_plan` 与 `raw_command_execute` 分离计划和执行。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RAW-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "execute 不接受未计划的任意命令。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "execute 不接受未计划的任意命令。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RAW-002",
+      "section": "18",
+      "heading": "Raw GDB / Raw Probe Command",
+      "title": "R4 approval",
+      "statement": "raw GDB/raw probe execute 必须分类为 R4 并要求人工 approval receipt。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RAW-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "无 receipt 或 receipt 不匹配时命令未发送到 backend。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "无 receipt 或 receipt 不匹配时命令未发送到 backend。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RAW-003",
+      "section": "18",
+      "heading": "Raw GDB / Raw Probe Command",
+      "title": "计划说明",
+      "statement": "raw plan 必须说明使用原因、预期影响、目标状态变化、可恢复性和后续验证步骤。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RAW-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "缺少任一说明字段的 plan 不可执行。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "缺少任一说明字段的 plan 不可执行。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-RAW-004",
+      "section": "18",
+      "heading": "Raw GDB / Raw Probe Command",
+      "title": "active capture 禁止",
+      "statement": "活跃 HSS capture 中不得执行 raw command。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-RAW-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "active capture 冲突返回拒绝且 command backend 未调用。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "active capture 冲突返回拒绝且 command backend 未调用。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CAP-001",
+      "section": "19",
+      "heading": "采样数据格式",
+      "title": "主格式",
+      "statement": "采样主格式必须为分段 `.capture.bin` 数据和 `.capture.json` metadata（物理文件名可为 `capture_0001.bin` 等）。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CAP-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "capture metadata 能唯一列出所有二进制段；不依赖 JCAP/SQLite。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "capture metadata 能唯一列出所有二进制段；不依赖 JCAP/SQLite。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CAP-002",
+      "section": "19",
+      "heading": "采样数据格式",
+      "title": "辅助格式",
+      "statement": "CSV 和 JSONL 只能作为辅助导出格式。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CAP-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "导出不替代原始 capture/metadata，且记录源 capture hash。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "导出不替代原始 capture/metadata，且记录源 capture hash。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CAP-003",
+      "section": "19",
+      "heading": "采样数据格式",
+      "title": "不压缩",
+      "statement": "第一版 capture 二进制不得压缩。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CAP-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "metadata compression 标记为 none，读取无需压缩库。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "metadata compression 标记为 none，读取无需压缩库。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CAP-004",
+      "section": "19",
+      "heading": "采样数据格式",
+      "title": "segmentSize",
+      "statement": "默认 segmentSize 必须为 64 MB，可配置范围 16–512 MB。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CAP-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "边界值通过；低于 16 或高于 512 被拒绝。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "边界值通过；低于 16 或高于 512 被拒绝。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CAP-005",
+      "section": "19",
+      "heading": "采样数据格式",
+      "title": "最小 sample 结构",
+      "statement": "每个 sample 必须包含 sampleIndex、timestampTicks、statusFlags 和 values[]。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CAP-005",
+          "kind": "contract",
+          "level": "module",
+          "description": "编码/解码 golden test 字节级一致，并验证单调 index/time。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "编码/解码 golden test 字节级一致，并验证单调 index/time。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CAP-006",
+      "section": "19",
+      "heading": "采样数据格式",
+      "title": "statusFlags",
+      "statement": "statusFlags 必须支持 valid、read_error、timeout、overflow、dropped_before_this_sample、target_halted、write_nearby、write_in_progress、backend_busy。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CAP-006",
+          "kind": "contract",
+          "level": "module",
+          "description": "每个 flag 有固定 bit、编码/解码测试和查询过滤行为。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "每个 flag 有固定 bit、编码/解码测试和查询过滤行为。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CAP-007",
+      "section": "19",
+      "heading": "采样数据格式",
+      "title": "Agent 不猜文件名",
+      "statement": "Agent 必须通过 capture index/metadata 查询数据，不得猜测 segment 文件名或直接解析 raw BIN。",
+      "normative": "MUST",
+      "category": "architecture",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CAP-007",
+          "kind": "contract",
+          "level": "module",
+          "description": "resources/workflows 只引导 list/summary/query/export；query 验证 segment 路径和 CRC。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "resources/workflows 只引导 list/summary/query/export；query 验证 segment 路径和 CRC。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SEG-001",
+      "section": "20",
+      "heading": "分段采样",
+      "title": "按大小 rollover",
+      "statement": "capture 必须按配置文件大小自动生成 `capture_0001.bin`、`capture_0002.bin` 等连续分段。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SEG-001",
+          "kind": "integration",
+          "level": "phase",
+          "description": "使用小测试阈值触发至少三段，sampleIndex 无重叠/缺口且各段不超过允许边界。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "使用小测试阈值触发至少三段，sampleIndex 无重叠/缺口且各段不超过允许边界。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SEG-002",
+      "section": "20",
+      "heading": "分段采样",
+      "title": "capture.json 段信息",
+      "statement": "capture.json 必须包含 captureId、backend、symbols、sampling、segment list、每段 CRC、sampleStart、sampleCount 和 quality summary。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P05",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SEG-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "metadata schema 校验通过；篡改段内容时 query 检测 CRC mismatch。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "metadata schema 校验通过；篡改段内容时 query 检测 CRC mismatch。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-AUD-001",
+      "section": "21",
+      "heading": "审计日志",
+      "title": "异步非阻塞 JSONL",
+      "statement": "审计必须通过异步、非阻塞队列追加 JSONL，不能阻塞主要调试/采样路径。",
+      "normative": "MUST",
+      "category": "nonfunctional",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-AUD-001",
+          "kind": "integration",
+          "level": "phase",
+          "description": "压力测试下操作延迟不等待磁盘逐条 fsync；队列失败产生 warning 而不伪造成功。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "压力测试下操作延迟不等待磁盘逐条 fsync；队列失败产生 warning 而不伪造成功。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-AUD-002",
+      "section": "21",
+      "heading": "审计日志",
+      "title": "每 session 一个 audit",
+      "statement": "每个 session 必须在 `<projectRoot>/.jlink-mcp/audit/<session>/audit.jsonl` 维护审计。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-AUD-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "不同 session 记录隔离且路径受 cwd 防逃逸保护。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "不同 session 记录隔离且路径受 cwd 防逃逸保护。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-AUD-003",
+      "section": "21",
+      "heading": "审计日志",
+      "title": "审计查询与汇总",
+      "statement": "必须提供有界 audit query 和 summary。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-AUD-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "可按 operation/risk/ok/time range 查询，并返回计数汇总。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "可按 operation/risk/ok/time range 查询，并返回计数汇总。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-AUD-004",
+      "section": "21",
+      "heading": "审计日志",
+      "title": "覆盖范围",
+      "statement": "audit 必须覆盖 variable/SVD write、CPU control、flash、erase、raw、policy change、backend fallback 和 capture start/stop。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P07",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-AUD-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "每种操作至少一个成功/拒绝/失败 fixture 记录，包含 plan/risk/result。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "每种操作至少一个成功/拒绝/失败 fixture 记录，包含 plan/risk/result。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SES-001",
+      "section": "22",
+      "heading": "Session 管理",
+      "title": "显式 sessionName",
+      "statement": "Agent 可以传 sessionName。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SES-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "合法名称保留语义并经过路径安全规范化。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "合法名称保留语义并经过路径安全规范化。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SES-002",
+      "section": "22",
+      "heading": "Session 管理",
+      "title": "自动命名",
+      "statement": "未传 sessionName 时必须生成 `YYYYMMDD_HHMMSS_<short-task-name>` 形式的唯一名称。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SES-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "固定时钟测试验证格式和碰撞处理。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "固定时钟测试验证格式和碰撞处理。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SES-003",
+      "section": "22",
+      "heading": "Session 管理",
+      "title": "创建无需确认",
+      "statement": "session 创建不得要求用户确认。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SES-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "R0 session init 自动完成且不触碰硬件。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "R0 session init 自动完成且不触碰硬件。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-SES-004",
+      "section": "22",
+      "heading": "Session 管理",
+      "title": "session 目录",
+      "statement": "session metadata 必须保存在 `<projectRoot>/.jlink-mcp/sessions/` 下。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-SES-004",
+          "kind": "contract",
+          "level": "module",
+          "description": "session 文件路径位于 cwd 内并可恢复读取。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "session 文件路径位于 cwd 内并可恢复读取。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-DISC-001",
+      "section": "23",
+      "heading": "Agent 能力发现",
+      "title": "最小 AGENTS 入口",
+      "statement": "AGENTS.md 只保留最小入口和安全原则，不复制完整 MCP 手册。",
+      "normative": "MUST",
+      "category": "nonfunctional",
+      "priority": "required",
+      "ownerPhase": "P08",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-DISC-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "AGENTS 指向 mcu_capabilities/workflow resources，内容保持精简。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "AGENTS 指向 mcu_capabilities/workflow resources，内容保持精简。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-DISC-002",
+      "section": "23",
+      "heading": "Agent 能力发现",
+      "title": "发现工具",
+      "statement": "必须提供 mcu_capabilities、mcu_tool_catalog、mcu_backend_status 和 mcu_risk_policy。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P08",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-DISC-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "四个工具在 Codex、Claude/OpenCode MCP inspection 中可发现，输出一致。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "四个工具在 Codex、Claude/OpenCode MCP inspection 中可发现，输出一致。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-DISC-003",
+      "section": "23",
+      "heading": "Agent 能力发现",
+      "title": "resources/prompts/playbook",
+      "statement": "MCP 必须提供按任务组织的 resources、prompts 和 workflow playbook。",
+      "normative": "MUST",
+      "category": "functional",
+      "priority": "required",
+      "ownerPhase": "P08",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-DISC-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "至少覆盖只读调试、变量写、HSS 激励采样、SVD、Flash verify 和 R4 流程。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "至少覆盖只读调试、变量写、HSS 激励采样、SVD、Flash verify 和 R4 流程。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-DISC-004",
+      "section": "23",
+      "heading": "Agent 能力发现",
+      "title": "首调用建议",
+      "statement": "server instructions 必须明确建议 Agent 先调用 mcu_capabilities，再读取对应 workflow。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P08",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-DISC-004",
+          "kind": "integration",
+          "level": "phase",
+          "description": "三个客户端接入测试中模型能发现首步和风险边界。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "三个客户端接入测试中模型能发现首步和风险边界。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ENV-001",
+      "section": "24",
+      "heading": "返回格式",
+      "title": "统一 JSON envelope",
+      "statement": "所有核心工具必须返回统一 JSON envelope，至少包含 ok、operation、data、risk、backend、artifacts、warnings 和 message。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ENV-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "所有核心 tool output schema 通过统一 contract test。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "所有核心 tool output schema 通过统一 contract test。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ENV-002",
+      "section": "24",
+      "heading": "返回格式",
+      "title": "backend 路由证据",
+      "statement": "envelope 必须用 backend.selected、fallbackFrom 和 reason 说明实际后端及降级原因。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P03",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ENV-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "HSS/BMA/RSP/RTT 各路由场景返回一致字段。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "HSS/BMA/RSP/RTT 各路由场景返回一致字段。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-ENV-003",
+      "section": "24",
+      "heading": "返回格式",
+      "title": "MCP 兼容输出",
+      "statement": "核心工具必须提供 outputSchema/structuredContent；为兼容旧客户端，可同时返回相同 JSON 的 TextContent，业务失败设置 isError。",
+      "normative": "MUST",
+      "category": "contract",
+      "priority": "required",
+      "ownerPhase": "P01",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-ENV-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "MCP inspector/客户端 contract test 验证 structuredContent 与 text JSON 一致。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "MCP inspector/客户端 contract test 验证 structuredContent 与 text JSON 一致。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-001",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "001",
+      "statement": "多核、多镜像和复杂项目根识别不得进入第一版。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-001",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-002",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "002",
+      "statement": "GCC map parser 不得作为 v0.2.1 必需能力；GCC/IAR ELF 仍按内容支持。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-002",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-003",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "003",
+      "statement": "远程 Agent、远程硬件和复杂多探针调度不得进入第一版。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-003",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-004",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "004",
+      "statement": "TraceAgent、Runtime Evidence、CodeGraph Bridge 和离线实验诊断不得进入主线。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-004",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-005",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "005",
+      "statement": "采样压缩、JCAP/SQLite 和离线 UI 不得进入冻结实现。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-005",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-006",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "006",
+      "statement": "多组/多频率 HSS 并行采样不得进入第一版。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-006",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-007",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "007",
+      "statement": "任意地址默认写、SVD register-level 默认写和 MCU 端代码修改依赖不得进入第一版。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-007",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-OOS-008",
+      "section": "25",
+      "heading": "第一版明确不做",
+      "title": "008",
+      "statement": "HSS 运行中的复杂事务写入不得进入第一版。",
+      "normative": "MUST_NOT",
+      "category": "out-of-scope",
+      "priority": "required",
+      "ownerPhase": "P09",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-OOS-008",
+          "kind": "static",
+          "level": "release",
+          "description": "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "公共 catalog、schemas、prompts 和生产默认路径不暴露该能力；存在的实验代码被隔离或删除。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CLR-001",
+      "section": "0",
+      "heading": "修订澄清",
+      "title": "Spec 与包版本分离",
+      "statement": "功能规格版本 v0.2.1 与 npm/package 版本独立管理，不要求 package 降级或与 Spec 同号。",
+      "normative": "MUST",
+      "category": "governance",
+      "priority": "required",
+      "ownerPhase": "P00",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CLR-001",
+          "kind": "contract",
+          "level": "module",
+          "description": "阶段报告同时记录 specVersion 与 packageVersion，不因规格号修改 package 版本。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "阶段报告同时记录 specVersion 与 packageVersion，不因规格号修改 package 版本。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CLR-002",
+      "section": "0",
+      "heading": "修订澄清",
+      "title": "HM_C095 仅为测试夹具",
+      "statement": "J-Link V8.84 与 HM_C095 目标工程只作为主要硬件验收 fixture，不得成为生产默认或通用语义。",
+      "normative": "MUST",
+      "category": "governance",
+      "priority": "required",
+      "ownerPhase": "P00",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CLR-002",
+          "kind": "contract",
+          "level": "module",
+          "description": "traceability、hardware-environment 与测试 profile 明确 target-specific；生产源码无默认绑定。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "traceability、hardware-environment 与测试 profile 明确 target-specific；生产源码无默认绑定。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CLR-003",
+      "section": "0",
+      "heading": "修订澄清",
+      "title": "源代码识别不是地址权威",
+      "statement": "目标工程源码扫描只能发现候选和声明上下文；地址、尺寸、类型和 member offset 必须由 debug artifact/map 验证。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P02",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CLR-003",
+          "kind": "contract",
+          "level": "module",
+          "description": "没有 artifact/map 证据时 resolver 不输出可执行地址。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "没有 artifact/map 证据时 resolver 不输出可执行地址。"
+      ],
+      "notes": []
+    },
+    {
+      "id": "REQ-CLR-004",
+      "section": "0",
+      "heading": "修订澄清",
+      "title": "真实写测试安全恢复",
+      "statement": "硬件变量写验收只能使用用户/policy 明确选择的非执行器 RAM 调试变量，并执行 old→new→readback→restore→readback。",
+      "normative": "MUST",
+      "category": "safety",
+      "priority": "required",
+      "ownerPhase": "P04",
+      "implementationStatus": "unassessed",
+      "acceptanceStatus": "not_run",
+      "codeMapping": [],
+      "plannedTests": [
+        {
+          "id": "TEST-REQ-CLR-004",
+          "kind": "hardware",
+          "level": "phase",
+          "description": "hardware evidence 记录 old/new/readback/restore，restored=true；未识别安全变量时测试 not_run 而非猜测。",
+          "status": "planned",
+          "evidence": []
+        }
+      ],
+      "acceptanceCriteria": [
+        "hardware evidence 记录 old/new/readback/restore，restored=true；未识别安全变量时测试 not_run 而非猜测。"
+      ],
+      "notes": []
+    }
+  ]
+}

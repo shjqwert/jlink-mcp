@@ -1,0 +1,371 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/jlink-mcp/schemas/hardware-environment.schema.json",
+  "title": "Jlink_MCP hardware environment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "fixtureId",
+    "purpose",
+    "status",
+    "host",
+    "jlink",
+    "connection",
+    "project",
+    "artifacts",
+    "p00Authorization",
+    "fingerprints"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "jlink-mcp.hardware-environment/v1"
+    },
+    "fixtureId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "purpose": {
+      "enum": [
+        "primary-hardware-acceptance",
+        "secondary-hardware-acceptance",
+        "offline-fixture"
+      ]
+    },
+    "status": {
+      "enum": [
+        "unverified",
+        "verified",
+        "blocked",
+        "unavailable"
+      ]
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "architecture",
+        "nodeVersion",
+        "npmVersion",
+        "powershellVersion"
+      ],
+      "properties": {
+        "os": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "architecture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodeVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "npmVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "powershellVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "jlink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectedSoftwareVersion",
+        "installDir",
+        "dllPath",
+        "dllVersion",
+        "dllSha256",
+        "probeModel",
+        "probeSerial"
+      ],
+      "properties": {
+        "expectedSoftwareVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "installDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dllPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dllVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dllSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "probeModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "probeSerial": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interface",
+        "speedKhz",
+        "targetId",
+        "historicalTargetHint",
+        "targetIdSource"
+      ],
+      "properties": {
+        "interface": {
+          "enum": [
+            "SWD",
+            "JTAG",
+            null
+          ]
+        },
+        "speedKhz": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "targetId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "historicalTargetHint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targetIdSource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "gitRequired",
+        "sourceModificationAllowed",
+        "buildAllowed",
+        "projectConfigFile",
+        "sourceFingerprintBefore",
+        "sourceFingerprintAfter"
+      ],
+      "properties": {
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gitRequired": {
+          "const": false
+        },
+        "sourceModificationAllowed": {
+          "const": false
+        },
+        "buildAllowed": {
+          "type": "boolean"
+        },
+        "projectConfigFile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceFingerprintBefore": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourceFingerprintAfter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "debugArtifact",
+        "debugArtifactSha256",
+        "mapFile",
+        "mapFileSha256",
+        "flashArtifact",
+        "flashArtifactSha256",
+        "svdFile",
+        "svdFileSha256"
+      ],
+      "properties": {
+        "debugArtifact": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "debugArtifactSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mapFile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mapFileSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "flashArtifact": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flashArtifactSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "svdFile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "svdFileSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "p00Authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowedRiskLevels",
+        "allowedOperations",
+        "forbiddenOperations",
+        "r4ApprovalGranted"
+      ],
+      "properties": {
+        "allowedRiskLevels": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "R0",
+              "R1"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "allowedOperations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forbiddenOperations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "r4ApprovalGranted": {
+          "const": false
+        }
+      }
+    },
+    "fingerprints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capturedAt",
+        "fixtureFingerprint",
+        "notes"
+      ],
+      "properties": {
+        "capturedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "fixtureFingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

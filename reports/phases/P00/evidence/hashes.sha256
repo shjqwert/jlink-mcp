@@ -1,0 +1,4 @@
+3ed65cf6eb9b06796e7f64afa84c55841f11ae931b4690f6e0573be4ce5e2572  *reports/environment/hardware-environment.json
+c80de09b2afe269b97e235fd459a3d9c965a82697a8a30124ba25d6daa4d0398  *reports/phases/P00/evidence/test-runs.jsonl
+2ed36766c4f1939733f44f15dc14a299381dbe5141494f112e6a944614777776  *reports/phases/P00/evidence/hardware-runs.jsonl
+# hashes.sha256 is excluded to avoid a self-referential checksum.

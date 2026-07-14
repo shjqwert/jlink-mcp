@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "jlink-mcp.catalog-snapshot/v1",
+  "phaseId": "P00",
+  "repositoryCommit": "0000000000000000000000000000000000000000",
+  "generatedAt": null,
+  "tools": [],
+  "resources": [],
+  "prompts": [],
+  "summary": {
+    "keep": 0,
+    "refactor": 0,
+    "hide": 0,
+    "remove": 0,
+    "testOnly": 0
+  },
+  "targetSpecificCouplings": []
+}

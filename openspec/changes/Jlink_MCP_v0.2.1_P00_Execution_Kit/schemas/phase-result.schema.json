@@ -1,0 +1,1077 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/jlink-mcp/schemas/phase-result.schema.json",
+  "title": "Jlink_MCP phase result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "specVersion",
+    "phase",
+    "repository",
+    "environment",
+    "scope",
+    "implementation",
+    "tests",
+    "hardware",
+    "risk",
+    "timing",
+    "artifacts",
+    "deviations",
+    "limitations",
+    "acceptance"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "jlink-mcp.phase-result/v1"
+    },
+    "specVersion": {
+      "const": "0.2.1"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "status",
+        "startedAt",
+        "finishedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^P[0-9]{2}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "planned",
+            "running",
+            "accepted",
+            "conditional",
+            "rejected",
+            "blocked"
+          ]
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "baseCommit",
+        "resultCommit",
+        "branch",
+        "dirty"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "baseCommit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "resultCommit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "workspaceFingerprint": {
+          "type": "string"
+        },
+        "changedFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "architecture",
+        "node",
+        "npm",
+        "jlink",
+        "targetFixture"
+      ],
+      "properties": {
+        "os": {
+          "type": "string"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        },
+        "npm": {
+          "type": "string"
+        },
+        "jlink": {
+          "$ref": "#/$defs/jlinkIdentity"
+        },
+        "targetFixture": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "root",
+            "gitRequired",
+            "targetId",
+            "sourceModified",
+            "buildTriggered"
+          ],
+          "properties": {
+            "root": {
+              "type": "string"
+            },
+            "gitRequired": {
+              "const": false
+            },
+            "targetId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "projectConfig": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sourceFingerprintBefore": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sourceFingerprintAfter": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sourceModified": {
+              "type": "boolean"
+            },
+            "buildTriggered": {
+              "type": "boolean"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/artifactRef"
+              }
+            }
+          }
+        }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirementIds",
+        "inScope",
+        "outOfScope"
+      ],
+      "properties": {
+        "requirementIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "inScope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outOfScope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "publicContractsChanged",
+        "compatibilityNotes"
+      ],
+      "properties": {
+        "summary": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 12
+        },
+        "publicContractsChanged": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "compatibilityNotes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "removedOrHiddenLegacySurface": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "runs",
+        "mandatoryNotRun"
+      ],
+      "properties": {
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "passed",
+            "failed",
+            "skipped",
+            "notRun"
+          ],
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "notRun": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/testRun"
+          }
+        },
+        "mandatoryNotRun": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executed",
+        "authorizationScope",
+        "operations",
+        "captures",
+        "safety"
+      ],
+      "properties": {
+        "executed": {
+          "type": "boolean"
+        },
+        "authorizationScope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hardwareOperation"
+          }
+        },
+        "captures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/captureEvidence"
+          }
+        },
+        "safety": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "targetWritten",
+            "flashIssued",
+            "eraseIssued",
+            "resetIssued",
+            "haltIssued",
+            "sourceModified"
+          ],
+          "properties": {
+            "targetWritten": {
+              "type": "boolean"
+            },
+            "flashIssued": {
+              "type": "boolean"
+            },
+            "eraseIssued": {
+              "type": "boolean"
+            },
+            "resetIssued": {
+              "type": "boolean"
+            },
+            "haltIssued": {
+              "type": "boolean"
+            },
+            "sourceModified": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "levelsTouched",
+        "openRisks",
+        "acceptedRisks"
+      ],
+      "properties": {
+        "levelsTouched": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "R0",
+              "R1",
+              "R2",
+              "R3",
+              "R4",
+              "R5"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "openRisks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/riskItem"
+          }
+        },
+        "acceptedRisks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/riskItem"
+          }
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plannedMinutes",
+        "elapsedMs",
+        "blockedMs",
+        "humanApprovalWaitMs",
+        "hardwareMs",
+        "executionElapsedMs",
+        "dispatchCount",
+        "correctionCount",
+        "reviewCount",
+        "modelDistribution",
+        "tokens",
+        "variancePercent",
+        "correctionNotes"
+      ],
+      "properties": {
+        "plannedMinutes": {
+          "type": "number",
+          "minimum": 0
+        },
+        "elapsedMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blockedMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "humanApprovalWaitMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hardwareMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "executionElapsedMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dispatchCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correctionCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reviewCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modelDistribution": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "available",
+            "reason"
+          ],
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "input": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "output": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "available": {
+                    "const": false
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "input"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "output"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "variancePercent": {
+          "type": "number"
+        },
+        "correctionNotes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/artifactRef"
+      }
+    },
+    "deviations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exitCriteria",
+        "decision",
+        "blockers"
+      ],
+      "properties": {
+        "exitCriteria": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/criterion"
+          },
+          "minItems": 1
+        },
+        "decision": {
+          "enum": [
+            "accepted",
+            "conditional",
+            "rejected",
+            "blocked"
+          ]
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "jlinkIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installed",
+        "softwareVersion",
+        "dllVersion",
+        "dllPath",
+        "dllSha256",
+        "probeModel",
+        "probeSerial",
+        "interface",
+        "speedKhz"
+      ],
+      "properties": {
+        "installed": {
+          "type": "boolean"
+        },
+        "softwareVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dllVersion": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dllPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dllSha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "probeModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "probeSerial": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "interface": {
+          "enum": [
+            "SWD",
+            "JTAG",
+            null
+          ]
+        },
+        "speedKhz": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "bytes",
+        "purpose"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "purpose": {
+          "type": "string"
+        }
+      }
+    },
+    "testRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "requirementIds",
+        "level",
+        "kind",
+        "mandatory",
+        "command",
+        "cwd",
+        "startedAt",
+        "durationMs",
+        "exitCode",
+        "result",
+        "counts",
+        "evidencePaths"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^P[0-9]{2}-(UT|CT|IT|HW-R|HW-W|AG|SF|RG)-[0-9]{3}$"
+        },
+        "requirementIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "level": {
+          "enum": [
+            "affected",
+            "module",
+            "phase",
+            "release"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "unit",
+            "contract",
+            "integration",
+            "hardware-read",
+            "hardware-write",
+            "agent-conformance",
+            "safety",
+            "regression"
+          ]
+        },
+        "mandatory": {
+          "type": "boolean"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "exitCode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "result": {
+          "enum": [
+            "passed",
+            "failed",
+            "skipped",
+            "not_run"
+          ]
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "passed",
+            "failed",
+            "skipped"
+          ],
+          "properties": {
+            "passed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "stdoutTail": {
+          "type": "string"
+        },
+        "logPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidencePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "hardwareOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "operation",
+        "risk",
+        "dryRun",
+        "result",
+        "target",
+        "readbackOk",
+        "restored",
+        "approval"
+      ],
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "risk": {
+          "enum": [
+            "R0",
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "R5"
+          ]
+        },
+        "dryRun": {
+          "type": "boolean"
+        },
+        "planId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planDigest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "oldValue": {},
+        "newValue": {},
+        "readback": {},
+        "readbackOk": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "restored": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "result": {
+          "enum": [
+            "passed",
+            "failed",
+            "rejected",
+            "not_run"
+          ]
+        },
+        "approval": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "required",
+            "provider",
+            "receiptDigest",
+            "outcome"
+          ],
+          "properties": {
+            "required": {
+              "type": "boolean"
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "receiptDigest": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "outcome": {
+              "enum": [
+                "not_required",
+                "approved",
+                "denied",
+                "expired",
+                "not_requested"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "captureEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captureId",
+        "metadataPath",
+        "metadataSha256",
+        "segments",
+        "summary"
+      ],
+      "properties": {
+        "captureId": {
+          "type": "string"
+        },
+        "metadataPath": {
+          "type": "string"
+        },
+        "metadataSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactRef"
+          }
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "requestedRateHz",
+            "actualRateHz",
+            "sampleCount",
+            "validSamples",
+            "readErrors",
+            "timeouts",
+            "overflows",
+            "droppedSamples"
+          ],
+          "properties": {
+            "requestedRateHz": {
+              "type": "number",
+              "minimum": 0
+            },
+            "actualRateHz": {
+              "type": "number",
+              "minimum": 0
+            },
+            "sampleCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "validSamples": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "readErrors": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "timeouts": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "overflows": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "droppedSamples": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "riskItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "description",
+        "owner",
+        "resolution"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "high",
+            "critical"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "resolution": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "criterion",
+        "status",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "criterion": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "fail",
+            "not_run"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        }
+      }
+    }
+  }
+}
