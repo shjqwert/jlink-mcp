@@ -1,5 +1,15 @@
 ## ADDED Requirements
 
+### Requirement: JCAP v0 is experimental before byte freezing
+
+The first package implementation SHALL declare `formatVersion=0` and `status=experimental`. It SHALL support raw→SQLite rebuild→bounded query→analysis→UI without freezing all binary offsets or promising compatibility. `formatVersion=1` and byte golden vectors require a separate post-loop change.
+
+#### Scenario: v0 completes its data loop
+
+- **WHEN** raw data is rebuilt and viewed successfully
+- **THEN** the package remains experimental v0
+- **AND** no v1 reader/writer compatibility obligation is introduced.
+
 ### Requirement: Completed captures use a JCAP directory package
 
 Jlink_MCP SHALL store each capture under `<projectRoot>/.jlink-mcp/captures/<captureId>.jcap/`, where `captureId` is a lowercase, hyphenated RFC-4122 UUID-v4. The runtime package SHALL contain `raw/events.bin`, sample segments named consecutively from `raw/capture_0001.bin` through at most `raw/capture_9999.bin` after HSS Start succeeds, derived `capture.db` when `indexStatus=ready`, and `export/*.csv` only after explicit export. A capture that fails during trusted script selection, R3 reset, stabilization, or HSS Start MAY contain a valid event journal and no sample segment. A terminal capture whose index build failed SHALL retain complete immutable raw with `indexStatus=failed` in the current operation and `rebuild_required` after restart until a valid DB is published. Binary occurrences of `captureId` SHALL be the UUID's exact 16 RFC-4122 network-order bytes.

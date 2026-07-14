@@ -1,5 +1,25 @@
 ## ADDED Requirements
 
+### Requirement: Trust validation uses one local command
+
+`jlink-mcp trust validate` SHALL replace acceptance-mode candidate/promotion flow. Outside the MCP catalog, it SHALL validate the DLL/helper/adapter Runtime Bundle and selected ScriptFile, run bounded HSS validation, display the result, require one local-user confirmation, and persist a Trust Profile. Agent, UI and MCP tools SHALL NOT elevate trust.
+
+#### Scenario: runtime validation succeeds
+
+- **WHEN** a local user confirms a passing `trust validate` result
+- **THEN** the exact Runtime Bundle is saved in the Trust Profile
+- **AND** a changed identity requires validation again.
+
+### Requirement: Script mode is explicit and cache-backed
+
+HSS SHALL accept only `script.mode=none|file`. `none` explicitly selects no script and SHALL NOT fall back to a system default. `file` SHALL canonicalize and hash the source, copy it to a SHA-256-named content-addressed cache, and load that cached copy. No-op scripts and additional lock/re-hash TOCTOU schemes are not required.
+
+#### Scenario: a source script changes after validation
+
+- **WHEN** the original file changes after its cached copy is trusted
+- **THEN** the current execution uses the cached verified copy
+- **AND** selecting the changed source requires a new validation.
+
 ### Requirement: HSS uses one validated Windows x64 DLL path
 
 The `jlink-hss` backend SHALL use the project's experimental adapter as its only supported HSS path for Windows x64 and `JLink_x64.dll`. It SHALL resolve the DLL in this order: explicit `--jlink-dll`, `JLINK_DLL_PATH`, SEGGER installation registry path, the directory of `JLink.exe` found on PATH, then common SEGGER installation directories. It SHALL NOT hard-code a machine-specific path or add cross-platform, 32-bit, or multi-DLL abstractions in the first version.

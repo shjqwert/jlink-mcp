@@ -1,4 +1,4 @@
-## Gate 0 — Baseline, adapter proof, and runtime decisions
+## P0 — Baseline, runtime trust, and contracts
 
 - [ ] 0.1 Record repository commit/worktree state, Node/TypeScript/J-Link DLL/helper/adapter identities, target artifact/MAP hashes, and reproducible compile/test commands.
 - [ ] 0.2 Implement and test the Windows x64 DLL resolver order: explicit `--jlink-dll`/`JLINK_DLL_PATH`, SEGGER registry, PATH `JLink.exe` directory, then common SEGGER directories; reject missing, non-x64, invalid-export, failed-`GetCaps`, and unvalidated identities.
@@ -6,17 +6,17 @@
 - [ ] 0.4 Preserve accepted HSS fixtures and freeze the HM_C095 oracle as OUT/MAP-resolved `g_hssDbgCounterFocIsr`: record its one-increment-per-FOC-update formula, firmware-derived modular-delta/rate bounds, repeat/wrap tolerance, observation window and pass/fail rules; verify the full sample-index-0 capture, timebase and dropped flags without a fixed address.
 - [ ] 0.5 Collapse HSS availability, planning, and Start/Read/Stop behind one service; remove conflicting generic-router/direct-helper capability views.
 - [ ] 0.6 Implement adapter validation for required exports, `GetCaps`, lifecycle, decoder semantics, identity allowlist, and revalidation on DLL/helper/adapter/ScriptFile change.
-- [ ] 0.7 Spike and select one SQLite adapter that works on supported Node 18, standalone MCP, local loopback Web, and packaged installation.
-- [ ] 0.8 Freeze JCAP v1 binary layouts, ScriptFile provenance, reset/capture events, supported scalar types, monotonic timebase, separate `captureState`/`indexStatus`, terminal-raw-before-DB publication, query bounds, and final package structure.
-- [ ] 0.9 Implement the dedicated ScriptFile identity gate: canonical absolute non-reparse path, trusted SHA-256 approval, locked-handle revalidation, return code `0`, and no default-script fallback; prohibit Raw/general ExecCommand only inside the selector/HSS path while retaining explicit raw probe/GDB auxiliaries as R4.
+- [ ] 0.7 Record SQLite compatibility constraints; select and prove the adapter with the P1 data path.
+- [ ] 0.8 Define the minimum experimental JCAP v0 contract for provenance, raw rebuild, lifecycle, query bounds and package structure; defer v1 byte-layout freezing.
+- [ ] 0.9 Implement `script.mode=none|file`: reject implicit default scripts; for file mode canonicalize/hash once, copy to the SHA-256-named cache and load that copy; prohibit Raw/general ExecCommand inside HSS.
 - [ ] 0.10 Implement `resetBeforeCapture=true` as a single-use R3 reset operation bound to target/Artifact/layout/policy/session/TTL, followed by bounded target stabilization before HSS Start.
-- [ ] 0.11 Implement the user-explicit process-local acceptance mode for one exact DLL/helper/adapter/ScriptFile/target/probe tuple and bounded GetCaps/reset/HSS suite; emit a candidate trust manifest and require separate trusted-local user promotion before production use.
+- [ ] 0.11 Implement trusted local `jlink-mcp trust validate` for one Runtime Bundle/target/probe tuple and bounded HSS suite; display results, require one user confirmation and save a Trust Profile without exposing it as an MCP Tool.
 
 Gate acceptance: compile and focused tests pass; Windows x64 resolver and project-config target resolution pass; production unknown identity and missing trusted script approval block GetCaps/reset/capture; acceptance mode is process-local, capability-limited and cannot self-promote; no default script is used; reset audit and stability failure are structured; the HM_C095 counter oracle proves the complete post-stability capture from sample index 0 under recorded rate bounds; SQLite packaging proof exists; no production module has been deleted.
 
-## Gate 1 — Offline JCAP minimal slice
+## P1 — HSS → JCAP → Query
 
-- [ ] 1.1 Create one shared byte-golden corpus for headers, SCRIPT descriptors, records, footers, event frames/TLV, CRCs, rollover, truncation and corruption; require the native writer, TypeScript decoder and DB rebuild to use it before real HSS integration.
+- [ ] 1.1 Select and prove one SQLite adapter for Node 18, standalone MCP, local loopback Web and packaged installation; implement the minimal JCAP v0 raw/rebuild corpus needed by the data path.
 - [ ] 1.2 Implement versioned sample segment header/descriptors/records with CRC, provenance, type rejection, rollover, and truncated-record detection against the golden corpus.
 - [ ] 1.3 Implement append-safe `raw/events.bin` for lifecycle, target-control reset, write, flag, and fault events in the shared pre-reset QPC timebase against the same corpus.
 - [ ] 1.4 Implement capture lifecycle and finalization in the order: sync/close samples → sync `finalizing` → validate raw prefix → sync terminal event (or transition to `recoverable`) → close immutable raw journal → build/validate/fsync/rename `capture.db.tmp`; keep `captureState` separate from `indexStatus` and make failed indexes rebuildable without raw mutation.
@@ -26,7 +26,7 @@ Gate acceptance: compile and focused tests pass; Windows x64 resolver and projec
 
 Gate acceptance: a fixture can record the trusted script and R3 reset before HSS Start, capture/finalize the full post-stability series, close terminal raw before DB build, be queried, have its DB deleted and rebuilt with equivalent metadata/events/quality/provenance, while raw hashes remain unchanged and no terminal event makes the first DB immediately stale.
 
-## Gate 2 — Artifact, symbols, and read-only HSS
+## P2 — Artifact, symbols, and controlled writes
 
 - [ ] 2.1 Implement bounded content-driven Artifact probing, candidate pairing and SHA-256 generations, then compute `targetArtifactMatch` by exact read-only comparison of every Artifact-defined nonvolatile load byte (`PT_LOAD.p_filesz` or OUT/AXF equivalent; excluding RAM/BSS/NOLOAD/gaps); bind evidence to target/probe/connection/runtime identities and invalidate it on reconnect, Artifact/target/probe changes, Flash/Erase, or possibly-Flash-modifying Raw.
 - [ ] 2.2 Implement Symbol Catalog search/resolve, stable logical identity, layout hash, region/type eligibility, and structured rejection of unsafe kinds.
@@ -37,7 +37,7 @@ Gate acceptance: a fixture can record the trusted script and R3 reset before HSS
 
 Gate acceptance: HSS uses only the validated DLL and trusted ScriptFile identities, records reset and capture evidence in rebuildable JCAP, rejects mismatches/unsupported or expired plans, and passes the independently known semantic fixture without dropping any post-stability capture prefix.
 
-## Gate 3 — Controlled writes and audit
+### P2 continuation — Controlled writes and audit
 
 - [ ] 3.1 Make verified, policy-allowlisted RAM scalar, fixed-array element, and contiguous slice writes R2 using `variable_write_plan` with RAM/type/value/range checks, `maxWrites`, Artifact/layout/policy/session/TTL binding, old-value read and readback; require no R3 operation plan or user approval.
 - [ ] 3.2 Enforce verified target identity for normal writes, explicit R4 policy exceptions for unverified identity, and hard reject mismatch.
@@ -48,17 +48,17 @@ Gate acceptance: HSS uses only the validated DLL and trusted ScriptFile identiti
 
 Gate acceptance: normal verified RAM writes execute only as R2 with readback and no user confirmation; unverified exceptions require R4; no write or CPU control bypasses policy or capture ownership; Agent self-approval and approval replay fail; active-capture halt/reset causes no hardware action; every attempted state change has deterministic result and append-safe audit evidence.
 
-## Gate 4 — Analysis, UI, and discovery
+## P3 — Analysis, offline UI, and discovery
 
-- [ ] 4.1 Refactor generic control/state-machine analyzers to normalized bounded capture records and persist only derived runs/findings.
-- [ ] 4.2 Add deterministic golden fixtures for supported metrics, transitions, missing evidence, and invalid-quality ranges.
+- [ ] 4.1 Implement only write-window comparison, peak/steady-state/overshoot, state transition and duration analyzers over bounded capture records.
+- [ ] 4.2 Add deterministic fixtures for those metrics, transitions, missing evidence and invalid-quality ranges.
 - [ ] 4.3 Implement only the local loopback Web offline UI/query service and `npm run ui -- --project|--open`; do not add VS Code/webview integration, hardware controls, or raw parsing.
-- [ ] 4.4 Implement timeline brush/events/quality and per-variable visibility, color, unit, line, independent axis, scale, offset, auto-fit, and reset with separate preferences.
+- [ ] 4.4 Implement timeline brush/events/quality, variable visibility, multi-variable curves and basic auto-fit; defer colors, line styles, complex axes, unit editing and preference persistence.
 - [ ] 4.5 Publish tool schemas, risk metadata, resources/prompts, and a reference Agent skill/client conformance test; state that third-party Agent review is not server-enforceable.
 
 Gate acceptance: offline UI opens a completed capture without hardware; analysis is deterministic and raw hashes do not change; discovery exposes the intended workflow and risk boundary.
 
-## Gate 5 — Replacement-first deletion
+## P4 — Replacement-first deletion and final acceptance
 
 - [ ] 5.1 Extract shared ELF/GDB/process/CRC/typed-value logic from old owners before deletion.
 - [ ] 5.2 Remove `ai-debug-workflow`, backend benchmark/routing, global capture query index, Direct RTT capture, old viewer lifecycle API, Runtime Evidence, and CodeGraph Bridge registrations and implementation.
@@ -68,7 +68,7 @@ Gate acceptance: offline UI opens a completed capture without hardware; analysis
 
 Gate acceptance: no removed capability remains registered or documented; retained RTT/GDB/CPU/Flash/Raw tools remain risk-classified auxiliaries; `halt`/`resume`/`reset` contracts and J-Link execution remain intact; final capture path is HSS → JCAP → query/analysis/UI.
 
-## Gate 6 — End-to-end acceptance
+### P4 continuation — End-to-end acceptance
 
 - [ ] 6.1 In the non-Git HM_C095 project root, probe the current `.out/.map`, resolve and cache variables, and create a validated HSS plan without guessing filenames.
 - [ ] 6.2 Run read-only capture and one verified policy-allowed R2 RAM write with readback; separately exercise one R4 approval rejection/authorization path without conflating it with the normal write; stop/finalize and verify package contents and provenance.

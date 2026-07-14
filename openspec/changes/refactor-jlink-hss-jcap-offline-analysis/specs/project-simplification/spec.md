@@ -1,5 +1,15 @@
 ## ADDED Requirements
 
+### Requirement: Replacement-first deletion is batched
+
+Batch A SHALL remove Backend Router, Direct RTT Capture, External Import, legacy CaptureService, global capture index and old viewer lifecycle. Batch B SHALL remove OpenOCD, Black Magic Probe, Telnet Proxy, TraceAgent, Runtime Evidence, CodeGraph Bridge, `ai-debug-workflow` and dead docs/tests/scripts. Each completed batch SHALL run compile, affected tests, tool-catalog checking, import/reference scanning and HSS regression.
+
+#### Scenario: a deletion batch finishes
+
+- **WHEN** all named modules in one batch are removed after their replacements exist
+- **THEN** the shared batch verification succeeds
+- **AND** a per-module full hardware acceptance run is not required.
+
 ### Requirement: J-Link is the only production probe backend in this change
 
 Jlink_MCP SHALL retain the generic `ProbeBackend` boundary but SHALL ship only `JLinkBackend` as the production probe implementation for this change.

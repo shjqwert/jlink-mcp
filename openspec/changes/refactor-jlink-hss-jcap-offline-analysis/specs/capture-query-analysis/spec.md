@@ -1,5 +1,15 @@
 ## ADDED Requirements
 
+### Requirement: V1 analysis is limited and deterministic
+
+`analysis_run` SHALL initially implement only write-event before/after window comparison, peak, steady-state value, overshoot, state transition and state duration. Missing or low-quality evidence SHALL return warnings rather than inferred findings.
+
+#### Scenario: requested evidence is insufficient
+
+- **WHEN** a selected analysis window lacks valid samples
+- **THEN** the result reports insufficient evidence
+- **AND** it does not create a generic or domain-specific conclusion.
+
 ### Requirement: Capture queries use the index layer by default
 
 Jlink_MCP SHALL expose `capture_list`, `capture_summary`, `capture_series`, `capture_event_window`, `analysis_run`, `capture_index_rebuild`, and `capture_export` through the derived/indexed query layer. Agent and UI callers SHALL not parse raw BIN. The local loopback Web UI SHALL expose no probe, capture-control, write, flash, reset, or raw-command operation.

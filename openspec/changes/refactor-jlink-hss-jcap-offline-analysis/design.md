@@ -2,6 +2,18 @@
 
 仓库已有 HSS 只读采样和 capture-time RAM write MVP，但当前数据分散在 BIN、JSON、JSONL、CSV，且存在两套 HSS 可用性判断和多条 capture fallback。目标工程验证基线是 `D:\FOC_Project\Trunk\ProJect\HM_C095_SCM_App-e8f80a2-mcal-config`；其现有硬件证据只证明 transport/data-quality，尚未证明 semantic correctness。
 
+## Optimization decisions
+
+本节覆盖本变更中与其冲突的旧细节，未提及的安全约束和需求保持不变。
+
+- 系统仅以 `RuntimeContext`（DLL/helper/adapter/ScriptFile 身份）、`TargetContext`（target/probe/artifact/symbol layout）、`OperationPlan`（policy/readback/maxWrites/R4）和 `CapturePackage` 组织主线。Runtime Bundle 是 RuntimeContext 内的单一身份集合。
+- 删除 acceptance-mode、candidate manifest 和单独 promotion 状态机。可信本地 CLI `jlink-mcp trust validate` 校验 Runtime Bundle 与 ScriptFile、执行有界 HSS 验证、显示结果并在一次用户确认后保存 Trust Profile；它不是 MCP Tool，Agent 不能提升信任。
+- ScriptFile 只有 `script.mode=none|file`：`none` 显式禁止默认脚本；`file` 校验规范化路径和 SHA-256，将内容复制至以 SHA-256 命名的缓存副本后供 J-Link 加载。此内容寻址副本是唯一 TOCTOU 防护方案，不再要求 no-op ScriptFile 或叠加文件锁/重复校验。
+- Artifact 比对按风险触发：只读可使用 `unverified` 并持续告警；R2 写入和正式语义验收必须完整验证；`mismatch` 拒绝 capture 和变量写入。验证缓存限于当前 connection generation，并在 reconnect、Artifact/Target/Probe 变化、Flash/Erase 或可能改 Flash 的 Raw 操作后失效。
+- JCAP 首版为 `formatVersion=0`、`status=experimental`，先验证 Raw→DB→Query→Analysis→UI；不冻结完整字节布局，v1 冻结另立变更。SQLite adapter 移至 P1 数据路径验证。
+- 首版 UI 仅支持打开 JCAP、项目/会话/capture 导航、变量、多变量曲线、zoom/brush、events、quality、基本 Y auto-fit 和有界查询；高级样式、复杂多轴、单位编辑、任意 scale/offset 持久化和完整 preferences 延后。分析仅提供写入前后窗口、峰值/稳态/超调、状态迁移和持续时间。
+- replacement-first 分为 Batch A（旧 Capture 主线）和 Batch B（历史/非主线模块）；每批统一执行 compile、affected tests、tool catalog、import/reference scan 和 HSS regression。
+
 ## Goals / Non-Goals
 
 **Goals**

@@ -1,5 +1,15 @@
 ## ADDED Requirements
 
+### Requirement: Operation plans share the core contexts
+
+An OperationPlan SHALL bind policy, readback, `maxWrites`, risk and applicable RuntimeContext/TargetContext facts once. It SHALL not create duplicate Runtime or Artifact approval state; existing R4 human confirmation remains required for R4 operations.
+
+#### Scenario: an R2 write is planned
+
+- **WHEN** a verified allowlisted RAM write is planned
+- **THEN** its OperationPlan binds RuntimeContext, TargetContext, policy, budget and readback
+- **AND** it still requires the existing R2 enforcement and audit.
+
 ### Requirement: Core tool responses include structured risk facts
 
 Jlink_MCP SHALL return risk level, user-approval requirement, policy result, side effects, target state implications, and recommended verification for operations that can alter target state.

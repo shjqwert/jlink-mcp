@@ -1,5 +1,15 @@
 ## ADDED Requirements
 
+### Requirement: UI v1 scope is intentionally small
+
+The first offline UI SHALL provide JCAP open, project/session/capture navigation, variable list, multi-variable curves, zoom/time brush, events, quality, basic Y auto-fit and bounded queries. Custom colors/line styles, complex multi-axis layouts, variable unit editing, arbitrary persisted scale/offset and a full preference system are deferred.
+
+#### Scenario: a user opens a capture
+
+- **WHEN** a completed package is opened without hardware
+- **THEN** the required navigation and query-backed analysis controls are available
+- **AND** no deferred presentation system is required.
+
 ### Requirement: The UI is a post-capture analysis surface
 
 The first UI SHALL be a local loopback Web application that opens and analyzes saved JCAP captures without connecting to target hardware. It SHALL NOT require VS Code integration or use a VS Code webview.
