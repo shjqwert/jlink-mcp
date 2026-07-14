@@ -6,7 +6,8 @@ import { resolveHssDebugArtifact } from "./debug-artifact";
 import { hssProjectPaths, resolveInsideProject } from "./project-paths";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { resolveHssTargetIdentity, type HssTargetIdentityInput } from "./target-identity";
-import type { HssRuntimeIdentity } from "../hss-dll/hss-dll-adapter";
+import type { HssRuntimeIdentity, HssScriptIdentity } from "../hss-dll/hss-dll-adapter";
+import type { HssScriptSpec } from "../trust/trust-profile";
 
 export const HM_C095_HSS_VARIABLES = [
   { name: "g_hssDbgCounterFocIsr", unit: "count" },
@@ -28,6 +29,7 @@ export interface HssCapturePlanInput extends HssTargetIdentityInput {
   serial?: string;
   readMode?: "periodic" | "drain";
   resumeBeforeStart?: boolean;
+  script?: HssScriptSpec;
   jlinkScriptFile?: string;
   approvedJlinkScriptSha256?: string;
   resetBeforeCapture?: boolean;
@@ -88,12 +90,7 @@ export interface HssCapturePlan {
     pollIntervalMs: number;
     requiredConsecutiveRunningChecks: number;
   };
-  scriptIdentity?: {
-    path: string;
-    sha256: string;
-    approvalSha256: string;
-    approvalSource: "project-config" | "trusted-allowlist";
-  };
+  scriptIdentity?: HssScriptIdentity & { validated: true; approvalSha256: string };
   runtimeIdentity?: HssRuntimeIdentity;
   resetOperation?: {
     operation: "reset";

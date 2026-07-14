@@ -30,12 +30,14 @@ export async function hssCapabilityProbe(
     interface: input.interface,
     speedKhz: input.speedKhz,
     serial: input.serial,
+    script: input.script,
     jlinkScriptFile: input.jlinkScriptFile,
     approvedJlinkScriptSha256: input.approvedJlinkScriptSha256,
   };
-  const discovery = discoverHssDll(resolvedInput, env, options);
   const helperPath = resolveHssHelperPath(env, options.helperPath);
   const preflight = await hssDllPreflight(resolvedInput, { ...options, deferConnectPreflight: true });
+  const discovery = preflight.discovery as ReturnType<typeof discoverHssDll>;
+  const identityOptions = { ...options, scriptIdentity: preflight.scriptIdentity as import("../hss-dll/hss-dll-adapter").HssScriptIdentity };
   const runtimeIdentity = preflight.runtimeIdentity as import("../hss-dll/hss-dll-adapter").HssRuntimeIdentity;
   const helperPreflight = preflight.helperPreflight as { status?: unknown; errorCode?: unknown; exportsFound?: unknown } | undefined;
   const exportsValidated = helperPreflight?.status === "ok" && helperPreflight.exportsFound === true;
@@ -43,11 +45,11 @@ export async function hssCapabilityProbe(
     && Boolean(preflight.helperExists)
     && runtimeIdentity.validated
     && exportsValidated;
-  const getCaps = getCapsAllowed ? await hssDllGetCaps(resolvedInput, options) : undefined;
+  const getCaps = getCapsAllowed ? await hssDllGetCaps(resolvedInput, identityOptions) : undefined;
   const getCapsIdentity = getCaps?.runtimeIdentity as import("../hss-dll/hss-dll-adapter").HssRuntimeIdentity | undefined;
   const getCapsValidated = Boolean(getCaps && getCapsIdentity && isValidatedHssGetCapsResult(getCaps, getCapsIdentity));
   const caps = getCapsValidated ? getCaps!.caps as Record<string, unknown> : undefined;
-  const connectPreflight = getCapsValidated ? await hssDllTargetState(resolvedInput, getCapsIdentity!, options) as { status?: unknown; errorCode?: unknown; targetWasHalted?: unknown; targetWasHaltedRaw?: unknown } : undefined;
+  const connectPreflight = getCapsValidated ? await hssDllTargetState(resolvedInput, getCapsIdentity!, identityOptions) as { status?: unknown; errorCode?: unknown; targetWasHalted?: unknown; targetWasHaltedRaw?: unknown } : undefined;
   const targetStateValidated = connectPreflight?.status === "ok" && typeof connectPreflight.targetWasHalted === "boolean";
   const targetWasHalted = connectPreflight?.targetWasHalted === true;
   const targetWasHaltedRaw = typeof connectPreflight?.targetWasHaltedRaw === "number" ? connectPreflight.targetWasHaltedRaw : undefined;

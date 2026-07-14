@@ -1,18 +1,18 @@
 ## P0 — Baseline, runtime trust, and contracts
 
 - [ ] 0.1 Record repository commit/worktree state, Node/TypeScript/J-Link DLL/helper/adapter identities, target artifact/MAP hashes, and reproducible compile/test commands.
-- [ ] 0.2 Implement and test the Windows x64 DLL resolver order: explicit `--jlink-dll`/`JLINK_DLL_PATH`, SEGGER registry, PATH `JLink.exe` directory, then common SEGGER directories; reject missing, non-x64, invalid-export, failed-`GetCaps`, and unvalidated identities.
-- [ ] 0.3 Resolve target identity from explicit parameter then supported project configuration; return a structured selection error for absent/ambiguous results and record `targetId`, source, and confidence.
+- [x] 0.2 Implement and test the Windows x64 DLL resolver order: explicit `--jlink-dll`/`JLINK_DLL_PATH`, SEGGER registry, PATH `JLink.exe` directory, then common SEGGER directories; reject missing, non-x64, invalid-export, failed-`GetCaps`, and unvalidated identities.
+- [x] 0.3 Resolve target identity from explicit parameter then supported project configuration; return a structured selection error for absent/ambiguous results and record `targetId`, source, and confidence.
 - [ ] 0.4 Preserve accepted HSS fixtures and freeze the HM_C095 oracle as OUT/MAP-resolved `g_hssDbgCounterFocIsr`: record its one-increment-per-FOC-update formula, firmware-derived modular-delta/rate bounds, repeat/wrap tolerance, observation window and pass/fail rules; verify the full sample-index-0 capture, timebase and dropped flags without a fixed address.
-- [ ] 0.5 Collapse HSS availability, planning, and Start/Read/Stop behind one service; remove conflicting generic-router/direct-helper capability views.
-- [ ] 0.6 Implement adapter validation for required exports, `GetCaps`, lifecycle, decoder semantics, identity allowlist, and revalidation on DLL/helper/adapter/ScriptFile change.
+- [x] 0.5 Collapse HSS availability, planning, and Start/Read/Stop behind one service; remove conflicting generic-router/direct-helper capability views.
+- [x] 0.6 Implement adapter validation for required exports, `GetCaps`, lifecycle, decoder semantics, identity allowlist, and revalidation on DLL/helper/adapter/script-mode/cache-script change.
 - [ ] 0.7 Record SQLite compatibility constraints; select and prove the adapter with the P1 data path.
 - [ ] 0.8 Define the minimum experimental JCAP v0 contract for provenance, raw rebuild, lifecycle, query bounds and package structure; defer v1 byte-layout freezing.
-- [ ] 0.9 Implement `script.mode=none|file`: reject implicit default scripts; for file mode canonicalize/hash once, copy to the SHA-256-named cache and load that copy; prohibit Raw/general ExecCommand inside HSS.
+- [x] 0.9 Implement `script.mode=none|file`: reject implicit default scripts; for file mode canonicalize/hash once, copy to the SHA-256-named cache and load that copy; prohibit Raw/general ExecCommand inside HSS.
 - [ ] 0.10 Implement `resetBeforeCapture=true` as a single-use R3 reset operation bound to target/Artifact/layout/policy/session/TTL, followed by bounded target stabilization before HSS Start.
-- [ ] 0.11 Implement trusted local `jlink-mcp trust validate` for one Runtime Bundle/target/probe tuple and bounded HSS suite; display results, require one user confirmation and save a Trust Profile without exposing it as an MCP Tool.
+- [x] 0.11 Implement trusted local `jlink-mcp trust validate` for one Runtime Bundle/target/probe tuple and bounded HSS suite; display results, require one user confirmation and save a Trust Profile without exposing it as an MCP Tool.
 
-Gate acceptance: compile and focused tests pass; Windows x64 resolver and project-config target resolution pass; production unknown identity and missing trusted script approval block GetCaps/reset/capture; acceptance mode is process-local, capability-limited and cannot self-promote; no default script is used; reset audit and stability failure are structured; the HM_C095 counter oracle proves the complete post-stability capture from sample index 0 under recorded rate bounds; SQLite packaging proof exists; no production module has been deleted.
+Gate acceptance: compile and focused tests pass; Windows x64 resolver and project-config target resolution pass; production reloads a persistent Trust Profile and blocks unknown or changed DLL/helper/adapter/script-mode/target/probe/suite tuples before GetCaps/reset/capture; only the local `trust validate` CLI can save trust after confirmation; no default script is used; reset audit and stability failure are structured; the HM_C095 counter oracle proves the complete post-stability capture from sample index 0 under recorded rate bounds; SQLite packaging proof exists; no production module has been deleted.
 
 ## P1 — HSS → JCAP → Query
 
@@ -32,10 +32,10 @@ Gate acceptance: a fixture can record the trusted script and R3 reset before HSS
 - [ ] 2.2 Implement Symbol Catalog search/resolve, stable logical identity, layout hash, region/type eligibility, and structured rejection of unsafe kinds.
 - [ ] 2.3 Implement process-local Hot Variables with stale detection and targeted refresh; remove project-specific default symbol assumptions.
 - [ ] 2.4 Build HSS plans from catalog references and enforce reported variable/rate/duration/bandwidth/type limits before hardware access.
-- [ ] 2.5 Migrate HSS start/status/stop to JCAP raw/finalizer and record DLL/helper/adapter/ScriptFile plus Artifact provenance.
+- [ ] 2.5 Migrate HSS start/status/stop to JCAP raw/finalizer and record DLL/helper/adapter/script-mode/cache-script plus Artifact provenance.
 - [ ] 2.6 Run targeted fixtures and the authorized hardware sequence `GetCaps → state check → R3 resetBeforeCapture → bounded stability → HSS Start/Read/Stop` against the named HM_C095 target project without modifying or rebuilding it automatically; resolve `g_hssDbgCounterFocIsr` dynamically and enforce the recorded modular-delta/rate/window oracle over every post-stability record.
 
-Gate acceptance: HSS uses only the validated DLL and trusted ScriptFile identities, records reset and capture evidence in rebuildable JCAP, rejects mismatches/unsupported or expired plans, and passes the independently known semantic fixture without dropping any post-stability capture prefix.
+Gate acceptance: HSS uses only the validated DLL and trusted script-mode/cache identities, records reset and capture evidence in rebuildable JCAP, rejects mismatches/unsupported or expired plans, and passes the independently known semantic fixture without dropping any post-stability capture prefix.
 
 ### P2 continuation — Controlled writes and audit
 

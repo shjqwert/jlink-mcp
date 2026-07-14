@@ -41,6 +41,7 @@ require.cache["vscode"] = { id: "vscode", filename: "vscode", loaded: true, expo
 import { JLinkMcpServer } from "./server";
 import { ProbeFactoryConfig, ProbeType } from "../probe/factory";
 import { initLogger } from "../utils/logger";
+import { runTrustValidate } from "./trust/trust-cli";
 
 // Stderr logger for standalone mode
 initLogger({ appendLine(msg: string) { process.stderr.write(msg + "\n"); } } as any);
@@ -96,6 +97,11 @@ function buildProbeConfig(): ProbeFactoryConfig {
 }
 
 async function main() {
+  const args = process.argv.slice(2);
+  if (args[0] === "trust" && args[1] === "validate") {
+    process.exitCode = await runTrustValidate(args.slice(2));
+    return;
+  }
   const probeConfig = buildProbeConfig();
   process.stderr.write(`Starting MCP server with probe: ${probeConfig.type}\n`);
 

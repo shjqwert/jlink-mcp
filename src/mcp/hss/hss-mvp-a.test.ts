@@ -8,6 +8,7 @@ import test from "node:test";
 import { ProcessManager } from "../../utils/process-manager";
 import { JLinkBackend } from "../../probe/jlink";
 import { resolveHssRuntimeIdentity } from "../hss-dll/hss-dll-adapter";
+import { cacheHssScript, hssTrustProjectIdentity, readHssTrustProfile, saveHssTrustProfile } from "../trust/trust-profile";
 import { appendHssAudit } from "./audit-log";
 import { encodeHssRecord } from "./hss-artifact";
 import { HssCaptureService } from "./hss-capture-service";
@@ -24,24 +25,25 @@ const FAKE_JLINK_SCRIPT_FILE = join(process.cwd(), ".tmp", "approved-hss-reset-f
 const FAKE_JLINK_SCRIPT_CONTENT = "// deterministic trusted HSS ScriptFile fixture\n";
 const FAKE_JLINK_SCRIPT_SHA256 = createHash("sha256").update(FAKE_JLINK_SCRIPT_CONTENT).digest("hex");
 const FAKE_JLINK_SCRIPT_APPROVAL_SHA256 = createHash("sha256").update(JSON.stringify({
-  approvalSource: "project-config",
-  path: FAKE_JLINK_SCRIPT_FILE,
+  mode: "file",
   sha256: FAKE_JLINK_SCRIPT_SHA256,
 })).digest("hex");
-const FAKE_HSS_RUNTIME_IDENTITY_SHA256 = resolveHssRuntimeIdentity({
+const FAKE_HSS_RUNTIME_IDENTITY = resolveHssRuntimeIdentity({
   selectedDllPath: "JLink_x64.dll",
   sha256: FAKE_HSS_DLL_SHA256,
 }, {}, { helperPath: process.execPath, scriptIdentity: {
+  mode: "file",
   path: FAKE_JLINK_SCRIPT_FILE,
   sha256: FAKE_JLINK_SCRIPT_SHA256,
   approvalSha256: FAKE_JLINK_SCRIPT_APPROVAL_SHA256,
-  approvalSource: "project-config",
+  approvalSource: "trusted-allowlist",
   validated: true,
 } }, {
   helperVersion: "1",
   helperProtocolVersion: 1,
   dllVersion: "88400",
-}).sha256!;
+});
+const FAKE_HSS_RUNTIME_IDENTITY_SHA256 = FAKE_HSS_RUNTIME_IDENTITY.sha256!;
 
 test("HSS envelope, risk, project paths, status flags, and audit are stable", async () => {
   const root = await tempProject();
@@ -177,12 +179,11 @@ test("HSS capture rejects an unvalidated DLL before invoking the helper", async 
         requestedRateHz: 1,
         durationSec: 1,
         readMode: "periodic",
-        jlinkScriptFile: nativeScript,
-        approvedJlinkScriptSha256: nativeScriptSha256,
+        jlinkScriptMode: "none",
         symbols: [{ name: "fixture", address: "0x20000000", size: 4 }],
       };
       const invoke = (): Record<string, unknown> => {
-        const result = spawnSync(nativeHelper, ["hss-capture", "--plan", planFile], { encoding: "utf8", windowsHide: true });
+        const result = spawnSync(nativeHelper, ["hss-capture", "--jlink-script-mode", "none", "--plan", planFile], { encoding: "utf8", windowsHide: true });
         assert.equal(result.status, 0, result.stderr);
         return JSON.parse(result.stdout) as Record<string, unknown>;
       };
@@ -257,9 +258,9 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     await writeFile(helper, fakeHelperSource(), "utf8");
 
     const cap = await service.capabilityProbe({ dllPath: dll, device: "Z20K146M", interface: "SWD", speedKhz: 4000 });
-    assert.equal(cap.ok, true);
+    assert.equal(cap.ok, true, JSON.stringify(cap));
     assert.equal((cap.data?.helper as { exists?: boolean }).exists, true);
-    assert.equal((cap.data?.hss as { getCapsValidated?: boolean }).getCapsValidated, true);
+    assert.equal((cap.data?.hss as { getCapsValidated?: boolean }).getCapsValidated, true, JSON.stringify(cap));
     assert.equal((cap.data?.hss as { startReadStopValidated?: boolean }).startReadStopValidated, true);
 
     const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 1000, durationSec: 1, readMode: "drain" });
@@ -346,7 +347,7 @@ test("HSS capture plan forwards explicit DLL and connection parameters to capabi
     validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256],
   });
   try {
-    await writeHmProject(root);
+    await writeHmProject(root, "123456789");
     await mkdir(join(root, "custom"), { recursive: true });
     await writeFakeHssDll(dll);
     await writeFile(helper, argvEchoHelperSource(), "utf8");
@@ -364,6 +365,7 @@ test("HSS capture plan forwards explicit DLL and connection parameters to capabi
 
     assert.equal(plan.ok, true, JSON.stringify(plan));
     assert.equal(plan.data?.startReady, true);
+    const trustedScriptPath = readHssTrustProfile(root)!.script.path!;
     const argv = JSON.parse(await readFile(argvLog, "utf8")) as string[];
     assert.deepEqual(argv, [
       "getcaps",
@@ -377,8 +379,10 @@ test("HSS capture plan forwards explicit DLL and connection parameters to capabi
       "4000",
       "--serial",
       "123456789",
+      "--jlink-script-mode",
+      "file",
       "--jlink-script-file",
-      FAKE_JLINK_SCRIPT_FILE,
+      trustedScriptPath,
       "--approved-jlink-script-sha256",
       FAKE_JLINK_SCRIPT_SHA256,
     ]);
@@ -1029,7 +1033,7 @@ function fakeHssDllBuffer(): Buffer {
   return data;
 }
 
-async function writeHmProject(root: string): Promise<string> {
+async function writeHmProject(root: string, serial?: string): Promise<string> {
   const exe = join(root, "Appl", "Debug", "Exe");
   const list = join(root, "Appl", "Debug", "List");
   await mkdir(exe, { recursive: true });
@@ -1037,7 +1041,22 @@ async function writeHmProject(root: string): Promise<string> {
   await mkdir(join(root, ".jlink-mcp"), { recursive: true });
   await mkdir(join(process.cwd(), ".tmp"), { recursive: true });
   await writeFile(FAKE_JLINK_SCRIPT_FILE, FAKE_JLINK_SCRIPT_CONTENT, "utf8");
-  await writeFile(join(root, ".jlink-mcp", "hss-script-approval.json"), JSON.stringify({ path: FAKE_JLINK_SCRIPT_FILE, sha256: FAKE_JLINK_SCRIPT_SHA256 }), "utf8");
+  const script = cacheHssScript({ mode: "file", path: FAKE_JLINK_SCRIPT_FILE }, root);
+  saveHssTrustProfile({
+    version: 1,
+    suiteVersion: "hss-runtime-v1",
+    validatedAt: new Date(0).toISOString(),
+    runtime: {
+      dllPath: FAKE_HSS_RUNTIME_IDENTITY.dllPath!, dllSha256: FAKE_HSS_RUNTIME_IDENTITY.dllSha256!, dllVersion: FAKE_HSS_RUNTIME_IDENTITY.dllVersion!,
+      helperPath: FAKE_HSS_RUNTIME_IDENTITY.helperPath, helperSha256: FAKE_HSS_RUNTIME_IDENTITY.helperSha256!, helperVersion: FAKE_HSS_RUNTIME_IDENTITY.helperVersion!, helperProtocolVersion: FAKE_HSS_RUNTIME_IDENTITY.helperProtocolVersion!,
+      adapterPath: FAKE_HSS_RUNTIME_IDENTITY.adapterPath, adapterSha256: FAKE_HSS_RUNTIME_IDENTITY.adapterSha256!, adapterVersion: FAKE_HSS_RUNTIME_IDENTITY.adapterVersion, sha256: FAKE_HSS_RUNTIME_IDENTITY_SHA256,
+    },
+    script,
+    project: hssTrustProjectIdentity(root),
+    target: { targetId: "Z20K146M" },
+    probe: { serial, interface: "SWD", speedKhz: 4000 },
+    validation: { getCaps: true, lifecycle: true, decoderSemantics: true },
+  }, root);
   await writeFile(join(root, ".jlink-mcp", "policy.json"), JSON.stringify({ version: 2, requireReadback: true, allowBurstWrite: false, defaultMaxWritesScope: "capture", variableWriteAllowlist: [] }), "utf8");
   await writeFile(join(root, "Appl", "FOC_SCM.ewp"), "<project><option><name>OGChipSelectEditMenu</name><state>Z20K146M ZhiXin Z20K146M</state></option></project>", "utf8");
   await writeFile(join(exe, "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
@@ -1099,12 +1118,12 @@ if (command === "connect-preflight") {
 }
 if (command === "target-state") {
   if (process.env.HSS_ORDER_LOG) fs.appendFileSync(process.env.HSS_ORDER_LOG, "target-state\\n");
-  console.log(JSON.stringify({ status: "ok", operation: "target-state", dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, targetWasHalted: ${targetWasHalted ? "true" : "false"}, targetWasHaltedRaw: ${targetWasHalted ? "1" : "0"}, beforeState: ${targetWasHalted ? '"halted"' : '"running"'}, afterState: ${targetWasHalted ? '"halted"' : '"running"'}, jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false }));
+  console.log(JSON.stringify({ status: "ok", operation: "target-state", dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, targetWasHalted: ${targetWasHalted ? "true" : "false"}, targetWasHaltedRaw: ${targetWasHalted ? "1" : "0"}, beforeState: ${targetWasHalted ? '"halted"' : '"running"'}, afterState: ${targetWasHalted ? '"halted"' : '"running"'}, jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false }));
   process.exit(0);
 }
 if (command === "getcaps") {
   if (process.env.HSS_ORDER_LOG) fs.appendFileSync(process.env.HSS_ORDER_LOG, "getcaps\\n");
-  console.log(JSON.stringify(${getCapsOk ? `{ status: "ok", returnCode: 0, caps: { maxBlocks: 16, maxFreq: ${maxFreq} }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 }` : "{ status: \"error\", errorCode: \"HSS_HELPER_TIMEOUT\", reason: \"GetCaps failed\" }"}));
+  console.log(JSON.stringify(${getCapsOk ? `{ status: "ok", returnCode: 0, caps: { maxBlocks: 16, maxFreq: ${maxFreq} }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 }` : "{ status: \"error\", errorCode: \"HSS_HELPER_TIMEOUT\", reason: \"GetCaps failed\" }"}));
   process.exit(0);
 }
 if (command !== "hss-capture") {
@@ -1112,7 +1131,7 @@ if (command !== "hss-capture") {
   process.exit(0);
 }
 if (process.env.HSS_ORDER_LOG) fs.appendFileSync(process.env.HSS_ORDER_LOG, "hss-capture\\n");
-const plan = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+const plan = JSON.parse(fs.readFileSync(option("--plan"), "utf8"));
 const records = [];
 const symbolCount = plan.symbols.length;
 const totalSamples = plan.requestedRateHz * plan.durationSec;
@@ -1150,7 +1169,7 @@ fs.writeFileSync(plan.outputFile, Buffer.concat(records));
 if (${options.mutateDllAfterCapture ? "true" : "false"}) fs.appendFileSync(plan.dllPath, "identity-changed");
 const validSamples = records.length - readErrorCount;
 const payloadChangedRatio = ${options.payloadHeaderOnly ? "0" : "validSamples > 1 ? 1 : 0"};
-const result = { status: "${helperStatus}", ${helperError} helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: ${options.lifecycleValidated === false ? "false" : "true"}, decoderSemanticsValidated: ${options.decoderSemanticsValidated === false ? "false" : "true"}, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples, emittedSamples: records.length, duplicateSamples: 0, missingSamples: 0, readErrors: readErrorCount, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: plan.resumeBeforeStart === true, resumeIssued: plan.resumeBeforeStart === true, targetWasHaltedBeforeResume: ${targetWasHalted ? "true" : "false"}, targetWasHaltedAfterResume: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 4 + symbolCount * 4, bytesPerSample: symbolCount * 4, hssBlockCount: Math.min(3, symbolCount), readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: records.length > 1 ? 1 : 0, payloadChangedRatio, payloadFirstChangedOffset: payloadChangedRatio > 0 ? 4 : -1, payloadFirstChangedBytes: payloadChangedRatio > 0 ? "01000000" : "" };
+const result = { status: "${helperStatus}", ${helperError} helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: ${options.lifecycleValidated === false ? "false" : "true"}, decoderSemanticsValidated: ${options.decoderSemanticsValidated === false ? "false" : "true"}, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples, emittedSamples: records.length, duplicateSamples: 0, missingSamples: 0, readErrors: readErrorCount, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: plan.resumeBeforeStart === true, resumeIssued: plan.resumeBeforeStart === true, targetWasHaltedBeforeResume: ${targetWasHalted ? "true" : "false"}, targetWasHaltedAfterResume: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 4 + symbolCount * 4, bytesPerSample: symbolCount * 4, hssBlockCount: Math.min(3, symbolCount), readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: records.length > 1 ? 1 : 0, payloadChangedRatio, payloadFirstChangedOffset: payloadChangedRatio > 0 ? 4 : -1, payloadFirstChangedBytes: payloadChangedRatio > 0 ? "01000000" : "" };
 result.resetBeforeCapture = plan.resetBeforeCapture === true;
 const finish = () => console.log(JSON.stringify(result));
 ${options.lingerMs ? `setTimeout(finish, ${options.lingerMs});` : "finish();"}
@@ -1175,12 +1194,12 @@ if (command === "connect-preflight") {
   process.exit(0);
 }
 if (command === "target-state") {
-  console.log(JSON.stringify({ status: "ok", operation: "target-state", dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, targetWasHalted: false, targetWasHaltedRaw: 0, beforeState: "running", afterState: "running", jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false }));
+  console.log(JSON.stringify({ status: "ok", operation: "target-state", dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, targetWasHalted: false, targetWasHaltedRaw: 0, beforeState: "running", afterState: "running", jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false }));
   process.exit(0);
 }
 if (command === "getcaps") {
   if (process.env.HSS_ARGV_LOG) fs.writeFileSync(process.env.HSS_ARGV_LOG, JSON.stringify(process.argv.slice(2)));
-  console.log(JSON.stringify({ status: "ok", argv: process.argv.slice(2), returnCode: 0, caps: { maxBlocks: 10, maxFreq: 1000 }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 }));
+  console.log(JSON.stringify({ status: "ok", argv: process.argv.slice(2), returnCode: 0, caps: { maxBlocks: 10, maxFreq: 1000 }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 }));
   process.exit(0);
 }
 console.log(JSON.stringify({ status: "error", errorCode: "BAD_COMMAND" }));

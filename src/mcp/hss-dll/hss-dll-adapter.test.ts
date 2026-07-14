@@ -42,6 +42,8 @@ function nodeHelper(
         if (parsed.status === "ok" && process.argv[2] === "getcaps") {
           const pathIndex = process.argv.indexOf("--jlink-script-file");
           const hashIndex = process.argv.indexOf("--approved-jlink-script-sha256");
+          const modeIndex = process.argv.indexOf("--jlink-script-mode");
+          parsed.jlinkScriptMode = modeIndex >= 0 ? process.argv[modeIndex + 1] : undefined;
           parsed.jlinkScriptFile = pathIndex >= 0 ? process.argv[pathIndex + 1] : undefined;
           parsed.jlinkScriptSha256 = hashIndex >= 0 ? process.argv[hashIndex + 1] : undefined;
           parsed.jlinkScriptReturnCode = 0;
@@ -181,7 +183,12 @@ test("HSS runtime identity approval is invalidated by DLL, helper, or adapter ch
     const dllSha256 = writeFakeDll(dll);
     fs.writeFileSync(helperPath, "helper-v1");
     fs.writeFileSync(adapterPath, "adapter-v1");
-    const base = { helperPath, adapterPath, validatedDllSha256: [dllSha256] };
+    const base = { helperPath, adapterPath, validatedDllSha256: [dllSha256], scriptIdentity: {
+      mode: "none" as const,
+      approvalSha256: createHash("sha256").update("none").digest("hex"),
+      approvalSource: "trust-validation" as const,
+      validated: true,
+    } };
     const discovery = discoverHssDll({ dllPath: dll }, {}, base);
     const identity = resolveHssRuntimeIdentity(discovery, {}, base, TEST_RUNTIME_VERSIONS, true);
     assert.ok(identity.sha256);
@@ -392,12 +399,16 @@ test("HSS getcaps passes only dedicated approved J-Link script selection argumen
     }));
     assert.equal(result.status, "ok");
     const argv = JSON.parse(fs.readFileSync(argvFile, "utf8")) as string[];
-    assert.deepEqual(argv.slice(-4), [
+    const runtime = result.runtimeIdentity as { jlinkScriptFile: string };
+    assert.deepEqual(argv.slice(-6), [
+      "--jlink-script-mode",
+      "file",
       "--jlink-script-file",
-      scriptFile,
+      runtime.jlinkScriptFile,
       "--approved-jlink-script-sha256",
       scriptSha256,
     ]);
+    assert.notEqual(runtime.jlinkScriptFile, scriptFile);
     assert.equal(argv.some((value) => /raw|execcommand/i.test(value)), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

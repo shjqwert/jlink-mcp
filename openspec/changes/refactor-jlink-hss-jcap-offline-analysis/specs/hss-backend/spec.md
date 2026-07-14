@@ -2,7 +2,7 @@
 
 ### Requirement: Trust validation uses one local command
 
-`jlink-mcp trust validate` SHALL replace acceptance-mode candidate/promotion flow. Outside the MCP catalog, it SHALL validate the DLL/helper/adapter Runtime Bundle and selected ScriptFile, run bounded HSS validation, display the result, require one local-user confirmation, and persist a Trust Profile. Agent, UI and MCP tools SHALL NOT elevate trust.
+`jlink-mcp trust validate` SHALL be the sole trust-validation flow. Outside the MCP catalog, it SHALL validate the exact project/DLL/helper/adapter/script-mode/cache-script/target/probe/suite tuple, run bounded HSS validation, display the result, require one local-user confirmation, and atomically persist a Trust Profile in the project's external user-local trust namespace. Agent, UI and MCP tools SHALL NOT elevate trust.
 
 #### Scenario: runtime validation succeeds
 
@@ -12,7 +12,7 @@
 
 ### Requirement: Script mode is explicit and cache-backed
 
-HSS SHALL accept only `script.mode=none|file`. `none` explicitly selects no script and SHALL NOT fall back to a system default. `file` SHALL canonicalize and hash the source, copy it to a SHA-256-named content-addressed cache, and load that cached copy. No-op scripts and additional lock/re-hash TOCTOU schemes are not required.
+HSS SHALL accept only `script.mode=none|file`. `none` explicitly selects no script and SHALL NOT fall back to a system default. `file` SHALL canonicalize and hash the source, copy it to a SHA-256-named content-addressed cache in the external user-local trust namespace, and load that cached copy. The namespace SHALL be derived from the SHA-256 of the canonical project real path and SHALL NOT be inside the project workspace at the OS real-path layer. Before creating or accessing a profile or cache, the implementation SHALL resolve the store's nearest existing ancestor and validate its uncreated suffix, rejecting extended-length, junction/reparse-point, SUBST, and 8.3 aliases that map to the project root or a descendant. No-op scripts and additional lock/re-hash TOCTOU schemes are not required.
 
 #### Scenario: a source script changes after validation
 
@@ -38,49 +38,27 @@ The `jlink-hss` backend SHALL use the project's experimental adapter as its only
 - **THEN** HSS returns structured `unavailable`
 - **AND** no Direct RTT, RSP, or external-import fallback starts automatically.
 
-### Requirement: HSS requires one trusted dedicated ScriptFile identity
+### Requirement: Production HSS uses the persistent Trust Profile
 
-Every formal GetCaps, reset, and capture execution SHALL use the same dedicated J-Link ScriptFile identity. The identity SHALL contain a canonical absolute Windows path, the actual SHA-256, and a trusted approval digest from a project allowlist, supported project configuration, or explicitly authorized acceptance process. A caller-provided digest alone SHALL NOT approve a script. Missing, untrusted, changed, non-regular, reparse-point, non-canonical, or non-UTF-8-representable script input SHALL return structured `unavailable`; Jlink_MCP SHALL NOT use the installed default script.
+Every formal GetCaps, target-state, reset, and capture execution SHALL derive the external user-local namespace from the canonical project real path, resolve the external store through the same real-path policy used by local trust validation, and reload and verify its persistent Trust Profile for the exact project/DLL/helper/adapter/script-mode/target/probe/suite tuple. In `file` mode the profile binds the verified external cache SHA-256 and the helper receives only that cache path/hash; in `none` mode it receives neither path nor hash. Project `.jlink-mcp` files, a caller digest, target project, JCAP raw, Agent, MCP Tool, or offline UI SHALL NOT establish trust.
 
-The helper SHALL deny write/delete sharing while holding the canonical script handle, hash that handle before and after the fixed `ScriptFile = <path>` command, and require selection return code `0`. It SHALL preserve lossless UTF-8/UTF-16 paths. The ScriptFile selector and HSS execution path SHALL NOT expose or invoke arbitrary Raw/general ExecCommand; this restriction does not remove the existing explicit R4 raw probe/GDB auxiliary tools, which HSS SHALL NOT use as a fallback or internal escape path. The script SHA-256 and approval digest SHALL participate in the validated DLL/helper/adapter/script runtime identity; any change invalidates the approval.
+Any missing external profile, project-namespace mismatch, tuple mismatch, changed runtime identity, cache collision/tamper, or changed cached script SHALL fail closed before the next hardware action or HSS Start. HSS SHALL NOT use an installed default ScriptFile, Raw/general ExecCommand, Direct RTT, RSP, or external-import fallback.
 
-A target that requires no custom initialization SHALL still use an explicitly selected, hashed and approved no-op ScriptFile. Empty selection and implicit installed defaults remain forbidden.
+#### Scenario: exact trusted tuple executes
 
-#### Scenario: trusted script is selected
+- **GIVEN** the persistent Trust Profile matches the current runtime, script mode, target, probe, and suite
+- **WHEN** GetCaps, target-state, reset, or capture crosses a J-Link boundary
+- **THEN** the helper receives the explicit script mode and matching cache identity
+- **AND** runtime and script provenance are recorded.
 
-- **GIVEN** the canonical absolute ScriptFile path and actual SHA-256 match a trusted approval
-- **WHEN** GetCaps, reset, or capture crosses a J-Link execution boundary
-- **THEN** the same held file identity is checked before and after selection
-- **AND** selection return code `0`, effective path, actual SHA-256, approval digest, and runtime identity are returned for provenance.
+#### Scenario: trusted tuple changes
 
-#### Scenario: script selection is absent or changes
-
-- **WHEN** either path or digest is absent, the digest is only caller asserted, the path resolves through a reparse point, content changes, selection returns nonzero, or any phase resolves a different identity
-- **THEN** GetCaps/reset/capture fails before the next hardware action or HSS Start
-- **AND** no installed default ScriptFile, Raw command, general ExecCommand, Direct RTT, RSP, or external-import fallback is used.
-
-### Requirement: Runtime identity acceptance has a process-local bootstrap
-
-Production HSS SHALL accept only DLL/helper/adapter/ScriptFile identities present in a user-promoted trust manifest and SHALL otherwise fail closed. A user MAY explicitly start an acceptance mode through a trusted local host/CLI boundary outside the ordinary MCP tool catalog. Acceptance mode SHALL be limited to one process, one exact candidate identity tuple, one target MCU, one probe/connection identity and one validation-suite version; it SHALL permit only preflight/export checks and the bounded `GetCaps → target-state check → one R3 resetBeforeCapture → stabilization → HSS Start/Read/Stop` acceptance flow.
-
-Acceptance mode SHALL NOT permit normal RAM writes, Flash/Erase, Raw/general ExecCommand, Direct RTT/RSP/external-import fallback, wildcard identities, or persistence of provisional approval. Successful validation SHALL emit only a versioned candidate trust manifest containing DLL/helper/adapter/ScriptFile SHA-256 values, target MCU, suite version, validation time, GetCaps result and semantic-fixture result. The candidate SHALL have its own digest. Production SHALL remain closed until the user explicitly promotes that exact digest through the trusted local host/CLI, which atomically records the promoted tuple and promotion audit in the local policy/trust store; neither the target project nor JCAP raw is used as the trust store. The Agent and acceptance process SHALL NOT self-promote it.
-
-#### Scenario: first identity tuple is evaluated
-
-- **GIVEN** the user explicitly starts acceptance mode with one exact candidate tuple and target
-- **WHEN** the bounded validation flow executes
-- **THEN** only the declared acceptance operations are available for that process
-- **AND** a passing run produces a candidate manifest without changing the production trust set.
-
-#### Scenario: candidate is not promoted
-
-- **WHEN** acceptance succeeds but no trusted local user promotion occurs
-- **THEN** a later production process still reports the tuple as unvalidated
-- **AND** GetCaps/reset/capture fail closed.
+- **WHEN** any project namespace/DLL/helper/adapter/script mode/cache script/target/probe/suite identity changes or a restarted process reloads a nonmatching profile
+- **THEN** GetCaps/reset/capture fails closed before the next hardware action or HSS Start.
 
 ### Requirement: resetBeforeCapture is an explicit bounded R3 phase
 
-When `resetBeforeCapture=true`, the resolved HSS capture plan SHALL contain a single-use R3 reset operation bound to canonical reset arguments, target identity, Artifact/layout/policy hashes, session, expiry/TTL, operation digest, and capture ID. The execution order SHALL be target/OUT/MAP/runtime identity resolution, trusted ScriptFile selection, J-Link main-backend GetCaps, target-state check, bound reset, bounded stabilization, HSS Start/Read/Stop, then reset/capture events and append-safe audit. It SHALL reuse the existing J-Link CPU-control executor without renaming or changing the input/output contract of `halt`, `resume`, or `reset`.
+When `resetBeforeCapture=true`, the resolved HSS capture plan SHALL contain a single-use R3 reset operation bound to canonical reset arguments, target identity, Artifact/layout/policy hashes, session, expiry/TTL, operation digest, and capture ID. The execution order SHALL be target/OUT/MAP/runtime identity resolution, trusted script-mode/cache identity validation, J-Link main-backend GetCaps, target-state check, bound reset, bounded stabilization, HSS Start/Read/Stop, then reset/capture events and append-safe audit. It SHALL reuse the existing J-Link CPU-control executor without renaming or changing the input/output contract of `halt`, `resume`, or `reset`.
 
 The resolved stabilization policy SHALL contain `minimumRecoveryMs` (`0..60000`), `timeoutMs` (`1..60000`), `pollIntervalMs` (`10..1000`), and `requiredConsecutiveRunningChecks` (`2..100`). Stabilization SHALL require the minimum recovery interval, unchanged DLL/helper/adapter/script identities, and the configured consecutive not-halted observations. The resolved values SHALL be stored in the plan and capture provenance.
 
@@ -115,7 +93,7 @@ For `resetBeforeCapture`, the oracle SHALL begin at sample index 0 of the post-s
 
 ### Requirement: HSS capture artifacts expose query and event hooks
 
-Completed HSS captures SHALL expose JCAP raw sample segments, the raw event journal, DLL/helper/adapter/ScriptFile provenance, target identity/source/confidence, R3 reset/capture events, stabilization evidence, variable definitions, quality, event markers, flag intervals, and bounded query/export hooks through `capture.db`.
+Completed HSS captures SHALL expose JCAP raw sample segments, the raw event journal, DLL/helper/adapter/script-mode/cache-script provenance, target identity/source/confidence, R3 reset/capture events, stabilization evidence, variable definitions, quality, event markers, flag intervals, and bounded query/export hooks through `capture.db`.
 
 #### Scenario: completed HSS capture indexed
 

@@ -16,6 +16,7 @@ test("production tool surface exposes HSS only through HssCaptureService", async
     assert.deepEqual(tools.filter((name) => name.startsWith("capture_backend_")), []);
     assert.equal(tools.includes("capture_import_experiment"), false);
     assert.deepEqual(tools.filter((name) => name.startsWith("hss_dll_")), []);
+    assert.deepEqual(tools.filter((name) => /trust|approve|promote/i.test(name)), []);
 
     for (const name of [
       "hss_capability_probe",

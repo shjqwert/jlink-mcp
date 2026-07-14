@@ -642,6 +642,7 @@ static int preflight(const std::wstring& dll_path) {
 static std::string option_utf8(const std::map<std::wstring, std::wstring>& options, const wchar_t* name, const char* fallback);
 
 struct JlinkScriptSelection {
+  std::string mode;
   bool enabled = false;
   HANDLE handle = INVALID_HANDLE_VALUE;
   std::wstring path;
@@ -676,11 +677,26 @@ static bool path_contains_reparse_point(const std::wstring& path) {
 }
 
 static bool prepare_jlink_script(
+    const std::string& mode,
     const std::wstring& path,
     const std::string& approved_sha256,
     JlinkScriptSelection* selection,
     std::string* error_code,
     std::string* reason) {
+  if (mode != "none" && mode != "file") {
+    *error_code = "HSS_JLINK_SCRIPT_MODE_INVALID";
+    *reason = "--jlink-script-mode must be explicitly set to none or file";
+    return false;
+  }
+  if (mode == "none") {
+    if (!path.empty() || !approved_sha256.empty()) {
+      *error_code = "HSS_JLINK_SCRIPT_ARGUMENTS_INVALID";
+      *reason = "J-Link script path and SHA-256 are forbidden when script mode is none";
+      return false;
+    }
+    selection->mode = mode;
+    return true;
+  }
   if (path.empty() || !valid_sha256_hex(approved_sha256)) {
     *error_code = "HSS_JLINK_SCRIPT_IDENTITY_UNVALIDATED";
     *reason = "J-Link script selection requires an absolute path and approved SHA-256";
@@ -728,6 +744,7 @@ static bool prepare_jlink_script(
     *reason = "J-Link script SHA-256 does not match the approved identity";
     return false;
   }
+  selection->mode = mode;
   selection->enabled = true;
   selection->handle = handle;
   selection->path = canonical;
@@ -748,6 +765,12 @@ static bool apply_jlink_script(
     char* output,
     int output_size,
     bool* crashed) {
+  if (selection.mode == "none") {
+    *return_code = 0;
+    *crashed = false;
+    if (output_size > 0) output[0] = '\0';
+    return true;
+  }
   if (!selection.enabled || selection.handle == INVALID_HANDLE_VALUE) return false;
   const std::string command = "ScriptFile = " + selection.pathUtf8;
   *return_code = call_exec(arm_exec, command.c_str(), output, output_size, crashed);
@@ -769,6 +792,7 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   std::string script_error_code;
   std::string script_error_reason;
   if (!prepare_jlink_script(
+      option_utf8(options, L"--jlink-script-mode", ""),
       script_path,
       option_utf8(options, L"--approved-jlink-script-sha256", ""),
       &script_selection,
@@ -885,6 +909,7 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     << "\",\"speedKhz\":" << speed
     << ",\"connectReturnCode\":" << connect_rc
     << ",\"execOutput\":\"" << escape(exec_out) << "\""
+    << ",\"jlinkScriptMode\":\"" << script_selection.mode << "\""
     << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
     << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
     << ",\"jlinkScriptReturnCode\":" << script_rc
@@ -1337,6 +1362,21 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
 static int self_test() {
   U32 parsed_u32 = 0;
   int parsed_int = 0;
+  JlinkScriptSelection no_script;
+  JlinkScriptSelection rejected_script;
+  std::string script_error_code;
+  std::string script_error_reason;
+  char script_output[1] = {1};
+  int script_return_code = -1;
+  bool script_crashed = true;
+  if (!prepare_jlink_script("none", L"", "", &no_script, &script_error_code, &script_error_reason)
+      || !apply_jlink_script(nullptr, no_script, &script_return_code, script_output, sizeof(script_output), &script_crashed)
+      || script_return_code != 0 || script_crashed || script_output[0] != '\0'
+      || prepare_jlink_script("", L"", "", &rejected_script, &script_error_code, &script_error_reason)
+      || prepare_jlink_script("none", L"C:\\conflict.jlinkscript", "", &rejected_script, &script_error_code, &script_error_reason)) {
+    error_json("HSS_SELF_TEST_SCRIPT_MODE_FAILED", "J-Link script mode boundary failed");
+    return 0;
+  }
   if (!parse_u32_text("0x20000004", &parsed_u32) || parsed_u32 != 0x20000004U || parse_u32_text("0x100000000", &parsed_u32)) {
     error_json("HSS_SELF_TEST_PARSE_U32_FAILED", "uint32 option parsing failed");
     return 0;
@@ -1593,7 +1633,7 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
   JlinkScriptSelection script_selection;
   std::string script_error_code;
   std::string script_error_reason;
-  if (!prepare_jlink_script(script_path, approved_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
+  if (!prepare_jlink_script(option_utf8(options, L"--jlink-script-mode", ""), script_path, approved_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
     error_json(script_error_code, script_error_reason, dll_utf8);
     return 0;
   }
@@ -1713,6 +1753,7 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
     << ",\"dllVersion\":" << dll_version
     << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
     << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
+    << ",\"jlinkScriptMode\":\"" << script_selection.mode << "\""
     << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
     << ",\"jlinkScriptSha256\":\"" << script_selection.sha256 << "\""
     << ",\"jlinkScriptReturnCode\":" << script_rc
@@ -1743,6 +1784,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string approved_dll_sha256 = json_string(plan, "approvedDllSha256");
   const std::string jlink_script_utf8 = json_string(plan, "jlinkScriptFile");
   const std::string approved_jlink_script_sha256 = json_string(plan, "approvedJlinkScriptSha256");
+  const std::string jlink_script_mode = option_utf8(options, L"--jlink-script-mode", "");
   const bool runtime_identity_validated = json_bool(plan, "runtimeIdentityValidated", false);
   const std::string output_file = json_string(plan, "outputFile");
   const std::string stop_file = json_string(plan, "stopFile");
@@ -1780,11 +1822,12 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   std::string script_error_code;
   std::string script_error_reason;
   std::wstring jlink_script_path;
-  if (!widen_utf8(jlink_script_utf8, &jlink_script_path)) {
+  if (!jlink_script_utf8.empty() && !widen_utf8(jlink_script_utf8, &jlink_script_path)) {
     error_json("HSS_JLINK_SCRIPT_PATH_INVALID", "J-Link script path is not valid lossless UTF-8", dll_utf8);
     return 0;
   }
   if (!prepare_jlink_script(
+      jlink_script_mode,
       jlink_script_path,
       approved_jlink_script_sha256,
       &script_selection,
@@ -2132,6 +2175,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
     << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
     << ",\"dllVersion\":" << dll_version
+    << ",\"jlinkScriptMode\":\"" << script_selection.mode << "\""
     << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
     << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
     << ",\"jlinkScriptReturnCode\":" << script_rc

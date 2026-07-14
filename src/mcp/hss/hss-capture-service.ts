@@ -6,6 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ProbeBackend } from "../../probe/backend";
 import {
   discoverHssDll,
+  hssScriptHelperArgs,
   hssRuntimeIdentityMatches,
   refreshHssRuntimeIdentity,
   resolveHssScriptIdentity,
@@ -15,6 +16,7 @@ import {
   type HssRuntimeIdentity,
   type HssScriptIdentity,
 } from "../hss-dll/hss-dll-adapter";
+import { readHssTrustProfile, type HssScriptSpec, type HssTrustProfile } from "../trust/trust-profile";
 import { resolveHssDebugArtifact } from "./debug-artifact";
 import { appendHssAudit } from "./audit-log";
 import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, hssCaptureStopFromMetadata, queryHssCapture, readHssMetadata, writeInitialMetadata } from "./hss-artifact";
@@ -49,6 +51,7 @@ export interface HssCaptureServiceOptions {
   validatedDllSha256?: readonly string[];
   validatedRuntimeIdentitySha256?: readonly string[];
   validatedJlinkScriptSha256?: readonly string[];
+  trustValidation?: boolean;
   adapterPath?: string;
   memoryIo?: HssVariableMemoryIo;
   targetEndian?: "little" | "big";
@@ -100,7 +103,7 @@ export class HssCaptureService {
     return this.wrap("hss_capability_probe", input, async () => {
       const targetIdentity = await resolveHssTargetIdentity(input, { cwd: this.cwd() });
       await ensureHssProjectDirs(this.cwd());
-      return hssCapabilityProbe(input, {
+      return hssCapabilityProbe({ ...input, script: input.script ?? trustProfileScript(readHssTrustProfile(this.cwd())) }, {
         env: this.env(),
         helperPath: this.options.helperPath,
         helperArgsPrefix: this.options.helperArgsPrefix,
@@ -108,6 +111,7 @@ export class HssCaptureService {
         validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
         adapterPath: this.options.adapterPath,
         validatedJlinkScriptSha256: this.options.validatedJlinkScriptSha256,
+        trustValidation: this.options.trustValidation,
         cwd: this.cwd(),
         targetIdentity,
       });
@@ -125,6 +129,7 @@ export class HssCaptureService {
         interface: input.interface ?? (probe?.interface as "SWD" | "JTAG" | undefined),
         speedKhz: input.speedKhz ?? probe?.speed,
         serial: input.serial ?? probe?.serialNumber,
+        script: input.script ?? trustProfileScript(readHssTrustProfile(this.cwd())),
         jlinkScriptFile: input.jlinkScriptFile,
         approvedJlinkScriptSha256: input.approvedJlinkScriptSha256,
       }, {
@@ -135,6 +140,7 @@ export class HssCaptureService {
         validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
         adapterPath: this.options.adapterPath,
         validatedJlinkScriptSha256: this.options.validatedJlinkScriptSha256,
+        trustValidation: this.options.trustValidation,
         cwd: this.cwd(),
         targetIdentity,
       });
@@ -163,25 +169,6 @@ export class HssCaptureService {
         });
       }
       const probe = this.probe.getCaptureConfig();
-      const discovery = discoverHssDll({
-        dllPath: input.dllPath ?? storedPlan?.runtimeIdentity?.dllPath ?? configuredJlinkDllPath(probe),
-        device: targetIdentity.targetId,
-        interface: input.interface,
-        speedKhz: input.speedKhz,
-        serial: input.serial,
-      }, env, {
-        validatedDllSha256: this.options.validatedDllSha256,
-        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
-        adapterPath: this.options.adapterPath,
-      });
-      if (!discovery.selectedDllPath) throw new HssError(HSS_ERROR.HSS_DLL_MISSING, "JLink_x64.dll was not found");
-      if (discovery.architecture !== "x64") {
-        throw new HssError(HSS_ERROR.HSS_DLL_ARCH_UNSUPPORTED, "the resolved J-Link DLL is not Windows x64", { discovery });
-      }
-      if (!discovery.exportsFound) throw new HssError(HSS_ERROR.HSS_DLL_EXPORTS_MISSING, "required JLINK_HSS_* exports were not found");
-      if (!discovery.identityValidated) {
-        throw new HssError(HSS_ERROR.HSS_DLL_IDENTITY_UNVALIDATED, "the resolved J-Link DLL identity has not passed the project validation suite", { discovery });
-      }
       const helperPath = resolveHssHelperPath(env, this.options.helperPath);
       if (!existsSync(helperPath)) throw new HssError(HSS_ERROR.HSS_HELPER_MISSING, "native HSS helper was not found", { helperPath });
       const requestedDevice = requestedTarget(input);
@@ -197,14 +184,16 @@ export class HssCaptureService {
         speedKhz: input.speedKhz ?? probe?.speed ?? 4000,
       } as const;
       const serial = input.serial ?? probe?.serialNumber;
+      const script = input.script ?? storedPlanScript(storedPlan) ?? trustProfileScript(readHssTrustProfile(this.cwd()));
       const capabilityInput = {
         dllPath: input.dllPath ?? storedPlan?.runtimeIdentity?.dllPath ?? configuredJlinkDllPath(probe),
         device: targetIdentity.targetId,
         interface: target.interface,
         speedKhz: target.speedKhz,
         serial,
-        jlinkScriptFile: input.jlinkScriptFile ?? storedPlan?.scriptIdentity?.path,
-        approvedJlinkScriptSha256: input.approvedJlinkScriptSha256 ?? storedPlan?.scriptIdentity?.sha256,
+        script,
+        jlinkScriptFile: input.jlinkScriptFile,
+        approvedJlinkScriptSha256: input.approvedJlinkScriptSha256,
       };
       const capability = await hssCapabilityProbe(capabilityInput, {
         env,
@@ -214,12 +203,18 @@ export class HssCaptureService {
         validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
         adapterPath: this.options.adapterPath,
         validatedJlinkScriptSha256: this.options.validatedJlinkScriptSha256,
+        trustValidation: this.options.trustValidation,
         cwd: this.cwd(),
         targetIdentity,
       });
       const runtimeIdentity = capability.runtimeIdentity as HssRuntimeIdentity;
+      const discovery = ((capability.preflight as Record<string, unknown> | undefined)?.discovery ?? {}) as ReturnType<typeof discoverHssDll>;
+      if (!discovery.selectedDllPath) throw new HssError(HSS_ERROR.HSS_DLL_MISSING, "JLink_x64.dll was not found");
       if (!runtimeIdentity?.validated) {
-        throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_UNVALIDATED, "the reported DLL/helper/adapter identity tuple has not passed the project validation suite", { runtimeIdentity });
+        const code = discovery.unavailableCode === HSS_ERROR.HSS_DLL_IDENTITY_UNVALIDATED
+          ? HSS_ERROR.HSS_DLL_IDENTITY_UNVALIDATED
+          : HSS_ERROR.HSS_RUNTIME_IDENTITY_UNVALIDATED;
+        throw new HssError(code, "the reported DLL/helper/adapter identity tuple has not passed the project validation suite", { runtimeIdentity });
       }
       const hss = capability.hss as {
         getCapsOk?: boolean;
@@ -236,6 +231,7 @@ export class HssCaptureService {
       const plan = storedPlan ?? await buildHssCapturePlan(input, this.cwd(), true, targetIdentity);
       if (!storedPlan) await this.bindCapturePlan(plan, input, capability);
       if (!plan.scriptIdentity
+          || plan.scriptIdentity.mode !== runtimeIdentity.jlinkScriptMode
           || plan.scriptIdentity.path !== runtimeIdentity.jlinkScriptFile
           || plan.scriptIdentity.sha256 !== runtimeIdentity.jlinkScriptSha256
           || plan.scriptIdentity.approvalSha256 !== runtimeIdentity.jlinkScriptApprovalSha256) {
@@ -287,6 +283,7 @@ export class HssCaptureService {
         warnings,
         script: {
           ...plan.scriptIdentity,
+          approvalSource: plan.scriptIdentity.approvalSource ?? "trusted-allowlist",
           getCapsSelectionReturnCode: Number((capability.getCaps as Record<string, unknown> | undefined)?.jlinkScriptReturnCode ?? -1),
           noDefaultFallback: true,
         },
@@ -323,6 +320,7 @@ export class HssCaptureService {
         jlinkScriptFile: plan.scriptIdentity.path,
         approvedJlinkScriptSha256: plan.scriptIdentity.sha256,
         jlinkScriptApprovalSha256: plan.scriptIdentity.approvalSha256,
+        jlinkScriptMode: plan.scriptIdentity.mode,
         resetBeforeCapture: plan.resetBeforeCapture,
         requireFirstSampleIndexZero: plan.resetBeforeCapture,
         targetWasHaltedBeforeCapture,
@@ -342,7 +340,7 @@ export class HssCaptureService {
         target: targetIdentity,
         symbols: plan.symbols,
       });
-      const child = spawn(helperPath, [...(this.options.helperArgsPrefix ?? []), "hss-capture", "--plan", plan.output.planFile], {
+      const child = spawn(helperPath, [...(this.options.helperArgsPrefix ?? []), "hss-capture", "--jlink-script-mode", plan.scriptIdentity.mode, "--plan", plan.output.planFile], {
         windowsHide: true,
         env: { ...process.env, ...this.env() },
       });
@@ -456,9 +454,19 @@ export class HssCaptureService {
       const probe = this.probe.getCaptureConfig();
       if (!probe?.device || probe.device === "Unspecified") throw new HssError(HSS_ERROR.HSS_DEVICE_REQUIRED, "CPU control requires an explicitly configured J-Link target device");
       const targetIdentity = await resolveHssTargetIdentity({ device: probe.device }, { cwd: this.cwd() });
-      const script = resolveHssScriptIdentity({}, this.env(), {
+      const trustProfile = readHssTrustProfile(this.cwd());
+      const scriptSpec = trustProfileScript(trustProfile);
+      const script = resolveHssScriptIdentity({
+        script: scriptSpec,
+        device: targetIdentity.targetId,
+        interface: probe.interface,
+        speedKhz: probe.speed,
+        serial: probe.serialNumber,
+      }, this.env(), {
         cwd: this.cwd(),
         validatedJlinkScriptSha256: this.options.validatedJlinkScriptSha256,
+        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+        trustProfile,
       });
       if (!script.validated) throw new HssError(HSS_ERROR.HSS_JLINK_SCRIPT_IDENTITY_UNVALIDATED, script.reason ?? "trusted J-Link ScriptFile identity is required");
       const capability = await hssCapabilityProbe({
@@ -467,8 +475,7 @@ export class HssCaptureService {
         interface: probe?.interface,
         speedKhz: probe?.speed,
         serial: probe?.serialNumber,
-        jlinkScriptFile: script.path,
-        approvedJlinkScriptSha256: script.sha256,
+        script: scriptSpec,
       }, {
         env: this.env(),
         helperPath: this.options.helperPath,
@@ -479,6 +486,8 @@ export class HssCaptureService {
         adapterPath: this.options.adapterPath,
         cwd: this.cwd(),
         targetIdentity,
+        scriptIdentity: script,
+        trustProfile,
       });
       const runtimeIdentity = capability.runtimeIdentity as HssRuntimeIdentity;
       if (!runtimeIdentity?.validated) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_UNVALIDATED, "CPU control runtime identity is not validated");
@@ -523,7 +532,7 @@ export class HssCaptureService {
         runtimeIdentity: executionIdentity,
         target: { device: targetIdentity.targetId, interface: probe?.interface ?? "SWD", speedKhz: probe?.speed ?? 4000 },
         serial: probe?.serialNumber,
-        scriptIdentity: { path: runtimeIdentity.jlinkScriptFile!, sha256: runtimeIdentity.jlinkScriptSha256!, approvalSha256: runtimeIdentity.jlinkScriptApprovalSha256!, approvalSource: script.approvalSource! },
+        scriptIdentity: script,
       };
       const result = this.options.cpuControlExecutor
         ? await this.options.cpuControlExecutor(request)
@@ -772,8 +781,9 @@ export class HssCaptureService {
     const helperIdentityMatches = active.stopTimedOut || (helperResult?.helperVersion === active.runtimeIdentity.helperVersion
       && helperResult?.helperProtocolVersion === active.runtimeIdentity.helperProtocolVersion
       && String(helperResult?.dllVersion ?? "") === active.runtimeIdentity.dllVersion
-      && helperResult?.jlinkScriptFile === active.runtimeIdentity.jlinkScriptFile
-      && helperResult?.jlinkScriptSha256 === active.runtimeIdentity.jlinkScriptSha256
+      && helperResult?.jlinkScriptMode === active.runtimeIdentity.jlinkScriptMode
+      && (helperResult?.jlinkScriptFile || undefined) === active.runtimeIdentity.jlinkScriptFile
+      && (helperResult?.jlinkScriptSha256 || undefined) === active.runtimeIdentity.jlinkScriptSha256
       && helperResult?.jlinkScriptReturnCode === 0);
     if (!hssRuntimeIdentityMatches(active.runtimeIdentity, postIdentity) || !helperIdentityMatches) {
       state = "failed";
@@ -902,7 +912,8 @@ export class HssCaptureService {
 
   private async bindCapturePlan(plan: HssCapturePlan, input: HssCapturePlanInput, capability: Record<string, unknown>): Promise<void> {
     const runtimeIdentity = capability.runtimeIdentity as HssRuntimeIdentity | undefined;
-    if (!runtimeIdentity?.validated || !runtimeIdentity.jlinkScriptFile || !runtimeIdentity.jlinkScriptSha256 || !runtimeIdentity.jlinkScriptApprovalSha256) {
+    if (!runtimeIdentity?.validated || !runtimeIdentity.jlinkScriptMode || !runtimeIdentity.jlinkScriptApprovalSha256
+        || (runtimeIdentity.jlinkScriptMode === "file" && (!runtimeIdentity.jlinkScriptFile || !runtimeIdentity.jlinkScriptSha256))) {
       const preflight = capability.preflight as Record<string, unknown> | undefined;
       const script = preflight?.scriptIdentity as HssScriptIdentity | undefined;
       throw new HssError((script?.errorCode as keyof typeof HSS_ERROR | undefined) && HSS_ERROR[script!.errorCode as keyof typeof HSS_ERROR]
@@ -912,10 +923,13 @@ export class HssCaptureService {
     const preflight = capability.preflight as Record<string, unknown>;
     const script = preflight.scriptIdentity as HssScriptIdentity;
     plan.scriptIdentity = {
+      mode: runtimeIdentity.jlinkScriptMode,
+      sourcePath: script.sourcePath,
       path: runtimeIdentity.jlinkScriptFile,
       sha256: runtimeIdentity.jlinkScriptSha256,
       approvalSha256: runtimeIdentity.jlinkScriptApprovalSha256,
       approvalSource: script.approvalSource ?? "trusted-allowlist",
+      validated: true,
     };
     plan.runtimeIdentity = runtimeIdentity;
     if (!plan.resetBeforeCapture) return;
@@ -1302,6 +1316,16 @@ function configuredJlinkDllPath(probe: { jlinkExePath: string } | null): string 
   return existsSync(candidate) ? candidate : undefined;
 }
 
+function trustProfileScript(profile?: HssTrustProfile): HssScriptSpec | undefined {
+  if (!profile) return undefined;
+  return profile.script.mode === "none" ? { mode: "none" } : { mode: "file", path: profile.script.path! };
+}
+
+function storedPlanScript(plan?: HssCapturePlan): HssScriptSpec | undefined {
+  if (!plan?.scriptIdentity) return undefined;
+  return plan.scriptIdentity.mode === "none" ? { mode: "none" } : { mode: "file", path: plan.scriptIdentity.path! };
+}
+
 function cpuControlHelperArgs(input: Record<string, unknown>): string[] {
   const runtime = input.runtimeIdentity as HssRuntimeIdentity;
   const target = input.target as { device: string; interface: "SWD" | "JTAG"; speedKhz: number };
@@ -1315,8 +1339,7 @@ function cpuControlHelperArgs(input: Record<string, unknown>): string[] {
     "--operation", String(input.operation ?? ""),
     ...(input.halt === true ? ["--halt", "true"] : []),
     ...(input.serial ? ["--serial", String(input.serial)] : []),
-    "--jlink-script-file", script?.path ?? "",
-    "--approved-jlink-script-sha256", script?.sha256 ?? "",
+    ...hssScriptHelperArgs(script!),
   ];
 }
 
@@ -1334,8 +1357,9 @@ function helperReportedIdentityMatches(result: Record<string, unknown>, identity
   return result.helperVersion === identity.helperVersion
     && result.helperProtocolVersion === identity.helperProtocolVersion
     && String(result.dllVersion ?? "") === identity.dllVersion
-    && result.jlinkScriptFile === identity.jlinkScriptFile
-    && result.jlinkScriptSha256 === identity.jlinkScriptSha256
+    && result.jlinkScriptMode === identity.jlinkScriptMode
+    && (result.jlinkScriptFile || undefined) === identity.jlinkScriptFile
+    && (result.jlinkScriptSha256 || undefined) === identity.jlinkScriptSha256
     && result.jlinkScriptReturnCode === 0;
 }
 

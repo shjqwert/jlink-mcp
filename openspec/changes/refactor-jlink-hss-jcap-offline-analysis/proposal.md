@@ -9,8 +9,8 @@
 - 主线收敛为 `Artifact → Symbol/Hot Variables → J-Link DLL HSS → .jcap → Query/Analysis → Offline UI`。
 - HSS 只保留一套能力视图和执行入口；不再自动回退到 Direct RTT、RSP 或 External Import。
 - 首版仅支持 Windows x64 + `JLink_x64.dll`。DLL 按“显式 `--jlink-dll`/`JLINK_DLL_PATH` → SEGGER 安装注册表 → PATH 中 `JLink.exe` 同目录 → 常见安装目录”解析；未知或未验证身份禁止采样。
-- HSS 连接只使用专用 `ScriptFile` 选择器；脚本必须是绝对路径且 SHA-256 来自可信批准源。GetCaps、reset 和 capture 均禁止回退到未批准的 SEGGER 默认脚本，也不新增通用 Raw/ExecCommand 表面。
-- 身份门禁使用一个可信本地命令 `jlink-mcp trust validate`：校验 DLL/helper/adapter/ScriptFile、执行有界 HSS 验证、展示 Runtime Bundle，经用户一次确认后保存 Trust Profile。它不作为 MCP Tool 暴露，Agent 不能自行提升信任。
+- HSS 连接显式使用 `script.mode=none|file`；`none` 不创建或选择脚本，`file` 将规范化源读取并哈希一次后复制到 SHA-256 命名缓存，GetCaps、reset 和 capture 只加载复核后的缓存副本。两种模式都禁止回退到 SEGGER 默认脚本，也不新增通用 Raw/ExecCommand 表面。
+- 身份门禁使用一个可信本地命令 `jlink-mcp trust validate`：校验 DLL/helper/adapter/script-mode/cache-script/target/probe/suite 精确元组、执行有界 HSS 验证、展示 Runtime Bundle，经用户一次确认后保存 Trust Profile。它不作为 MCP Tool 暴露，Agent 不能自行提升信任。
 - capture 记录实际 DLL 路径、版本、SHA-256，adapter/helper 版本与哈希，以及脚本路径、SHA-256、批准摘要和选择结果。
 - 真实硬件验收使用显式 `resetBeforeCapture=true`：GetCaps 和目标状态检查后执行一次绑定 target/Artifact/layout/policy/session/TTL 的 R3 reset，目标满足有界稳定条件后才启动新的 HSS capture。
 - 目标 MCU 由“显式参数 → 项目配置 → 无法唯一确定则结构化报错”解析；不得根据目录名、工程名或历史默认值猜测。

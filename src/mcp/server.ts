@@ -934,8 +934,10 @@ export class JLinkMcpServer {
       interface: z.enum(["SWD", "JTAG"]).optional(),
       speedKhz: z.number().int().positive().optional(),
       serial: z.string().optional(),
-      jlinkScriptFile: z.string().optional(),
-      approvedJlinkScriptSha256: z.string().regex(/^[0-9a-fA-F]{64}$/).optional(),
+      script: z.discriminatedUnion("mode", [
+        z.object({ mode: z.literal("none") }).strict(),
+        z.object({ mode: z.literal("file"), path: z.string().min(1) }).strict(),
+      ]),
     };
     const scalarType = z.enum(["uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"]);
     const symbolSchema = z.object({
@@ -973,7 +975,7 @@ export class JLinkMcpServer {
 
     this.server.tool("hss_capability_probe", "Probe read-only J-Link HSS MVP-A availability without reset, halt, flash, raw-command, or target-memory writes.", hssDllInput,
       async (input) => result(() => this.hssCapture.capabilityProbe(input)));
-    this.server.tool("hss_capture_plan", "Resolve an HSS plan with a trusted ScriptFile; resetBeforeCapture=true composes one bounded R3 reset before HSS Start.", {
+    this.server.tool("hss_capture_plan", "Resolve an HSS plan with explicit script.mode=none|file; resetBeforeCapture=true composes one bounded R3 reset before HSS Start.", {
       ...hssDllInput,
       ...planInput,
     },

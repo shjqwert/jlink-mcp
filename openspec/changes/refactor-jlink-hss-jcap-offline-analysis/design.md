@@ -6,9 +6,9 @@
 
 本节覆盖本变更中与其冲突的旧细节，未提及的安全约束和需求保持不变。
 
-- 系统仅以 `RuntimeContext`（DLL/helper/adapter/ScriptFile 身份）、`TargetContext`（target/probe/artifact/symbol layout）、`OperationPlan`（policy/readback/maxWrites/R4）和 `CapturePackage` 组织主线。Runtime Bundle 是 RuntimeContext 内的单一身份集合。
-- 删除 acceptance-mode、candidate manifest 和单独 promotion 状态机。可信本地 CLI `jlink-mcp trust validate` 校验 Runtime Bundle 与 ScriptFile、执行有界 HSS 验证、显示结果并在一次用户确认后保存 Trust Profile；它不是 MCP Tool，Agent 不能提升信任。
-- ScriptFile 只有 `script.mode=none|file`：`none` 显式禁止默认脚本；`file` 校验规范化路径和 SHA-256，将内容复制至以 SHA-256 命名的缓存副本后供 J-Link 加载。此内容寻址副本是唯一 TOCTOU 防护方案，不再要求 no-op ScriptFile 或叠加文件锁/重复校验。
+- 系统仅以 `RuntimeContext`（DLL/helper/adapter/script-mode/cache-script 身份）、`TargetContext`（target/probe/artifact/symbol layout）、`OperationPlan`（policy/readback/maxWrites/R4）和 `CapturePackage` 组织主线。Runtime Bundle 是 RuntimeContext 内的单一身份集合。
+- 删除 acceptance-mode、candidate manifest 和单独 promotion 状态机。可信本地 CLI `jlink-mcp trust validate` 校验 Runtime Bundle 与 ScriptFile、执行有界 HSS 验证、显示结果并在一次用户确认后将 Trust Profile 保存到工作区外的用户本地信任存储；它不是 MCP Tool，Agent 不能提升信任。
+- ScriptFile 只有 `script.mode=none|file`：`none` 显式禁止默认脚本；`file` 校验规范化路径和 SHA-256，将内容复制至用户本地信任存储内以 SHA-256 命名的缓存副本后供 J-Link 加载。信任存储按规范化工程根真实路径 SHA-256 隔离且不得位于工程内；存储根须解析最近存在祖先的 OS 真实路径并校验待创建后缀，拒绝扩展长度路径、junction/reparse point、SUBST 或 8.3 短路径映射回工程的别名。此内容寻址副本是唯一 TOCTOU 防护方案，不再要求 no-op ScriptFile 或叠加文件锁/重复校验。
 - Artifact 比对按风险触发：只读可使用 `unverified` 并持续告警；R2 写入和正式语义验收必须完整验证；`mismatch` 拒绝 capture 和变量写入。验证缓存限于当前 connection generation，并在 reconnect、Artifact/Target/Probe 变化、Flash/Erase 或可能改 Flash 的 Raw 操作后失效。
 - JCAP 首版为 `formatVersion=0`、`status=experimental`，先验证 Raw→DB→Query→Analysis→UI；不冻结完整字节布局，v1 冻结另立变更。SQLite adapter 移至 P1 数据路径验证。
 - 首版 UI 仅支持打开 JCAP、项目/会话/capture 导航、变量、多变量曲线、zoom/brush、events、quality、基本 Y auto-fit 和有界查询；高级样式、复杂多轴、单位编辑、任意 scale/offset 持久化和完整 preferences 延后。分析仅提供写入前后窗口、峰值/稳态/超调、状态迁移和持续时间。
@@ -65,12 +65,11 @@ The project SHALL treat the current experimental J-Link DLL API adapter as its s
 - No machine-specific absolute DLL path is stored as a default. If no DLL is found, its architecture is not x64, required exports or `GetCaps` fail, or its identity is not validated, HSS reports structured `unavailable`.
 - A single HSS service owns planning, availability and Start/Read/Stop; generic backend routing and direct helper shortcuts are removed.
 - No automatic fallback to Direct RTT, RSP or external import is allowed.
-- Every formal GetCaps, reset and capture requires one dedicated J-Link `ScriptFile` selected by canonical absolute path and a SHA-256 approved by a trusted allowlist, project configuration, or explicitly authorized acceptance process. A target that needs no custom initialization still supplies an explicitly selected and approved no-op ScriptFile. A caller-provided digest alone is not approval; an empty script selection is structured `unavailable` and never falls back to the installed default script.
-- The helper opens a regular non-reparse script with write/delete sharing denied, canonicalizes it, hashes the held handle, keeps the handle through the fixed `ScriptFile = <path>` command, requires return code `0`, and rehashes the same handle. UTF-8/UTF-16 conversion is lossless; no generic ExecCommand input is exposed.
+- Every formal GetCaps, target-state and capture passes an explicit `script.mode`. `none` passes no script path/hash and disables installed defaults; `file` canonicalizes and hashes the source once, writes a SHA-256-named cache copy under the external user-local trust store, verifies that copy and passes only its path/hash to the helper.
+- The helper requires `--jlink-script-mode none|file`; only `file` invokes the fixed `ScriptFile = <cache-path>` selector and requires return code `0`. No generic ExecCommand input is exposed.
 - Each capture records the resolved DLL path, DLL version and SHA-256, adapter version/hash, helper version/hash, effective script path/SHA-256/approval digest/GetCaps and capture selection results, architecture, resolution source, and validated capabilities.
-- Production mode accepts only identities in a user-promoted trust manifest and fails closed on an unknown or changed DLL/helper/adapter/script identity.
-- Acceptance mode is a user-explicit local host/CLI invocation outside the ordinary MCP tool catalog. It is process-local, binds one exact DLL/helper/adapter/ScriptFile tuple, target MCU, probe/connection identity and validation-suite version, and permits only export/preflight checks plus the bounded `GetCaps → target-state check → one R3 resetBeforeCapture → stabilization → HSS Start/Read/Stop` acceptance flow. It exposes no normal RAM write, Flash/Erase, Raw/ExecCommand or fallback capability.
-- A successful acceptance run emits only a candidate trust manifest containing the four identities, target MCU, suite version, validation time, GetCaps result and semantic-fixture result. Production trust remains closed until a user explicitly promotes that exact candidate through the trusted local host/CLI boundary; the acceptance process and Agent cannot self-promote it.
+- Production mode resolves the same external store by normalized project-root real-path SHA-256. Before profile/cache creation or access it resolves the store's nearest existing ancestor through the OS, validates the uncreated suffix, and rejects any extended-length, junction/reparse-point, SUBST, or 8.3 alias whose real destination is the project root or a descendant. It reloads the persistent Trust Profile and accepts only its exact project/DLL/helper/adapter/script-mode/target/probe/suite tuple; any changed namespace, identity or cached script content fails closed. Project `.jlink-mcp` data is never a trust source.
+- `jlink-mcp trust validate` is a user-explicit local CLI outside the MCP catalog. It validates the exact tuple with the bounded HSS suite, displays the result and atomically saves the Trust Profile to that external project namespace only after local confirmation. Agent, MCP Tool and offline UI cannot create or promote trust.
 - The minimum validation gate is export discovery, `GetCaps`, Start/Read/Stop lifecycle, record decoding and a semantic fixture whose expected values are independently known.
 
 ### 2. Artifact identity and target match are explicit
@@ -181,7 +180,7 @@ Order: baseline and adapter proof → SQLite decision → JCAP minimal slice →
 
 ### 12. Hardware acceptance starts a new capture after explicit reset and stabilization
 
-The supported Gate 0 sequence is fixed: resolve target, OUT/MAP and runtime identities → select the trusted ScriptFile → GetCaps through the J-Link main backend → inspect target state → execute the bound R3 reset with `resetBeforeCapture=true` → wait for bounded stabilization → HSS Start/Read/Stop → persist reset/capture events and the complete audit.
+The supported Gate 0 sequence is fixed: resolve target, OUT/MAP and runtime identities → validate the trusted script mode/cache identity → GetCaps through the J-Link main backend → inspect target state → execute the bound R3 reset with `resetBeforeCapture=true` → wait for bounded stabilization → HSS Start/Read/Stop → persist reset/capture events and the complete audit.
 
 The resolved plan SHALL contain `minimumRecoveryMs` (`0..60000`), `timeoutMs` (`1..60000`), `pollIntervalMs` (`10..1000`) and `requiredConsecutiveRunningChecks` (`2..100`). Stabilization succeeds only after the minimum recovery interval, unchanged DLL/helper/adapter/script identities, and the required consecutive not-halted observations. Timeout, state-read failure or identity drift returns structured `HSS_TARGET_STABILITY_TIMEOUT` or the specific identity error and performs no HSS Start.
 

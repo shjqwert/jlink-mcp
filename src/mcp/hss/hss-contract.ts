@@ -132,10 +132,12 @@ export interface HssCaptureMetadata {
     dllVersion?: string;
   };
   script?: {
-    path: string;
-    sha256: string;
+    mode: "none" | "file";
+    sourcePath?: string;
+    path?: string;
+    sha256?: string;
     approvalSha256: string;
-    approvalSource: "project-config" | "trusted-allowlist";
+    approvalSource: "trust-profile" | "trust-validation" | "trusted-allowlist";
     getCapsSelectionReturnCode: number;
     captureSelectionReturnCode?: number;
     noDefaultFallback: true;
