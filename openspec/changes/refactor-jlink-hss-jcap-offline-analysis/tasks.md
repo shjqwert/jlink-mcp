@@ -6,8 +6,8 @@
 - [ ] 0.4 Preserve accepted HSS fixtures and freeze the HM_C095 oracle as OUT/MAP-resolved `g_hssDbgCounterFocIsr`: record its one-increment-per-FOC-update formula, firmware-derived modular-delta/rate bounds, repeat/wrap tolerance, observation window and pass/fail rules; verify the full sample-index-0 capture, timebase and dropped flags without a fixed address.
 - [x] 0.5 Collapse HSS availability, planning, and Start/Read/Stop behind one service; remove conflicting generic-router/direct-helper capability views.
 - [x] 0.6 Implement adapter validation for required exports, `GetCaps`, lifecycle, decoder semantics, identity allowlist, and revalidation on DLL/helper/adapter/script-mode/cache-script change.
-- [ ] 0.7 Record SQLite compatibility constraints; select and prove the adapter with the P1 data path.
-- [ ] 0.8 Define the minimum experimental JCAP v0 contract for provenance, raw rebuild, lifecycle, query bounds and package structure; defer v1 byte-layout freezing.
+- [x] 0.7 Record SQLite compatibility constraints; select and prove the adapter with the P1 data path.
+- [x] 0.8 Define the minimum experimental JCAP v0 contract for provenance, raw rebuild, lifecycle, query bounds and package structure; defer v1 byte-layout freezing.
 - [x] 0.9 Implement `script.mode=none|file`: reject implicit default scripts; for file mode canonicalize/hash once, copy to the SHA-256-named cache and load that copy; prohibit Raw/general ExecCommand inside HSS.
 - [ ] 0.10 Implement `resetBeforeCapture=true` as a single-use R3 reset operation bound to target/Artifact/layout/policy/session/TTL, followed by bounded target stabilization before HSS Start.
 - [x] 0.11 Implement trusted local `jlink-mcp trust validate` for one Runtime Bundle/target/probe tuple and bounded HSS suite; display results, require one user confirmation and save a Trust Profile without exposing it as an MCP Tool.
@@ -16,8 +16,8 @@ Gate acceptance: compile and focused tests pass; Windows x64 resolver and projec
 
 ## P1 — HSS → JCAP → Query
 
-- [ ] 1.1 Select and prove one SQLite adapter for Node 18, standalone MCP, local loopback Web and packaged installation; implement the minimal JCAP v0 raw/rebuild corpus needed by the data path.
-- [ ] 1.2 Implement versioned sample segment header/descriptors/records with CRC, provenance, type rejection, rollover, and truncated-record detection against the golden corpus.
+- [x] 1.1 Select and prove one SQLite adapter for Node 18, standalone MCP, local loopback Web and packaged installation; implement the minimal JCAP v0 raw/rebuild corpus needed by the data path.
+- [ ] 1.2 Integrate the experimental v0 self-describing sample envelope, provenance, type rejection, rollover policy, and valid-prefix/truncated-tail detection with the production HSS writer; defer byte-frozen headers/descriptors/records to a separate v1 change.
 - [ ] 1.3 Implement append-safe `raw/events.bin` for lifecycle, target-control reset, write, flag, and fault events in the shared pre-reset QPC timebase against the same corpus.
 - [ ] 1.4 Implement capture lifecycle and finalization in the order: sync/close samples → sync `finalizing` → validate raw prefix → sync terminal event (or transition to `recoverable`) → close immutable raw journal → build/validate/fsync/rename `capture.db.tmp`; keep `captureState` separate from `indexStatus` and make failed indexes rebuildable without raw mutation.
 - [ ] 1.5 Implement the minimum versioned SQLite schema, final-raw source hashes, integrity checks, buckets, and rebuild from sample/event raw files.

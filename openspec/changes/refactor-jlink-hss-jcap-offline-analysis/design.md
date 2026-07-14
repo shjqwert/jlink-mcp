@@ -91,38 +91,19 @@ Each artifact generation binds canonical path, format, SHA-256, optional MAP SHA
 
 The stable key is `qualifiedName + memberPath`. Runtime layout includes artifact generation, address, type, size, region, resolver and confidence. Hot Variables cache only validated layouts for a process-local debug session. Artifact/MAP/policy/session changes make entries stale; stale entries cannot be read, written or sampled until selectively refreshed.
 
-JCAP v1 sampling supports scalar 1/2/4-byte integer/enum/boolean values and IEEE-754 float32. The `uint32` value slot preserves raw bits. Unsupported widths, float64, dynamic arrays, bitfields and pointer dereference are rejected. Fixed-array element/slice targets remain valid for controlled writes but are expanded to supported scalar sample columns for HSS.
+Experimental JCAP v0 records stable variable identity, capture-relative ticks, quality flags and numeric values in a self-describing payload. Physical scalar codes, byte offsets and binary value-slot layout are deliberately deferred to a separate v1 freeze. Unsupported HSS source types remain rejected by the HSS plan before they reach JCAP.
 
 ### 4. Raw capture is authoritative and rebuildable
 
-JCAP v1 is byte-frozen. Every multibyte field is unsigned little-endian; the endian marker is `0x01020304`. Binary UUIDs are 16 RFC-4122 network-order bytes, SHA-256 values are 32 raw bytes, and CRC algorithm `1` is CRC-32/ISO-HDLC/IEEE (`refin/refout=true`, reflected polynomial `0xEDB88320`, init/xorout `0xFFFFFFFF`) stored as little-endian `u32`. The package name is a lowercase RFC-4122 UUID-v4 and is the same UUID stored in every raw header.
+JCAP v0 freezes only the package roles (`capture.db`, `raw/samples.bin`, `raw/events.bin`, optional on-demand `export/`) and a self-describing experimental envelope carrying `formatVersion=0`, status, record kind, payload encoding, payload length and payload SHA-256. The current writer uses newline-delimited JSON envelopes as one v0 encoding, but delimiter choice, fixed offsets, header/footer sizes, CRC/TLV algorithms, scalar codes and SQLite schema are not v1 compatibility promises.
 
-Each `raw/capture_NNNN.bin` starts with a synced 512-byte `JCAPSEG\0` header and a synced, CRC-protected descriptor block before any records. The descriptor block is self-contained, at most 1 MiB, and contains CAPTURE, TARGET, ARTIFACT, RUNTIME, SCRIPT, then up to 64 VARIABLE descriptors in ascending `variableId`. It contains every string and identity needed to rebuild the index without JSON, JSONL, CSV, a sidecar, or `capture.db`.
-
-The pre-implementation JCAP v1 descriptor contract is re-frozen to insert one mandatory SCRIPT descriptor between RUNTIME and VARIABLE. It records the effective path, script SHA-256, trusted-approval SHA-256, no-fallback/approval flags, and GetCaps/capture selection return codes. Header, record, footer, CRC, scalar and status layouts remain unchanged; no released JCAP v1 runtime data exists to migrate.
-
-Each sample record is fixed-width and CRC-protected:
-
-```text
-u64 sampleIndex
-u64 captureRelativeNanosecondTick
-u32 statusFlags
-u32 reserved = 0
-u32 rawValue[variableCount]
-u32 recordCrc32
-```
-
-The record size is `28 + 4 * variableCount`; its CRC covers the preceding `24 + 4 * variableCount` bytes. Sample indexes strictly increase across segments and ticks are nondecreasing. Ticks use integer QPC conversion `floor((qpcNow - qpcStart) * 1_000_000_000 / qpcFrequency)`, never wall-clock or rate estimation. A sample-index gap is legal only when `dropped_before_this_sample` is set.
-
-A clean segment ends with one 64-byte `JCAPEND\0` footer. A segment rolls before a record would make the file exceed 128 MiB including that footer. Parsers validate the header and descriptors first, accept only the contiguous CRC-valid record prefix, report partial tails or corruption, and never resynchronize or synthesize gaps.
-
-`raw/events.bin` starts with a synced 256-byte `JCAPEVT\0` header and contains append-safe `EVT1` frames. Frames use the sample QPC-relative tick domain and a bounded, 4-aligned TLV payload for lifecycle, target-control reset, variable-write, quality-interval, fault, and segment-rollover events. A frame becomes visible only when its final frame CRC is valid; an incomplete or invalid tail is ignored and reported. The optional audit SHA-256 references the separate append-safe security audit instead of copying mutable audit data.
+Sample payloads carry increasing sample index, nondecreasing capture-relative nanosecond tick, status flags and named numeric values. Event payloads carry provenance, lifecycle, reset/write/fault facts and the same tick domain. Readers accept only the contiguous length/hash-valid prefix; a partial tail or invalid envelope stops parsing and produces an explicit corrupt-suffix diagnostic without resynchronization.
 
 For `resetBeforeCapture`, the QPC epoch and `planned` journal are created before reset. The reset event occurs while planned; `active` is appended only after reset succeeds, stabilization succeeds and HSS Start succeeds. The first sample remains `sampleIndex=0` but may have a positive tick. Pre-reset values are not sample records, and no post-stability sample prefix may be discarded.
 
 Raw files are immutable authority after append/close. `capture.db` is derived, schema-versioned, and source-hash bound. Rebuild reads only validated raw prefixes, records corrupt ranges explicitly, never modifies raw, and restores capture identity, descriptors, timing, quality, segment ranges, and capture-local events.
 
-JCAP implementation starts with one shared set of byte-golden vectors covering header, descriptors, records, footer, event frames, CRCs, rollover and damaged tails. The native/C++ writer, TypeScript decoder and SQLite rebuild path must all pass those same vectors before real HSS data is connected. This sequencing does not add a live compatibility path for earlier drafts.
+JCAP v0 uses one shared golden corpus for round-trip, script/reset provenance, pre-start failure, terminal lifecycle, truncated tail, corrupt suffix and rebuild equivalence. A later v1 change may introduce byte-golden vectors and native writer compatibility only after the v0 data path is accepted.
 
 ### 5. Capture lifecycle is explicit
 
@@ -138,7 +119,7 @@ Finalization closes and syncs all sample segments, appends and syncs `finalizing
 
 ### 6. SQLite is behind a runtime adapter gate
 
-The implementation SHALL first select and test one SQLite runtime adapter compatible with the supported Node 18, standalone MCP, and local loopback Web packaging. No dependency is chosen by this specification. The gate requires schema creation, transactions, integrity check, atomic finalization and bundled installation tests before JCAP implementation proceeds.
+The selected adapter is `sqlite3@5.1.7`, loaded as an external CommonJS native dependency by both extension and standalone Node 18 builds. The packaged installation includes its Windows x64 `node_sqlite3.node` binding plus `bindings` and `file-uri-to-path`; the same adapter module is used by standalone MCP and the local loopback query service. The gate requires schema creation, transactions, integrity check, raw-source verification, rebuild, fsync/close and atomic publication tests.
 
 `capture.db` contains capture/variable/segment/event/quality/bucket/analysis indexes. It is derived data and carries schema version plus source hashes. UI preferences are stored separately.
 

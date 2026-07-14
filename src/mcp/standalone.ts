@@ -42,6 +42,7 @@ import { JLinkMcpServer } from "./server";
 import { ProbeFactoryConfig, ProbeType } from "../probe/factory";
 import { initLogger } from "../utils/logger";
 import { runTrustValidate } from "./trust/trust-cli";
+export { jcapCaptureEventWindow, jcapCaptureList, jcapCaptureSeries, jcapCaptureSummary, rebuildJcapV0Index, verifyJcapV0Index, writeJcapV0Raw } from "./jcap/jcap-v0";
 
 // Stderr logger for standalone mode
 initLogger({ appendLine(msg: string) { process.stderr.write(msg + "\n"); } } as any);
@@ -123,7 +124,9 @@ async function main() {
   await server.startStdio();
 }
 
-main().catch((err) => {
-  process.stderr.write(`Fatal error: ${err}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`Fatal error: ${err}\n`);
+    process.exit(1);
+  });
+}

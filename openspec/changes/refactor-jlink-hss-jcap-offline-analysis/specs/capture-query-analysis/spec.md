@@ -1,6 +1,6 @@
 ## ADDED Requirements
 
-### Requirement: V1 analysis is limited and deterministic
+### Requirement: Experimental v0 analysis is limited and deterministic
 
 `analysis_run` SHALL initially implement only write-event before/after window comparison, peak, steady-state value, overshoot, state transition and state duration. Missing or low-quality evidence SHALL return warnings rather than inferred findings.
 
@@ -50,7 +50,7 @@ Jlink_MCP SHALL expose `capture_list`, `capture_summary`, `capture_series`, `cap
 
 #### Scenario: series request exceeds a product or byte bound
 
-- **WHEN** variable count, bucket count, their product, time window, or encoded response exceeds a v1 bound
+- **WHEN** variable count, bucket count, their product, time window, or encoded response exceeds a v0 bound
 - **THEN** Jlink_MCP returns a structured bounds error
 - **AND** does not silently change the requested resolution.
 
