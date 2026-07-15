@@ -17,7 +17,7 @@ import { hssFail, hssOk } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { HM_C095_HSS_VARIABLES, buildHssCapturePlan } from "./hss-plan";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
-import { ensureHssProjectDirs, resolveInsideProject } from "./project-paths";
+import { configureHssProjectPaths, ensureHssProjectDirs, resolveInsideProject } from "./project-paths";
 import { resolveIarMapSymbols } from "./iar-map-parser";
 
 const FAKE_HSS_DLL_SHA256 = createHash("sha256").update(fakeHssDllBuffer()).digest("hex");
@@ -109,7 +109,11 @@ test("HSS capture plan resolves one and ten HM_C095 variables without Git", asyn
     await writeHmProject(root);
     const one = await buildHssCapturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32", alias: "counter" }], requestedRateHz: 1000, durationSec: 3 }, root, true);
     assert.equal(one.symbols[0].alias, "counter");
-    assert.equal(one.hmC095.expectedCounterDelta, 16);
+    assert.equal(one.hmC095.expectedCounterDelta, 8);
+    assert.equal(one.hmC095.counterAddress, one.symbols[0].address);
+    assert.equal(one.hmC095.counterType, "uint32");
+    assert.equal(one.hmC095.modulus, "4294967296");
+    assert.equal(one.stabilityPolicy.minimumRecoveryMs, 1000);
     assert.equal(one.sampling.estimatedSamples, 3000);
     assert.equal(one.output.firstSegmentFile.endsWith("capture_0001.bin"), true);
     assert.equal(one.target.targetId, "Z20K146M");
@@ -122,6 +126,77 @@ test("HSS capture plan resolves one and ten HM_C095 variables without Git", asyn
   }
 });
 
+test("HM_C095 plan derives the DMA counter rate from generated PWM and TDG timing", async () => {
+  const root = await tempProject();
+  try {
+    await writeHmProject(root);
+    const plan = await buildHssCapturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 1000 }, root, true);
+    assert.equal(plan.hmC095.focIsrFreqHz, 8000);
+    assert.equal(plan.hmC095.expectedCounterDelta, 8);
+    assert.equal(plan.hmC095.rateDerivation.triggerStride, 2);
+    assert.equal(plan.hmC095.rateDerivation.source, "hm-c095-generated-config");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("HM_C095 plan fails closed when timing configuration is missing, invalid, or non-integral", async () => {
+  const root = await tempProject();
+  const input = { symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" as const }], requestedRateHz: 1000 };
+  const expectUnsafe = () => assert.rejects(
+    () => buildHssCapturePlan(input, root, true),
+    (error: unknown) => error instanceof HssError && error.code === HSS_ERROR.SYMBOL_UNSAFE,
+  );
+  const mcu = join(root, "EB_Project", "config", "Mcu.xdm");
+  const bsw = join(root, "Appl", "Source", "BSW", "Src");
+  try {
+    await writeHmProject(root);
+    await rm(mcu);
+    await expectUnsafe();
+
+    await writeHmProject(root);
+    await rm(join(bsw, "Tmu_Drv_Cfg.c"));
+    await expectUnsafe();
+
+    await writeHmProject(root);
+    await writeFile(mcu, '<d:var name="McuFOSCClockFrequency" value="invalid"/>', "utf8");
+    await expectUnsafe();
+
+    await writeHmProject(root);
+    await writeFile(join(bsw, "Tmu_Drv_Cfg.c"), "unsupported trigger topology", "utf8");
+    await expectUnsafe();
+
+    await writeHmProject(root);
+    await writeFile(join(bsw, "Mcpwm_Pwm_Drv_PBcfg.c"), "Pwm_Drv_I1_Counter0_Cfg = { .PwmPeriod = 624U };\nPwm_Drv_Inst1_Cfg = { .ClkDiv = MCPWM_PWM_DRV_CLK_DIVIDE_1 };\nMCPWM_PWM_DRV_MODE_COMBINE_SYM_CENTER_ALIGNED\n", "utf8");
+    await expectUnsafe();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("external HSS roots leave the canonical target project byte-for-byte unchanged", async () => {
+  const parent = await tempProject();
+  const projectRoot = join(parent, "target");
+  const storageRoot = join(parent, "storage");
+  const evidenceRoot = join(parent, "evidence");
+  await mkdir(projectRoot, { recursive: true });
+  try {
+    await writeHmProject(projectRoot);
+    const before = await projectSnapshot(projectRoot);
+    const paths = configureHssProjectPaths(projectRoot, { storageRoot, evidenceRoot });
+    await ensureHssProjectDirs(projectRoot);
+    const plan = await buildHssCapturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }] }, projectRoot, true);
+    assert.equal(plan.projectRoot, paths.projectRoot);
+    assert.equal(plan.storageRoot, paths.storageRoot);
+    assert.equal(plan.evidenceRoot, paths.evidenceRoot);
+    assert.equal(plan.output.outputDir.startsWith(paths.storageRoot), true);
+    assert.deepEqual(await projectSnapshot(projectRoot), before);
+    assert.throws(() => configureHssProjectPaths(projectRoot, { storageRoot: join(projectRoot, "capture"), evidenceRoot }), /outside projectRoot/);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
 test("HSS smoke full10 lets IAR map infer ADC and offset widths", async () => {
   const script = await readFile(join(process.cwd(), "scripts", "hss-hm-c095-smoke.mjs"), "utf8");
   for (const name of ["g_hssDbgRawAdcM1U", "g_hssDbgRawAdcM1V", "g_hssDbgRawAdcM2U", "g_hssDbgRawAdcM2V", "g_hssDbgOffsetM1U", "g_hssDbgOffsetM1V"]) {
@@ -129,6 +204,9 @@ test("HSS smoke full10 lets IAR map infer ADC and offset widths", async () => {
   }
   assert.match(script, /counterMonotonic/);
   assert.match(script, /counterChangedRatio/);
+  const hardwareAcceptance = await readFile(join(process.cwd(), "scripts", "hss-hm-c095-mvp-a.mjs"), "utf8");
+  assert.match(hardwareAcceptance, /postConnectStability/);
+  assert.match(hardwareAcceptance, /requiredConsecutiveRunningChecks/);
 });
 
 test("HSS capture rejects an unvalidated DLL before invoking the helper", async () => {
@@ -179,6 +257,15 @@ test("HSS capture rejects an unvalidated DLL before invoking the helper", async 
         requestedRateHz: 1,
         durationSec: 1,
         readMode: "periodic",
+        postConnectCounterAddress: "0x20000000",
+        postConnectCounterType: "uint32",
+        postConnectCounterModulus: "4294967296",
+        postConnectExpectedRateHz: 16000,
+        postConnectRateToleranceRatio: 0.5,
+        postConnectMinimumRecoveryMs: 0,
+        postConnectTimeoutMs: 1000,
+        postConnectPollIntervalMs: 10,
+        postConnectRequiredConsecutiveRunningChecks: 2,
         jlinkScriptMode: "none",
         symbols: [{ name: "fixture", address: "0x20000000", size: 4 }],
       };
@@ -223,7 +310,6 @@ test("HSS capture rejects a validated DLL when GetCaps fails", async () => {
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
     validatedDllSha256: [sha256],
-    validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256],
   });
   try {
     await writeHmProject(root);
@@ -311,7 +397,7 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     assert.equal(query.data?.transportStatus, "pass");
     assert.equal((query.data?.hmC095 as { counterDeltaPass?: boolean }).counterDeltaPass, true);
     assert.equal((query.data?.hmC095 as { counterMonotonic?: boolean }).counterMonotonic, true);
-    assert.equal((query.data?.hmC095 as { counterDeltaMean?: number }).counterDeltaMean, 16);
+    assert.equal((query.data?.hmC095 as { counterDeltaMean?: number }).counterDeltaMean, 8);
     const rawQuery = await service.captureQuery({ captureId, includeRawSamples: true, maxSamples: 10, hmC095Profile: false });
     assert.match(rawQuery.warnings[0] ?? "", /raw samples decimated from 1000 to 10/);
 
@@ -445,6 +531,15 @@ test("resetBeforeCapture binds R3 reset, stabilizes before HSS start, and reject
     const helperPlan = JSON.parse(await readFile(plan.data!.output.planFile, "utf8")) as Record<string, unknown>;
     assert.equal(helperPlan.resetBeforeCapture, true);
     assert.equal(helperPlan.requireFirstSampleIndexZero, true);
+    assert.equal(helperPlan.postConnectCounterAddress, plan.data!.hmC095.counterAddress);
+    assert.equal(helperPlan.postConnectCounterType, "uint32");
+    assert.equal(helperPlan.postConnectCounterModulus, "4294967296");
+    assert.equal(helperPlan.postConnectExpectedRateHz, 8000);
+    assert.equal(helperPlan.postConnectRateToleranceRatio, 0.5);
+    assert.equal(helperPlan.postConnectMinimumRecoveryMs, 0);
+    assert.equal(helperPlan.postConnectTimeoutMs, 1000);
+    assert.equal(helperPlan.postConnectPollIntervalMs, 10);
+    assert.equal(helperPlan.postConnectRequiredConsecutiveRunningChecks, 2);
     assert.equal((await service.cpuControl("halt")).error?.code, HSS_ERROR.CAPTURE_CONFLICT);
     assert.equal((await service.cpuControl("reset")).error?.code, HSS_ERROR.CAPTURE_CONFLICT);
     const captureId = (start.data as { captureId: string }).captureId;
@@ -1033,11 +1128,32 @@ function fakeHssDllBuffer(): Buffer {
   return data;
 }
 
+async function projectSnapshot(root: string): Promise<string[]> {
+  const entries: string[] = [];
+  const walk = async (directory: string, relative = ""): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const name = relative ? `${relative}/${entry.name}` : entry.name;
+      const file = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        entries.push(`d:${name}`);
+        await walk(file, name);
+      } else if (entry.isFile()) {
+        entries.push(`f:${name}:${createHash("sha256").update(await readFile(file)).digest("hex")}`);
+      }
+    }
+  };
+  await walk(root);
+  return entries.sort();
+}
+
 async function writeHmProject(root: string, serial?: string): Promise<string> {
   const exe = join(root, "Appl", "Debug", "Exe");
   const list = join(root, "Appl", "Debug", "List");
+  const bsw = join(root, "Appl", "Source", "BSW", "Src");
   await mkdir(exe, { recursive: true });
   await mkdir(list, { recursive: true });
+  await mkdir(join(root, "EB_Project", "config"), { recursive: true });
+  await mkdir(bsw, { recursive: true });
   await mkdir(join(root, ".jlink-mcp"), { recursive: true });
   await mkdir(join(process.cwd(), ".tmp"), { recursive: true });
   await writeFile(FAKE_JLINK_SCRIPT_FILE, FAKE_JLINK_SCRIPT_CONTENT, "utf8");
@@ -1059,6 +1175,13 @@ async function writeHmProject(root: string, serial?: string): Promise<string> {
   }, root);
   await writeFile(join(root, ".jlink-mcp", "policy.json"), JSON.stringify({ version: 2, requireReadback: true, allowBurstWrite: false, defaultMaxWritesScope: "capture", variableWriteAllowlist: [] }), "utf8");
   await writeFile(join(root, "Appl", "FOC_SCM.ewp"), "<project><option><name>OGChipSelectEditMenu</name><state>Z20K146M ZhiXin Z20K146M</state></option></project>", "utf8");
+  await Promise.all([
+    writeFile(join(root, "EB_Project", "config", "Mcu.xdm"), '<d:var name="McuFOSCClockFrequency" type="FLOAT"\n value="4.0E7"/><d:var name="later" value="30"/>', "utf8"),
+    writeFile(join(bsw, "Parcc_Drv_PBcfg.c"), "/* Start of  PARCC_MCPWM1*/\n/* Module clock divider */\n(Parcc_Drv_ClockDividerType)1U,\n},\n/* Start of  PARCC_TDG1*/\n/* Module clock divider */\n(Parcc_Drv_ClockDividerType)1U,\n},\n", "utf8"),
+    writeFile(join(bsw, "Mcpwm_Pwm_Drv_PBcfg.c"), "Pwm_Drv_I1_Counter0_Cfg = { .PwmPeriod = 625U };\nPwm_Drv_Inst1_Cfg = { .ClkDiv = MCPWM_PWM_DRV_CLK_DIVIDE_1 };\nMCPWM_PWM_DRV_MODE_COMBINE_SYM_CENTER_ALIGNED\n", "utf8"),
+    writeFile(join(bsw, "Tdg_Adc_Drv_PBcfg.c"), "DelayOutputConfig_Group1_Channel0 = { TDG_ADC_DRV_DELAY_OUTPUT_0, 1238U };\nTdg_Adc_Drv_Config_1 = { (Tdg_Adc_Drv_ClockDivideType)1U, 1241U, /* ModulateValue */ };\nTdg_Adc_Drv_GroupConfig_1 = { (boolean)FALSE };\n", "utf8"),
+    writeFile(join(bsw, "Tmu_Drv_Cfg.c"), "TMU_DRV_INPUT_CHANNEL_MCPWM1_INIT_TRIG0, TMU_DRV_OUTPUT_CHANNEL_TDG1_TRIG_IN", "utf8"),
+  ]);
   await writeFile(join(exe, "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
   const map = join(list, "FOC_SCM.map");
   await writeFile(map, [
@@ -1136,7 +1259,7 @@ const records = [];
 const symbolCount = plan.symbols.length;
 const totalSamples = plan.requestedRateHz * plan.durationSec;
 const readErrorCount = ${readErrorCount};
-const expectedDelta = Math.max(1, Math.round(16000 / plan.requestedRateHz));
+const expectedDelta = Math.max(1, Math.round(plan.postConnectExpectedRateHz / plan.requestedRateHz));
 function counterValue(i) {
   if ("${counterMode}" === "zero") return 0;
   if ("${counterMode}" === "constant") return 7;

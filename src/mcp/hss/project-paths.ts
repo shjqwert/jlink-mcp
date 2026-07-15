@@ -1,10 +1,12 @@
 import { mkdir, realpath } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { HSS_ERROR, HssError } from "./hss-errors";
 
 export interface HssProjectPaths {
   projectRoot: string;
+  storageRoot: string;
+  evidenceRoot: string;
   outputRoot: string;
   capturesDir: string;
   exportsDir: string;
@@ -12,21 +14,51 @@ export interface HssProjectPaths {
   sessionsDir: string;
 }
 
+export interface HssExternalRoots {
+  storageRoot: string;
+  evidenceRoot: string;
+}
+
+const configuredPaths = new Map<string, HssProjectPaths>();
+
 export function hssProjectRoot(cwd = process.cwd()): string {
-  return resolve(cwd);
+  const root = resolve(cwd);
+  return existsSync(root) ? realpathSync.native(root) : root;
 }
 
 export function hssProjectPaths(cwd = process.cwd()): HssProjectPaths {
   const projectRoot = hssProjectRoot(cwd);
+  const configured = configuredPaths.get(projectRoot.toLowerCase());
+  if (configured) return configured;
   const outputRoot = join(projectRoot, ".jlink-mcp");
   return {
     projectRoot,
+    storageRoot: outputRoot,
+    evidenceRoot: outputRoot,
     outputRoot,
     capturesDir: join(outputRoot, "captures"),
     exportsDir: join(outputRoot, "exports"),
     auditDir: join(outputRoot, "audit"),
     sessionsDir: join(outputRoot, "sessions"),
   };
+}
+
+export function configureHssProjectPaths(cwd: string, roots: HssExternalRoots): HssProjectPaths {
+  const projectRoot = hssProjectRoot(cwd);
+  const storageRoot = externalRoot(roots.storageRoot, projectRoot, "storageRoot");
+  const evidenceRoot = externalRoot(roots.evidenceRoot, projectRoot, "evidenceRoot");
+  const paths: HssProjectPaths = {
+    projectRoot,
+    storageRoot,
+    evidenceRoot,
+    outputRoot: join(projectRoot, ".jlink-mcp"),
+    capturesDir: join(storageRoot, "captures"),
+    exportsDir: join(storageRoot, "exports"),
+    auditDir: join(evidenceRoot, "audit"),
+    sessionsDir: join(evidenceRoot, "sessions"),
+  };
+  configuredPaths.set(projectRoot.toLowerCase(), paths);
+  return paths;
 }
 
 export async function ensureHssProjectDirs(cwd = process.cwd()): Promise<HssProjectPaths> {
@@ -69,4 +101,24 @@ export function insideProjectIfExists(input: string | undefined, cwd = process.c
   if (!input) return undefined;
   const resolved = resolveInsideProject(input, cwd);
   return existsSync(resolved) ? resolved : undefined;
+}
+
+function externalRoot(input: string, projectRoot: string, name: string): string {
+  if (!isAbsolute(input)) throw new HssError(HSS_ERROR.PATH_OUTSIDE_CWD, `${name} must be absolute`, { [name]: input });
+  if (/^\\\\\?\\|~\d(?:\\|$)/i.test(input)) throw new HssError(HSS_ERROR.PATH_OUTSIDE_CWD, `${name} uses an unsupported path alias`, { [name]: input });
+  let existing = resolve(input);
+  const suffix: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    suffix.unshift(existing.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
+    existing = parent;
+  }
+  const root = resolve(realpathSync.native(existing), ...suffix);
+  const normalizedProject = projectRoot.toLowerCase();
+  const normalizedRoot = root.toLowerCase();
+  if (normalizedRoot === normalizedProject || normalizedRoot.startsWith(normalizedProject + sep.toLowerCase())) {
+    throw new HssError(HSS_ERROR.PATH_OUTSIDE_CWD, `${name} must be outside projectRoot`, { projectRoot, [name]: root });
+  }
+  return root;
 }

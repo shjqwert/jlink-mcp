@@ -103,6 +103,8 @@ export interface HssCaptureMetadata {
   captureId: string;
   sessionName: string;
   projectRoot: string;
+  storageRoot?: string;
+  evidenceRoot?: string;
   backend: "jlink-hss";
   state: "completed" | "stopped" | "failed";
   transportStatus: HssTransportStatus;
@@ -112,6 +114,7 @@ export interface HssCaptureMetadata {
   artifact: {
     file: string;
     mapFile?: string;
+    mapSha256?: string;
     sha256: string;
     resolver: "elf-dwarf" | "iar-map" | "mixed";
   };
@@ -182,6 +185,7 @@ export interface HssCaptureMetadata {
     targetHaltedAfterResumeRaw?: number;
   };
   hmC095?: Record<string, unknown>;
+  hmC095Oracle?: Record<string, unknown>;
   segments: HssSegmentMetadata[];
   quality: {
     sampleCount: number;

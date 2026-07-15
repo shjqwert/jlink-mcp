@@ -208,7 +208,7 @@ test("a persisted file profile reproduces the validation runtime identity after 
   }
 });
 
-test("trust validate saves only after local confirmation", async () => {
+test("trust validate saves after local confirmation or explicit user authorization", async () => {
   const cwd = tempDir();
   const store = `${cwd}-store`;
   const previousStore = process.env.JLINK_MCP_TRUST_STORE_ROOT;
@@ -233,6 +233,18 @@ test("trust validate saves only after local confirmation", async () => {
       write: () => undefined,
     }), 2);
     assert.equal(readHssTrustProfile(cwd), undefined);
+
+    assert.equal(await runTrustValidate([...args, "--user-authorized", "true"], {
+      validate: async () => profile({ mode: "none" }, cwd),
+      confirm: async () => { throw new Error("interactive confirmation must be skipped"); },
+      write: () => undefined,
+    }), 0);
+    assert.ok(readHssTrustProfile(cwd));
+
+    assert.equal(await runTrustValidate([...args, "--user-authorized", "invalid"], {
+      validate: async () => profile({ mode: "none" }, cwd),
+      write: () => undefined,
+    }), 1);
   } finally {
     if (previousStore === undefined) delete process.env.JLINK_MCP_TRUST_STORE_ROOT;
     else process.env.JLINK_MCP_TRUST_STORE_ROOT = previousStore;

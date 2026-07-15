@@ -22,6 +22,8 @@ import {
 
 interface TrustValidateInput {
   cwd: string;
+  storageRoot: string;
+  evidenceRoot: string;
   targetId: string;
   dllPath?: string;
   helperPath?: string;
@@ -35,6 +37,7 @@ interface TrustValidateInput {
   speedKhz: number;
   rateHz: number;
   durationSec: number;
+  userAuthorized: boolean;
 }
 
 interface TrustCliDependencies {
@@ -46,7 +49,7 @@ interface TrustCliDependencies {
 export async function runTrustValidate(argv: string[], dependencies: TrustCliDependencies = {}): Promise<number> {
   const write = dependencies.write ?? ((text) => stdout.write(text));
   try {
-    const input = parseTrustValidateArgs(argv);
+    const input = parseTrustValidateArgs(argv, dependencies.validate === undefined);
     const profile = await (dependencies.validate ?? validateRuntimeBundle)(input);
     const summary = JSON.stringify({
       suiteVersion: profile.suiteVersion,
@@ -55,9 +58,10 @@ export async function runTrustValidate(argv: string[], dependencies: TrustCliDep
       target: profile.target,
       probe: profile.probe,
       validation: profile.validation,
+      paths: { projectRoot: input.cwd, storageRoot: input.storageRoot, evidenceRoot: input.evidenceRoot },
     }, null, 2);
     write(`${summary}\n`);
-    const confirmed = await (dependencies.confirm ?? confirmTrust)(summary);
+    const confirmed = input.userAuthorized || await (dependencies.confirm ?? confirmTrust)(summary);
     if (!confirmed) {
       write("Trust Profile not saved.\n");
       return 2;
@@ -122,6 +126,8 @@ async function validateLifecycle(input: TrustValidateInput, runtime: HssRuntimeI
   } }, processManager);
   const service = new HssCaptureService(probe, {
     cwd: input.cwd,
+    storageRoot: input.storageRoot,
+    evidenceRoot: input.evidenceRoot,
     helperPath: runtime.helperPath,
     adapterPath: runtime.adapterPath,
     validatedDllSha256: [runtime.dllSha256!],
@@ -149,13 +155,20 @@ async function validateLifecycle(input: TrustValidateInput, runtime: HssRuntimeI
     if (!plan.ok || !plan.data) throw new Error(plan.error?.message ?? "HSS validation plan failed");
     const started = await service.captureStart({ planId: plan.data.planId });
     if (!started.ok || !started.data) throw new Error(started.error?.message ?? "HSS validation capture failed to start");
-    await new Promise((resolve) => setTimeout(resolve, input.durationSec * 1000 + 500));
+    const deadline = Date.now() + plan.data.stabilityPolicy.timeoutMs + input.durationSec * 1000 + 2000;
+    while (Date.now() < deadline) {
+      const status = await service.captureStatus({ captureId: started.data.captureId as string });
+      if (!status.ok || status.data?.state !== "capturing") break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     const stopped = await service.captureStop({ captureId: started.data.captureId as string });
     if (!stopped.ok) throw new Error(stopped.error?.message ?? "HSS validation capture failed");
     const metadata = await readHssMetadata(started.data.metadataFile as string);
     const helper = [...metadata.events].reverse().find((event) => event.type === "helperResult")?.helperResult as Record<string, unknown> | undefined;
-    if (helper?.lifecycleValidated !== true || helper.decoderSemanticsValidated !== true) {
-      throw new Error("bounded HSS lifecycle or decoder validation failed");
+    const postConnect = helper?.postConnectStability as Record<string, unknown> | undefined;
+    if (helper?.lifecycleValidated !== true || helper.decoderSemanticsValidated !== true
+        || postConnect?.passed !== true) {
+      throw new Error("bounded HSS lifecycle, post-connect stability, or decoder validation failed");
     }
   } finally {
     await service.dispose();
@@ -193,7 +206,7 @@ function profileFrom(input: TrustValidateInput, runtime: HssRuntimeIdentity, scr
   };
 }
 
-function parseTrustValidateArgs(argv: string[]): TrustValidateInput {
+function parseTrustValidateArgs(argv: string[], requireExternalRoots: boolean): TrustValidateInput {
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
@@ -208,11 +221,17 @@ function parseTrustValidateArgs(argv: string[]): TrustValidateInput {
   };
   const mode = required("script-mode");
   if (mode !== "none" && mode !== "file") throw new Error("--script-mode must be none or file");
+  const userAuthorized = values.get("user-authorized");
+  if (userAuthorized !== undefined && userAuthorized !== "true" && userAuthorized !== "false") {
+    throw new Error("--user-authorized must be true or false");
+  }
   const script = mode === "none" ? { mode } as const : { mode, path: required("script-file") } as const;
   const interfaceName = values.get("interface") ?? "SWD";
   if (interfaceName !== "SWD" && interfaceName !== "JTAG") throw new Error("--interface must be SWD or JTAG");
   return {
     cwd: values.get("project") ?? process.cwd(),
+    storageRoot: requireExternalRoots ? required("storage-root") : values.get("storage-root") ?? "",
+    evidenceRoot: requireExternalRoots ? required("evidence-root") : values.get("evidence-root") ?? "",
     targetId: required("target"),
     dllPath: values.get("jlink-dll"),
     helperPath: values.get("helper"),
@@ -226,6 +245,7 @@ function parseTrustValidateArgs(argv: string[]): TrustValidateInput {
     speedKhz: positiveInteger(values.get("speed"), 4000, "speed"),
     rateHz: positiveInteger(values.get("rate"), 100, "rate"),
     durationSec: positiveInteger(values.get("duration"), 1, "duration"),
+    userAuthorized: userAuthorized === "true",
   };
 }
 

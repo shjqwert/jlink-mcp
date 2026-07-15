@@ -34,7 +34,7 @@ import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePla
 import { executeHssVariableWritePlan, type HssVariableWriteExecuteInput, type HssVariableWriteExecuteResult } from "./hss-write-execute";
 import { HssCaptureWriteQueue } from "./hss-write-queue";
 import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
-import { assertInsideProject, ensureHssProjectDirs, hssProjectPaths } from "./project-paths";
+import { assertInsideProject, configureHssProjectPaths, ensureHssProjectDirs, hssProjectPaths, type HssProjectPaths } from "./project-paths";
 import { resolveHssTargetIdentity, type HssTargetIdentityInput } from "./target-identity";
 
 const OUTSIDE_CAPTURE_ID = "outside-capture";
@@ -45,6 +45,8 @@ export interface HssCaptureStartInput extends HssDllPreflightInput, HssCapturePl
 
 export interface HssCaptureServiceOptions {
   cwd?: string;
+  storageRoot?: string;
+  evidenceRoot?: string;
   env?: Record<string, string | undefined>;
   helperPath?: string;
   helperArgsPrefix?: string[];
@@ -96,8 +98,16 @@ export class HssCaptureService {
   private readonly writeCounters = new Map<string, { ops: number; elements: number }>();
   private captureGeneration = 0;
   private active: ActiveCapture | null = null;
+  private readonly paths: HssProjectPaths;
 
-  constructor(private readonly probe: ProbeBackend, private readonly options: HssCaptureServiceOptions = {}) {}
+  constructor(private readonly probe: ProbeBackend, private readonly options: HssCaptureServiceOptions = {}) {
+    if (Boolean(options.storageRoot) !== Boolean(options.evidenceRoot)) {
+      throw new HssError(HSS_ERROR.PATH_OUTSIDE_CWD, "storageRoot and evidenceRoot must be supplied together");
+    }
+    this.paths = options.storageRoot && options.evidenceRoot
+      ? configureHssProjectPaths(options.cwd ?? process.cwd(), { storageRoot: options.storageRoot, evidenceRoot: options.evidenceRoot })
+      : hssProjectPaths(options.cwd ?? process.cwd());
+  }
 
   async capabilityProbe(input: HssDllPreflightInput & HssTargetIdentityInput = {}): Promise<HssEnvelope<Record<string, unknown>>> {
     return this.wrap("hss_capability_probe", input, async () => {
@@ -271,6 +281,8 @@ export class HssCaptureService {
         captureId: plan.output.captureId,
         sessionName: input.sessionName ?? "hm_c095_hss",
         projectRoot: plan.projectRoot,
+        storageRoot: plan.storageRoot,
+        evidenceRoot: plan.evidenceRoot,
         artifact: plan.artifact,
         target,
         probe: { serial: input.serial ?? probe?.serialNumber, dllVersion: undefined, model: undefined },
@@ -288,6 +300,7 @@ export class HssCaptureService {
           noDefaultFallback: true,
         },
         reset: plan.resetBeforeCapture ? { operation: plan.resetOperation, stabilityPolicy: plan.stabilityPolicy, status: "planned" } : undefined,
+        hmC095Oracle: plan.hmC095,
       });
       this.metadataFiles.set(plan.output.captureId, plan.output.metadataFile);
       const resetResult = plan.resetBeforeCapture
@@ -302,7 +315,7 @@ export class HssCaptureService {
       const launchIdentity = refreshHssRuntimeIdentity(runtimeIdentity, {
         env,
         helperPath,
-        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+        validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
         adapterPath: this.options.adapterPath,
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, launchIdentity)) {
@@ -337,6 +350,15 @@ export class HssCaptureService {
         writeResponseFile,
         requestedRateHz: plan.sampling.requestedRateHz,
         durationSec: plan.sampling.durationSec,
+        postConnectCounterAddress: plan.hmC095.counterAddress,
+        postConnectCounterType: plan.hmC095.counterType,
+        postConnectCounterModulus: plan.hmC095.modulus,
+        postConnectExpectedRateHz: plan.hmC095.focIsrFreqHz,
+        postConnectRateToleranceRatio: plan.hmC095.rateToleranceRatio,
+        postConnectMinimumRecoveryMs: plan.stabilityPolicy.minimumRecoveryMs,
+        postConnectTimeoutMs: plan.stabilityPolicy.timeoutMs,
+        postConnectPollIntervalMs: plan.stabilityPolicy.pollIntervalMs,
+        postConnectRequiredConsecutiveRunningChecks: plan.stabilityPolicy.requiredConsecutiveRunningChecks,
         target: targetIdentity,
         symbols: plan.symbols,
       });
@@ -521,7 +543,7 @@ export class HssCaptureService {
         env: this.env(),
         helperPath: runtimeIdentity.helperPath,
         adapterPath: runtimeIdentity.adapterPath,
-        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+        validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, executionIdentity)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "CPU-control runtime identity changed before hardware access");
       binding.consumed = true;
@@ -549,7 +571,7 @@ export class HssCaptureService {
         env: this.env(),
         helperPath: runtimeIdentity.helperPath,
         adapterPath: runtimeIdentity.adapterPath,
-        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+        validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, postIdentity)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "CPU-control runtime identity changed after hardware access", { binding, result });
       const event = this.active
@@ -578,7 +600,7 @@ export class HssCaptureService {
 
   async sessionRecover(input: { captureId?: string } = {}): Promise<HssEnvelope<Record<string, unknown>>> {
     return this.wrap("hss_session_recover", input, async () => {
-      const paths = hssProjectPaths(this.cwd());
+      const paths = this.paths;
       const captureIds = input.captureId ? [input.captureId] : await readdir(paths.capturesDir).catch(() => []);
       const recovered: Array<Record<string, unknown>> = [];
       const skipped: Array<Record<string, unknown>> = [];
@@ -775,7 +797,7 @@ export class HssCaptureService {
     const postIdentity = refreshHssRuntimeIdentity(active.runtimeIdentity, {
       env: this.env(),
       helperPath: active.runtimeIdentity.helperPath,
-      validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+      validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(active.runtimeIdentity),
       adapterPath: active.runtimeIdentity.adapterPath,
     });
     const helperIdentityMatches = active.stopTimedOut || (helperResult?.helperVersion === active.runtimeIdentity.helperVersion
@@ -861,7 +883,7 @@ export class HssCaptureService {
   private metadataFor(captureId: string): string {
     const known = this.metadataFiles.get(captureId);
     if (known) return known;
-    const paths = hssProjectPaths(this.cwd());
+    const paths = this.paths;
     const metadataFile = join(paths.capturesDir, captureId, "capture.json");
     assertInsideProject(metadataFile, paths.capturesDir);
     return metadataFile;
@@ -984,7 +1006,7 @@ export class HssCaptureService {
         env: this.env(),
         helperPath: runtimeIdentity.helperPath,
         adapterPath: runtimeIdentity.adapterPath,
-        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+        validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, before)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "runtime or ScriptFile identity changed before reset");
       const request = {
@@ -1015,7 +1037,7 @@ export class HssCaptureService {
         env: this.env(),
         helperPath: runtimeIdentity.helperPath,
         adapterPath: runtimeIdentity.adapterPath,
-        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+        validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, after)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "runtime or ScriptFile identity changed after reset");
       const stability = await this.waitForTargetStability(plan, runtimeIdentity, target, serial);
@@ -1094,7 +1116,7 @@ export class HssCaptureService {
         env: this.env(),
         helperPath: runtimeIdentity.helperPath,
         adapterPath: runtimeIdentity.adapterPath,
-        validatedRuntimeIdentitySha256: this.options.validatedRuntimeIdentitySha256,
+        validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, identity)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "runtime or ScriptFile identity changed during target stabilization");
       const request = { operation: "target-state", runtimeIdentity: identity, target, serial, scriptIdentity: plan.scriptIdentity };
@@ -1139,6 +1161,10 @@ export class HssCaptureService {
       await this.safeAudit(operation, input, envelope);
       return envelope;
     }
+  }
+
+  private validatedRuntimeHashes(identity: HssRuntimeIdentity): readonly string[] | undefined {
+    return this.options.validatedRuntimeIdentitySha256 ?? (identity.validated && identity.sha256 ? [identity.sha256] : undefined);
   }
 
   private async safeAudit(operation: Parameters<typeof hssOk<unknown>>[0], input: unknown, envelope: HssEnvelope<unknown>): Promise<void> {

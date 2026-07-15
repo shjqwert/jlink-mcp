@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import type { HssTrustProfile } from "../trust/trust-profile";
 import {
   discoverHssDll,
   hssDllBenchmark,
@@ -281,6 +282,52 @@ test("HSS DLL preflight runs connect-preflight when device and helper are availa
     );
     assert.equal((preflight.connectPreflight as { targetWasHalted?: boolean }).targetWasHalted, true);
     assert.equal(preflight.safetyStatus, "HSS_SAFETY_FAIL");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("HSS trust validation does not let a stale profile replace the candidate runtime", async () => {
+  const dir = tempDir();
+  try {
+    const dll = path.join(dir, "JLink_x64.dll");
+    const sha256 = writeFakeDll(dll);
+    const helper = nodeHelper(dir, `
+      const command = process.argv[2];
+      if (command === 'connect-preflight') console.log(JSON.stringify({ status: 'ok', targetWasHalted: false }));
+      else console.log(JSON.stringify({ status: 'ok', exportsFound: true }));
+    `);
+    const input = { dllPath: dll, device: "Z20K146M", interface: "SWD" as const, speedKhz: 4000, serial: "1" };
+    const approved = approvedOptions(dll, sha256, { env: {}, ...helper });
+    const script = approved.scriptIdentity!;
+    const staleProfile = {
+      version: 1,
+      suiteVersion: "hss-runtime-v1",
+      validatedAt: new Date(0).toISOString(),
+      runtime: {
+        dllPath: dll,
+        dllSha256: "0".repeat(64),
+        dllVersion: "88400",
+        helperPath: helper.helperPath,
+        helperSha256: "1".repeat(64),
+        helperVersion: "1",
+        helperProtocolVersion: 1,
+        adapterPath: __filename,
+        adapterSha256: "2".repeat(64),
+        adapterVersion: "1",
+        sha256: "3".repeat(64),
+      },
+      script: { mode: script.mode, path: script.path, sha256: script.sha256 },
+      project: { root: dir, namespaceSha256: "4".repeat(64) },
+      target: { targetId: input.device },
+      probe: { serial: input.serial, interface: input.interface, speedKhz: input.speedKhz },
+      validation: { getCaps: true, lifecycle: true, decoderSemantics: true },
+      profileSha256: "5".repeat(64),
+    } satisfies HssTrustProfile;
+
+    const preflight = await hssDllPreflight(input, { ...approved, trustProfile: staleProfile, trustValidation: true });
+    assert.equal(preflight.getcapsAllowed, true);
+    assert.equal((preflight.runtimeIdentity as { dllSha256?: string }).dllSha256, sha256);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

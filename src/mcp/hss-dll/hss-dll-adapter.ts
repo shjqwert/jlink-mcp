@@ -313,6 +313,7 @@ function revalidateCachedScript(script: HssScriptIdentity): HssScriptIdentity {
 }
 
 function trustedOptions(input: HssDllPreflightInput, script: HssScriptIdentity, options: HssHelperOptions): HssHelperOptions {
+  if (options.trustValidation === true) return { ...options, scriptIdentity: script };
   const profile = options.trustProfile ?? readHssTrustProfile(options.cwd);
   if (!profile || !hssTrustProfileMatches(profile, {
     targetId: input.device,

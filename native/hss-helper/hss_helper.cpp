@@ -442,6 +442,12 @@ static int json_int(const std::string& text, const char* name, int fallback = 0)
   return std::regex_search(text, match, pattern) ? std::stoi(match[1].str()) : fallback;
 }
 
+static double json_double(const std::string& text, const char* name, double fallback = 0.0) {
+  std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*(\\d+(?:\\.\\d+)?)");
+  std::smatch match;
+  return std::regex_search(text, match, pattern) ? std::stod(match[1].str()) : fallback;
+}
+
 static bool json_bool(const std::string& text, const char* name, bool fallback = false) {
   std::regex pattern(std::string("\"") + name + "\"\\s*:\\s*(true|false)");
   std::smatch match;
@@ -571,6 +577,154 @@ static HssSampleDecision observe_hss_sample(HssRecordSequence* sequence, uint32_
   sequence->lastSampleIndex = sample_index;
   ++sequence->emittedSamples;
   return HssSampleDecision::emit;
+}
+
+enum class PostConnectDecision {
+  pending,
+  stable,
+  recoveryRestart,
+  nonWrappingDecrease,
+};
+
+struct PostConnectStabilityEvidence {
+  bool passed = false;
+  bool hasValue = false;
+  bool hasRate = false;
+  bool runningWindowObserved = false;
+  int checkCount = 0;
+  int consecutiveRunningChecks = 0;
+  int64_t elapsedMs = 0;
+  U32 firstValue = 0;
+  U32 lastValue = 0;
+  double firstRateHz = 0.0;
+  double lastRateHz = 0.0;
+  double minRateHz = 0.0;
+  double maxRateHz = 0.0;
+};
+
+static PostConnectDecision observe_post_connect_counter(
+    PostConnectStabilityEvidence* evidence,
+    U32 value,
+    int64_t interval_ns,
+    int64_t elapsed_ms,
+    int minimum_recovery_ms,
+    int required_consecutive_checks,
+    double min_rate_hz,
+    double max_rate_hz) {
+  if (!evidence->hasValue) {
+    evidence->hasValue = true;
+    evidence->firstValue = value;
+    evidence->lastValue = value;
+    return PostConnectDecision::pending;
+  }
+  const U32 previous = evidence->lastValue;
+  const U32 delta = value - previous;
+  const double rate_hz = interval_ns > 0 ? static_cast<double>(delta) * 1000000000.0 / static_cast<double>(interval_ns) : 0.0;
+  evidence->lastValue = value;
+  evidence->lastRateHz = rate_hz;
+  if (!evidence->hasRate) {
+    evidence->hasRate = true;
+    evidence->firstRateHz = rate_hz;
+    evidence->minRateHz = rate_hz;
+    evidence->maxRateHz = rate_hz;
+  } else {
+    evidence->minRateHz = (std::min)(evidence->minRateHz, rate_hz);
+    evidence->maxRateHz = (std::max)(evidence->maxRateHz, rate_hz);
+  }
+  const bool rate_valid = delta > 0 && rate_hz >= min_rate_hz && rate_hz <= max_rate_hz;
+  if (value < previous && !rate_valid) {
+    if (elapsed_ms < minimum_recovery_ms && !evidence->runningWindowObserved) return PostConnectDecision::recoveryRestart;
+    return PostConnectDecision::nonWrappingDecrease;
+  }
+  if (rate_valid) evidence->runningWindowObserved = true;
+  evidence->consecutiveRunningChecks = rate_valid ? evidence->consecutiveRunningChecks + 1 : 0;
+  return elapsed_ms >= minimum_recovery_ms && evidence->consecutiveRunningChecks >= required_consecutive_checks
+    ? PostConnectDecision::stable
+    : PostConnectDecision::pending;
+}
+
+static void write_post_connect_evidence(const PostConnectStabilityEvidence& evidence) {
+  std::cout
+    << ",\"postConnectStability\":{\"passed\":" << (evidence.passed ? "true" : "false")
+    << ",\"checkCount\":" << evidence.checkCount
+    << ",\"runningWindowObserved\":" << (evidence.runningWindowObserved ? "true" : "false")
+    << ",\"consecutiveRunningChecks\":" << evidence.consecutiveRunningChecks
+    << ",\"elapsedMs\":" << evidence.elapsedMs
+    << ",\"firstValue\":" << evidence.firstValue
+    << ",\"lastValue\":" << evidence.lastValue
+    << ",\"firstRateHz\":" << evidence.firstRateHz
+    << ",\"lastRateHz\":" << evidence.lastRateHz
+    << ",\"minRateHz\":" << evidence.minRateHz
+    << ",\"maxRateHz\":" << evidence.maxRateHz << "}";
+}
+
+static bool wait_for_post_connect_stability(
+    JLINKARM_IsHalted_Fn arm_halted,
+    JLINKARM_ReadMemU32_Fn arm_read_u32,
+    U32 counter_address,
+    int expected_rate_hz,
+    double rate_tolerance_ratio,
+    int minimum_recovery_ms,
+    int timeout_ms,
+    int poll_interval_ms,
+    int required_consecutive_checks,
+    PostConnectStabilityEvidence* evidence,
+    std::string* error_code,
+    std::string* reason) {
+  const double min_rate_hz = static_cast<double>(expected_rate_hz) * (1.0 - rate_tolerance_ratio);
+  const double max_rate_hz = static_cast<double>(expected_rate_hz) * (1.0 + rate_tolerance_ratio);
+  const int64_t started_ns = now_ns();
+  int64_t previous_read_ns = started_ns;
+  while (true) {
+    const int64_t read_ns = now_ns();
+    evidence->elapsedMs = (read_ns - started_ns) / 1000000;
+    if (evidence->elapsedMs > timeout_ms) {
+      *error_code = "HSS_POST_CONNECT_STABILITY_TIMEOUT";
+      *reason = "post-connect counter did not reach the bounded running-rate stability gate";
+      return false;
+    }
+    bool crashed = false;
+    const int halted = call_int0(arm_halted, &crashed);
+    ++evidence->checkCount;
+    if (crashed || halted < 0) {
+      *error_code = "HSS_POST_CONNECT_TARGET_STATE_READ_FAILED";
+      *reason = "post-connect target-state read failed";
+      return false;
+    }
+    if (halted > 0) {
+      *error_code = "HSS_POST_CONNECT_TARGET_HALTED";
+      *reason = "target halted during post-connect stability gate";
+      return false;
+    }
+    U32 value = 0;
+    U8 read_status = 0xFFU;
+    const int read_rc = call_read_mem_u32(arm_read_u32, counter_address, 1U, &value, &read_status, &crashed);
+    if (crashed || read_rc < 0 || read_status != 0U) {
+      *error_code = "HSS_POST_CONNECT_COUNTER_READ_FAILED";
+      *reason = "post-connect counter read failed";
+      return false;
+    }
+    const PostConnectDecision decision = observe_post_connect_counter(
+      evidence,
+      value,
+      read_ns - previous_read_ns,
+      evidence->elapsedMs,
+      minimum_recovery_ms,
+      required_consecutive_checks,
+      min_rate_hz,
+      max_rate_hz);
+    previous_read_ns = read_ns;
+    if (decision == PostConnectDecision::nonWrappingDecrease) {
+      *error_code = "HSS_POST_CONNECT_COUNTER_DECREASE";
+      *reason = "post-connect counter decreased without a rate-valid uint32 wrap";
+      return false;
+    }
+    if (decision == PostConnectDecision::stable) {
+      evidence->passed = true;
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
+  }
 }
 
 static void write_record(std::ofstream& out, uint64_t sample_index, int64_t timestamp_ticks, uint32_t status_flags, const std::vector<uint32_t>& values, uint32_t* crc) {
@@ -1431,6 +1585,36 @@ static int self_test() {
     error_json("HSS_SELF_TEST_RECORD_DECREASING_FAILED", "decreasing HSS record sequence was not rejected");
     return 0;
   }
+  PostConnectStabilityEvidence recovery_restart;
+  if (observe_post_connect_counter(&recovery_restart, 9350U, 1, 0, 250, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&recovery_restart, 9350U, 100000000, 100, 250, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&recovery_restart, 0U, 100000000, 200, 250, 2, 8000.0, 24000.0) != PostConnectDecision::recoveryRestart
+      || observe_post_connect_counter(&recovery_restart, 1600U, 100000000, 300, 250, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&recovery_restart, 3200U, 100000000, 400, 250, 2, 8000.0, 24000.0) != PostConnectDecision::stable) {
+    error_json("HSS_SELF_TEST_POST_CONNECT_RECOVERY_FAILED", "recovery-window counter restart did not reset the post-connect baseline");
+    return 0;
+  }
+  PostConnectStabilityEvidence late_decrease;
+  if (observe_post_connect_counter(&late_decrease, 9350U, 1, 0, 250, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&late_decrease, 0U, 300000000, 300, 250, 2, 8000.0, 24000.0) != PostConnectDecision::nonWrappingDecrease) {
+    error_json("HSS_SELF_TEST_POST_CONNECT_DECREASE_FAILED", "post-recovery non-wrapping counter decrease was not rejected");
+    return 0;
+  }
+  PostConnectStabilityEvidence interrupted_window;
+  if (observe_post_connect_counter(&interrupted_window, 0U, 1, 0, 250, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&interrupted_window, 1600U, 100000000, 100, 250, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&interrupted_window, 1600U, 50000000, 150, 250, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&interrupted_window, 0U, 50000000, 200, 250, 2, 8000.0, 24000.0) != PostConnectDecision::nonWrappingDecrease) {
+    error_json("HSS_SELF_TEST_POST_CONNECT_INTERRUPTED_WINDOW_FAILED", "a decrease after an interrupted running window was not rejected");
+    return 0;
+  }
+  PostConnectStabilityEvidence valid_wrap;
+  if (observe_post_connect_counter(&valid_wrap, 0xFFFFFF00U, 1, 0, 0, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&valid_wrap, 0x00000540U, 100000000, 100, 0, 2, 8000.0, 24000.0) != PostConnectDecision::pending
+      || observe_post_connect_counter(&valid_wrap, 0x00000B80U, 100000000, 200, 0, 2, 8000.0, 24000.0) != PostConnectDecision::stable) {
+    error_json("HSS_SELF_TEST_POST_CONNECT_WRAP_FAILED", "rate-valid uint32 wrap was not accepted");
+    return 0;
+  }
   const auto block_plan = build_hss_block_plan({
     {"counter", 0x20006B28U, 4},
     {"pattern", 0x20000800U, 4},
@@ -1801,6 +1985,16 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const int speed = json_int(plan, "speedKhz", 4000);
   const int requested_rate = json_int(plan, "requestedRateHz", 1000);
   const int duration_sec = json_int(plan, "durationSec", 1);
+  const std::string post_connect_counter_address_text = json_string(plan, "postConnectCounterAddress");
+  const std::string post_connect_counter_type = json_string(plan, "postConnectCounterType");
+  const std::string post_connect_counter_modulus = json_string(plan, "postConnectCounterModulus");
+  const int post_connect_expected_rate_hz = json_int(plan, "postConnectExpectedRateHz", 0);
+  const double post_connect_rate_tolerance_ratio = json_double(plan, "postConnectRateToleranceRatio", -1.0);
+  const int post_connect_minimum_recovery_ms = json_int(plan, "postConnectMinimumRecoveryMs", -1);
+  const int post_connect_timeout_ms = json_int(plan, "postConnectTimeoutMs", -1);
+  const int post_connect_poll_interval_ms = json_int(plan, "postConnectPollIntervalMs", -1);
+  const int post_connect_required_checks = json_int(plan, "postConnectRequiredConsecutiveRunningChecks", -1);
+  U32 post_connect_counter_address = 0;
   const auto symbols = json_symbols(plan);
   if (dll_utf8.empty() || output_file.empty() || capture_id.empty() || symbols.empty() || symbols.size() > 10 || requested_rate < 1 || duration_sec < 1) {
     error_json("HSS_PLAN_INVALID", "plan is missing required fields");
@@ -1812,6 +2006,18 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   }
   if (read_mode != "periodic" && read_mode != "drain") {
     error_json("HSS_PLAN_INVALID", "readMode must be periodic or drain");
+    return 0;
+  }
+  if (!parse_u32_text(post_connect_counter_address_text, &post_connect_counter_address)
+      || post_connect_counter_type != "uint32"
+      || post_connect_counter_modulus != "4294967296"
+      || post_connect_expected_rate_hz < 1 || post_connect_expected_rate_hz > 1000000
+      || post_connect_rate_tolerance_ratio <= 0.0 || post_connect_rate_tolerance_ratio >= 1.0
+      || post_connect_minimum_recovery_ms < 0 || post_connect_minimum_recovery_ms > 60000
+      || post_connect_timeout_ms < 1 || post_connect_timeout_ms > 60000
+      || post_connect_poll_interval_ms < 10 || post_connect_poll_interval_ms > 1000
+      || post_connect_required_checks < 2 || post_connect_required_checks > 100) {
+    error_json("HSS_PLAN_INVALID", "post-connect uint32 counter stability policy is missing or invalid");
     return 0;
   }
   if (!runtime_identity_validated || !valid_sha256_hex(approved_dll_sha256)) {
@@ -1881,7 +2087,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto hss_start = reinterpret_cast<JLINK_HSS_Start_Fn>(required(dll, "JLINK_HSS_Start"));
   auto hss_read = reinterpret_cast<JLINK_HSS_Read_Fn>(required(dll, "JLINK_HSS_Read"));
   auto hss_stop = reinterpret_cast<JLINK_HSS_Stop_Fn>(required(dll, "JLINK_HSS_Stop"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_version || !hss_start || !hss_read || !hss_stop) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_halted || !arm_read_mem || !arm_read_u32 || !arm_version || !hss_start || !hss_read || !hss_stop) {
     FreeLibrary(dll);
     error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS exports missing", dll_utf8);
     return 0;
@@ -1980,6 +2186,44 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (arm_halted) {
     halted_after_resume = call_int0(arm_halted, &crashed);
     if (crashed) halted_after_resume = -2;
+  }
+
+  PostConnectStabilityEvidence post_connect_evidence;
+  std::string post_connect_error_code;
+  std::string post_connect_error_reason;
+  write_hss_diag(diagnostic_file, capture_id, "before_post_connect_stability");
+  const bool post_connect_stable = wait_for_post_connect_stability(
+    arm_halted,
+    arm_read_u32,
+    post_connect_counter_address,
+    post_connect_expected_rate_hz,
+    post_connect_rate_tolerance_ratio,
+    post_connect_minimum_recovery_ms,
+    post_connect_timeout_ms,
+    post_connect_poll_interval_ms,
+    post_connect_required_checks,
+    &post_connect_evidence,
+    &post_connect_error_code,
+    &post_connect_error_reason);
+  write_hss_diag(diagnostic_file, capture_id, post_connect_stable ? "after_post_connect_stability" : "post_connect_stability_failed");
+  if (!post_connect_stable) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    std::cout
+      << "{\"status\":\"error\",\"errorCode\":\"" << post_connect_error_code
+      << "\",\"reason\":\"" << escape(post_connect_error_reason)
+      << "\",\"dll\":\"" << escape(dll_utf8)
+      << "\",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
+      << ",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
+      << ",\"dllVersion\":" << dll_version
+      << ",\"jlinkScriptMode\":\"" << script_selection.mode << "\""
+      << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
+      << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
+      << ",\"jlinkScriptReturnCode\":" << script_rc
+      << ",\"captureId\":\"" << escape(capture_id) << "\"";
+    write_post_connect_evidence(post_connect_evidence);
+    std::cout << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+    return 0;
   }
 
   auto block_plan = build_hss_block_plan(symbols);
@@ -2241,7 +2485,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadChangedRatio\":" << payload_changed_ratio
     << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
-     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":" << record_sequence.droppedSamples
+     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":" << record_sequence.droppedSamples;
+  write_post_connect_evidence(post_connect_evidence);
+  std::cout
     << ",\"targetReset\":false,\"targetWritten\":" << (target_written ? "true" : "false")
     << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
      << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":" << (record_sequence.hasSample ? record_sequence.firstSampleIndex : 0)

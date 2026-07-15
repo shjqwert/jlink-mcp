@@ -46,6 +46,8 @@ export async function writeInitialMetadata(input: {
   captureId: string;
   sessionName: string;
   projectRoot: string;
+  storageRoot?: string;
+  evidenceRoot?: string;
   artifact: HssCaptureMetadata["artifact"];
   target: HssCaptureMetadata["target"];
   probe?: HssCaptureMetadata["probe"];
@@ -58,12 +60,15 @@ export async function writeInitialMetadata(input: {
   warnings?: string[];
   script?: HssCaptureMetadata["script"];
   reset?: HssCaptureMetadata["reset"];
+  hmC095Oracle?: Record<string, unknown>;
 }): Promise<void> {
   const metadata: HssCaptureMetadata = {
     version: 1,
     captureId: input.captureId,
     sessionName: input.sessionName,
     projectRoot: input.projectRoot,
+    ...(input.storageRoot ? { storageRoot: input.storageRoot } : {}),
+    ...(input.evidenceRoot ? { evidenceRoot: input.evidenceRoot } : {}),
     backend: "jlink-hss",
     state: "failed",
     transportStatus: "failed",
@@ -75,6 +80,7 @@ export async function writeInitialMetadata(input: {
     probe: input.probe ?? {},
     ...(input.script ? { script: input.script } : {}),
     ...(input.reset ? { reset: input.reset } : {}),
+    ...(input.hmC095Oracle ? { hmC095Oracle: input.hmC095Oracle } : {}),
     symbols: input.symbols,
     sampling: {
       requestedRateHz: input.requestedRateHz,
@@ -230,6 +236,7 @@ export async function hssCaptureStopFromMetadata(metadataFile: string): Promise<
 }
 
 export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd()): Promise<Record<string, unknown>> {
+  const paths = hssProjectPaths(cwd);
   const metadataFile = metadataPathForCapture(input.captureId, input.metadataFile, cwd);
   const metadata = await readMetadataForCapture(input.captureId, metadataFile, cwd);
   if (metadata.state !== "completed" && metadata.state !== "stopped" && metadata.state !== "failed") {
@@ -237,9 +244,9 @@ export async function queryHssCapture(input: HssQueryInput, cwd = process.cwd())
   }
   const segment = metadata.segments[0];
   if (!segment) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture has no segment metadata");
-  assertInsideProject(metadata.projectRoot, cwd);
+  if (metadata.projectRoot.toLowerCase() !== paths.projectRoot.toLowerCase()) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture projectRoot does not match the selected project");
   const captureDir = dirname(metadataFile);
-  assertInsideProject(captureDir, cwd);
+  assertInsideProject(captureDir, paths.storageRoot);
   const segmentFile = join(captureDir, segment.file);
   assertInsideProject(segmentFile, captureDir);
   const actualCrc = await crc32File(segmentFile);
@@ -279,10 +286,10 @@ export async function exportHssCapture(input: { captureId: string; metadataFile?
   if (metadata.state !== "completed" && metadata.state !== "stopped" && metadata.state !== "failed") throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_TERMINAL, "capture is not terminal");
   const segment = metadata.segments[0];
   if (!segment) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture has no segment metadata");
-  assertInsideProject(metadata.projectRoot, cwd);
   const paths = hssProjectPaths(cwd);
+  if (metadata.projectRoot.toLowerCase() !== paths.projectRoot.toLowerCase()) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "capture projectRoot does not match the selected project");
   const captureDir = dirname(metadataFile);
-  assertInsideProject(captureDir, cwd);
+  assertInsideProject(captureDir, paths.storageRoot);
   const segmentFile = join(captureDir, segment.file);
   assertInsideProject(segmentFile, captureDir);
   if (await crc32File(segmentFile) !== segment.crc32) throw new HssError(HSS_ERROR.HSS_CRC_MISMATCH, "capture segment CRC mismatch");
@@ -361,8 +368,9 @@ export async function readHssMetadata(file: string): Promise<HssCaptureMetadata>
 }
 
 export async function readMetadataForCapture(captureId: string, metadataFile: string | undefined, cwd = process.cwd()): Promise<HssCaptureMetadata> {
-  const file = metadataFile ?? join(hssProjectPaths(cwd).capturesDir, captureId, "capture.json");
-  assertInsideProject(file, cwd);
+  const paths = hssProjectPaths(cwd);
+  const file = metadataFile ?? join(paths.capturesDir, captureId, "capture.json");
+  assertInsideProject(file, paths.storageRoot);
   const metadata = await readHssMetadata(file);
   if (metadata.captureId !== captureId) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "captureId does not match metadata");
   return metadata;
@@ -372,7 +380,7 @@ function metadataPathForCapture(captureId: string, metadataFile: string | undefi
   const paths = hssProjectPaths(cwd);
   assertInsideProject(join(paths.capturesDir, captureId), paths.capturesDir);
   const file = metadataFile ?? join(paths.capturesDir, captureId, "capture.json");
-  assertInsideProject(file, cwd);
+  assertInsideProject(file, paths.storageRoot);
   return file;
 }
 
@@ -927,17 +935,61 @@ function nextCsvFile(exportsDir: string, captureId: string): string {
   throw new HssError(HSS_ERROR.HSS_EXPORT_EXISTS, "all CSV export names for this capture already exist", { captureId, exportsDir });
 }
 
-function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol[], actualRateHz: number, metadata?: HssCaptureMetadata): Record<string, unknown> {
+export function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol[], actualRateHz: number, metadata?: HssCaptureMetadata): Record<string, unknown> {
   const counterIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgCounterFocIsr");
   const sawIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgSawFocIsr");
   const toggleIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgToggleFocIsr");
   const patternIndex = symbols.findIndex((symbol) => symbol.name === "g_hssDbgPatternFocIsr");
   const errorMask = HSS_STATUS_FLAGS.read_error | HSS_STATUS_FLAGS.timeout | HSS_STATUS_FLAGS.overflow;
   const validRecords = records.filter((record) => (record.statusFlags & HSS_STATUS_FLAGS.valid) !== 0 && (record.statusFlags & errorMask) === 0);
-  const counter = counterIndex >= 0 ? validRecords.map((record) => record.rawValues[counterIndex] >>> 0) : [];
+  const counter = counterIndex >= 0 ? records.map((record) => record.rawValues[counterIndex] >>> 0) : [];
   const deltas: number[] = [];
-  for (let index = 1; index < counter.length; index += 1) deltas.push((counter[index] - counter[index - 1]) >>> 0);
-  const expected = actualRateHz > 0 ? 16000 / actualRateHz : null;
+  const modulus = 1n << 32n;
+  const strictOracle = metadata?.reset !== undefined;
+  const configuredRateValue = metadata?.hmC095Oracle?.focIsrFreqHz;
+  const configuredToleranceValue = metadata?.hmC095Oracle?.rateToleranceRatio;
+  const configuredRate = Number(configuredRateValue ?? 16000);
+  const configuredTolerance = Number(configuredToleranceValue ?? 0.5);
+  const validRate = Number.isSafeInteger(configuredRate) && configuredRate > 0;
+  const validTolerance = Number.isFinite(configuredTolerance) && configuredTolerance >= 0 && configuredTolerance < 1;
+  const rateDerivation = metadata?.hmC095Oracle?.rateDerivation as Record<string, unknown> | undefined;
+  const configSha256 = rateDerivation?.configSha256;
+  const validDerivation = rateDerivation?.source === "hm-c095-generated-config"
+    && typeof configSha256 === "object"
+    && configSha256 !== null
+    && !Array.isArray(configSha256)
+    && ["mcu", "parcc", "pwm", "tdg", "tmu"].every((name) => /^[0-9a-f]{64}$/.test(String((configSha256 as Record<string, unknown>)[name] ?? "")));
+  const strictRatePass = typeof configuredRateValue === "number" && validRate && configuredRate <= 1_000_000;
+  const strictTolerancePass = typeof configuredToleranceValue === "number" && validTolerance;
+  const strictConfigurationPass = !strictOracle || (strictRatePass && strictTolerancePass && validDerivation);
+  const focIsrFreqHz = strictOracle ? (strictRatePass ? configuredRate : 0) : (validRate ? configuredRate : 16000);
+  const rateToleranceRatio = strictOracle ? (strictTolerancePass ? configuredTolerance : 0) : (validTolerance ? configuredTolerance : 0.5);
+  const observationWindowMs = 100;
+  const observationWindowTicks = BigInt(observationWindowMs) * 1_000_000n;
+  let adjacentBoundsPass = true;
+  let unexplainedDecreaseCount = 0;
+  let wrapCount = 0;
+  let lastProgressTick = records[0]?.timestampTicks;
+  let progressWithinWindow = false;
+  for (let index = 1; index < counter.length; index += 1) {
+    const delta = Number((BigInt(counter[index]) - BigInt(counter[index - 1]) + modulus) % modulus);
+    const elapsedTicks = records[index].timestampTicks - records[index - 1].timestampTicks;
+    const expectedForTicks = focIsrFreqHz * Number(elapsedTicks) / 1_000_000_000;
+    const upperBound = Math.max(1, Math.ceil(expectedForTicks * (1 + rateToleranceRatio)) + 1);
+    deltas.push(delta);
+    if (delta > upperBound) adjacentBoundsPass = false;
+    if (counter[index] < counter[index - 1]) {
+      if (BigInt(counter[index - 1]) + BigInt(upperBound) < modulus) unexplainedDecreaseCount += 1;
+      else wrapCount += 1;
+    }
+    if (delta > 0) {
+      if (records[index].timestampTicks - records[0].timestampTicks <= observationWindowTicks) progressWithinWindow = true;
+      lastProgressTick = records[index].timestampTicks;
+    } else if (lastProgressTick !== undefined && records[index].timestampTicks - lastProgressTick >= observationWindowTicks) {
+      adjacentBoundsPass = false;
+    }
+  }
+  const expected = actualRateHz > 0 ? focIsrFreqHz / actualRateHz : null;
   const mean = deltas.length ? deltas.reduce((sum, value) => sum + value, 0) / deltas.length : null;
   const nonZeroDeltaRatio = deltas.length ? deltas.filter((value) => value > 0).length / deltas.length : 0;
   const counterChangedRatio = ratioOfChanges(counter);
@@ -947,14 +999,40 @@ function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol
   const toggleValues = toggleIndex >= 0 ? new Set(validRecords.map((record) => record.rawValues[toggleIndex])) : new Set<number>();
   const patternValues = patternIndex >= 0 ? new Set(validRecords.map((record) => record.rawValues[patternIndex])) : new Set<number>();
   const allSamplesValid = records.length > 1 && validRecords.length === records.length;
+  const firstSampleIndexZero = records[0]?.sampleIndex === 0n;
+  const timebasePass = records.every((record, index) => index === 0 || record.timestampTicks >= records[index - 1].timestampTicks);
+  const droppedFlagsPass = records.every((record, index) => {
+    const marked = (record.statusFlags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0;
+    return index === 0 ? !marked : marked === (record.sampleIndex > records[index - 1].sampleIndex + 1n);
+  });
+  const elapsedTicks = records.length > 1 ? records.at(-1)!.timestampTicks - records[0].timestampTicks : 0n;
+  const totalDelta = deltas.reduce((sum, value) => sum + value, 0);
+  const expectedTotalDelta = focIsrFreqHz * Number(elapsedTicks) / 1_000_000_000;
+  const rateLowerBound = Math.max(0, Math.floor(expectedTotalDelta * (1 - rateToleranceRatio)) - 1);
+  const rateUpperBound = Math.ceil(expectedTotalDelta * (1 + rateToleranceRatio)) + 1;
+  const windowRatePass = elapsedTicks === 0n || (totalDelta >= rateLowerBound && totalDelta <= rateUpperBound);
   const counterDeltaPass = allSamplesValid
     && counterIndex >= 0
-    && counterMonotonic
+    && (strictOracle ? firstSampleIndexZero : counterMonotonic)
+    && (!strictOracle || timebasePass)
+    && (!strictOracle || droppedFlagsPass)
+    && (!strictOracle || adjacentBoundsPass)
+    && (!strictOracle || unexplainedDecreaseCount === 0)
+    && (!strictOracle || progressWithinWindow)
+    && (!strictOracle || windowRatePass)
     && !counterAllConstant;
   const patternChanges = patternIndex < 0 ? undefined : patternValues.size > 1;
-  const semanticPass = counterDeltaPass;
+  const semanticPass = strictConfigurationPass && counterDeltaPass;
   return {
-    focIsrFreqHz: 16000,
+    focIsrFreqHz,
+    counterSymbol: "g_hssDbgCounterFocIsr",
+    counterType: "uint32",
+    incrementsPerFocUpdate: 1,
+    modulus: "4294967296",
+    rateToleranceRatio,
+    rateDerivation,
+    observationWindowMs,
+    strictOracle,
     counterPresent: counterIndex >= 0,
     transportPass: metadata?.transportStatus === "pass",
     payloadPass: metadata?.payloadValidationStatus === "pass",
@@ -969,6 +1047,16 @@ function hmC095Validation(records: HssSampleRecord[], symbols: HssResolvedSymbol
     counterChangedRatio,
     counterAllConstant,
     counterMonotonic,
+    firstSampleIndexZero,
+    timebasePass,
+    droppedFlagsPass,
+    adjacentBoundsPass,
+    windowRatePass,
+    rateLowerBound,
+    rateUpperBound,
+    totalDelta,
+    wrapCount,
+    unexplainedDecreaseCount,
     counterDeltaPass,
     sawFollowsCounterLow16: sawPass,
     toggleAliasWarning: toggleIndex >= 0 && toggleValues.size <= 1,

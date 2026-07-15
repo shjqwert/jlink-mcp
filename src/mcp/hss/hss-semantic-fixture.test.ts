@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { HssError } from "./hss-errors";
-import { finalizeMetadata, readHssRecords, writeInitialMetadata } from "./hss-artifact";
+import { finalizeMetadata, hmC095Validation, readHssRecords, writeInitialMetadata } from "./hss-artifact";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { createPredictableSemanticFixture } from "./predictable-semantic-fixture";
 
@@ -110,4 +110,67 @@ test("decoder rejects invalid semantic record sequences", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("HM_C095 strict oracle accepts repeat and uint32 wrap but rejects bad index, flags, stalls, and decreases", () => {
+  const symbols = [{ name: "g_hssDbgCounterFocIsr", type: "uint32", address: "0x20001234", size: 4, source: "iar-map" }] as const;
+  const record = (sampleIndex: bigint, timestampTicks: bigint, value: number, statusFlags = HSS_STATUS_FLAGS.valid) => ({
+    sampleIndex,
+    timestampTicks,
+    statusFlags,
+    rawValues: [value >>> 0],
+  });
+  const validOracle = {
+    focIsrFreqHz: 8000,
+    rateToleranceRatio: 0.5,
+    rateDerivation: {
+      source: "hm-c095-generated-config",
+      configSha256: Object.fromEntries(["mcu", "parcc", "pwm", "tdg", "tmu"].map((name) => [name, "a".repeat(64)])),
+    },
+  };
+  const strictMetadata = { reset: { status: "completed" }, transportStatus: "pass", payloadValidationStatus: "pass", hmC095Oracle: validOracle } as never;
+  const accepted = hmC095Validation([
+    record(0n, 0n, 0xfffffff8),
+    record(1n, 0n, 0xfffffff8),
+    record(2n, 1_000_000n, 0),
+  ], [...symbols], 1000, strictMetadata);
+  assert.equal(accepted.semanticPass, true);
+  assert.equal(accepted.wrapCount, 1);
+  assert.equal(accepted.firstSampleIndexZero, true);
+  assert.equal(accepted.droppedFlagsPass, true);
+
+  const wrongStart = hmC095Validation([record(1n, 0n, 0), record(2n, 1_000_000n, 16)], [...symbols], 1000, strictMetadata);
+  assert.equal(wrongStart.semanticPass, false);
+  const badFlags = hmC095Validation([record(0n, 0n, 0), record(2n, 1_000_000n, 16)], [...symbols], 1000, strictMetadata);
+  assert.equal(badFlags.droppedFlagsPass, false);
+  const stalled = hmC095Validation([record(0n, 0n, 1), record(1n, 100_000_000n, 1)], [...symbols], 1000, strictMetadata);
+  assert.equal(stalled.semanticPass, false);
+  const decrease = hmC095Validation([record(0n, 0n, 100), record(1n, 1_000_000n, 90)], [...symbols], 1000, strictMetadata);
+  assert.equal(decrease.unexplainedDecreaseCount, 1);
+  assert.equal(decrease.semanticPass, false);
+
+  const derivedRate = hmC095Validation(
+    [record(0n, 0n, 100), record(1n, 1_000_000n, 108)],
+    [...symbols],
+    1000,
+    strictMetadata,
+  );
+  assert.equal(derivedRate.focIsrFreqHz, 8000);
+  assert.equal(derivedRate.semanticPass, true);
+
+  const strictValidation = (hmC095Oracle?: Record<string, unknown>) => hmC095Validation(
+    [record(0n, 0n, 100), record(1n, 1_000_000n, 108)],
+    [...symbols],
+    1000,
+    { reset: { status: "completed" }, transportStatus: "pass", payloadValidationStatus: "pass", ...(hmC095Oracle ? { hmC095Oracle } : {}) } as never,
+  );
+  assert.equal(strictValidation().semanticPass, false);
+  for (const invalidOracle of [
+    { ...validOracle, focIsrFreqHz: Number.POSITIVE_INFINITY },
+    { ...validOracle, focIsrFreqHz: 1_000_001 },
+    { ...validOracle, rateToleranceRatio: Number.NaN },
+    { ...validOracle, rateToleranceRatio: 1 },
+    { ...validOracle, rateDerivation: { ...validOracle.rateDerivation, source: "nominal-fallback" } },
+    { ...validOracle, rateDerivation: { source: "hm-c095-generated-config", configSha256: {} } },
+  ]) assert.equal(strictValidation(invalidOracle).semanticPass, false);
 });

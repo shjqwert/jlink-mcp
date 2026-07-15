@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { HSS_SAFETY_FALSE, type HssRequestedSymbol, type HssTargetIdentity } from "./hss-contract";
@@ -21,6 +22,12 @@ export const HM_C095_HSS_VARIABLES = [
   { name: "g_hssDbgOffsetM1U" },
   { name: "g_hssDbgOffsetM1V" },
 ] satisfies HssRequestedSymbol[];
+
+interface HmC095Rate {
+  focIsrFreqHz: number;
+  rateToleranceRatio: number;
+  rateDerivation: Record<string, unknown>;
+}
 
 export interface HssCapturePlanInput extends HssTargetIdentityInput {
   dllPath?: string;
@@ -53,10 +60,13 @@ export interface HssCapturePlan {
   planId: string;
   backend: "jlink-hss";
   projectRoot: string;
+  storageRoot: string;
+  evidenceRoot: string;
   target: HssTargetIdentity;
   artifact: {
     file: string;
     mapFile?: string;
+    mapSha256?: string;
     resolver: "elf-dwarf" | "iar-map" | "mixed";
     sha256: string;
   };
@@ -76,8 +86,18 @@ export interface HssCapturePlan {
     planFile: string;
   };
   hmC095: {
-    focIsrFreqHz: 16000;
+    focIsrFreqHz: number;
     expectedCounterDelta: number;
+    counterSymbol: "g_hssDbgCounterFocIsr";
+    counterAddress: string;
+    counterType: "uint32";
+    incrementsPerFocUpdate: 1;
+    modulus: "4294967296";
+    rateToleranceRatio: number;
+    rateDerivation: Record<string, unknown>;
+    observationWindowMs: 100;
+    adjacentDeltaMin: 0;
+    adjacentDeltaMax: number;
   };
   safety: typeof HSS_SAFETY_FALSE;
   startReady: boolean;
@@ -125,7 +145,7 @@ export async function buildHssCapturePlan(
   const resumeBeforeStart = input.resumeBeforeStart ?? false;
   const resetBeforeCapture = input.resetBeforeCapture ?? false;
   const stabilityPolicy = {
-    minimumRecoveryMs: input.minimumRecoveryMs ?? 250,
+    minimumRecoveryMs: input.minimumRecoveryMs ?? 1000,
     timeoutMs: input.timeoutMs ?? 10000,
     pollIntervalMs: input.pollIntervalMs ?? 100,
     requiredConsecutiveRunningChecks: input.requiredConsecutiveRunningChecks ?? 3,
@@ -143,10 +163,13 @@ export async function buildHssCapturePlan(
   const symbols = input.symbols?.length ? input.symbols : HM_C095_HSS_VARIABLES;
   if (symbols.length > 10) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "HSS MVP-A supports at most 10 variables");
   const artifact = await resolveHssDebugArtifact({ artifactFile: input.artifactFile, mapFile: input.mapFile, symbols, cwd });
+  const counter = artifact.symbols.find((symbol) => symbol.name === "g_hssDbgCounterFocIsr");
+  if (!counter || counter.type !== "uint32" || counter.size !== 4) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "HSS requires the dynamically resolved uint32 g_hssDbgCounterFocIsr counter");
+  const hmRate = deriveHmC095Rate(cwd);
   const paths = hssProjectPaths(cwd);
   const captureId = randomUUID();
   const baseDir = input.outputSubdir
-    ? resolveInsideProject(input.outputSubdir, cwd)
+    ? resolveInsideProject(input.outputSubdir, paths.storageRoot)
     : paths.capturesDir;
   const outputDir = join(baseDir, captureId);
   const recordSize = 24 + artifact.symbols.length * 4;
@@ -155,10 +178,13 @@ export async function buildHssCapturePlan(
     planId: randomUUID(),
     backend: "jlink-hss",
     projectRoot: paths.projectRoot,
+    storageRoot: paths.storageRoot,
+    evidenceRoot: paths.evidenceRoot,
     target,
     artifact: {
       file: artifact.artifactFile,
       mapFile: artifact.mapFile,
+      ...(artifact.mapFile ? { mapSha256: createHash("sha256").update(readFileSync(artifact.mapFile)).digest("hex") } : {}),
       resolver: artifact.resolver,
       sha256: artifact.sha256,
     },
@@ -178,8 +204,18 @@ export async function buildHssCapturePlan(
       planFile: join(outputDir, "plan.json"),
     },
     hmC095: {
-      focIsrFreqHz: 16000,
-      expectedCounterDelta: 16000 / requestedRateHz,
+      focIsrFreqHz: hmRate.focIsrFreqHz,
+      expectedCounterDelta: hmRate.focIsrFreqHz / requestedRateHz,
+      counterSymbol: "g_hssDbgCounterFocIsr",
+      counterAddress: counter.address,
+      counterType: "uint32",
+      incrementsPerFocUpdate: 1,
+      modulus: "4294967296",
+      rateToleranceRatio: hmRate.rateToleranceRatio,
+      rateDerivation: hmRate.rateDerivation,
+      observationWindowMs: 100,
+      adjacentDeltaMin: 0,
+      adjacentDeltaMax: Math.ceil((hmRate.focIsrFreqHz / requestedRateHz) * (1 + hmRate.rateToleranceRatio)) + 1,
     },
     safety: HSS_SAFETY_FALSE,
     startReady,
@@ -190,4 +226,64 @@ export async function buildHssCapturePlan(
   };
   await mkdir(outputDir, { recursive: true });
   return plan;
+}
+
+function deriveHmC095Rate(cwd: string): HmC095Rate {
+  const files = {
+    mcu: join(cwd, "EB_Project", "config", "Mcu.xdm"),
+    parcc: join(cwd, "Appl", "Source", "BSW", "Src", "Parcc_Drv_PBcfg.c"),
+    pwm: join(cwd, "Appl", "Source", "BSW", "Src", "Mcpwm_Pwm_Drv_PBcfg.c"),
+    tdg: join(cwd, "Appl", "Source", "BSW", "Src", "Tdg_Adc_Drv_PBcfg.c"),
+    tmu: join(cwd, "Appl", "Source", "BSW", "Src", "Tmu_Drv_Cfg.c"),
+  };
+  if (!Object.values(files).every(existsSync)) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "HM_C095 timing configuration is incomplete");
+  const text = Object.fromEntries(Object.entries(files).map(([name, file]) => [name, readFileSync(file, "utf8")])) as Record<keyof typeof files, string>;
+  const number = (source: string, pattern: RegExp, label: string) => {
+    const value = Number(source.match(pattern)?.[1]);
+    if (!Number.isFinite(value) || value <= 0) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, `HM_C095 timing ${label} is unavailable`);
+    return value;
+  };
+  const parccDivider = (module: "MCPWM1" | "TDG1") => number(
+    text.parcc,
+    new RegExp(`Start of\\s+PARCC_${module}[\\s\\S]*?[Cc]lock divider[\\s\\S]*?ClockDividerType\\)(\\d+)U`),
+    `${module} PARCC divider`,
+  ) + 1;
+  const foscHz = number(text.mcu, /McuFOSCClockFrequency[^>]*?value="([0-9.E+-]+)"/, "FOSC frequency");
+  const pwmPeriod = number(text.pwm, /Pwm_Drv_I1_Counter0_Cfg[\s\S]*?\.PwmPeriod\s*=\s*(\d+)U/, "PWM1 period");
+  const pwmDivider = number(text.pwm, /Pwm_Drv_Inst1_Cfg[\s\S]*?\.ClkDiv\s*=\s*MCPWM_PWM_DRV_CLK_DIVIDE_(\d+)/, "PWM1 divider");
+  const tdgPrescalerCode = number(text.tdg, /Tdg_Adc_Drv_Config_1[\s\S]*?ClockDivideType\)(\d+)U/, "TDG1 prescaler code");
+  const tdgPrescaler = 2 ** tdgPrescalerCode;
+  const tdgOffset = number(text.tdg, /DelayOutputConfig_Group1_Channel0[\s\S]*?\{[\s\S]*?TDG_ADC_DRV_DELAY_OUTPUT_0,[\s\S]*?(\d+)U/, "TDG1 offset");
+  const tdgMod = number(text.tdg, /Tdg_Adc_Drv_Config_1[\s\S]*?(\d+)U,\s*\/\* ModulateValue \*\//, "TDG1 modulator");
+  if (!/MCPWM_PWM_DRV_MODE_COMBINE_SYM_CENTER_ALIGNED/.test(text.pwm)
+      || !/TMU_DRV_INPUT_CHANNEL_MCPWM1_INIT_TRIG0[\s\S]*?TMU_DRV_OUTPUT_CHANNEL_TDG1_TRIG_IN/.test(text.tmu)
+      || !/Tdg_Adc_Drv_GroupConfig_1[\s\S]*?\(boolean\)FALSE/.test(text.tdg)
+      || tdgOffset > tdgMod) {
+    throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "HM_C095 timing trigger topology is unsupported");
+  }
+  const pwmHz = foscHz / parccDivider("MCPWM1") / pwmDivider / (2 * pwmPeriod);
+  const tdgTickHz = foscHz / parccDivider("TDG1") / tdgPrescaler;
+  const triggerStride = Math.ceil(((tdgOffset + 1) / tdgTickHz) * pwmHz);
+  const focIsrFreqHz = pwmHz / triggerStride;
+  if (!Number.isSafeInteger(focIsrFreqHz) || triggerStride < 1) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "HM_C095 derived counter rate is not a safe integer");
+  return {
+    focIsrFreqHz,
+    rateToleranceRatio: 0.5,
+    rateDerivation: {
+      source: "hm-c095-generated-config",
+      foscHz,
+      pwmParccDivider: parccDivider("MCPWM1"),
+      pwmDivider,
+      pwmPeriod,
+      pwmCenterAlignedFactor: 2,
+      pwmHz,
+      tdgParccDivider: parccDivider("TDG1"),
+      tdgPrescaler,
+      tdgOffset,
+      tdgMod,
+      triggerStride,
+      formula: "fCounter=fFOSC/(pwmParcc*pwmDivider*2*pwmPeriod)/ceil((tdgOffset+1)*fPWM/(fFOSC/tdgParcc/tdgPrescaler))",
+      configSha256: Object.fromEntries(Object.entries(files).map(([name, file]) => [name, createHash("sha256").update(readFileSync(file)).digest("hex")])),
+    },
+  };
 }

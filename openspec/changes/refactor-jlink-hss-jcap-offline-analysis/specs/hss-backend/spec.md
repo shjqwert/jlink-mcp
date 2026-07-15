@@ -2,11 +2,11 @@
 
 ### Requirement: Trust validation uses one local command
 
-`jlink-mcp trust validate` SHALL be the sole trust-validation flow. Outside the MCP catalog, it SHALL validate the exact project/DLL/helper/adapter/script-mode/cache-script/target/probe/suite tuple, run bounded HSS validation, display the result, require one local-user confirmation, and atomically persist a Trust Profile in the project's external user-local trust namespace. Agent, UI and MCP tools SHALL NOT elevate trust.
+`jlink-mcp trust validate` SHALL be the sole trust-validation flow. Outside the MCP catalog, it SHALL validate the exact project/DLL/helper/adapter/script-mode/cache-script/target/probe/suite tuple, run bounded HSS validation, display the result, require either local-user confirmation or an explicit `--user-authorized true` supplied under direct user instruction, and atomically persist a Trust Profile in the project's external user-local trust namespace. UI and MCP tools SHALL NOT elevate trust.
 
 #### Scenario: runtime validation succeeds
 
-- **WHEN** a local user confirms a passing `trust validate` result
+- **WHEN** a local user confirms a passing `trust validate` result or supplies explicit direct authorization for `--user-authorized true`
 - **THEN** the exact Runtime Bundle is saved in the Trust Profile
 - **AND** a changed identity requires validation again.
 
@@ -19,6 +19,16 @@ HSS SHALL accept only `script.mode=none|file`. `none` explicitly selects no scri
 - **WHEN** the original file changes after its cached copy is trusted
 - **THEN** the current execution uses the cached verified copy
 - **AND** selecting the changed source requires a new validation.
+
+### Requirement: Target project and writable HSS roots are separate
+
+HSS SHALL bind Trust Profile, target selection, OUT and MAP resolution to the canonical real `projectRoot`, while capture/export/temp data use an explicit external `storageRoot` and audit/session evidence uses an explicit external `evidenceRoot`. Both writable roots SHALL be rejected when they resolve to `projectRoot` or a descendant. Production plans and metadata SHALL record all three roots.
+
+#### Scenario: read-only target project is used for capture planning
+
+- **WHEN** HSS plans or runs against a target project with external storage and evidence roots
+- **THEN** every capture, temporary, export, audit and session file is created outside the target project
+- **AND** an automated before/after relative-path manifest and per-file SHA-256 snapshot is unchanged.
 
 ### Requirement: HSS uses one validated Windows x64 DLL path
 
@@ -60,7 +70,9 @@ Any missing external profile, project-namespace mismatch, tuple mismatch, change
 
 When `resetBeforeCapture=true`, the resolved HSS capture plan SHALL contain a single-use R3 reset operation bound to canonical reset arguments, target identity, Artifact/layout/policy hashes, session, expiry/TTL, operation digest, and capture ID. The execution order SHALL be target/OUT/MAP/runtime identity resolution, trusted script-mode/cache identity validation, J-Link main-backend GetCaps, target-state check, bound reset, bounded stabilization, HSS Start/Read/Stop, then reset/capture events and append-safe audit. It SHALL reuse the existing J-Link CPU-control executor without renaming or changing the input/output contract of `halt`, `resume`, or `reset`.
 
-The resolved stabilization policy SHALL contain `minimumRecoveryMs` (`0..60000`), `timeoutMs` (`1..60000`), `pollIntervalMs` (`10..1000`), and `requiredConsecutiveRunningChecks` (`2..100`). Stabilization SHALL require the minimum recovery interval, unchanged DLL/helper/adapter/script identities, and the configured consecutive not-halted observations. The resolved values SHALL be stored in the plan and capture provenance.
+The resolved stabilization policy SHALL contain the dynamically resolved counter address, `uint32` modulus, expected counter rate and tolerance, `minimumRecoveryMs` (`0..60000`), `timeoutMs` (`1..60000`), `pollIntervalMs` (`10..1000`), and `requiredConsecutiveRunningChecks` (`2..100`). After the capture helper's own `JLINKARM_Connect`, the same DLL connection SHALL use a single-element `JLINKARM_ReadMemU32` read with per-element status and require the minimum recovery interval plus the configured consecutive running, modular-forward, in-rate windows before `JLINK_HSS_Start`. A non-wrapping decrease within the recovery interval and before a running window begins SHALL reset the counter baseline and consecutive count as initialization restart evidence without extending the timeout; the same decrease after recovery or after a running window begins SHALL fail closed. Timeout, failed/status-invalid read or target halt SHALL perform no HSS Start. Success and failure SHALL report check count, elapsed time, first/last values and rate evidence. The resolved values SHALL be stored in the plan and capture provenance.
+
+The HM_C095 default `minimumRecoveryMs` SHALL be 1000ms based on the observed approximately 305ms connect-time initialization restart and SHALL remain caller-overridable within the validated bounds.
 
 #### Scenario: reset and stabilization succeed
 
@@ -79,7 +91,7 @@ The resolved stabilization policy SHALL contain `minimumRecoveryMs` (`0..60000`)
 
 HSS acceptance SHALL use an independently predictable monotonic counter, fixed-step sequence, or known waveform and SHALL verify decoded values, sample order, monotonic timebase, and dropped-sample flags rather than only proving that bytes were read.
 
-For the named HM_C095 acceptance project, the primary oracle SHALL be `g_hssDbgCounterFocIsr`, dynamically resolved from the selected OUT/MAP. The firmware increments this `uint32` once per `AppCurrentSenseHssFastUpdate`. The accepted plan SHALL record the FOC scheduling/rate evidence, the resulting modular-delta lower/upper bounds, the observation window and any permitted repeated-sample tolerance. For adjacent values, `delta=(current-previous) mod 2^32` SHALL satisfy those bounds; a wrap SHALL be accepted only when the same modular bound holds, at least one positive delta SHALL occur within the observation window, and an unexplained non-wrap decrease or out-of-bound delta SHALL fail. Other variables MAY provide diagnostics but SHALL NOT override the counter result. No symbol address or target default SHALL be hard-coded.
+For the named HM_C095 acceptance project, the primary oracle SHALL be `g_hssDbgCounterFocIsr`, dynamically resolved from the selected OUT/MAP. The firmware increments this `uint32` once per ADC1 DMA completion. The accepted plan SHALL derive the counter rate from the selected build's FOSC, MCPWM PARCC/divider/center-aligned period and TDG PARCC/prescaler/delay configuration, record the inputs, formula and source hashes, and distinguish the upstream 16kHz PWM rate from the resulting 8kHz DMA counter rate. It SHALL record the resulting modular-delta lower/upper bounds, the observation window and bounded repeated-sample tolerance. For adjacent values, `delta=(current-previous) mod 2^32` SHALL satisfy those bounds; a wrap SHALL be accepted only when the same modular bound holds, at least one positive delta SHALL occur within the observation window, and an unexplained non-wrap decrease or out-of-bound delta SHALL fail. Other variables MAY provide diagnostics but SHALL NOT override the counter result. No symbol address, target default or fixed product rate SHALL be hard-coded.
 
 For `resetBeforeCapture`, the oracle SHALL begin at sample index 0 of the post-stability capture. It SHALL ignore historical pre-reset data only because that data is outside the new capture; it SHALL NOT drop a post-stability capture prefix, ignore a non-wrapping decrease, or relax duplicate, decreasing-index, gap, dropped-flag, timebase, or read-error rules.
 
