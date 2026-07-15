@@ -10,14 +10,21 @@ import { ProcessManager } from "../utils/process-manager";
 import { log } from "../utils/logger";
 import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } from "./analysis/tools";
 import { evidenceForCodegraphTool } from "./bridge/tools";
-import { CaptureService } from "./capture";
 import { HssCaptureService } from "./hss/hss-capture-service";
+import { hssProjectPaths } from "./hss/project-paths";
+import { JcapBoundsError, JcapCaptureNotFoundError, JcapV0QueryService } from "./jcap/jcap-v0";
 import type { HssVariableWritePlanInput } from "./hss/hss-write-plan";
 import type { HssVariableWriteExecuteInput } from "./hss/hss-write-execute";
 import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
 import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
 import { RspMemoryIo } from "./rtt-channel/rsp-memory-transport";
 import { traceagentDecodeStream, traceagentWriteSignal } from "./rtt-protocols/traceagent-tools";
+
+export interface JLinkMcpServerOptions {
+  cwd?: string;
+  storageRoot?: string;
+  evidenceRoot?: string;
+}
 
 export class JLinkMcpServer {
   private server: McpServer;
@@ -26,10 +33,10 @@ export class JLinkMcpServer {
   private gdb: GDBClient;
   private rttClient: RTTClient;
   private telnetProxy: TelnetProxy;
-  private capture: CaptureService;
+  private jcapCapture: JcapV0QueryService;
   private hssCapture: HssCaptureService;
 
-  constructor(probeConfig?: ProbeFactoryConfig, rttPort?: number, telnetConfig?: { listenPort?: number; sourceHost?: string; sourcePort?: number }, gdbPath?: string) {
+  constructor(probeConfig?: ProbeFactoryConfig, rttPort?: number, telnetConfig?: { listenPort?: number; sourceHost?: string; sourcePort?: number }, gdbPath?: string, options: JLinkMcpServerOptions = {}) {
     this.processManager = new ProcessManager();
     this.probe = createProbeBackend(
       probeConfig || { type: "jlink" },
@@ -38,8 +45,8 @@ export class JLinkMcpServer {
 
     const effectiveGdbPath = gdbPath || "arm-none-eabi-gdb";
     this.gdb = new GDBClient(effectiveGdbPath, () => this.probe.getExclusiveOwner() ? `Probe is exclusively owned by ${this.probe.getExclusiveOwner()}` : null);
-    this.capture = new CaptureService(this.probe, this.processManager, effectiveGdbPath);
-    this.hssCapture = new HssCaptureService(this.probe);
+    this.hssCapture = new HssCaptureService(this.probe, options);
+    this.jcapCapture = new JcapV0QueryService(hssProjectPaths(options.cwd).capturesDir);
     const effectiveRttPort = rttPort ?? this.probe.getRTTPort();
     this.rttClient = new RTTClient("localhost", effectiveRttPort > 0 ? effectiveRttPort : 19021);
     this.telnetProxy = new TelnetProxy(
@@ -551,7 +558,7 @@ export class JLinkMcpServer {
     );
 
     this.registerAnalysisTools();
-    this.registerCaptureTools();
+    this.registerJcapCaptureTools();
     this.registerRttChannelTools();
     this.registerHssCaptureTools();
 
@@ -749,65 +756,46 @@ export class JLinkMcpServer {
     );
   }
 
-  private registerCaptureTools(): void {
+  private registerJcapCaptureTools(): void {
     const result = async (operation: () => Promise<unknown>) => {
       try {
-        return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
+        return { content: [{ type: "text" as const, text: JSON.stringify(await operation()) }] };
       } catch (error) {
-        return { content: [{ type: "text" as const, text: `ERROR: ${error instanceof Error ? error.message : String(error)}` }] };
+        const code = error instanceof JcapBoundsError
+          ? "bounds_error"
+          : error instanceof JcapCaptureNotFoundError
+            ? "capture_not_found"
+            : "jcap_error";
+        return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", code, message: error instanceof Error ? error.message : String(error) }) }] };
       }
     };
 
-    this.server.tool(
-      "capture_prepare",
-      "Resolve reviewed ELF scalars, verify target Flash/running-state/background RSP reads, calibrate at the configured SWD rate, and arm one capture. Never starts the motor or resets on preparation failure.",
-      {
-        elfFile: z.string().describe("Absolute path to the exact target ELF"),
-        configFile: z.string().describe("Absolute path to the user-confirmed, Git-tracked .jlink-mcp.json"),
-        symbols: z.array(z.object({
-          name: z.string().min(1).max(255).describe("Global/static scalar or fixed member selector"),
-          alias: z.string().min(1).max(127).optional(),
-          unit: z.string().max(63).optional(),
-        }).strict()).min(1).max(32),
-        rateHz: z.number().int().min(1).max(1000).optional(),
-        durationSec: z.number().int().min(1).max(600).optional(),
-        resetOnFailure: z.boolean().optional().describe("Defaults false; permits one hardware reset only after capture begins and verified stop fails"),
-        outputDir: z.string().optional().describe("Optional writable absolute output directory"),
-      },
-      async (input) => result(() => this.capture.prepare(input)),
-    );
-
-    const sessionSchema = { sessionId: z.string().uuid().describe("Exact capture session ID") };
-    this.server.tool("capture_start", "Start sampling for an armed session. This does not start the motor.", sessionSchema,
-      async ({ sessionId }) => result(() => this.capture.start(sessionId)));
-    this.server.tool("capture_status", "Read capture state and metrics without touching another probe session.", sessionSchema,
-      async ({ sessionId }) => result(() => this.capture.status(sessionId)));
-    this.server.tool("capture_stop", "Safely stop a session; if the motor is verified running, write and verify the reviewed stop mapping before post-stop capture.", sessionSchema,
-      async ({ sessionId }) => result(() => this.capture.stop(sessionId)));
-    this.server.tool(
-      "capture_control",
-      "Send only the reviewed start/stop command. Invoke start only after the user explicitly requested motor operation in this current session; sampling must already be running. No address or replacement value is accepted.",
-      { sessionId: z.string().uuid(), command: z.enum(["start", "stop"]) },
-      async ({ sessionId, command }) => result(() => this.capture.control(sessionId, command)),
-    );
-    this.server.tool(
-      "capture_query",
-      "Return at most 2000 ordered min/max/average time buckets from a terminal capture.",
-      {
-        sessionId: z.string().uuid(),
-        variables: z.array(z.string()).min(1).max(32).optional(),
-        startSec: z.number().nonnegative().optional(),
-        endSec: z.number().nonnegative().optional(),
-        buckets: z.number().int().min(1).max(2000).optional(),
-      },
-      async (input) => result(() => this.capture.query(input)),
-    );
-    this.server.tool("capture_export", "Export one terminal capture to non-overwriting CSV plus same-name JSON metadata.", sessionSchema,
-      async ({ sessionId }) => result(() => this.capture.export(sessionId)));
-    this.server.tool("capture_list", "List persisted captures in the default or explicitly selected absolute output directory.",
-      { outputDir: z.string().optional() }, async ({ outputDir }) => result(() => this.capture.list(outputDir)));
-    this.server.tool("capture_delete", "Delete exactly one terminal session; wildcards, bulk deletion, active sessions, and path escape are rejected.", sessionSchema,
-      async ({ sessionId }) => result(() => this.capture.delete(sessionId)));
+    const captureId = { captureId: z.string().uuid().describe("Indexed JCAP capture UUID under the configured captures root") };
+    this.server.tool("capture_list", "List Indexed JCAP v0 packages only. Default 50, maximum 100, cursor at most 1024 bytes, response at most 256 KiB; rejects bounds and has no hardware side effects.", {
+      limit: z.number().int().min(1).max(100).optional(),
+      cursor: z.string().max(1024).optional(),
+    }, async (input) => result(() => this.jcapCapture.list(input)));
+    this.server.tool("capture_summary", "Read an Indexed JCAP v0 summary (maximum 1 MiB). Returns independent captureState/indexStatus and structured not_ready or rebuild_required; never reads full raw or touches hardware.", captureId,
+      async (input) => result(() => this.jcapCapture.summary(input)));
+    this.server.tool("capture_series", "Read Indexed JCAP v0 buckets from capture.db only. Requires 1..32 variables, decimal u64 tick window, 1..4096 buckets, at most 65536 points and 8 MiB; rejects bounds without clamping and has no hardware side effects.", {
+      ...captureId,
+      variables: z.array(z.string().min(1).max(256)).min(1).max(32),
+      startTick: z.string().regex(/^\d+$/),
+      endTick: z.string().regex(/^\d+$/),
+      bucketCount: z.number().int().min(1).max(4096),
+    }, async (input) => result(() => this.jcapCapture.series(input)));
+    this.server.tool("capture_event_window", "Read an Indexed JCAP v0 event window from capture.db only. Requires an event UUID; each side 0..60000 ms, at most 16 variables, 2048 buckets, 128 events and 4 MiB; rejects bounds and has no hardware side effects.", {
+      ...captureId,
+      eventId: z.string().uuid(),
+      variables: z.array(z.string().min(1).max(256)).max(16),
+      beforeMs: z.number().int().min(0).max(60000),
+      afterMs: z.number().int().min(0).max(60000),
+      bucketCount: z.number().int().min(1).max(2048),
+    }, async (input) => result(() => this.jcapCapture.eventWindow(input)));
+    this.server.tool("capture_index_rebuild", "Rebuild only capture.db from validated immutable JCAP v0 raw prefixes. Active/finalizing captures return not_ready; raw is never modified and no hardware is accessed.", captureId,
+      async (input) => result(() => this.jcapCapture.rebuild(input)));
+    this.server.tool("capture_export", "Explicitly create package/export/samples.csv from a ready Indexed JCAP v0 database. Refuses overwrite, traversal, active/finalizing captures and hardware access; default query/rebuild paths create no export.", captureId,
+      async (input) => result(() => this.jcapCapture.exportCsv(input)));
   }
 
   private registerRttChannelTools(): void {
@@ -1141,14 +1129,9 @@ Then call **start_debug_session** to begin.
 - halt/resume/reset/step - CPU control
 - flash/erase - Firmware programming
 
-## Variable capture and motor safety
-For continuous variables, never loop **gdb_command**. Use this exact sequence:
-1. **capture_prepare** with the exact ELF and user-confirmed, Git-tracked .jlink-mcp.json
-2. Confirm **armed**, then call **capture_start**
-3. Call **capture_control start** only when the user explicitly requested motor operation in this current session
-4. Use **capture_control stop** or **capture_stop** and verify the stopped state
-5. Use **capture_query** and **capture_export** for results
-Never infer control addresses/values or alter SWD speed, rate, variables, or backend after calibration failure.
+## HSS capture and indexed JCAP queries
+For continuous variables, never loop **gdb_command**. Use **hss_capture_plan**, **hss_capture_start**, **hss_capture_status**, and **hss_capture_stop** for the production capture lifecycle. After terminal finalization, use bounded **capture_summary**, **capture_series**, **capture_event_window**, **capture_index_rebuild**, and explicit **capture_export** against Indexed JCAP; these query tools do not access hardware.
+Never infer control addresses/values or alter SWD speed, rate, variables, or backend after validation failure.
 
 ## ARM Cortex-M memory map:
 - 0x00000000: Vector table
@@ -1194,7 +1177,6 @@ Start by checking list_devices, then set_device, then start_debug_session.` }}],
 
   async dispose(): Promise<void> {
     await this.hssCapture.dispose();
-    await this.capture.dispose();
     this.gdb.disconnect();
     this.rttClient.disconnect();
     this.telnetProxy.stop();

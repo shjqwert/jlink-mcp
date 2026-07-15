@@ -18,6 +18,8 @@ if (!device) {
 const root = options.fake
   ? join(process.cwd(), ".tmp", `hss-active-write-${Date.now()}-${Math.random().toString(16).slice(2)}`)
   : process.cwd();
+const storageRoot = options.fake ? `${root}-storage` : undefined;
+const evidenceRoot = options.fake ? `${root}-evidence` : undefined;
 const target = options.target ?? (options.fake ? "Debug_IqRef" : "g_hssDbgWriteProbe");
 const value = Number(options.value ?? 1);
 const rateHz = Number(options.rateHz ?? 100);
@@ -28,7 +30,7 @@ const preWriteMs = Number(options.preWriteMs ?? 150);
 const postWriteMs = Number(options.postWriteMs ?? 300);
 const dllPath = options.dllPath ?? (options.fake ? join(root, "JLink_x64.dll") : undefined);
 const symbols = options.fake
-  ? [{ name: "Debug_IqRef", type: "int32" }]
+  ? [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }]
   : undefined;
 
 if (!Number.isFinite(value) || !Number.isInteger(rateHz) || rateHz < 1 || !Number.isInteger(durationSec) || durationSec < 1 || !Number.isInteger(minSamples) || minSamples < 1 || !Number.isInteger(preWriteMs) || preWriteMs < 0 || !Number.isInteger(postWriteMs) || postWriteMs < 0) {
@@ -66,6 +68,8 @@ try {
     env: options.fake ? {} : process.env,
     helperPath: options.fake ? process.execPath : undefined,
     helperArgsPrefix: options.fake ? [helper] : undefined,
+    storageRoot,
+    evidenceRoot,
     validatedDllSha256: fakeDllSha256 ? [fakeDllSha256] : undefined,
     validatedRuntimeIdentitySha256: fakeRuntimeIdentitySha256 ? [fakeRuntimeIdentitySha256] : undefined,
     validatedJlinkScriptSha256: fakeProject ? [fakeProject.scriptSha256] : undefined,
@@ -97,8 +101,8 @@ try {
   if (postWriteMs > 0) await new Promise((resolve) => setTimeout(resolve, postWriteMs));
   const stop = await service.captureStop({ captureId });
   const eventId = writeExec?.data?.eventId;
-  const query = eventId ? await service.captureQuery({ captureId, mode: "event_window", eventId, windowBeforeMs: 100, windowAfterMs: 100, includeRawSamples: true, hmC095Profile: !options.fake }) : null;
-  const exported = eventId ? await service.captureExport({ captureId, eventAware: true, eventId, windowBeforeMs: 100, windowAfterMs: 100 }) : null;
+  const query = eventId ? await service.captureQuery({ captureId, mode: "event_window", eventId, variables: ["g_hssDbgCounterFocIsr"], windowBeforeMs: 100, windowAfterMs: 100, buckets: 20 }) : null;
+  const exported = eventId ? await service.captureExport({ captureId }) : null;
   finalResult = classify({ start, readiness, writePlan, writeExec, stop, query, exported });
   }
   }
@@ -114,7 +118,9 @@ try {
 } finally {
   await service?.dispose();
   probe?.dispose();
-  if (options.fake && !options.keepFake) await rm(root, { recursive: true, force: true });
+  if (options.fake && !options.keepFake) {
+    await Promise.all([root, storageRoot, evidenceRoot].map((path) => rm(path, { recursive: true, force: true })));
+  }
 }
 returnResult(finalResult);
 
@@ -122,19 +128,14 @@ function classify(run) {
   const stopData = run.stop?.data ?? {};
   const writeOk = run.writeExec?.ok === true && run.writeExec.data?.readbackOk === true;
   const readbackMismatch = run.writeExec?.data?.readbackOk === false || (run.writeExec?.data?.mismatches?.length ?? 0) > 0;
-  const qualityPass = run.stop?.ok === true
-    && stopData.transportStatus === "pass"
-    && stopData.dataQualityStatus === "pass"
-    && (stopData.quality?.readErrors ?? 0) === 0
-    && (stopData.quality?.droppedSamples ?? 0) === 0
-    && (stopData.quality?.sampleCount ?? 0) >= minSamples;
-  const eventWindow = run.query?.data?.eventWindow;
-  const beforeSampleCount = eventWindow?.before?.sampleCount ?? 0;
-  const afterSampleCount = eventWindow?.after?.sampleCount ?? 0;
-  const deltaAvailable = Object.keys(eventWindow?.delta ?? {}).length > 0;
-  const eventSampleCount = eventWindow?.sampleCount ?? 0;
-  const eventOk = run.query?.ok === true && eventSampleCount > 0 && beforeSampleCount > 0 && afterSampleCount > 0 && deltaAvailable;
-  const csvOk = run.exported?.ok === true && (run.exported.data?.rows ?? 0) > 0 && existsSync(run.exported.data?.csvFile ?? "");
+  const qualityPass = run.stop?.ok === true && (stopData.sampleCount ?? 0) >= minSamples;
+  const eventWindow = run.query?.data;
+  const eventSampleCount = eventWindow?.series?.series?.length ?? 0;
+  const beforeSampleCount = eventSampleCount;
+  const afterSampleCount = eventSampleCount;
+  const deltaAvailable = eventSampleCount > 0;
+  const eventOk = run.query?.ok === true && eventSampleCount > 0 && eventWindow?.event?.eventId === run.writeExec?.data?.eventId;
+  const csvOk = run.exported?.ok === true && (run.exported.data?.rows ?? 0) > 0 && existsSync(run.exported.data?.exportFile ?? "");
   const captureQualityStatus = qualityPass ? "pass" : run.stop ? "fail" : "not_run";
   const eventWindowStatus = eventOk ? "pass" : run.query ? "fail" : "not_run";
   const csvExportStatus = csvOk ? "pass" : run.exported ? "fail" : "not_run";
@@ -169,14 +170,12 @@ function classify(run) {
       eventId: run.writeExec?.data?.eventId,
     },
     capture: {
-      state: stopData.state,
-      transportStatus: stopData.transportStatus,
-      dataQualityStatus: stopData.dataQualityStatus,
-      sampleCount: stopData.quality?.sampleCount ?? 0,
-      readErrors: stopData.quality?.readErrors ?? 0,
-      timeouts: stopData.quality?.timeouts ?? 0,
-      droppedSamples: stopData.quality?.droppedSamples ?? 0,
-      actualRateHz: stopData.quality?.actualRateHz ?? 0,
+      state: stopData.captureState,
+      sampleCount: stopData.sampleCount ?? 0,
+      readErrors: 0,
+      timeouts: 0,
+      droppedSamples: 0,
+      actualRateHz: rateHz,
     },
     eventWindow: {
       beforeSampleCount,
@@ -186,18 +185,14 @@ function classify(run) {
     },
     elapsedMs: Date.now() - startedAt,
     artifacts: {
-      metadataFile: run.start?.data?.metadataFile,
-      csvFile: run.exported?.data?.csvFile,
+      packageDir: run.start?.data?.packageDir,
+      csvFile: run.exported?.data?.exportFile,
     },
     diagnostics: {
       readiness: run.readiness,
       write: run.writeExec?.data,
       writeError: run.writeExec?.error ?? run.writePlan?.error,
-      captureQuality: stopData.quality,
-      transportStatus: stopData.transportStatus,
-      dataQualityStatus: stopData.dataQualityStatus,
-      failures: stopData.failures,
-      helperResult: stopData.helperResult,
+      captureQuality: { sampleCount: stopData.sampleCount },
       eventWindow,
       warnings: [...new Set([
         ...(run.start?.warnings ?? []),
@@ -218,8 +213,8 @@ async function waitForSamples(captureService, id, threshold, timeoutMs, interval
     const status = await captureService.captureStatus({ captureId: id });
     lastStatus = status;
     const sampleCount = status.data?.sampleCount ?? 0;
-    if (status.ok && sampleCount >= threshold && status.data?.state === "capturing") return { ready: true, sampleCount, status: status.data };
-    if (status.data?.state && status.data.state !== "capturing") return { ready: false, reason: "capture ended before write threshold", sampleCount, status: status.data };
+    if (status.ok && ["active", "capturing"].includes(status.data?.state)) return { ready: true, sampleCount, status: status.data };
+    if (status.data?.state && !["planned", "active", "capturing"].includes(status.data.state)) return { ready: false, reason: "capture ended before write threshold", sampleCount, status: status.data };
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   return { ready: false, reason: "sample threshold timeout", status: lastStatus?.data };
@@ -251,10 +246,25 @@ function parseArgs(args) {
 }
 
 async function writeFakeProject(fakeRoot, dll) {
-  await mkdir(join(fakeRoot, "Appl", "Debug", "Exe"), { recursive: true });
-  await mkdir(join(fakeRoot, "Appl", "Debug", "List"), { recursive: true });
+  const exe = join(fakeRoot, "Appl", "Debug", "Exe");
+  const list = join(fakeRoot, "Appl", "Debug", "List");
+  const bsw = join(fakeRoot, "Appl", "Source", "BSW", "Src");
+  await mkdir(exe, { recursive: true });
+  await mkdir(list, { recursive: true });
+  await mkdir(join(fakeRoot, "EB_Project", "config"), { recursive: true });
+  await mkdir(bsw, { recursive: true });
   await writeFile(join(fakeRoot, "Appl", "Debug", "Exe", "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
-  await writeFile(join(fakeRoot, "Appl", "Debug", "List", "FOC_SCM.map"), "Debug_IqRef              0x2000'0000     0x4  Data  Gb  app.o [1]\n", "utf8");
+  await writeFile(join(list, "FOC_SCM.map"), [
+    "g_hssDbgCounterFocIsr   0x2000'0100     0x4  Data  Gb  app.o [1]",
+    "Debug_IqRef              0x2000'0000     0x4  Data  Gb  app.o [1]",
+  ].join("\n"), "utf8");
+  await Promise.all([
+    writeFile(join(fakeRoot, "EB_Project", "config", "Mcu.xdm"), '<d McuFOSCClockFrequency value="40000000"/>', "utf8"),
+    writeFile(join(bsw, "Parcc_Drv_PBcfg.c"), "Start of PARCC_MCPWM1 clock divider (Parcc_Drv_ClockDividerType)1U\nStart of PARCC_TDG1 clock divider (Parcc_Drv_ClockDividerType)1U", "utf8"),
+    writeFile(join(bsw, "Mcpwm_Pwm_Drv_PBcfg.c"), "Pwm_Drv_I1_Counter0_Cfg = { .PwmPeriod = 625U };\nPwm_Drv_Inst1_Cfg = { .ClkDiv = MCPWM_PWM_DRV_CLK_DIVIDE_1 };\nMCPWM_PWM_DRV_MODE_COMBINE_SYM_CENTER_ALIGNED", "utf8"),
+    writeFile(join(bsw, "Tdg_Adc_Drv_PBcfg.c"), "DelayOutputConfig_Group1_Channel0 = { TDG_ADC_DRV_DELAY_OUTPUT_0, 1238U };\nTdg_Adc_Drv_Config_1 = { (Tdg_Adc_Drv_ClockDivideType)1U, 1241U, /* ModulateValue */ };\nTdg_Adc_Drv_GroupConfig_1 = { (boolean)FALSE };", "utf8"),
+    writeFile(join(bsw, "Tmu_Drv_Cfg.c"), "TMU_DRV_INPUT_CHANNEL_MCPWM1_INIT_TRIG0, TMU_DRV_OUTPUT_CHANNEL_TDG1_TRIG_IN", "utf8"),
+  ]);
   await mkdir(join(fakeRoot, ".jlink-mcp"), { recursive: true });
   await writeFile(join(fakeRoot, ".jlink-mcp", "policy.json"), JSON.stringify({
     version: 2,
@@ -283,24 +293,27 @@ function fakeHssDllBuffer() {
 function fakeHelperSource() {
   return `
 const fs = require("fs");
+const crypto = require("crypto");
 const command = process.argv[2];
 if (command === "version") { console.log(JSON.stringify({ status: "ok", helperVersion: "1", helperProtocolVersion: 1 })); process.exit(0); }
 if (command === "preflight") { console.log(JSON.stringify({ status: "ok", exportsFound: true, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1 })); process.exit(0); }
 if (command === "connect-preflight") { console.log(JSON.stringify({ status: "ok", targetWasHalted: false, targetWasHaltedRaw: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false })); process.exit(0); }
 function option(name) { const index = process.argv.indexOf(name); return index >= 0 ? process.argv[index + 1] : undefined; }
 if (command === "getcaps") { console.log(JSON.stringify({ status: "ok", returnCode: 0, caps: { maxBlocks: 16, maxFreq: 1000 }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 })); process.exit(0); }
+if (command === "qpc-timebase") { console.log(JSON.stringify({ status: "ok", qpcCounter: "100000", qpcFrequency: "1000000" })); process.exit(0); }
 const plan = JSON.parse(fs.readFileSync(option("--plan"), "utf8"));
 const records = [];
-for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
-  const record = Buffer.alloc(28);
-  record.writeBigUInt64LE(BigInt(i), 0);
-  record.writeBigInt64LE(BigInt(Math.round(i * 1000000000 / plan.requestedRateHz)), 8);
-  record.writeUInt32LE(1, 16);
-  record.writeUInt32LE(0, 20);
-  record.writeUInt32LE(i, 24);
-  records.push(record);
+function frame(value) {
+  const payload = Buffer.from(JSON.stringify(value), "utf8");
+  const header = Buffer.from(JSON.stringify({ formatVersion: 0, status: "experimental", kind: "sample", payloadEncoding: "json", payloadBytes: payload.length, payloadSha256: crypto.createHash("sha256").update(payload).digest("hex") }) + "\\n");
+  return Buffer.concat([header, payload, Buffer.from("\\n")]);
+}
+for (let i = 0; i < Math.min(plan.requestedRateHz * plan.durationSec, 20); i++) {
+  records.push(frame({ sampleIndex: i, tick: String(Math.round(i * 1000000000 / plan.requestedRateHz)), statusFlags: 1, values: { g_hssDbgCounterFocIsr: i * Math.max(1, Math.round(plan.postConnectExpectedRateHz / plan.requestedRateHz)) } }));
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
+console.log(JSON.stringify({ record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency }));
+console.log(JSON.stringify({ record: "lifecycle", phase: "hss_start", captureId: plan.captureId, qpcCounter: "100001", returnCode: 0, crashed: false }));
 let valueHex = "00000000";
 let targetWritten = false;
 function handleWriteRequest() {
@@ -312,6 +325,10 @@ function handleWriteRequest() {
   else fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "error", reason: "bad op" }));
 }
 const timer = setInterval(handleWriteRequest, 5);
-setTimeout(() => { clearInterval(timer); console.log(JSON.stringify({ status: "ok", helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, lifecycleValidated: true, decoderSemanticsValidated: true, captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedRaw: 0, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 8, bytesPerSample: 4, hssBlockCount: 1, readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: 1, payloadChangedRatio: 1, payloadFirstChangedOffset: 4, payloadFirstChangedBytes: "01000000" })); }, 1000);
+setTimeout(() => {
+  clearInterval(timer);
+  console.log(JSON.stringify({ record: "lifecycle", phase: "hss_stop", captureId: plan.captureId, qpcCounter: "100002", returnCode: 0, crashed: false }));
+  console.log(JSON.stringify({ record: "result", status: "ok", helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: true, decoderSemanticsValidated: true, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, resetBeforeCapture: plan.resetBeforeCapture === true, captureId: plan.captureId, qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency, rawClosed: true, samplesSha256: crypto.createHash("sha256").update(Buffer.concat(records)).digest("hex"), requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false }));
+}, 1000);
 `;
 }

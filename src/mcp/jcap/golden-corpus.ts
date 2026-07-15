@@ -18,12 +18,12 @@ export const JCAP_V0_GOLDEN: { provenance: JcapV0Provenance; samples: JcapV0Samp
     { sampleIndex: 2, tick: "30000000", statusFlags: 1, values: { counter: 12, feedback: 2 } },
   ],
   events: [
-    { eventId: "planned", type: "lifecycle", tick: "0", state: "planned" },
-    { eventId: "reset", type: "target_control", tick: "5000000", operation: "reset", result: "succeeded", operationDigest: sha("5") },
-    { eventId: "active", type: "lifecycle", tick: "9000000", state: "active", resetEventId: "reset" },
-    { eventId: "write", type: "variable_write", tick: "20000000", variable: "counter", oldValue: 10, newValue: 11, readback: 11 },
-    { eventId: "finalizing", type: "lifecycle", tick: "31000000", state: "finalizing" },
-    { eventId: "completed", type: "lifecycle", tick: "32000000", state: "completed" },
+    { eventId: "10000000-0000-4000-8000-000000000001", eventSequence: 0, type: "lifecycle", tick: "0", state: "planned" },
+    { eventId: "10000000-0000-4000-8000-000000000002", eventSequence: 1, type: "target_control", tick: "5000000", operation: "reset", result: "succeeded", operationDigest: sha("5") },
+    { eventId: "10000000-0000-4000-8000-000000000003", eventSequence: 2, type: "lifecycle", tick: "9000000", state: "active", resetEventId: "10000000-0000-4000-8000-000000000002" },
+    { eventId: "10000000-0000-4000-8000-000000000004", eventSequence: 3, type: "variable_write", tick: "20000000", variable: "counter", oldValue: 10, newValue: 11, readback: 11 },
+    { eventId: "10000000-0000-4000-8000-000000000005", eventSequence: 4, type: "lifecycle", tick: "31000000", state: "finalizing" },
+    { eventId: "10000000-0000-4000-8000-000000000006", eventSequence: 5, type: "lifecycle", tick: "32000000", state: "completed" },
   ],
 };
 
@@ -31,8 +31,8 @@ export const JCAP_V0_PRESTART_FAILURE: { provenance: JcapV0Provenance; samples: 
   provenance: { ...JCAP_V0_GOLDEN.provenance, captureId: "00000000-0000-4000-8000-000000000002", script: { mode: "none" } },
   samples: [],
   events: [
-    { eventId: "planned", type: "lifecycle", tick: "0", state: "planned" },
-    { eventId: "start-failed", type: "fault", tick: "1", code: "HSS_START_FAILED" },
-    { eventId: "failed", type: "lifecycle", tick: "2", state: "failed", reason: "HSS_START_FAILED" },
+    { eventId: "20000000-0000-4000-8000-000000000001", eventSequence: 0, type: "lifecycle", tick: "0", state: "planned" },
+    { eventId: "20000000-0000-4000-8000-000000000002", eventSequence: 1, type: "fault", tick: "1", code: "HSS_START_FAILED" },
+    { eventId: "20000000-0000-4000-8000-000000000003", eventSequence: 2, type: "lifecycle", tick: "2", state: "failed", reason: "HSS_START_FAILED" },
   ],
 };

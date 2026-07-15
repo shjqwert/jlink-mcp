@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -5,6 +6,69 @@ import { HSS_ERROR, HssError } from "./hss-errors";
 import type { HssCaptureMetadata } from "./hss-contract";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 import type { HssVariableWritePlan } from "./hss-write-plan";
+import type { JcapV0Event, JcapV0Writer } from "../jcap/jcap-v0";
+
+const DECIMAL_U64 = /^(0|[1-9][0-9]*)$/;
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+export interface HssQpcTimebase {
+  qpcEpochCounter: bigint;
+  qpcFrequency: bigint;
+}
+
+export interface HssJcapEventJournal extends HssQpcTimebase {
+  captureId: string;
+  writer: JcapV0Writer;
+  nextEventSequence: number;
+  lastTick: bigint;
+}
+
+export function parseHssQpcTimebase(value: Record<string, unknown>): HssQpcTimebase {
+  const counterText = value.qpcEpochCounter ?? value.qpcCounter;
+  const frequencyText = value.qpcFrequency;
+  if (typeof counterText !== "string" || !DECIMAL_U64.test(counterText)
+      || typeof frequencyText !== "string" || !DECIMAL_U64.test(frequencyText)) {
+    throw new HssError(HSS_ERROR.HSS_HELPER_BAD_JSON, "helper QPC timebase must contain decimal u64 qpcEpochCounter/qpcFrequency");
+  }
+  const qpcEpochCounter = BigInt(counterText);
+  const qpcFrequency = BigInt(frequencyText);
+  if (qpcEpochCounter > U64_MAX || qpcFrequency < 1n || qpcFrequency > U64_MAX) {
+    throw new HssError(HSS_ERROR.HSS_HELPER_BAD_JSON, "helper QPC timebase is outside decimal u64 bounds");
+  }
+  return { qpcEpochCounter, qpcFrequency };
+}
+
+export function hssQpcTick(timebase: HssQpcTimebase, qpcCounter: unknown): bigint {
+  if (typeof qpcCounter !== "string" || !DECIMAL_U64.test(qpcCounter)) {
+    throw new HssError(HSS_ERROR.HSS_HELPER_BAD_JSON, "helper event qpcCounter must be decimal u64");
+  }
+  const counter = BigInt(qpcCounter);
+  if (counter > U64_MAX || counter < timebase.qpcEpochCounter) {
+    throw new HssError(HSS_ERROR.HSS_HELPER_BAD_JSON, "helper event qpcCounter precedes the capture epoch or exceeds u64");
+  }
+  return ((counter - timebase.qpcEpochCounter) * 1_000_000_000n) / timebase.qpcFrequency;
+}
+
+export function appendHssJcapEvent(
+  journal: HssJcapEventJournal,
+  type: JcapV0Event["type"],
+  qpcCounter: unknown,
+  payload: Record<string, unknown>,
+): JcapV0Event {
+  const tick = hssQpcTick(journal, qpcCounter);
+  if (tick < journal.lastTick) throw new HssError(HSS_ERROR.HSS_HELPER_BAD_JSON, "helper event QPC order regressed");
+  const event: JcapV0Event = {
+    ...JSON.parse(JSON.stringify(payload)) as Record<string, unknown>,
+    eventId: randomUUID(),
+    eventSequence: journal.nextEventSequence,
+    type,
+    tick: tick.toString(),
+  };
+  journal.writer.appendEvent(event);
+  journal.nextEventSequence += 1;
+  journal.lastTick = tick;
+  return event;
+}
 
 export interface HssWriteEvent extends Record<string, unknown> {
   eventId: string;

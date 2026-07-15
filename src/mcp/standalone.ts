@@ -9,6 +9,7 @@
  *   J-Link:
  *     JLINK_DEVICE, JLINK_INSTALL_DIR, JLINK_INTERFACE, JLINK_SPEED,
  *     JLINK_SERIAL, JLINK_GDB_PORT, JLINK_RTT_PORT, JLINK_SWO_PORT
+ *   JCAP roots: JLINK_MCP_STORAGE_ROOT, JLINK_MCP_EVIDENCE_ROOT
  *
  *   OpenOCD:
  *     OPENOCD_BINARY, OPENOCD_INTERFACE, OPENOCD_TARGET,
@@ -42,7 +43,7 @@ import { JLinkMcpServer } from "./server";
 import { ProbeFactoryConfig, ProbeType } from "../probe/factory";
 import { initLogger } from "../utils/logger";
 import { runTrustValidate } from "./trust/trust-cli";
-export { jcapCaptureEventWindow, jcapCaptureList, jcapCaptureSeries, jcapCaptureSummary, rebuildJcapV0Index, verifyJcapV0Index, writeJcapV0Raw } from "./jcap/jcap-v0";
+export { JcapV0QueryService, jcapCaptureEventWindow, jcapCaptureExportCsv, jcapCaptureList, jcapCaptureSeries, jcapCaptureSummary, rebuildJcapV0Index, verifyJcapV0Index, writeJcapV0Raw } from "./jcap/jcap-v0";
 
 // Stderr logger for standalone mode
 initLogger({ appendLine(msg: string) { process.stderr.write(msg + "\n"); } } as any);
@@ -114,7 +115,11 @@ async function main() {
       sourceHost: env("TELNET_PROXY_SOURCE_HOST") || "localhost",
       sourcePort: env("TELNET_PROXY_SOURCE_PORT") ? Number(env("TELNET_PROXY_SOURCE_PORT")) : undefined,
     },
-    env("GDB_PATH") || "arm-none-eabi-gdb"
+    env("GDB_PATH") || "arm-none-eabi-gdb",
+    {
+      storageRoot: env("JLINK_MCP_STORAGE_ROOT"),
+      evidenceRoot: env("JLINK_MCP_EVIDENCE_ROOT"),
+    }
   );
 
   const shutdown = async () => { await server.dispose(); process.exit(0); };

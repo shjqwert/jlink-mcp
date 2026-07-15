@@ -22,7 +22,7 @@ HSS SHALL accept only `script.mode=none|file`. `none` explicitly selects no scri
 
 ### Requirement: Target project and writable HSS roots are separate
 
-HSS SHALL bind Trust Profile, target selection, OUT and MAP resolution to the canonical real `projectRoot`, while capture/export/temp data use an explicit external `storageRoot` and audit/session evidence uses an explicit external `evidenceRoot`. Both writable roots SHALL be rejected when they resolve to `projectRoot` or a descendant. Production plans and metadata SHALL record all three roots.
+HSS SHALL bind Trust Profile, target selection, OUT and MAP resolution to the canonical real `projectRoot`, while capture/export/temp data use an explicit external `storageRoot` and audit/session evidence uses an explicit external `evidenceRoot`. Both writable roots SHALL be rejected when they resolve to `projectRoot` or a descendant. Production plans and JCAP provenance SHALL record all three roots or their bound identities.
 
 #### Scenario: read-only target project is used for capture planning
 
@@ -105,13 +105,14 @@ For `resetBeforeCapture`, the oracle SHALL begin at sample index 0 of the post-s
 
 ### Requirement: HSS capture artifacts expose query and event hooks
 
-Completed HSS captures SHALL expose JCAP raw sample segments, the raw event journal, DLL/helper/adapter/script-mode/cache-script provenance, target identity/source/confidence, R3 reset/capture events, stabilization evidence, variable definitions, quality, event markers, flag intervals, and bounded query/export hooks through `capture.db`.
+Completed HSS captures SHALL expose the single JCAP raw sample journal, the raw event journal, DLL/helper/adapter/script-mode/cache-script provenance, target identity/source/confidence, R3 reset/capture events, stabilization evidence, variable definitions, quality, event markers, flag intervals, and bounded query/export hooks through `capture.db`. The production package SHALL be `<storageRoot>/captures/<captureId>.jcap/{raw/samples.bin,raw/events.bin,capture.db}`; helper plans, diagnostics, stop and write IPC files SHALL remain in the external session directory, and audits SHALL remain under `evidenceRoot`.
 
 #### Scenario: completed HSS capture indexed
 
 - **WHEN** an HSS capture completes
 - **THEN** its validated raw evidence remains under the `.jcap/raw` directory
 - **AND** its terminal raw event is synced and the raw journal is closed before `capture.db` is built and atomically published for query consumers.
+- **AND** no default JSON, JSONL, CSV, legacy `capture_0001.bin`, or package-local helper IPC artifact is created.
 
 #### Scenario: database is rebuilt
 

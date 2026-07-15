@@ -3,7 +3,8 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { appendHssWriteEvent, hssEventsFile, materializeHssCaptureEvents, readHssCaptureEvents } from "./hss-events";
+import { appendHssJcapEvent, appendHssWriteEvent, hssEventsFile, materializeHssCaptureEvents, parseHssQpcTimebase, readHssCaptureEvents, type HssJcapEventJournal } from "./hss-events";
+import { JcapV0Writer, readJcapV0Raw } from "../jcap/jcap-v0";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 import type { HssVariableWritePlan } from "./hss-write-plan";
 
@@ -58,6 +59,32 @@ test("large capture write events use sidecar artifacts", async () => {
     const sidecar = event.sidecarArtifact as { file: string; crc32: string };
     assert.equal(existsSync(sidecar.file), true);
     assert.match(sidecar.crc32, /^[0-9a-f]{8}$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("production HSS events use one strict QPC epoch and only the JCAP event journal", async () => {
+  const root = await tempProject();
+  const packageDir = join(root, "11111111-1111-4111-8111-111111111111.jcap");
+  try {
+    const timebase = parseHssQpcTimebase({ qpcEpochCounter: "100", qpcFrequency: "10" });
+    const writer = new JcapV0Writer({
+      packageDir,
+      externalSamples: true,
+      provenance: { captureId: "11111111-1111-4111-8111-111111111111", backend: "jlink-hss", runtime: {}, target: {}, script: { mode: "none" } },
+    });
+    const journal: HssJcapEventJournal = { captureId: "11111111-1111-4111-8111-111111111111", writer, ...timebase, nextEventSequence: 0, lastTick: 0n };
+    appendHssJcapEvent(journal, "lifecycle", "100", { state: "planned" });
+    appendHssJcapEvent(journal, "target_control", "101", { operation: "reset", optional: undefined });
+    assert.throws(() => appendHssJcapEvent(journal, "quality", "100", { phase: "regressed" }), /regressed/);
+    await writeFile(writer.samplesFile, Buffer.alloc(0));
+    writer.closeEvents();
+    const raw = readJcapV0Raw(packageDir);
+    assert.deepEqual(raw.events.map((event) => [event.eventSequence, event.tick]), [[0, "0"], [1, "100000000"]]);
+    assert.equal(existsSync(join(packageDir, "capture.json")), false);
+    assert.equal(existsSync(join(packageDir, "capture.events.jsonl")), false);
+    assert.throws(() => parseHssQpcTimebase({ qpcEpochCounter: "1.0", qpcFrequency: "10" }), /decimal u64/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

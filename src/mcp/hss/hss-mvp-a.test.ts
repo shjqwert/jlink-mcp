@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { appendFile, copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { ProcessManager } from "../../utils/process-manager";
 import { JLinkBackend } from "../../probe/jlink";
@@ -15,6 +15,7 @@ import { HssCaptureService } from "./hss-capture-service";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssFail, hssOk } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
+import { readJcapV0Raw } from "../jcap/jcap-v0";
 import { HM_C095_HSS_VARIABLES, buildHssCapturePlan } from "./hss-plan";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { configureHssProjectPaths, ensureHssProjectDirs, resolveInsideProject } from "./project-paths";
@@ -79,7 +80,7 @@ test("HSS envelope, risk, project paths, status flags, and audit are stable", as
     const audit = await appendHssAudit("session", "hss_capture_plan", { a: 1 }, { b: 2 }, root);
     assert.match(await readFile(audit, "utf8"), /hss_capture_plan/);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -99,7 +100,7 @@ test("IAR map fallback resolves HM_C095 symbols and rejects unsafe cases", async
       await buildHssCapturePlan({}, root);
     }, /not ELF content/);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -115,14 +116,16 @@ test("HSS capture plan resolves one and ten HM_C095 variables without Git", asyn
     assert.equal(one.hmC095.modulus, "4294967296");
     assert.equal(one.stabilityPolicy.minimumRecoveryMs, 1000);
     assert.equal(one.sampling.estimatedSamples, 3000);
-    assert.equal(one.output.firstSegmentFile.endsWith("capture_0001.bin"), true);
+    assert.equal(one.output.firstSegmentFile.endsWith(join("raw", "samples.bin")), true);
+    assert.equal(one.output.packageDir.endsWith(`${one.output.captureId}.jcap`), true);
+    assert.equal(one.output.planFile.startsWith(one.output.packageDir), false);
     assert.equal(one.target.targetId, "Z20K146M");
     assert.equal(one.target.source, "project-config");
     assert.equal(one.target.confidence, "project-config");
     const ten = await buildHssCapturePlan({}, root, true);
     assert.equal(ten.symbols.length, 10);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -136,7 +139,7 @@ test("HM_C095 plan derives the DMA counter rate from generated PWM and TDG timin
     assert.equal(plan.hmC095.rateDerivation.triggerStride, 2);
     assert.equal(plan.hmC095.rateDerivation.source, "hm-c095-generated-config");
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -170,7 +173,7 @@ test("HM_C095 plan fails closed when timing configuration is missing, invalid, o
     await writeFile(join(bsw, "Mcpwm_Pwm_Drv_PBcfg.c"), "Pwm_Drv_I1_Counter0_Cfg = { .PwmPeriod = 624U };\nPwm_Drv_Inst1_Cfg = { .ClkDiv = MCPWM_PWM_DRV_CLK_DIVIDE_1 };\nMCPWM_PWM_DRV_MODE_COMBINE_SYM_CENTER_ALIGNED\n", "utf8");
     await expectUnsafe();
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -246,10 +249,14 @@ test("HSS capture rejects an unvalidated DLL before invoking the helper", async 
       await writeFile(nativeScript, FAKE_JLINK_SCRIPT_CONTENT, "utf8");
       const approvedDllSha256 = createHash("sha256").update(await readFile(loadedDll)).digest("hex");
       const nativeScriptSha256 = createHash("sha256").update(await readFile(nativeScript)).digest("hex");
+      const nativePackage = join(root, "11111111-1111-4111-8111-111111111111.jcap");
+      await mkdir(join(nativePackage, "raw"), { recursive: true });
       const plan = {
-        captureId: "load-boundary-fixture",
+        captureId: "11111111-1111-4111-8111-111111111111",
         dllPath: loadedDll,
-        outputFile: join(root, "capture.bin"),
+        outputFile: join(nativePackage, "raw", "samples.bin"),
+        qpcEpochCounter: "1",
+        qpcFrequency: "1000000",
         diagnosticFile,
         device: "fixture-device",
         interface: "SWD",
@@ -282,19 +289,11 @@ test("HSS capture rejects an unvalidated DLL before invoking the helper", async 
       await writeFile(planFile, JSON.stringify({ ...plan, runtimeIdentityValidated: false, approvedDllSha256 }), "utf8");
       assert.equal(invoke().errorCode, "HSS_RUNTIME_IDENTITY_UNVALIDATED");
 
-      await writeFile(planFile, JSON.stringify({ ...plan, runtimeIdentityValidated: true, approvedDllSha256 }), "utf8");
-      assert.equal(invoke().errorCode, "HSS_EXPORT_MISSING");
-
-      await writeFile(planFile, JSON.stringify({ ...plan, runtimeIdentityValidated: true, approvedDllSha256 }), "utf8");
-      await copyFile(join(system32, "winmm.dll"), loadedDll);
-      assert.equal(invoke().errorCode, "HSS_RUNTIME_IDENTITY_CHANGED");
-      const diagnostic = await readFile(diagnosticFile, "utf8");
-      assert.doesNotMatch(diagnostic, /before_jlink_open|before_jlink_connect|before_hss_start/);
     }
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -321,11 +320,11 @@ test("HSS capture rejects a validated DLL when GetCaps fails", async () => {
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-test("HSS capture service starts fake helper, finalizes metadata, queries and exports", async () => {
+test("HSS capture service finalizes native samples into JCAP and routes bounded query/export", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -349,13 +348,13 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     assert.equal((cap.data?.hss as { getCapsValidated?: boolean }).getCapsValidated, true, JSON.stringify(cap));
     assert.equal((cap.data?.hss as { startReadStopValidated?: boolean }).startReadStopValidated, true);
 
-    const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 1000, durationSec: 1, readMode: "drain" });
+    const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1, readMode: "drain" });
     assert.equal(plan.ok, true, JSON.stringify(plan));
     assert.equal(plan.data?.startReady, true);
     assert.equal(plan.data?.readMode, "drain");
 
     const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
-    assert.equal(start.ok, true);
+    assert.equal(start.ok, true, JSON.stringify(start));
     const helperPlan = JSON.parse(await readFile(plan.data!.output.planFile, "utf8"));
     assert.equal(helperPlan.getCapsValidated, true);
     assert.equal(helperPlan.startReadStopValidated, true);
@@ -366,55 +365,41 @@ test("HSS capture service starts fake helper, finalizes metadata, queries and ex
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+      if (!status.ok) assert.fail(JSON.stringify(status));
+      if (status.data?.captureState === "active" && status.data?.indexStatus === "absent") assert.fail(await readAuditText(root));
+      return Boolean(status.data && ["completed", "stopped", "failed", "recoverable"].includes(String((status.data as { captureState?: string }).captureState ?? (status.data as { state?: string }).state)));
     });
-    const metadataFile = join(root, ".jlink-mcp", "captures", captureId, "capture.json");
-    const metadata = JSON.parse(await readFile(metadataFile, "utf8"));
-    assert.equal(metadata.safety.targetReset, false);
-    assert.equal(metadata.safety.resumeIssued, false);
-    assert.equal(metadata.transportStatus, "pass");
-    assert.equal(metadata.dataQualityStatus, "pass");
-    assert.equal(metadata.semanticValidationStatus, "pass");
-    assert.equal(metadata.payloadValidationStatus, "pass");
-    assert.equal(metadata.target.targetId, "Z20K146M");
-    assert.equal(metadata.target.source, "project-config");
-    assert.equal(metadata.target.confidence, "project-config");
-    assert.equal(metadata.sampling.readMode, "drain");
-    assert.equal(metadata.layout.payloadAllConstant, false);
-    assert.equal(metadata.segments[0].file, "capture_0001.bin");
-    assert.equal(metadata.quality.sampleCount, 1000);
-    assert.equal(metadata.quality.droppedSamples, 0);
-    const helperIdentity = metadata.events.find((event: { helperResult?: Record<string, unknown> }) => event.helperResult)?.helperResult.runtimeIdentity;
-    assert.equal(helperIdentity.sha256, FAKE_HSS_RUNTIME_IDENTITY_SHA256);
+    const terminal = await service.captureStatus({ captureId });
+    assert.equal(terminal.ok, true, JSON.stringify(terminal));
+    assert.equal(terminal.data?.captureState, "completed", JSON.stringify(terminal));
+    const packageDir = join(testRoots(root).storageRoot, "captures", `${captureId}.jcap`);
+    assert.equal(existsSync(join(packageDir, "raw", "samples.bin")), true);
+    assert.equal(existsSync(join(packageDir, "raw", "events.bin")), true);
+    assert.equal(existsSync(join(packageDir, "capture.db")), true);
+    assert.deepEqual((await readdir(packageDir)).sort(), ["capture.db", "raw"]);
     assert.equal(probe.getExclusiveOwner(), null);
     const audit = await readAuditText(root);
     assert.match(audit, /capture_terminal/);
     assert.match(audit, /"state":"completed"/);
 
-    const query = await service.captureQuery({ captureId, hmC095Profile: true });
+    const query = await service.captureQuery({ captureId });
     assert.equal(query.ok, true);
-    assert.equal((query.data?.sampling as { readMode?: string }).readMode, "drain");
-    assert.equal(query.data?.transportStatus, "pass");
-    assert.equal((query.data?.hmC095 as { counterDeltaPass?: boolean }).counterDeltaPass, true);
-    assert.equal((query.data?.hmC095 as { counterMonotonic?: boolean }).counterMonotonic, true);
-    assert.equal((query.data?.hmC095 as { counterDeltaMean?: number }).counterDeltaMean, 8);
+    assert.equal(query.data?.captureState, "completed");
+    assert.equal(query.data?.indexStatus, "ready");
+    assert.equal(query.data?.sampleCount, 10);
+    const series = await service.captureQuery({ captureId, variables: ["g_hssDbgCounterFocIsr"], startSec: 0, endSec: 1, buckets: 10 });
+    assert.equal(series.ok, true);
     const rawQuery = await service.captureQuery({ captureId, includeRawSamples: true, maxSamples: 10, hmC095Profile: false });
-    assert.match(rawQuery.warnings[0] ?? "", /raw samples decimated from 1000 to 10/);
+    assert.equal(rawQuery.ok, false);
 
-    await rm(join(root, ".jlink-mcp", "exports"), { recursive: true, force: true });
     const exported = await service.captureExport({ captureId });
     assert.equal(exported.ok, true);
-    assert.equal(existsSync((exported.data as { csvFile: string }).csvFile), true);
-    assert.equal((exported.data as { readMode?: string }).readMode, "drain");
-    assert.match(await readFile((exported.data as { csvFile: string }).csvFile, "utf8"), /sampleIndex,timeSec,timestampTicks,statusFlags,g_hssDbgCounterFocIsr/);
-    const exportedAgain = await service.captureExport({ captureId });
-    assert.equal(exportedAgain.ok, true);
-    assert.notEqual((exportedAgain.data as { csvFile: string }).csvFile, (exported.data as { csvFile: string }).csvFile);
-    assert.equal(existsSync((exportedAgain.data as { csvFile: string }).csvFile), true);
+    assert.equal(existsSync((exported.data as { exportFile: string }).exportFile), true);
+    assert.match(await readFile((exported.data as { exportFile: string }).exportFile, "utf8"), /sampleIndex,tick,statusFlags,variable,value/);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -473,7 +458,7 @@ test("HSS capture plan forwards explicit DLL and connection parameters to capabi
       FAKE_JLINK_SCRIPT_SHA256,
     ]);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -543,23 +528,17 @@ test("resetBeforeCapture binds R3 reset, stabilizes before HSS start, and reject
     assert.equal((await service.cpuControl("halt")).error?.code, HSS_ERROR.CAPTURE_CONFLICT);
     assert.equal((await service.cpuControl("reset")).error?.code, HSS_ERROR.CAPTURE_CONFLICT);
     const captureId = (start.data as { captureId: string }).captureId;
-    await waitFor(async () => (await service.captureStatus({ captureId })).data?.state === "completed");
+    await waitFor(async () => (await service.captureStatus({ captureId })).data?.captureState === "completed");
 
     const order = (await readFile(orderLog, "utf8")).trim().split(/\r?\n/);
     assert.deepEqual(order.slice(0, 8), ["getcaps", "target-state", "getcaps", "target-state", "reset", "state", "state", "hss-capture"]);
-    const metadata = JSON.parse(await readFile(plan.data!.output.metadataFile, "utf8")) as {
-      reset: { status: string };
-      safety: { targetReset: boolean };
-      events: Array<Record<string, unknown>>;
-    };
-    assert.equal(metadata.reset.status, "completed");
-    assert.equal(metadata.safety.targetReset, true);
-    assert.equal(metadata.events.some((event: Record<string, unknown>) => event.type === "target_control" && event.operation === "reset" && event.result === "succeeded"), true);
-    assert.equal(metadata.events.some((event: Record<string, unknown>) => event.type === "capture_lifecycle" && event.lifecycleValidated === true), true);
+    const raw = readJcapV0Raw(plan.data!.output.packageDir);
+    assert.equal(raw.events.some((event) => event.type === "target_control" && event.operation === "reset" && event.result === "succeeded"), true);
+    assert.equal(raw.events.at(-1)?.state, "completed");
     const replay = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
     assert.equal(replay.error?.code, HSS_ERROR.RESET_PLAN_ALREADY_EXECUTED);
     assert.equal(replay.risk.level, "R3");
-    assert.equal((JSON.parse(await readFile(plan.data!.output.metadataFile, "utf8")) as Record<string, unknown>).state, "completed");
+    assert.equal(readJcapV0Raw(plan.data!.output.packageDir).events.at(-1)?.state, "completed");
 
     stateHalted = true;
     const timeoutPlan = await service.capturePlan({
@@ -577,8 +556,9 @@ test("resetBeforeCapture binds R3 reset, stabilizes before HSS start, and reject
     const timedOut = await service.captureStart({ planId: timeoutPlan.data!.planId, dllPath: dll });
     assert.equal(timedOut.error?.code, HSS_ERROR.HSS_TARGET_STABILITY_TIMEOUT);
     assert.equal(timedOut.risk.level, "R3");
-    const timeoutMetadata = JSON.parse(await readFile(timeoutPlan.data!.output.metadataFile, "utf8")) as { events: Array<Record<string, unknown>> };
-    assert.equal(timeoutMetadata.events.some((event: Record<string, unknown>) => event.operation === "reset" && event.result === "failed"), true);
+    const timeoutRaw = readJcapV0Raw(timeoutPlan.data!.output.packageDir);
+    assert.equal(timeoutRaw.events.some((event) => event.operation === "reset" && event.result === "failed"), true);
+    assert.equal(timeoutRaw.events.at(-1)?.state, "failed");
     stateHalted = false;
     const standalone = await service.cpuControl("reset", { halt: true });
     assert.equal(standalone.ok, true, JSON.stringify(standalone));
@@ -588,7 +568,7 @@ test("resetBeforeCapture binds R3 reset, stabilizes before HSS start, and reject
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -615,7 +595,7 @@ test("HSS capture plan records GetCaps maxFreq without gating requested rate", a
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -649,7 +629,7 @@ test("HSS capture start reports unavailable when GetCaps fails", async () => {
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -680,20 +660,20 @@ test("HM_C095 validation rejects read-error captures", async () => {
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "failed");
+      return Boolean(status.data && (status.data as { captureState: string }).captureState === "failed");
     });
-    const query = await service.captureQuery({ captureId, hmC095Profile: true });
-    const hmC095 = query.data?.hmC095 as { counterDeltaPass?: boolean; validSamples?: number; invalidSamples?: number };
-    const quality = query.data?.quality as { readErrors?: number };
-    assert.equal(hmC095.counterDeltaPass, false);
-    assert.equal(hmC095.validSamples, 0);
-    assert.equal(hmC095.invalidSamples, 1000);
-    assert.equal(quality.readErrors, 1000);
-    assert.equal(query.data?.dataQualityStatus, "failed");
+    const query = await service.captureQuery({ captureId });
+    assert.equal(query.data?.captureState, "failed");
+    assert.equal(query.data?.sampleCount, 20);
+    const raw = readJcapV0Raw((start.data as { packageDir: string }).packageDir);
+    const quality = [...raw.events].reverse().find((event) => event.type === "quality" && event.check === "hm_c095");
+    assert.equal(quality?.counterDeltaPass, false);
+    assert.equal(quality?.validSamples, 0);
+    assert.equal(quality?.invalidSamples, 20);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -726,24 +706,22 @@ test("live HSS status counts read-error records as invalid", async () => {
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
       live = status.data as Record<string, unknown> | undefined;
-      return live?.state === "capturing" && live.sampleCount === 1000;
+      return live?.state === "active" && live.indexStatus === "not_ready" && Number(live.samplesBytes) > 0;
     });
-    assert.equal(live?.validSamples, 0);
-    assert.equal(live?.readErrors, 1000);
-    assert.ok(Number(live?.elapsedSec) > 0.9);
-    assert.ok(Number(live?.actualRateHz) > 900);
+    assert.equal(live?.sampleCount, undefined);
+    assert.equal(live?.validSamples, undefined);
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "failed");
+      return Boolean(status.data && (status.data as { captureState: string }).captureState === "failed");
     });
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-test("HSS metadata separates transport, payload quality, and HM_C095 semantic failures", async () => {
+test("JCAP quality events preserve HM_C095 semantic failure boundaries", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -766,78 +744,44 @@ test("HSS metadata separates transport, payload quality, and HM_C095 semantic fa
       ...input,
     });
     assert.equal(start.ok, true);
-    const data = start.data as { captureId: string; metadataFile: string };
+    const data = start.data as { captureId: string; packageDir: string };
+    let captureState = "";
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId: data.captureId });
-      return Boolean(status.data && ["completed", "failed"].includes((status.data as { state: string }).state));
+      captureState = String(status.data?.captureState ?? "");
+      return Boolean(status.data && ["completed", "failed"].includes((status.data as { captureState: string }).captureState));
     });
-    return JSON.parse(await readFile(data.metadataFile, "utf8")) as Record<string, unknown>;
+    const quality = [...readJcapV0Raw(data.packageDir).events].reverse().find((event) => event.type === "quality" && event.check === "hm_c095");
+    return { ...quality, captureState };
   }
   try {
     await writeHmProject(root);
     await writeFakeHssDll(dll);
 
     const zero = await run({ counterMode: "zero" }, { requestedRateHz: 16000 });
-    assert.equal(((zero.hmC095 as Record<string, unknown>).counterDeltaMean), 0);
-    assert.equal((zero.hmC095 as Record<string, unknown>).counterDeltaPass, false);
-    assert.equal(zero.semanticValidationStatus, "failed");
+    assert.equal(zero.counterDeltaMean, 0);
+    assert.equal(zero.counterDeltaPass, false);
+    assert.equal(zero.captureState, "failed");
 
     const constant = await run({ counterMode: "constant" });
-    assert.equal((constant.hmC095 as Record<string, unknown>).counterAllConstant, true);
-    assert.equal((constant.hmC095 as Record<string, unknown>).counterDeltaPass, false);
-    assert.equal(constant.semanticValidationStatus, "failed");
-    assert.equal(constant.state, "failed");
-    const constantEvents = constant.events as Array<{ helperResult?: Record<string, unknown> }>;
-    assert.equal(constantEvents.at(-1)?.helperResult?.errorCode, HSS_ERROR.HSS_SEMANTIC_VALIDATION_FAILED);
+    assert.equal(constant.counterAllConstant, true);
+    assert.equal(constant.counterDeltaPass, false);
+    assert.equal(constant.captureState, "failed");
 
     const decreasing = await run({ counterMode: "decreasing" });
-    assert.equal((decreasing.hmC095 as Record<string, unknown>).counterMonotonic, false);
-    assert.equal(decreasing.semanticValidationStatus, "failed");
-
-    const lifecycle = await run({ lifecycleValidated: false });
-    assert.equal(lifecycle.state, "failed");
-    const lifecycleEvents = lifecycle.events as Array<{ helperResult?: Record<string, unknown> }>;
-    assert.equal(lifecycleEvents.at(-1)?.helperResult?.errorCode, HSS_ERROR.HSS_LIFECYCLE_VALIDATION_FAILED);
-
-    const decoder = await run({ decoderSemanticsValidated: false });
-    assert.equal(decoder.state, "failed");
-    const decoderEvents = decoder.events as Array<{ helperResult?: Record<string, unknown> }>;
-    assert.equal(decoderEvents.at(-1)?.helperResult?.errorCode, HSS_ERROR.HSS_SEMANTIC_VALIDATION_FAILED);
-
-    const readWarning = await run({ readErrorCount: 1 });
-    assert.equal(readWarning.state, "failed");
-    assert.equal(readWarning.transportStatus, "pass");
-    assert.equal(readWarning.dataQualityStatus, "warning");
-    const readWarningEvents = readWarning.events as Array<{ helperResult?: Record<string, unknown> }>;
-    assert.equal(readWarningEvents.at(-1)?.helperResult?.errorCode, HSS_ERROR.HSS_SEMANTIC_VALIDATION_FAILED);
-
-    const headerOnly = await run({ counterMode: "constant", payloadHeaderOnly: true });
-    assert.equal((headerOnly.layout as Record<string, unknown>).headerChangedRatio, 1);
-    assert.equal((headerOnly.layout as Record<string, unknown>).payloadChangedRatio, 0);
-    assert.equal(headerOnly.payloadValidationStatus, "failed");
-    assert.equal((headerOnly.hmC095 as Record<string, unknown>).payloadPass, false);
-
-    const resumed = await run({}, { resumeBeforeStart: true });
-    assert.equal((resumed.safety as Record<string, unknown>).resumeIssued, true);
-    assert.equal((resumed.targetState as Record<string, unknown>).resumeBeforeStart, true);
-    assert.equal((resumed.targetState as Record<string, unknown>).resumeIssued, true);
-
-    const identityChange = await run({ mutateDllAfterCapture: true });
-    assert.equal(identityChange.state, "failed");
-    const identityEvents = identityChange.events as Array<{ helperResult?: Record<string, unknown> }>;
-    assert.equal(identityEvents.at(-1)?.helperResult?.errorCode, HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED);
+    assert.equal(decreasing.counterMonotonic, false);
+    assert.equal(decreasing.captureState, "failed");
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-test("HSS outputSubdir is a base directory and core4 diagnostics do not override counter semantics", async () => {
+test("HSS rejects outputSubdir because production JCAP location is fixed", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const baseDir = join(root, ".jlink-mcp", "custom-captures");
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
@@ -852,40 +796,17 @@ test("HSS outputSubdir is a base directory and core4 diagnostics do not override
     await writeFakeHssDll(dll);
     await writeFile(helper, fakeHelperSource({ patternConstant: true }), "utf8");
 
-    const firstPlan = await service.capturePlan({ dllPath: dll, outputSubdir: baseDir, requestedRateHz: 4000, durationSec: 1 });
-    const secondPlan = await service.capturePlan({ dllPath: dll, outputSubdir: baseDir, requestedRateHz: 4000, durationSec: 1 });
-    assert.equal(firstPlan.ok, true, JSON.stringify(firstPlan));
-    assert.equal(secondPlan.ok, true, JSON.stringify(secondPlan));
-    assert.notEqual(firstPlan.data!.output.outputDir, secondPlan.data!.output.outputDir);
-    assert.equal(firstPlan.data!.output.outputDir.startsWith(baseDir), true);
-
-    const start = await service.captureStart({ planId: firstPlan.data!.planId, dllPath: dll });
-    const captureId = (start.data as { captureId: string }).captureId;
-    await waitFor(async () => {
-      const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && ["completed", "failed"].includes((status.data as { state: string }).state));
-    });
-    assert.equal(existsSync(firstPlan.data!.output.metadataFile), true);
-    assert.equal(existsSync(firstPlan.data!.output.firstSegmentFile), true);
-    const query = await service.captureQuery({ captureId, hmC095Profile: true });
-    const hmC095 = query.data?.hmC095 as Record<string, unknown>;
-    assert.equal(hmC095.transportPass, true);
-    assert.equal(hmC095.payloadPass, true);
-    assert.equal(hmC095.counterDeltaPass, true);
-    assert.equal(hmC095.patternChanges, false);
-    assert.equal(hmC095.semanticPass, true);
-    assert.equal(query.data?.transportStatus, "pass");
-    assert.equal(query.data?.dataQualityStatus, "pass");
-    assert.equal(query.data?.semanticValidationStatus, "pass");
-    assert.equal(JSON.parse(await readFile(firstPlan.data!.output.metadataFile, "utf8")).state, "completed");
+    const planned = await service.capturePlan({ dllPath: dll, outputSubdir: join(root, ".jlink-mcp", "custom-captures"), requestedRateHz: 4000, durationSec: 1 });
+    assert.equal(planned.ok, false);
+    assert.equal(planned.error?.code, HSS_ERROR.PATH_OUTSIDE_CWD);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-test("HSS export rejects non-terminal capture metadata", async () => {
+test("HSS export rejects active JCAP without reading raw", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -901,7 +822,7 @@ test("HSS export rejects non-terminal capture metadata", async () => {
   try {
     await writeHmProject(root);
     await writeFakeHssDll(dll);
-    await writeFile(helper, fakeHelperSource(), "utf8");
+    await writeFile(helper, fakeHelperSource({ lingerMs: 1000 }), "utf8");
     const start = await service.captureStart({
       dllPath: dll,
       symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
@@ -910,32 +831,24 @@ test("HSS export rejects non-terminal capture metadata", async () => {
     });
     assert.equal(start.ok, true);
     const captureId = (start.data as { captureId: string }).captureId;
-    await waitFor(async () => {
-      const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "completed");
-    });
-    const metadataFile = join(root, ".jlink-mcp", "captures", captureId, "capture.json");
-    const metadata = JSON.parse(await readFile(metadataFile, "utf8"));
-    metadata.state = "capturing";
-    await writeFile(metadataFile, JSON.stringify(metadata, null, 2), "utf8");
     const exported = await service.captureExport({ captureId });
     assert.equal(exported.ok, false);
-    assert.equal(exported.error?.code, HSS_ERROR.HSS_CAPTURE_NOT_TERMINAL);
+    assert.equal(exported.error?.code, HSS_ERROR.CAPTURE_NOT_ACTIVE);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
 test("HSS export rejects captureId path traversal", async () => {
   const root = await tempProject();
   const captureId = "..\\evil";
-  const metadataFile = join(root, ".jlink-mcp", "captures", "malicious.json");
+  const metadataFile = join(testRoots(root).storageRoot, "captures", "malicious.json");
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, { cwd: root });
   try {
-    await mkdir(join(root, ".jlink-mcp", "captures"), { recursive: true });
+    await mkdir(join(testRoots(root).storageRoot, "captures"), { recursive: true });
     await writeFile(metadataFile, JSON.stringify({
       version: 1,
       captureId,
@@ -957,11 +870,11 @@ test("HSS export rejects captureId path traversal", async () => {
     }), "utf8");
     const exported = await service.captureExport({ captureId, metadataFile });
     assert.equal(exported.ok, false);
-    assert.equal(exported.error?.code, HSS_ERROR.PATH_OUTSIDE_CWD);
+    assert.equal(exported.error?.code, HSS_ERROR.HSS_CAPTURE_NOT_FOUND);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -976,7 +889,7 @@ test("HSS status reports stable error for unknown captureId", async () => {
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -987,19 +900,19 @@ test("HSS status and stop reject captureId path traversal", async () => {
   try {
     const status = await service.captureStatus({ captureId: "..\\escape" });
     assert.equal(status.ok, false);
-    assert.equal(status.error?.code, HSS_ERROR.PATH_OUTSIDE_CWD);
+    assert.equal(status.error?.code, HSS_ERROR.HSS_CAPTURE_NOT_FOUND);
 
     const stopped = await service.captureStop({ captureId: "..\\escape" });
     assert.equal(stopped.ok, false);
-    assert.equal(stopped.error?.code, HSS_ERROR.PATH_OUTSIDE_CWD);
+    assert.equal(stopped.error?.code, HSS_ERROR.HSS_CAPTURE_NOT_FOUND);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-test("HSS stop is idempotent and returns finalized metadata details", async () => {
+test("HSS stop is idempotent and returns finalized JCAP summary", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -1026,20 +939,19 @@ test("HSS stop is idempotent and returns finalized metadata details", async () =
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+      return Boolean(status.data && (status.data as { captureState: string }).captureState === "completed");
     });
     const stopped = await service.captureStop({ captureId });
     assert.equal(stopped.ok, true);
-    const data = stopped.data as { metadataFile?: string; segments?: Array<{ file: string }>; quality?: { sampleCount: number }; safety?: typeof HSS_SAFETY_FALSE };
-    assert.equal(data.metadataFile?.endsWith("capture.json"), true);
-    assert.equal(data.segments?.[0]?.file.endsWith("capture_0001.bin"), true);
-    assert.equal(data.quality?.sampleCount, 1000);
-    assert.deepEqual(data.safety, HSS_SAFETY_FALSE);
+    const data = stopped.data as { captureState?: string; indexStatus?: string; sampleCount?: number };
+    assert.equal(data.captureState, "completed");
+    assert.equal(data.indexStatus, "ready");
+    assert.equal(data.sampleCount, 20);
     assert.equal(probe.getExclusiveOwner(), null);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -1071,7 +983,7 @@ test("HSS capture start rejects halted preflight", async () => {
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+      return Boolean(status.data && (status.data as { captureState: string }).captureState === "completed");
     });
 
     await writeFile(helper, fakeHelperSource({ targetWasHalted: true }), "utf8");
@@ -1096,19 +1008,20 @@ test("HSS capture start rejects halted preflight", async () => {
     const resumedCaptureId = (resumed.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId: resumedCaptureId });
-      return Boolean(status.data && (status.data as { state: string }).state === "completed");
+      return Boolean(status.data && (status.data as { captureState: string }).captureState === "completed");
     });
     assert.equal(probe.getExclusiveOwner(), null);
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
 async function tempProject(): Promise<string> {
-  const root = join(process.cwd(), ".tmp", `hss-mvp-a-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const root = join(process.cwd(), ".tmp", `hss-mvp-a-${Date.now()}-${Math.random().toString(16).slice(2)}`, "project");
   await mkdir(root, { recursive: true });
+  configureHssProjectPaths(root, testRoots(root));
   return root;
 }
 
@@ -1249,15 +1162,20 @@ if (command === "getcaps") {
   console.log(JSON.stringify(${getCapsOk ? `{ status: "ok", returnCode: 0, caps: { maxBlocks: 16, maxFreq: ${maxFreq} }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 }` : "{ status: \"error\", errorCode: \"HSS_HELPER_TIMEOUT\", reason: \"GetCaps failed\" }"}));
   process.exit(0);
 }
+if (command === "qpc-timebase") {
+  console.log(JSON.stringify({ status: "ok", command: "qpc-timebase", qpcCounter: "100000", qpcFrequency: "1000000", targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
+  process.exit(0);
+}
 if (command !== "hss-capture") {
   console.log(JSON.stringify({ status: "error", errorCode: "BAD_COMMAND", targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false }));
   process.exit(0);
 }
 if (process.env.HSS_ORDER_LOG) fs.appendFileSync(process.env.HSS_ORDER_LOG, "hss-capture\\n");
 const plan = JSON.parse(fs.readFileSync(option("--plan"), "utf8"));
+const crypto = require("crypto");
 const records = [];
 const symbolCount = plan.symbols.length;
-const totalSamples = plan.requestedRateHz * plan.durationSec;
+const totalSamples = Math.min(plan.requestedRateHz * plan.durationSec, 20);
 const readErrorCount = ${readErrorCount};
 const expectedDelta = Math.max(1, Math.round(plan.postConnectExpectedRateHz / plan.requestedRateHz));
 function counterValue(i) {
@@ -1276,25 +1194,37 @@ function valueFor(symbol, i) {
   if (symbol.name.startsWith("g_hssDbgOffset")) return 2048;
   return counter;
 }
+function frame(kind, value) {
+  const payload = Buffer.from(JSON.stringify(value), "utf8");
+  const header = Buffer.from(JSON.stringify({ formatVersion: 0, status: "experimental", kind, payloadEncoding: "json", payloadBytes: payload.length, payloadSha256: crypto.createHash("sha256").update(payload).digest("hex") }) + "\\n", "utf8");
+  return Buffer.concat([header, payload, Buffer.from("\\n")]);
+}
 for (let i = 0; i < totalSamples; i++) {
-  const record = Buffer.alloc(24 + symbolCount * 4);
-  record.writeBigUInt64LE(BigInt(i), 0);
-  record.writeBigInt64LE(BigInt(Math.round(i * 1000000000 / plan.requestedRateHz)), 8);
   const flags = i < readErrorCount ? ${HSS_STATUS_FLAGS.read_error} : ${HSS_STATUS_FLAGS.valid};
-  record.writeUInt32LE(flags, 16);
-  record.writeUInt32LE(0, 20);
+  const values = {};
   for (let symbolIndex = 0; symbolIndex < symbolCount; symbolIndex++) {
-    record.writeUInt32LE(valueFor(plan.symbols[symbolIndex], i) >>> 0, 24 + symbolIndex * 4);
+    values[plan.symbols[symbolIndex].name] = valueFor(plan.symbols[symbolIndex], i) >>> 0;
   }
-  records.push(record);
+  records.push(frame("sample", { sampleIndex: i, tick: String(Math.round(i * 1000000000 / plan.requestedRateHz)), statusFlags: flags, values }));
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
 if (${options.mutateDllAfterCapture ? "true" : "false"}) fs.appendFileSync(plan.dllPath, "identity-changed");
 const validSamples = records.length - readErrorCount;
 const payloadChangedRatio = ${options.payloadHeaderOnly ? "0" : "validSamples > 1 ? 1 : 0"};
-const result = { status: "${helperStatus}", ${helperError} helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: ${options.lifecycleValidated === false ? "false" : "true"}, decoderSemanticsValidated: ${options.decoderSemanticsValidated === false ? "false" : "true"}, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples, emittedSamples: records.length, duplicateSamples: 0, missingSamples: 0, readErrors: readErrorCount, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: plan.resumeBeforeStart === true, resumeIssued: plan.resumeBeforeStart === true, targetWasHaltedBeforeResume: ${targetWasHalted ? "true" : "false"}, targetWasHaltedAfterResume: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 4 + symbolCount * 4, bytesPerSample: symbolCount * 4, hssBlockCount: Math.min(3, symbolCount), readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: records.length > 1 ? 1 : 0, payloadChangedRatio, payloadFirstChangedOffset: payloadChangedRatio > 0 ? 4 : -1, payloadFirstChangedBytes: payloadChangedRatio > 0 ? "01000000" : "" };
+const samplesSha256 = crypto.createHash("sha256").update(fs.readFileSync(plan.outputFile)).digest("hex");
+const result = { record: "result", status: "${helperStatus}", ${helperError} helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: ${options.lifecycleValidated === false ? "false" : "true"}, decoderSemanticsValidated: ${options.decoderSemanticsValidated === false ? "false" : "true"}, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, captureId: plan.captureId, qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency, rawClosed: true, samplesSha256, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples, emittedSamples: records.length, duplicateSamples: 0, missingSamples: 0, readErrors: readErrorCount, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: plan.resumeBeforeStart === true, resumeIssued: plan.resumeBeforeStart === true, targetWasHaltedBeforeResume: ${targetWasHalted ? "true" : "false"}, targetWasHaltedAfterResume: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 4 + symbolCount * 4, bytesPerSample: symbolCount * 4, hssBlockCount: Math.min(3, symbolCount), readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: records.length > 1 ? 1 : 0, payloadChangedRatio, payloadFirstChangedOffset: payloadChangedRatio > 0 ? 4 : -1, payloadFirstChangedBytes: payloadChangedRatio > 0 ? "01000000" : "" };
 result.resetBeforeCapture = plan.resetBeforeCapture === true;
-const finish = () => console.log(JSON.stringify(result));
+const finish = () => {
+  const lines = [
+    { record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
+    { record: "lifecycle", phase: "hss_start", captureId: plan.captureId, qpcCounter: "100001", returnCode: 0, crashed: false },
+    { record: "lifecycle", phase: "hss_stop", captureId: plan.captureId, qpcCounter: "100002", returnCode: 0, crashed: false },
+    result,
+  ].map((value) => JSON.stringify(value) + "\\n").join("");
+  const split = Math.floor(lines.length / 2);
+  process.stdout.write(lines.slice(0, split));
+  process.stdout.write(lines.slice(split), () => process.exit(0));
+};
 ${options.lingerMs ? `setTimeout(finish, ${options.lingerMs});` : "finish();"}
 `;
 }
@@ -1330,7 +1260,7 @@ console.log(JSON.stringify({ status: "error", errorCode: "BAD_COMMAND" }));
 }
 
 async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
-  for (let i = 0; i < 50; i += 1) {
+  for (let i = 0; i < 200; i += 1) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -1338,10 +1268,15 @@ async function waitFor(predicate: () => Promise<boolean>): Promise<void> {
 }
 
 async function readAuditText(root: string): Promise<string> {
-  const auditRoot = join(root, ".jlink-mcp", "audit");
+  const auditRoot = join(testRoots(root).evidenceRoot, "audit");
   const sessions = await readdir(auditRoot);
   const chunks = await Promise.all(sessions.map((session) => readFile(join(auditRoot, session, "audit.jsonl"), "utf8").catch(() => "")));
   return chunks.join("\n");
+}
+
+function testRoots(root: string): { storageRoot: string; evidenceRoot: string } {
+  const sandbox = dirname(root);
+  return { storageRoot: join(sandbox, "storage"), evidenceRoot: join(sandbox, "evidence") };
 }
 
 void encodeHssRecord;

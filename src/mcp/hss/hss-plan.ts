@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { HSS_SAFETY_FALSE, type HssRequestedSymbol, type HssTargetIdentity } from "./hss-contract";
 import { resolveHssDebugArtifact } from "./debug-artifact";
-import { hssProjectPaths, resolveInsideProject } from "./project-paths";
+import { hssProjectPaths } from "./project-paths";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { resolveHssTargetIdentity, type HssTargetIdentityInput } from "./target-identity";
 import type { HssRuntimeIdentity, HssScriptIdentity } from "../hss-dll/hss-dll-adapter";
@@ -80,6 +80,8 @@ export interface HssCapturePlan {
   };
   output: {
     captureId: string;
+    packageDir: string;
+    sessionDir: string;
     outputDir: string;
     metadataFile: string;
     firstSegmentFile: string;
@@ -168,10 +170,9 @@ export async function buildHssCapturePlan(
   const hmRate = deriveHmC095Rate(cwd);
   const paths = hssProjectPaths(cwd);
   const captureId = randomUUID();
-  const baseDir = input.outputSubdir
-    ? resolveInsideProject(input.outputSubdir, paths.storageRoot)
-    : paths.capturesDir;
-  const outputDir = join(baseDir, captureId);
+  if (input.outputSubdir) throw new HssError(HSS_ERROR.PATH_OUTSIDE_CWD, "JCAP captures use the fixed storageRoot/captures location");
+  const outputDir = join(paths.capturesDir, `${captureId}.jcap`);
+  const sessionDir = join(paths.sessionsDir, captureId);
   const recordSize = 24 + artifact.symbols.length * 4;
   const estimatedSamples = requestedRateHz * durationSec;
   const plan: HssCapturePlan = {
@@ -198,10 +199,12 @@ export async function buildHssCapturePlan(
     },
     output: {
       captureId,
+      packageDir: outputDir,
+      sessionDir,
       outputDir,
-      metadataFile: join(outputDir, "capture.json"),
-      firstSegmentFile: join(outputDir, "capture_0001.bin"),
-      planFile: join(outputDir, "plan.json"),
+      metadataFile: join(sessionDir, "session.json"),
+      firstSegmentFile: join(outputDir, "raw", "samples.bin"),
+      planFile: join(sessionDir, "plan.json"),
     },
     hmC095: {
       focIsrFreqHz: hmRate.focIsrFreqHz,
@@ -224,7 +227,7 @@ export async function buildHssCapturePlan(
     resetBeforeCapture,
     stabilityPolicy,
   };
-  await mkdir(outputDir, { recursive: true });
+  await Promise.all([mkdir(outputDir, { recursive: true }), mkdir(sessionDir, { recursive: true })]);
   return plan;
 }
 

@@ -2,7 +2,7 @@
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { ProcessManager } from "../../utils/process-manager";
 import { JLinkBackend } from "../../probe/jlink";
@@ -15,6 +15,7 @@ import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { encodeHssValues } from "./hss-typed-value";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
+import { readJcapV0Raw, rebuildJcapV0Index, writeJcapV0Raw } from "../jcap/jcap-v0";
 
 const FAKE_HSS_DLL_SHA256 = createHash("sha256").update(fakeHssDllBuffer()).digest("hex");
 const FAKE_JLINK_SCRIPT_FILE = join(process.cwd(), ".tmp", "approved-hss-mvp-b.JLinkScript");
@@ -52,6 +53,7 @@ test("MVP-B fake/injected memoryIo covers scalar write and draft array write pat
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
+    ...testRoots(root),
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
@@ -67,7 +69,7 @@ test("MVP-B fake/injected memoryIo covers scalar write and draft array write pat
     const start = await service.captureStart({
       device: "Z20K146M",
       dllPath: dll,
-      symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
@@ -95,18 +97,16 @@ test("MVP-B fake/injected memoryIo covers scalar write and draft array write pat
     assert.deepEqual(sliceExec.data!.readbackValues, [100, 120, 140, 160]);
     assert.deepEqual([...memory.get(0x20000020 + 8, 8)], [...encodeHssValues("int16", [100, 120, 140, 160], "little")]);
     await service.captureStop({ captureId });
-    const metadataFile = join(root, ".jlink-mcp", "captures", captureId, "capture.json");
-    const metadata = JSON.parse(await readFile(metadataFile, "utf8"));
-    assert.equal(existsSync(join(root, ".jlink-mcp", "captures", captureId, "capture.events.jsonl")), true);
-    assert.equal(existsSync(join(root, ".jlink-mcp", "captures", captureId, "capture.flags.jsonl")), true);
-    assert.equal(metadata.events.filter((event: { type?: string }) => event.type === "variable_write").length, 3);
-    assert.ok(metadata.flagIntervals.length >= 6);
-    const query = await service.captureQuery({ captureId, mode: "event_window", eventId: scalarExec.data!.eventId, windowBeforeMs: 50, windowAfterMs: 50, includeRawSamples: true, hmC095Profile: false });
+    const packageDir = (start.data as { packageDir: string }).packageDir;
+    const raw = readJcapV0Raw(packageDir);
+    assert.equal(existsSync(join(packageDir, "capture.events.jsonl")), false);
+    assert.equal(existsSync(join(packageDir, "capture.flags.jsonl")), false);
+    assert.equal(raw.events.filter((event) => event.type === "variable_write").length, 3);
+    const query = await service.captureQuery({ captureId, mode: "event_window", eventId: scalarExec.data!.eventId, variables: ["g_hssDbgCounterFocIsr"], windowBeforeMs: 50, windowAfterMs: 50, buckets: 10 });
     assert.equal(query.ok, true);
-    assert.ok(((query.data as { eventWindow: { sampleCount: number } }).eventWindow.sampleCount) > 0);
-    const exported = await service.captureExport({ captureId, eventAware: true, eventId: scalarExec.data!.eventId, windowBeforeMs: 50, windowAfterMs: 50 });
+    const exported = await service.captureExport({ captureId });
     assert.equal(exported.ok, true);
-    assert.match(await readFile((exported.data as { csvFile: string }).csvFile, "utf8"), /eventMarker,eventId/);
+    assert.match(await readFile((exported.data as { exportFile: string }).exportFile, "utf8"), /sampleIndex,tick,statusFlags,variable,value/);
     const audit = await readAudit(root);
     assert.match(audit, /variable_write_plan/);
     assert.match(audit, /variable_write_execute/);
@@ -115,7 +115,7 @@ test("MVP-B fake/injected memoryIo covers scalar write and draft array write pat
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -126,6 +126,7 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
+    ...testRoots(root),
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
@@ -140,7 +141,7 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
     const start = await service.captureStart({
       device: "Z20K146M",
       dllPath: dll,
-      symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
@@ -161,46 +162,12 @@ test("MVP-B helper IPC completes scalar writes and rejects non-scalar writes", a
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-test("active write event time is anchored to HSS sample time when host time is skewed", async () => {
-  const root = await tempProject();
-  try {
-    const segmentFile = join(root, "capture_0001.bin");
-    const records = Array.from({ length: 500 }, (_, index) => encodeHssRecord({
-      sampleIndex: BigInt(index),
-      timestampTicks: BigInt(index * 1_000_000),
-      statusFlags: HSS_STATUS_FLAGS.valid,
-      rawValues: [index],
-    }, 1));
-    await writeFile(segmentFile, Buffer.concat(records));
-    const result = writeExecuteResult({
-      hostWriteStartUs: 10_002_954_000,
-      hostWriteEndUs: 10_002_955_000,
-      writeStartUs: 10_002_954_000,
-      writeEndUs: 10_002_955_000,
-    });
-    const attachSampleIndex = (HssCaptureService.prototype as unknown as {
-      attachSampleIndex(active: unknown, result: HssVariableWriteExecuteResult): Promise<void>;
-    }).attachSampleIndex;
-
-    await attachSampleIndex.call({}, {
-      segmentFile,
-      startTimeUs: 10_000_000_000,
-      plan: {
-        sampling: { requestedRateHz: 1000 },
-        symbols: [{ name: "Debug_IqRef", type: "int32" }],
-      },
-    }, result);
-
-    assert.equal(result.sampleIndexNear, 499);
-    assert.equal(result.captureWriteStartUs, 499_000);
-    assert.equal(result.captureWriteEndUs, 500_000);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+test("active write ordering has no sample-nearest or host-time fallback", () => {
+  assert.equal("attachSampleIndex" in HssCaptureService.prototype, false);
 });
 
 test("variable_write_execute supports outside-capture scalar writes and rejects active bypass", async () => {
@@ -212,6 +179,7 @@ test("variable_write_execute supports outside-capture scalar writes and rejects 
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
+    ...testRoots(root),
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
@@ -240,7 +208,7 @@ test("variable_write_execute supports outside-capture scalar writes and rejects 
     const start = await service.captureStart({
       device: "Z20K146M",
       dllPath: dll,
-      symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
@@ -252,14 +220,14 @@ test("variable_write_execute supports outside-capture scalar writes and rejects 
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
 test("variable_write_plan rejects active capture after helper exit", async () => {
   const root = await tempProject();
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
-  const service = new HssCaptureService(probe, { cwd: root });
+  const service = new HssCaptureService(probe, { cwd: root, ...testRoots(root) });
   try {
     const internals = service as unknown as { active: unknown };
     internals.active = {
@@ -276,7 +244,7 @@ test("variable_write_plan rejects active capture after helper exit", async () =>
     (service as unknown as { active: unknown }).active = null;
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -287,6 +255,7 @@ test("hss_capture_stop timeout kills helper and finalizes failed metadata", asyn
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
+    ...testRoots(root),
     env: {},
     helperPath: process.execPath,
     helperArgsPrefix: [helper],
@@ -302,7 +271,7 @@ test("hss_capture_stop timeout kills helper and finalizes failed metadata", asyn
     const start = await service.captureStart({
       device: "Z20K146M",
       dllPath: dll,
-      symbols: [{ name: "Debug_IqRef", type: "int32" }],
+      symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }],
       requestedRateHz: 100,
       durationSec: 1,
     });
@@ -312,52 +281,48 @@ test("hss_capture_stop timeout kills helper and finalizes failed metadata", asyn
     const stopped = await service.captureStop({ captureId });
 
     assert.equal(stopped.ok, true);
-    assert.equal((stopped.data as { state: string }).state, "failed");
+    assert.equal((stopped.data as { captureState: string }).captureState, "failed");
+    assert.equal((stopped.data as { indexStatus: string }).indexStatus, "ready");
     assert.equal(probe.getExclusiveOwner(), null);
-    const metadataFile = join(root, ".jlink-mcp", "captures", captureId, "capture.json");
-    const metadata = JSON.parse(await readFile(metadataFile, "utf8")) as Record<string, unknown>;
-    assert.equal(metadata.state, "failed");
-    assert.match((metadata.failures as string[]).join("\n"), /capture stop timed out/);
-    const helperEvent = (metadata.events as Array<{ type?: string; helperResult?: Record<string, unknown> }>).find((event) => event.type === "helperResult");
-    assert.equal(helperEvent?.helperResult?.errorCode, HSS_ERROR.HSS_CAPTURE_STOP_TIMEOUT);
+    assert.equal(readJcapV0Raw((start.data as { packageDir: string }).packageDir).events.at(-1)?.state, "failed");
   } finally {
     await service.dispose();
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-test("hss_session_recover marks abandoned local capture metadata", async () => {
+test("hss_session_recover rebuilds a missing JCAP index without changing raw", async () => {
   const root = await tempProject();
   const captureId = "11111111-1111-4111-8111-111111111111";
-  const captureDir = join(root, ".jlink-mcp", "captures", captureId);
-  const metadataFile = join(captureDir, "capture.json");
+  const captureDir = join(testRoots(root).storageRoot, "captures", `${captureId}.jcap`);
   const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
-  const service = new HssCaptureService(probe, { cwd: root });
+  const service = new HssCaptureService(probe, { cwd: root, ...testRoots(root) });
   try {
-    await mkdir(captureDir, { recursive: true });
-    await writeInitialMetadata({
-      metadataFile,
-      captureId,
-      sessionName: "abandoned",
-      projectRoot: root,
-      artifact: { file: join(root, "FOC_SCM.out"), sha256: "0", resolver: "iar-map" },
-      target: { device: "Z20K146M", interface: "SWD", speedKhz: 4000 },
-      symbols: [{ name: "Debug_IqRef", type: "int32", address: "0x20000000", size: 4, source: "iar-map" }],
-      requestedRateHz: 100,
+    writeJcapV0Raw({
+      packageDir: captureDir,
+      provenance: { captureId, backend: "jlink-hss", runtime: {}, target: {}, script: { mode: "none" } },
+      samples: [{ sampleIndex: 0, tick: "0", statusFlags: HSS_STATUS_FLAGS.valid, values: { g_hssDbgCounterFocIsr: 0 } }],
+      events: [
+        { eventId: "11111111-1111-4111-8111-111111111110", eventSequence: 0, type: "lifecycle", tick: "0", state: "planned" },
+        { eventId: "11111111-1111-4111-8111-111111111112", eventSequence: 1, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: "11111111-1111-4111-8111-111111111113", eventSequence: 2, type: "lifecycle", tick: "1", state: "finalizing" },
+        { eventId: "11111111-1111-4111-8111-111111111114", eventSequence: 3, type: "lifecycle", tick: "1", state: "completed" },
+      ],
     });
+    await rebuildJcapV0Index(captureDir);
+    const before = createHash("sha256").update(await readFile(join(captureDir, "raw", "samples.bin"))).digest("hex");
+    await rm(join(captureDir, "capture.db"));
 
     const recovered = await service.sessionRecover();
 
     assert.equal(recovered.ok, true);
     assert.equal((recovered.data as { recovered: number }).recovered, 1);
-    const metadata = JSON.parse(await readFile(metadataFile, "utf8")) as Record<string, unknown>;
-    assert.match((metadata.failures as string[]).join("\n"), /abandoned by previous process/);
-    const helperEvent = (metadata.events as Array<{ helperResult?: Record<string, unknown> }>).find((event) => event.helperResult);
-    assert.equal(helperEvent?.helperResult?.errorCode, HSS_ERROR.HSS_SESSION_ABANDONED);
+    assert.equal((recovered.data as { sessions: Array<{ captureState: string; indexStatus: string }> }).sessions[0].indexStatus, "ready");
+    assert.equal(createHash("sha256").update(await readFile(join(captureDir, "raw", "samples.bin"))).digest("hex"), before);
   } finally {
     probe.dispose();
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -408,8 +373,11 @@ function fakeHssDllBuffer(): Buffer {
 async function writeProject(root: string): Promise<void> {
   const exe = join(root, "Appl", "Debug", "Exe");
   const list = join(root, "Appl", "Debug", "List");
+  const bsw = join(root, "Appl", "Source", "BSW", "Src");
   await mkdir(exe, { recursive: true });
   await mkdir(list, { recursive: true });
+  await mkdir(join(root, "EB_Project", "config"), { recursive: true });
+  await mkdir(bsw, { recursive: true });
   await mkdir(join(root, ".jlink-mcp"), { recursive: true });
   await mkdir(join(process.cwd(), ".tmp"), { recursive: true });
   await writeFile(FAKE_JLINK_SCRIPT_FILE, FAKE_JLINK_SCRIPT_CONTENT, "utf8");
@@ -431,11 +399,19 @@ async function writeProject(root: string): Promise<void> {
   }, root);
   await writeFile(join(exe, "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
   await writeFile(join(list, "FOC_SCM.map"), [
+    "g_hssDbgCounterFocIsr   0x2000'0100     0x4  Data  Gb  app.o [1]",
     "Debug_IqRef              0x2000'0000     0x4  Data  Gb  app.o [1]",
     "Debug_R3                 0x2000'0008     0x4  Data  Gb  app.o [1]",
     "Debug_TargetTable        0x2000'0010     0x8  Data  Gb  app.o [1]",
     "Debug_ProfileTable       0x2000'0020     0x20 Data  Gb  app.o [1]",
   ].join("\n"), "utf8");
+  await Promise.all([
+    writeFile(join(root, "EB_Project", "config", "Mcu.xdm"), '<d McuFOSCClockFrequency value="40000000"/>', "utf8"),
+    writeFile(join(bsw, "Parcc_Drv_PBcfg.c"), "Start of PARCC_MCPWM1 clock divider (Parcc_Drv_ClockDividerType)1U\nStart of PARCC_TDG1 clock divider (Parcc_Drv_ClockDividerType)1U", "utf8"),
+    writeFile(join(bsw, "Mcpwm_Pwm_Drv_PBcfg.c"), "Pwm_Drv_I1_Counter0_Cfg = { .PwmPeriod = 625U };\nPwm_Drv_Inst1_Cfg = { .ClkDiv = MCPWM_PWM_DRV_CLK_DIVIDE_1 };\nMCPWM_PWM_DRV_MODE_COMBINE_SYM_CENTER_ALIGNED", "utf8"),
+    writeFile(join(bsw, "Tdg_Adc_Drv_PBcfg.c"), "DelayOutputConfig_Group1_Channel0 = { TDG_ADC_DRV_DELAY_OUTPUT_0, 1238U };\nTdg_Adc_Drv_Config_1 = { (Tdg_Adc_Drv_ClockDivideType)1U, 1241U, /* ModulateValue */ };\nTdg_Adc_Drv_GroupConfig_1 = { (boolean)FALSE };", "utf8"),
+    writeFile(join(bsw, "Tmu_Drv_Cfg.c"), "TMU_DRV_INPUT_CHANNEL_MCPWM1_INIT_TRIG0, TMU_DRV_OUTPUT_CHANNEL_TDG1_TRIG_IN", "utf8"),
+  ]);
 }
 
 async function writePolicy(root: string): Promise<void> {
@@ -462,18 +438,21 @@ if (command === "preflight") { console.log(JSON.stringify({ status: "ok", export
 if (command === "connect-preflight") { console.log(JSON.stringify({ status: "ok", targetWasHalted: false, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false })); process.exit(0); }
 if (command === "getcaps") { console.log(JSON.stringify({ status: "ok", returnCode: 0, caps: { maxBlocks: 16, maxFreq: 1000 }, dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0 })); process.exit(0); }
 if (command === "target-state") { console.log(JSON.stringify({ status: "ok", operation: "target-state", dllVersion: 88400, helperVersion: "1", helperProtocolVersion: 1, targetWasHalted: false, targetWasHaltedRaw: 0, beforeState: "running", afterState: "running", jlinkScriptMode: option("--jlink-script-mode"), jlinkScriptFile: option("--jlink-script-file"), jlinkScriptSha256: option("--approved-jlink-script-sha256"), jlinkScriptReturnCode: 0, targetReset: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false, resumeIssued: false })); process.exit(0); }
+if (command === "qpc-timebase") { console.log(JSON.stringify({ status: "ok", qpcCounter: "100000", qpcFrequency: "1000000" })); process.exit(0); }
 const plan = JSON.parse(fs.readFileSync(option("--plan"), "utf8"));
+const crypto = require("crypto");
 const records = [];
-for (let i = 0; i < plan.requestedRateHz * plan.durationSec; i++) {
-  const record = Buffer.alloc(28);
-  record.writeBigUInt64LE(BigInt(i), 0);
-  record.writeBigInt64LE(BigInt(Math.round(i * 1000000000 / plan.requestedRateHz)), 8);
-  record.writeUInt32LE(${HSS_STATUS_FLAGS.valid}, 16);
-  record.writeUInt32LE(0, 20);
-  record.writeUInt32LE(i, 24);
-  records.push(record);
+function frame(value) {
+  const payload = Buffer.from(JSON.stringify(value), "utf8");
+  const header = Buffer.from(JSON.stringify({ formatVersion: 0, status: "experimental", kind: "sample", payloadEncoding: "json", payloadBytes: payload.length, payloadSha256: crypto.createHash("sha256").update(payload).digest("hex") }) + "\\n");
+  return Buffer.concat([header, payload, Buffer.from("\\n")]);
+}
+for (let i = 0; i < Math.min(plan.requestedRateHz * plan.durationSec, 20); i++) {
+  records.push(frame({ sampleIndex: i, tick: String(Math.round(i * 1000000000 / plan.requestedRateHz)), statusFlags: ${HSS_STATUS_FLAGS.valid}, values: { g_hssDbgCounterFocIsr: i * Math.max(1, Math.round(plan.postConnectExpectedRateHz / plan.requestedRateHz)) } }));
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
+console.log(JSON.stringify({ record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency }));
+console.log(JSON.stringify({ record: "lifecycle", phase: "hss_start", captureId: plan.captureId, qpcCounter: "100001", returnCode: 0, crashed: false }));
 const memory = new Map([["536870912", "00000000"]]);
 let targetWritten = false;
 function handleWriteRequest() {
@@ -494,20 +473,29 @@ function handleWriteRequest() {
   fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "error", reason: "bad op" }));
 }
 const timer = setInterval(handleWriteRequest, 5);
-setTimeout(() => { clearInterval(timer); console.log(JSON.stringify({ status: "ok", helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: true, decoderSemanticsValidated: true, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, resetBeforeCapture: plan.resetBeforeCapture === true, captureId: plan.captureId, requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false, hssSampleHeaderBytes: 4, hssSampleStrideBytes: 8, bytesPerSample: 4, hssBlockCount: 1, readBufferBytes: 4096, firstChangedOffset: 0, firstChangedBytes: "00000000", headerChangedRatio: 1, payloadChangedRatio: 1, payloadFirstChangedOffset: 4, payloadFirstChangedBytes: "01000000" })); }, 1000);
+setTimeout(() => {
+  clearInterval(timer);
+  console.log(JSON.stringify({ record: "lifecycle", phase: "hss_stop", captureId: plan.captureId, qpcCounter: "100002", returnCode: 0, crashed: false }));
+  console.log(JSON.stringify({ record: "result", status: "ok", helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: true, decoderSemanticsValidated: true, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, resetBeforeCapture: plan.resetBeforeCapture === true, captureId: plan.captureId, qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency, rawClosed: true, samplesSha256: crypto.createHash("sha256").update(fs.readFileSync(plan.outputFile)).digest("hex"), requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false }));
+}, 1000);
 `;
 }
 
 async function readAudit(root: string): Promise<string> {
-  const auditRoot = join(root, ".jlink-mcp", "audit");
+  const auditRoot = join(testRoots(root).evidenceRoot, "audit");
   const sessions = await import("node:fs/promises").then((fs) => fs.readdir(auditRoot));
   const chunks = await Promise.all(sessions.map((session) => readFile(join(auditRoot, session, "audit.jsonl"), "utf8").catch(() => "")));
   return chunks.join("\n");
 }
 
 async function tempProject(): Promise<string> {
-  const root = join(process.cwd(), ".tmp", `hss-mvp-b-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const root = join(process.cwd(), ".tmp", `hss-mvp-b-${Date.now()}-${Math.random().toString(16).slice(2)}`, "project");
   await mkdir(root, { recursive: true });
   return root;
+}
+
+function testRoots(root: string): { storageRoot: string; evidenceRoot: string } {
+  const sandbox = dirname(root);
+  return { storageRoot: join(sandbox, "storage"), evidenceRoot: join(sandbox, "evidence") };
 }
 

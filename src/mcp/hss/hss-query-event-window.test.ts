@@ -1,6 +1,6 @@
 ﻿import assert from "node:assert/strict";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
 import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-flag-overlay";
@@ -8,12 +8,14 @@ import { crc32File, encodeHssRecord, queryHssCapture } from "./hss-artifact";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 import type { HssVariableWritePlan } from "./hss-write-plan";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
+import { configureHssProjectPaths } from "./project-paths";
 
 test("hss_capture_query supports event_window with effective flags and summary", async () => {
   const root = await tempProject();
+  const paths = configureHssProjectPaths(root, testRoots(root));
   try {
     const captureId = "11111111-1111-4111-8111-111111111111";
-    const captureDir = join(root, ".jlink-mcp", "captures", captureId);
+    const captureDir = join(paths.capturesDir, captureId);
     await mkdir(captureDir, { recursive: true });
     const segmentFile = join(captureDir, "capture_0001.bin");
     const records = Array.from({ length: 10 }, (_, index) => encodeHssRecord({
@@ -93,15 +95,16 @@ test("hss_capture_query supports event_window with effective flags and summary",
     }, root);
     assert.equal((withoutNearby.eventWindow as { sampleCount: number }).sampleCount, 2);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
 test("hss_capture_query event_window reports warnings when windows have no samples", async () => {
   const root = await tempProject();
+  const paths = configureHssProjectPaths(root, testRoots(root));
   try {
     const captureId = "11111111-1111-4111-8111-111111111112";
-    const captureDir = join(root, ".jlink-mcp", "captures", captureId);
+    const captureDir = join(paths.capturesDir, captureId);
     await mkdir(captureDir, { recursive: true });
     const segmentFile = join(captureDir, "capture_0001.bin");
     await writeFile(segmentFile, Buffer.concat([encodeHssRecord({
@@ -123,7 +126,7 @@ test("hss_capture_query event_window reports warnings when windows have no sampl
     assert.equal(warnings.includes("after window contains no samples"), true);
     assert.equal(warnings.includes("event is after last captured sample"), true);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
@@ -205,8 +208,13 @@ function writeResult(captureId: string, overrides: Partial<HssVariableWriteExecu
 }
 
 async function tempProject(): Promise<string> {
-  const root = join(process.cwd(), ".tmp", `hss-query-event-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const root = join(process.cwd(), ".tmp", `hss-query-event-${Date.now()}-${Math.random().toString(16).slice(2)}`, "project");
   await mkdir(root, { recursive: true });
   return root;
+}
+
+function testRoots(root: string): { storageRoot: string; evidenceRoot: string } {
+  const sandbox = dirname(root);
+  return { storageRoot: join(sandbox, "storage"), evidenceRoot: join(sandbox, "evidence") };
 }
 

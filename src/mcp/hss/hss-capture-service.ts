@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, fsyncSync, openSync, statSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -19,13 +19,12 @@ import {
 import { readHssTrustProfile, type HssScriptSpec, type HssTrustProfile } from "../trust/trust-profile";
 import { resolveHssDebugArtifact } from "./debug-artifact";
 import { appendHssAudit } from "./audit-log";
-import { exportHssCapture, finalizeMetadata, hssCaptureStatusFromMetadata, hssCaptureStopFromMetadata, queryHssCapture, readHssMetadata, writeInitialMetadata } from "./hss-artifact";
+import { hmC095Validation, type HssQueryInput, type HssSampleRecord } from "./hss-artifact";
 import { hssCapabilityProbe } from "./hss-capability";
 import type { HssCapturePlan, HssCapturePlanInput } from "./hss-plan";
 import { buildHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE, type HssCaptureMetadata } from "./hss-contract";
-import { appendHssTargetControlEvent, appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
-import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-flag-overlay";
+import { appendHssJcapEvent, hssQpcTick, parseHssQpcTimebase, type HssJcapEventJournal } from "./hss-events";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import { HelperHssVariableMemoryIo, ProbeDirectHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
@@ -33,9 +32,19 @@ import { loadHssPolicy } from "./hss-policy";
 import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePlan, type HssVariableWritePlanInput } from "./hss-write-plan";
 import { executeHssVariableWritePlan, type HssVariableWriteExecuteInput, type HssVariableWriteExecuteResult } from "./hss-write-execute";
 import { HssCaptureWriteQueue } from "./hss-write-queue";
-import { assertNoMvpAWriteFlags, HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { assertInsideProject, configureHssProjectPaths, ensureHssProjectDirs, hssProjectPaths, type HssProjectPaths } from "./project-paths";
 import { resolveHssTargetIdentity, type HssTargetIdentityInput } from "./target-identity";
+import {
+  finalizeJcapV0Capture,
+  JcapV0Writer,
+  jcapCaptureEventWindow,
+  jcapCaptureExportCsv,
+  jcapCaptureSeries,
+  jcapCaptureSummary,
+  rebuildJcapV0Index,
+  readJcapV0Raw,
+  verifyJcapV0Index,
+} from "../jcap/jcap-v0";
 
 const OUTSIDE_CAPTURE_ID = "outside-capture";
 
@@ -74,25 +83,23 @@ interface ActiveCapture {
   writeRequestFile: string;
   writeResponseFile: string;
   child: ChildProcessWithoutNullStreams;
-  stdout: string;
   stderr: string;
   writeQueue: HssCaptureWriteQueue;
-  startTimeUs: number;
   done: Promise<void>;
   stopTimedOut?: boolean;
   helperExited?: boolean;
   runtimeIdentity: HssRuntimeIdentity;
-}
-
-interface SampleAnchor {
-  sampleIndex: number;
-  captureTimeUs: number;
+  journal: HssJcapEventJournal;
+  stdoutRemainder: string;
+  helperResult?: Record<string, unknown>;
+  helperResultCount: number;
+  stdoutError?: Error;
+  hssStarted: boolean;
 }
 
 export class HssCaptureService {
   private readonly sessionId = randomUUID();
   private readonly plans = new Map<string, HssCapturePlan>();
-  private readonly metadataFiles = new Map<string, string>();
   private readonly writePlans = new HssWritePlanStore();
   private readonly outsideWritePlanMapFiles = new Map<string, string>();
   private readonly writeCounters = new Map<string, { ops: number; elements: number }>();
@@ -272,58 +279,61 @@ export class HssCaptureService {
         if (Date.now() > Date.parse(plan.resetOperation.expiresAt)) throw new HssError(HSS_ERROR.RESET_PLAN_EXPIRED, "reset operation plan expired", { expiresAt: plan.resetOperation.expiresAt });
       }
       const owner = `hss:${plan.output.captureId}`;
-      const stopFile = join(plan.output.outputDir, "stop.request");
-      const diagnosticFile = join(plan.output.outputDir, "capture.diag.json");
-      const writeRequestFile = join(plan.output.outputDir, "write.request.json");
-      const writeResponseFile = join(plan.output.outputDir, "write.response.json");
-      await writeInitialMetadata({
-        metadataFile: plan.output.metadataFile,
-        captureId: plan.output.captureId,
-        sessionName: input.sessionName ?? "hm_c095_hss",
-        projectRoot: plan.projectRoot,
-        storageRoot: plan.storageRoot,
-        evidenceRoot: plan.evidenceRoot,
-        artifact: plan.artifact,
-        target,
-        probe: { serial: input.serial ?? probe?.serialNumber, dllVersion: undefined, model: undefined },
-        symbols: plan.symbols,
-        requestedRateHz: plan.sampling.requestedRateHz,
-        readMode: input.readMode ?? plan.readMode,
-        resumeBeforeStart: input.resumeBeforeStart ?? plan.resumeBeforeStart,
-        targetWasHaltedBeforeCapture,
-        targetWasHaltedRaw: hss.targetWasHaltedRaw,
-        warnings,
-        script: {
-          ...plan.scriptIdentity,
-          approvalSource: plan.scriptIdentity.approvalSource ?? "trusted-allowlist",
-          getCapsSelectionReturnCode: Number((capability.getCaps as Record<string, unknown> | undefined)?.jlinkScriptReturnCode ?? -1),
-          noDefaultFallback: true,
-        },
-        reset: plan.resetBeforeCapture ? { operation: plan.resetOperation, stabilityPolicy: plan.stabilityPolicy, status: "planned" } : undefined,
-        hmC095Oracle: plan.hmC095,
-      });
-      this.metadataFiles.set(plan.output.captureId, plan.output.metadataFile);
-      const resetResult = plan.resetBeforeCapture
-        ? await this.executeResetBeforeCapture(plan, runtimeIdentity, plan.output.metadataFile, target, serial)
-        : undefined;
-      if (resetResult) {
-        const metadata = await readHssMetadata(plan.output.metadataFile);
-        metadata.reset = { ...metadata.reset, status: "completed", result: resetResult };
-        await writeFile(plan.output.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
-      }
-      if (!this.probe.acquireExclusive(owner)) throw new HssError(HSS_ERROR.HSS_CAPTURE_ACTIVE, `probe is already owned by ${this.probe.getExclusiveOwner() ?? "another operation"}`);
-      const launchIdentity = refreshHssRuntimeIdentity(runtimeIdentity, {
+      const stopFile = join(plan.output.sessionDir, "stop.request");
+      const diagnosticFile = join(plan.output.sessionDir, "capture.diag.json");
+      const writeRequestFile = join(plan.output.sessionDir, "write.request.json");
+      const writeResponseFile = join(plan.output.sessionDir, "write.response.json");
+      const qpcResponse = await runHssHelperCommand("qpc-timebase", [], {
         env,
         helperPath,
-        validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
-        adapterPath: this.options.adapterPath,
+        helperArgsPrefix: this.options.helperArgsPrefix,
       });
-      if (!hssRuntimeIdentityMatches(runtimeIdentity, launchIdentity)) {
-        this.probe.releaseExclusive(owner);
-        throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "DLL/helper/adapter identity changed before capture helper launch", { runtimeIdentity: launchIdentity });
-      }
-      await writeHelperPlan(plan.output.planFile, {
+      if (qpcResponse.status !== "ok") throw new HssError(HSS_ERROR.HSS_HELPER_BAD_JSON, "qpc-timebase helper command failed", { qpcResponse });
+      const qpc = parseHssQpcTimebase(qpcResponse);
+      const writer = new JcapV0Writer({
+        packageDir: plan.output.packageDir,
+        externalSamples: true,
+        provenance: {
+          captureId: plan.output.captureId,
+          sessionName: input.sessionName ?? "hm_c095_hss",
+          backend: "jlink-hss",
+          runtime: plainJsonRecord({ ...runtimeIdentity, roots: { projectRoot: plan.projectRoot, storageRoot: plan.storageRoot, evidenceRoot: plan.evidenceRoot } }),
+          target: plainJsonRecord({ ...target, targetWasHaltedBeforeCapture, targetWasHaltedRaw: hss.targetWasHaltedRaw }),
+          script: plan.scriptIdentity.mode === "file"
+            ? { mode: "file", path: plan.scriptIdentity.path, sha256: plan.scriptIdentity.sha256 }
+            : { mode: "none" },
+          ...(plan.resetBeforeCapture ? { reset: plainJsonRecord({ operation: plan.resetOperation, stabilityPolicy: plan.stabilityPolicy }) } : {}),
+        },
+      });
+      const journal: HssJcapEventJournal = {
         captureId: plan.output.captureId,
+        writer,
+        qpcEpochCounter: qpc.qpcEpochCounter,
+        qpcFrequency: qpc.qpcFrequency,
+        nextEventSequence: 0,
+        lastTick: 0n,
+      };
+      appendHssJcapEvent(journal, "lifecycle", qpc.qpcEpochCounter.toString(), { state: "planned", phase: "capture_planned" });
+      writer.syncEvents();
+      let acquired = false;
+      let resetResult: Record<string, unknown> | undefined;
+      try {
+        resetResult = plan.resetBeforeCapture
+          ? await this.executeResetBeforeCapture(plan, runtimeIdentity, journal, target, serial)
+          : undefined;
+        if (!this.probe.acquireExclusive(owner)) throw new HssError(HSS_ERROR.HSS_CAPTURE_ACTIVE, `probe is already owned by ${this.probe.getExclusiveOwner() ?? "another operation"}`);
+        acquired = true;
+        const launchIdentity = refreshHssRuntimeIdentity(runtimeIdentity, {
+          env,
+          helperPath,
+          validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(runtimeIdentity),
+          adapterPath: this.options.adapterPath,
+        });
+        if (!hssRuntimeIdentityMatches(runtimeIdentity, launchIdentity)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "DLL/helper/adapter identity changed before capture helper launch", { runtimeIdentity: launchIdentity });
+        await writeHelperPlan(plan.output.planFile, {
+        captureId: plan.output.captureId,
+        qpcEpochCounter: qpc.qpcEpochCounter.toString(),
+        qpcFrequency: qpc.qpcFrequency.toString(),
         dllPath: discovery.selectedDllPath,
         approvedDllSha256: launchIdentity.dllSha256,
         runtimeIdentityValidated: launchIdentity.validated,
@@ -361,12 +371,12 @@ export class HssCaptureService {
         postConnectRequiredConsecutiveRunningChecks: plan.stabilityPolicy.requiredConsecutiveRunningChecks,
         target: targetIdentity,
         symbols: plan.symbols,
-      });
-      const child = spawn(helperPath, [...(this.options.helperArgsPrefix ?? []), "hss-capture", "--jlink-script-mode", plan.scriptIdentity.mode, "--plan", plan.output.planFile], {
-        windowsHide: true,
-        env: { ...process.env, ...this.env() },
-      });
-      const active: ActiveCapture = {
+        });
+        const child = spawn(helperPath, [...(this.options.helperArgsPrefix ?? []), "hss-capture", "--jlink-script-mode", plan.scriptIdentity.mode, "--plan", plan.output.planFile], {
+          windowsHide: true,
+          env: { ...process.env, ...this.env() },
+        });
+        const active: ActiveCapture = {
         captureId: plan.output.captureId,
         generation: ++this.captureGeneration,
         owner,
@@ -378,15 +388,17 @@ export class HssCaptureService {
         writeRequestFile,
         writeResponseFile,
         child,
-        stdout: "",
         stderr: "",
         writeQueue: new HssCaptureWriteQueue(),
-        startTimeUs: Date.now() * 1000,
         done: Promise.resolve(),
         runtimeIdentity: launchIdentity,
-      };
-      active.done = new Promise((resolveDone) => {
-        child.stdout.on("data", (data: Buffer) => { active.stdout += data.toString(); });
+        journal,
+        stdoutRemainder: "",
+        helperResultCount: 0,
+        hssStarted: false,
+        };
+        active.done = new Promise((resolveDone) => {
+        child.stdout.on("data", (data: Buffer) => { this.consumeHelperStdout(active, data.toString("utf8")); });
         child.stderr.on("data", (data: Buffer) => { active.stderr += data.toString(); });
         child.once("exit", (code) => {
           active.helperExited = true;
@@ -397,9 +409,9 @@ export class HssCaptureService {
           active.helperExited = true;
           void this.finishActive(active, -1).finally(resolveDone);
         });
-      });
-      this.active = active;
-      return {
+        });
+        this.active = active;
+        return {
         captureId: plan.output.captureId,
         state: "capturing",
         backend: "jlink-hss",
@@ -409,8 +421,8 @@ export class HssCaptureService {
         runtimeIdentity: launchIdentity,
         symbols: plan.symbols,
         outputDir: plan.output.outputDir,
-        metadataFile: plan.output.metadataFile,
-        segments: [plan.output.firstSegmentFile],
+        packageDir: plan.output.packageDir,
+        samplesFile: plan.output.firstSegmentFile,
         safety: HSS_SAFETY_FALSE,
         targetWasHaltedBeforeCapture,
         targetWasHaltedRaw: hss.targetWasHaltedRaw,
@@ -418,7 +430,12 @@ export class HssCaptureService {
         resetBeforeCapture: plan.resetBeforeCapture,
         reset: resetResult,
         risk: plan.resetBeforeCapture ? "R3" : "R1",
-      };
+        };
+      } catch (error) {
+        if (acquired) this.probe.releaseExclusive(owner);
+        await this.finalizePreStartFailure(journal, error);
+        throw error;
+      }
     });
   }
 
@@ -426,35 +443,27 @@ export class HssCaptureService {
     return this.wrap("hss_capture_status", input, async () => {
       const active = this.active?.captureId === input.captureId ? this.active : null;
       if (active) {
-        const recordSize = 24 + active.plan.symbols.length * 4;
-        const quality = existsSync(active.segmentFile) ? activeQuality(await readFile(active.segmentFile), recordSize) : emptyLiveQuality();
         return {
           captureId: input.captureId,
-          state: "capturing",
-          ...quality,
-          elapsedSec: quality.elapsedSec,
+          state: active.hssStarted ? "active" : "planned",
+          indexStatus: "not_ready",
           requestedRateHz: active.plan.sampling.requestedRateHz,
-          actualRateHz: quality.actualRateHz,
-          sampling: {
-            requestedRateHz: active.plan.sampling.requestedRateHz,
-            hssIndexRateHz: quality.actualRateHz,
-            hostObservedRateHz: quality.actualRateHz,
-            helperReportedRateHz: 0,
-            helperActualRateHz: 0,
-            readMode: active.plan.readMode,
-          },
-          currentSegment: "capture_0001.bin",
+          samplesBytes: existsSync(active.segmentFile) ? statSync(active.segmentFile).size : 0,
+          packageDir: active.plan.output.packageDir,
+          helperExited: active.helperExited === true,
+          helperResultCount: active.helperResultCount,
+          stdoutError: active.stdoutError?.message,
           warnings: [],
         };
       }
-      return hssCaptureStatusFromMetadata(this.metadataFor(input.captureId));
+      return { captureId: input.captureId, ...await jcapCaptureSummary(this.packageFor(input.captureId)) };
     });
   }
 
   async captureStop(input: { captureId: string }): Promise<HssEnvelope<Record<string, unknown>>> {
     return this.wrap("hss_capture_stop", input, async () => {
       const active = this.active?.captureId === input.captureId ? this.active : null;
-      if (!active) return hssCaptureStopFromMetadata(this.metadataFor(input.captureId));
+      if (!active) return { captureId: input.captureId, ...await jcapCaptureSummary(this.packageFor(input.captureId)) };
       active.writeQueue.beginStopping();
       await active.writeQueue.waitForIdle();
       await writeFile(active.stopFile, "stop", "utf8");
@@ -463,7 +472,7 @@ export class HssCaptureService {
         active.child.kill();
         await active.done;
       }
-      return hssCaptureStopFromMetadata(active.metadataFile);
+      return { captureId: input.captureId, ...await jcapCaptureSummary(active.plan.output.packageDir) };
     });
   }
 
@@ -575,54 +584,79 @@ export class HssCaptureService {
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, postIdentity)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "CPU-control runtime identity changed after hardware access", { binding, result });
       const event = this.active
-        ? await appendHssTargetControlEvent(this.active.metadataFile, {
+        ? appendHssJcapEvent(this.active.journal, "target_control", result.operationAfterQpcCounter ?? await this.qpcCounter(this.active), {
           operation,
           result: "succeeded",
           captureId: this.active.captureId,
           operationDigest: binding.operationDigest,
           beforeState: result.beforeState ?? "unknown",
           afterState: result.afterState ?? "unknown",
-          startUs: Date.now() * 1000,
-          endUs: Date.now() * 1000,
         })
         : undefined;
       return { operation, risk: "R3", binding, result, runtimeIdentity: postIdentity, scriptIdentity: script, eventId: event?.eventId };
     });
   }
 
-  async captureQuery(input: Parameters<typeof queryHssCapture>[0]): Promise<HssEnvelope<Record<string, unknown>>> {
-    return this.wrap("hss_capture_query", input, () => queryHssCapture({ ...input, metadataFile: input.metadataFile ?? this.metadataFor(input.captureId) }, this.cwd()));
+  async captureQuery(input: HssQueryInput): Promise<HssEnvelope<Record<string, unknown>>> {
+    return this.wrap("hss_capture_query", input, async () => {
+      if (this.active?.captureId === input.captureId) throw new HssError(HSS_ERROR.CAPTURE_NOT_ACTIVE, "active/finalizing JCAP captures are not query-ready", { captureId: input.captureId, indexStatus: "not_ready" });
+      if (input.includeRawSamples) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "full raw samples are not available through bounded JCAP queries");
+      if (input.metadataFile || input.maxSamples !== undefined || input.flagFilter || input.summary || input.hmC095Profile !== undefined) {
+        throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "legacy metadata/raw/flag query options are not supported by the JCAP query path");
+      }
+      const packageDir = this.packageFor(input.captureId);
+      if (input.mode === "event_window") {
+        return jcapCaptureEventWindow({
+          packageDir,
+          eventId: requiredText(input.eventId, "eventId"),
+          variables: input.variables ?? [],
+          beforeMs: requiredBoundedInteger(input.windowBeforeMs, "windowBeforeMs"),
+          afterMs: requiredBoundedInteger(input.windowAfterMs, "windowAfterMs"),
+          bucketCount: requiredBoundedInteger(input.buckets, "buckets"),
+        });
+      }
+      if (!input.variables?.length) return jcapCaptureSummary(packageDir);
+      return jcapCaptureSeries({
+        packageDir,
+        variables: input.variables,
+        startTick: secondsToTick(input.startSec, "startSec"),
+        endTick: secondsToTick(input.endSec, "endSec"),
+        bucketCount: requiredBoundedInteger(input.buckets, "buckets"),
+      });
+    });
   }
 
-  async captureExport(input: Parameters<typeof exportHssCapture>[0]): Promise<HssEnvelope<Record<string, unknown>>> {
-    return this.wrap("hss_capture_export", input, () => exportHssCapture({ ...input, metadataFile: input.metadataFile ?? this.metadataFor(input.captureId) }, this.cwd()));
+  async captureExport(input: { captureId: string; metadataFile?: string; format?: "csv"; variables?: string[]; eventAware?: boolean; eventId?: string; windowBeforeMs?: number; windowAfterMs?: number }): Promise<HssEnvelope<Record<string, unknown>>> {
+    return this.wrap("hss_capture_export", input, async () => {
+      if (input.format && input.format !== "csv") throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "JCAP export supports CSV only");
+      const packageDir = this.packageFor(input.captureId);
+      if (input.metadataFile || input.variables || input.eventAware !== undefined || input.eventId || input.windowBeforeMs !== undefined || input.windowAfterMs !== undefined) {
+        throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, "legacy or event-aware export options are not supported; request the explicit JCAP CSV export");
+      }
+      if (this.active?.captureId === input.captureId) throw new HssError(HSS_ERROR.CAPTURE_NOT_ACTIVE, "active/finalizing JCAP captures are not export-ready");
+      return jcapCaptureExportCsv(packageDir);
+    });
   }
 
   async sessionRecover(input: { captureId?: string } = {}): Promise<HssEnvelope<Record<string, unknown>>> {
     return this.wrap("hss_session_recover", input, async () => {
       const paths = this.paths;
-      const captureIds = input.captureId ? [input.captureId] : await readdir(paths.capturesDir).catch(() => []);
+      const captureIds = input.captureId ? [input.captureId] : (await readdir(paths.capturesDir).catch(() => []))
+        .filter((name) => name.endsWith(".jcap")).map((name) => name.slice(0, -5));
       const recovered: Array<Record<string, unknown>> = [];
       const skipped: Array<Record<string, unknown>> = [];
       for (const captureId of captureIds) {
-        const metadataFile = join(paths.capturesDir, captureId, "capture.json");
-        assertInsideProject(metadataFile, paths.capturesDir);
-        if (!existsSync(metadataFile)) {
-          skipped.push({ captureId, reason: "metadata_missing" });
+        const packageDir = this.packageFor(captureId);
+        if (!existsSync(packageDir)) {
+          skipped.push({ captureId, reason: "package_missing" });
           continue;
         }
-        const metadata = await readHssMetadata(metadataFile);
-        if (!isAbandonedMetadata(metadata)) {
-          skipped.push({ captureId, reason: "not_abandoned" });
+        const status = await verifyJcapV0Index(packageDir);
+        if (status.indexStatus !== "rebuild_required") {
+          skipped.push({ captureId, reason: "index_not_rebuild_required", ...status });
           continue;
         }
-        const reason = "capture abandoned by previous process";
-        metadata.failures.push(reason);
-        metadata.warnings.push("session recovered as abandoned");
-        metadata.events.push({ type: "helperResult", helperResult: { status: "error", errorCode: HSS_ERROR.HSS_SESSION_ABANDONED, reason } });
-        await writeFile(metadataFile, JSON.stringify(metadata, null, 2), "utf8");
-        this.metadataFiles.set(captureId, metadataFile);
-        recovered.push({ captureId, state: metadata.state, metadataFile, reason });
+        recovered.push({ captureId, ...await rebuildJcapV0Index(packageDir) });
       }
       return { recovered: recovered.length, skipped: skipped.length, sessions: recovered, skippedSessions: skipped };
     });
@@ -674,14 +708,27 @@ export class HssCaptureService {
         const io = this.options.memoryIo ?? new HelperHssVariableMemoryIo(active.writeRequestFile, active.writeResponseFile, active.captureId);
         try {
           const result = await executeHssVariableWritePlan(plan, io, this.options.targetEndian ?? "little", Boolean(input.dryRun), (stage) => active.writeQueue.setStage(stage));
-          await this.attachSampleIndex(active, result);
           if (!input.dryRun) {
             active.writeQueue.setStage("EVENT_APPEND");
-            await appendHssWriteEvent(active.metadataFile, plan, result, true);
-            active.writeQueue.setStage("FLAG_APPEND");
-            await appendHssWriteFlagIntervals(active.metadataFile, { eventId: result.eventId, writeStartUs: this.captureTimeUs(active, result), writeEndUs: this.captureTimeUs(active, result) + Math.max(1, result.writeEndUs - result.writeStartUs), requestedRateHz: active.plan.sampling.requestedRateHz });
-            await materializeHssCaptureEvents(active.metadataFile);
-            await materializeHssFlagIntervals(active.metadataFile);
+            const writeQpcCounter = await this.qpcCounter(active);
+            const event = appendHssJcapEvent(active.journal, "variable_write", writeQpcCounter, {
+              writeId: result.writeId,
+              writeKind: plan.targetRef.kind,
+              canonicalTarget: plan.canonicalTarget,
+              targetRef: plan.targetRef,
+              oldValue: result.oldValue,
+              oldValues: result.oldValues,
+              newValue: result.newValue,
+              newValues: result.newValues,
+              readback: result.readback,
+              readbackValues: result.readbackValues,
+              readbackOk: result.readbackOk,
+              mismatches: result.mismatches,
+              risk: plan.risk,
+              ok: true,
+            });
+            result.eventId = event.eventId;
+            appendHssJcapEvent(active.journal, "flag", writeQpcCounter, { flag: "write_nearby", sourceEventId: event.eventId, ok: true });
             this.consumeWrite(plan);
             this.writePlans.markExecuted(writePlanId);
           }
@@ -690,13 +737,21 @@ export class HssCaptureService {
         } catch (error) {
           if (error instanceof HssError && error.details.writeIssued === true) {
             const maybeResult = "writeId" in error.details ? error.details as unknown as HssVariableWriteExecuteResult : undefined;
-            if (maybeResult) await this.attachSampleIndex(active, maybeResult);
             active.writeQueue.setStage("EVENT_APPEND");
-            await appendHssWriteEvent(active.metadataFile, plan, maybeResult, false, error.code);
-            active.writeQueue.setStage("FLAG_APPEND");
-            if (maybeResult) await appendHssWriteFlagIntervals(active.metadataFile, { eventId: maybeResult.eventId, writeStartUs: this.captureTimeUs(active, maybeResult), writeEndUs: this.captureTimeUs(active, maybeResult) + Math.max(1, maybeResult.writeEndUs - maybeResult.writeStartUs), requestedRateHz: active.plan.sampling.requestedRateHz, backendBusy: error.code === HSS_ERROR.UNKNOWN_WRITE_STATE });
-            await materializeHssCaptureEvents(active.metadataFile);
-            await materializeHssFlagIntervals(active.metadataFile);
+            const writeQpcCounter = await this.qpcCounter(active);
+            const event = appendHssJcapEvent(active.journal, "variable_write", writeQpcCounter, {
+              writeId: maybeResult?.writeId ?? randomUUID(),
+              writeKind: plan.targetRef.kind,
+              canonicalTarget: plan.canonicalTarget,
+              targetRef: plan.targetRef,
+              readbackOk: maybeResult?.readbackOk ?? false,
+              mismatches: maybeResult?.mismatches ?? [],
+              risk: plan.risk,
+              ok: false,
+              errorCode: error.code,
+            });
+            appendHssJcapEvent(active.journal, "flag", writeQpcCounter, { flag: "backend_busy", sourceEventId: event.eventId, ok: false, errorCode: error.code });
+            if (maybeResult) maybeResult.eventId = event.eventId;
             if (maybeResult) maybeResult.queueStages = active.writeQueue.history();
             this.consumeWrite(plan);
             this.writePlans.markExecuted(writePlanId);
@@ -773,26 +828,19 @@ export class HssCaptureService {
 
   private async finishActive(active: ActiveCapture, code: number | null): Promise<void> {
     if (this.active?.captureId !== active.captureId) return;
+    this.consumeHelperStdout(active, "", true);
     let state: "completed" | "stopped" | "failed" = "failed";
-    let helperResult: Record<string, unknown> | undefined;
+    let helperResult = active.helperResult;
     let failure: string | undefined;
     if (active.stopTimedOut) {
       failure = "capture stop timed out; helper was killed";
-      helperResult = { status: "error", errorCode: HSS_ERROR.HSS_CAPTURE_STOP_TIMEOUT, reason: failure, exitCode: code, stdout: active.stdout, stderr: active.stderr };
+      helperResult = { status: "error", errorCode: HSS_ERROR.HSS_CAPTURE_STOP_TIMEOUT, reason: failure, exitCode: code, stderr: active.stderr };
+    } else if (active.stdoutError || active.helperResultCount !== 1 || !helperResult) {
+      failure = active.stdoutError?.message ?? `helper produced ${active.helperResultCount} result records`;
+      helperResult = { status: "error", errorCode: HSS_ERROR.HSS_HELPER_BAD_JSON, reason: failure, exitCode: code, stderr: active.stderr };
     } else {
-      try {
-        helperResult = JSON.parse(active.stdout.trim() || "{}") as Record<string, unknown>;
-        state = helperResult.status === "ok" ? "completed" : helperResult.status === "stopped" ? "stopped" : "failed";
-        if (state === "failed") failure = String(helperResult.reason ?? helperResult.errorCode ?? `helper exited ${code}`);
-        else if (helperResult.lifecycleValidated !== true) {
-          state = "failed";
-          failure = "Start/Read/Stop lifecycle validation did not complete successfully";
-          helperResult = { ...helperResult, status: "error", errorCode: HSS_ERROR.HSS_LIFECYCLE_VALIDATION_FAILED, reason: failure };
-        }
-      } catch (error) {
-        failure = error instanceof Error ? error.message : String(error);
-        helperResult = { status: "error", errorCode: HSS_ERROR.HSS_HELPER_BAD_JSON, exitCode: code, stdout: active.stdout, stderr: active.stderr, reason: failure };
-      }
+      state = helperResult.status === "ok" ? "completed" : helperResult.status === "stopped" ? "stopped" : "failed";
+      if (state === "failed") failure = String(helperResult.reason ?? helperResult.errorCode ?? `helper exited ${code}`);
     }
     const postIdentity = refreshHssRuntimeIdentity(active.runtimeIdentity, {
       env: this.env(),
@@ -800,7 +848,7 @@ export class HssCaptureService {
       validatedRuntimeIdentitySha256: this.validatedRuntimeHashes(active.runtimeIdentity),
       adapterPath: active.runtimeIdentity.adapterPath,
     });
-    const helperIdentityMatches = active.stopTimedOut || (helperResult?.helperVersion === active.runtimeIdentity.helperVersion
+    const helperIdentityMatches = state === "failed" || (helperResult?.helperVersion === active.runtimeIdentity.helperVersion
       && helperResult?.helperProtocolVersion === active.runtimeIdentity.helperProtocolVersion
       && String(helperResult?.dllVersion ?? "") === active.runtimeIdentity.dllVersion
       && helperResult?.jlinkScriptMode === active.runtimeIdentity.jlinkScriptMode
@@ -820,51 +868,65 @@ export class HssCaptureService {
     const diagnostic = await readHelperDiagnostic(active.diagnosticFile);
     helperResult = { ...helperResult, runtimeIdentity: postIdentity, ...(diagnostic ? { diagnostic } : {}) };
     try {
-      if (active.plan.resetBeforeCapture && helperResult.lifecycleValidated === true) {
-        await appendHssTargetControlEvent(active.metadataFile, {
-          type: "capture_lifecycle",
-          captureId: active.captureId,
-          state,
-          resetPlanId: active.plan.resetOperation?.planId,
-          resetOperationDigest: active.plan.resetOperation?.operationDigest,
-          startUs: active.startTimeUs,
-          endUs: Date.now() * 1000,
-          lifecycleValidated: true,
-        });
+      const rawProof = helperResult.rawClosed === true
+        && typeof helperResult.samplesSha256 === "string"
+        && /^[0-9a-f]{64}$/.test(helperResult.samplesSha256)
+        && existsSync(active.segmentFile)
+        && await sha256FileAsync(active.segmentFile) === helperResult.samplesSha256;
+      if (!rawProof) {
+        state = "failed";
+        failure = failure ?? "helper did not prove samples flush/close/hash identity";
       }
-      const metadata = await finalizeMetadata({ metadataFile: active.metadataFile, state, segmentFile: active.segmentFile, helperResult, failure });
-      if (state !== "failed") {
-        const validationErrorCode = metadata.failures.length > 0
-          ? HSS_ERROR.HSS_DECODE_VALIDATION_FAILED
-          : metadata.semanticValidationStatus === "failed" || metadata.payloadValidationStatus === "failed"
-            ? HSS_ERROR.HSS_SEMANTIC_VALIDATION_FAILED
-            : undefined;
-        if (validationErrorCode) {
+      if (!existsSync(active.segmentFile)) createEmptySyncedFile(active.segmentFile);
+      const counter = await this.qpcCounter(active).catch(() => active.journal.qpcEpochCounter.toString());
+      if (rawProof && active.hssStarted) {
+        const raw = readJcapV0Raw(active.plan.output.packageDir);
+        const records: HssSampleRecord[] = raw.samples.map((sample) => ({
+          sampleIndex: BigInt(sample.sampleIndex),
+          timestampTicks: BigInt(sample.tick),
+          statusFlags: sample.statusFlags,
+          rawValues: active.plan.symbols.map((symbol) => Number(sample.values[symbol.name])),
+        }));
+        const semantic = hmC095Validation(records, active.plan.symbols, active.plan.sampling.requestedRateHz, {
+          transportStatus: "pass",
+          reset: active.plan.resetBeforeCapture ? { operation: active.plan.resetOperation } : undefined,
+          hmC095Oracle: active.plan.hmC095,
+        } as unknown as HssCaptureMetadata);
+        appendHssJcapEvent(active.journal, "quality", counter, { check: "hm_c095", ...semantic });
+        if (semantic.semanticPass !== true) {
           state = "failed";
-          failure = validationErrorCode === HSS_ERROR.HSS_DECODE_VALIDATION_FAILED
-            ? "decoded HSS record sequence failed validation"
-            : "decoded HSS values, order, timebase, or payload semantics failed validation";
-          helperResult = { ...helperResult, status: "error", errorCode: validationErrorCode, reason: failure };
-          metadata.state = "failed";
-          metadata.failures.push(failure);
-          metadata.events.push({ type: "helperResult", helperResult });
-          await writeFile(active.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
+          failure = failure ?? "HM_C095 strict semantic validation failed";
         }
       }
+      if (!active.hssStarted) {
+        appendHssJcapEvent(active.journal, "fault", counter, { errorCode: String(helperResult.errorCode ?? HSS_ERROR.HSS_LIFECYCLE_VALIDATION_FAILED), reason: failure ?? "HSS did not start" });
+        appendHssJcapEvent(active.journal, "lifecycle", counter, { state: "failed", phase: "capture_terminal" });
+        active.journal.writer.closeEvents();
+        await rebuildJcapV0Index(active.plan.output.packageDir);
+      } else {
+        const tick = hssQpcTick(active.journal, counter).toString();
+        const event = (sequence: number, terminalState: string) => ({
+          eventId: randomUUID(), eventSequence: sequence, type: "lifecycle" as const, tick,
+          state: terminalState, phase: terminalState === "finalizing" ? "raw_closed" : "capture_terminal",
+        });
+        await finalizeJcapV0Capture({
+          writer: active.journal.writer,
+          finalizingEvent: event(active.journal.nextEventSequence, "finalizing"),
+          terminalEvent: event(active.journal.nextEventSequence + 1, state),
+          recoverableEvent: event(active.journal.nextEventSequence + 1, "recoverable"),
+        });
+      }
     } catch (error) {
-      const text = await readFile(active.metadataFile, "utf8").catch(() => "{}");
-      const metadata = JSON.parse(text) as Record<string, unknown>;
-      metadata.state = "failed";
-      metadata.failures = [...(Array.isArray(metadata.failures) ? metadata.failures : []), error instanceof Error ? error.message : String(error)];
-      await writeFile(active.metadataFile, JSON.stringify(metadata, null, 2), "utf8");
+      failure = error instanceof Error ? error.message : String(error);
+      active.journal.writer.close();
     } finally {
       this.writePlans.invalidateCapture(active.captureId, active.generation);
       active.writeQueue.close();
       await appendHssAudit(this.sessionId, "hss_capture_status", { event: "capture_terminal", captureId: active.captureId }, {
         captureId: active.captureId,
         state,
-        metadataFile: active.metadataFile,
-        segmentFile: active.segmentFile,
+        packageDir: active.plan.output.packageDir,
+        samplesFile: active.segmentFile,
         helperResult,
         failure,
       }, this.cwd()).catch(() => undefined);
@@ -874,19 +936,90 @@ export class HssCaptureService {
     }
   }
 
+  private consumeHelperStdout(active: ActiveCapture, chunk: string, final = false): void {
+    if (active.stdoutError) return;
+    active.stdoutRemainder += chunk;
+    if (active.stdoutRemainder.length > 1024 * 1024) {
+      active.stdoutError = new Error("helper NDJSON record exceeds the bounded stdout buffer");
+      return;
+    }
+    const lines = active.stdoutRemainder.split(/\r?\n/);
+    active.stdoutRemainder = lines.pop() ?? "";
+    if (final && active.stdoutRemainder.trim()) {
+      lines.push(active.stdoutRemainder);
+      active.stdoutRemainder = "";
+    }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try { this.acceptHelperRecord(active, JSON.parse(line) as Record<string, unknown>); }
+      catch (error) { active.stdoutError = error instanceof Error ? error : new Error(String(error)); break; }
+    }
+  }
+
+  private acceptHelperRecord(active: ActiveCapture, record: Record<string, unknown>): void {
+    if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("helper NDJSON record must be an object");
+    if (record.captureId !== active.captureId) throw new Error("helper NDJSON captureId mismatch");
+    if (record.record === "result") {
+      const resultQpc = parseHssQpcTimebase(record);
+      if (resultQpc.qpcEpochCounter !== active.journal.qpcEpochCounter || resultQpc.qpcFrequency !== active.journal.qpcFrequency) throw new Error("helper result QPC timebase mismatch");
+      active.helperResultCount += 1;
+      if (active.helperResultCount !== 1) throw new Error("helper emitted more than one result record");
+      active.helperResult = record;
+      return;
+    }
+    if (record.record === "fault") {
+      appendHssJcapEvent(active.journal, "fault", record.qpcCounter, { errorCode: record.errorCode, reason: record.reason });
+      return;
+    }
+    if (record.record !== "lifecycle") throw new Error("helper emitted an unknown NDJSON record kind");
+    if (record.phase === "qpc_epoch") {
+      const streamQpc = parseHssQpcTimebase(record);
+      if (streamQpc.qpcEpochCounter !== active.journal.qpcEpochCounter || streamQpc.qpcFrequency !== active.journal.qpcFrequency) throw new Error("helper lifecycle QPC timebase mismatch");
+      return;
+    }
+    if (record.phase === "hss_start") {
+      if (!Number.isSafeInteger(record.returnCode) || Number(record.returnCode) < 0 || record.crashed !== false) return;
+      if (active.hssStarted) throw new Error("helper emitted duplicate successful hss_start");
+      appendHssJcapEvent(active.journal, "lifecycle", record.qpcCounter, { state: "active", phase: "hss_start", returnCode: record.returnCode });
+      active.hssStarted = true;
+      return;
+    }
+    appendHssJcapEvent(active.journal, "quality", record.qpcCounter, { phase: record.phase, returnCode: record.returnCode, crashed: record.crashed, samplesBytes: record.samplesBytes, samplesByteBudget: record.samplesByteBudget });
+  }
+
+  private async qpcCounter(active: ActiveCapture): Promise<string> {
+    const response = await runHssHelperCommand("qpc-timebase", [], { env: this.env(), helperPath: active.runtimeIdentity.helperPath, helperArgsPrefix: this.options.helperArgsPrefix });
+    if (response.status !== "ok") throw new Error("qpc-timebase helper command failed");
+    const parsed = parseHssQpcTimebase(response);
+    if (parsed.qpcFrequency !== active.journal.qpcFrequency) throw new Error("QPC frequency changed during capture");
+    const reported = BigInt(String(response.qpcCounter ?? response.qpcEpochCounter));
+    const minimum = active.journal.qpcEpochCounter
+      + ((active.journal.lastTick * active.journal.qpcFrequency + 999_999_999n) / 1_000_000_000n);
+    return (reported < minimum ? minimum : reported).toString();
+  }
+
+  private async finalizePreStartFailure(journal: HssJcapEventJournal, error: unknown): Promise<void> {
+    createEmptySyncedFile(journal.writer.samplesFile);
+    const reason = error instanceof Error ? error.message : String(error);
+    const counter = (journal.qpcEpochCounter
+      + ((journal.lastTick * journal.qpcFrequency + 999_999_999n) / 1_000_000_000n)).toString();
+    appendHssJcapEvent(journal, "fault", counter, { errorCode: error instanceof HssError ? error.code : HSS_ERROR.HSS_LIFECYCLE_VALIDATION_FAILED, reason });
+    appendHssJcapEvent(journal, "lifecycle", counter, { state: "failed", phase: "pre_start_failure" });
+    journal.writer.closeEvents();
+    await rebuildJcapV0Index(journal.writer.packageDir);
+  }
+
   private requirePlan(planId: string): HssCapturePlan {
     const plan = this.plans.get(planId);
     if (!plan) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, `unknown HSS planId: ${planId}`);
     return plan;
   }
 
-  private metadataFor(captureId: string): string {
-    const known = this.metadataFiles.get(captureId);
-    if (known) return known;
-    const paths = this.paths;
-    const metadataFile = join(paths.capturesDir, captureId, "capture.json");
-    assertInsideProject(metadataFile, paths.capturesDir);
-    return metadataFile;
+  private packageFor(captureId: string): string {
+    if (!/^[0-9a-f-]{36}$/i.test(captureId)) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "captureId must be a UUID", { captureId });
+    const packageDir = join(this.paths.capturesDir, `${captureId}.jcap`);
+    assertInsideProject(packageDir, this.paths.capturesDir);
+    return packageDir;
   }
 
   private cwd(): string {
@@ -908,28 +1041,6 @@ export class HssCaptureService {
     counter.ops += 1;
     counter.elements += plan.writeElementCount;
     this.writeCounters.set(key, counter);
-  }
-
-  private async attachSampleIndex(active: ActiveCapture, result: HssVariableWriteExecuteResult): Promise<void> {
-    const hostStartUs = result.hostWriteStartUs ?? result.writeStartUs;
-    const hostEndUs = result.hostWriteEndUs ?? result.writeEndUs;
-    const fallbackStartUs = Math.max(0, hostStartUs - active.startTimeUs);
-    const fallbackEndUs = Math.max(fallbackStartUs, hostEndUs - active.startTimeUs);
-    const anchor = await readSampleAnchor(active, fallbackStartUs).catch(() => null);
-    if (anchor) {
-      const durationUs = Math.max(1, hostEndUs - hostStartUs);
-      result.captureWriteStartUs = anchor.captureTimeUs;
-      result.captureWriteEndUs = anchor.captureTimeUs + durationUs;
-      result.sampleIndexNear = anchor.sampleIndex;
-      return;
-    }
-    result.captureWriteStartUs = fallbackStartUs;
-    result.captureWriteEndUs = fallbackEndUs;
-    result.sampleIndexNear = Math.max(0, Math.round(fallbackStartUs * active.plan.sampling.requestedRateHz / 1_000_000));
-  }
-
-  private captureTimeUs(active: ActiveCapture, result: HssVariableWriteExecuteResult): number {
-    return result.captureWriteStartUs ?? Math.max(0, (result.hostWriteStartUs ?? result.writeStartUs) - active.startTimeUs);
   }
 
   private async bindCapturePlan(plan: HssCapturePlan, input: HssCapturePlanInput, capability: Record<string, unknown>): Promise<void> {
@@ -980,7 +1091,7 @@ export class HssCaptureService {
     plan.resetOperation = binding;
   }
 
-  private async executeResetBeforeCapture(plan: HssCapturePlan, runtimeIdentity: HssRuntimeIdentity, metadataFile: string, target: { device: string; interface: "SWD" | "JTAG"; speedKhz: number }, serial?: string): Promise<Record<string, unknown>> {
+  private async executeResetBeforeCapture(plan: HssCapturePlan, runtimeIdentity: HssRuntimeIdentity, journal: HssJcapEventJournal, target: { device: string; interface: "SWD" | "JTAG"; speedKhz: number }, serial?: string): Promise<Record<string, unknown>> {
     const binding = plan.resetOperation;
     if (!binding) throw new HssError(HSS_ERROR.RESET_PLAN_INVALID, "resetBeforeCapture requires a bound R3 reset operation");
     if (binding.consumed) throw new HssError(HSS_ERROR.RESET_PLAN_ALREADY_EXECUTED, "reset operation plan is single-use", { planId: binding.planId });
@@ -999,7 +1110,6 @@ export class HssCaptureService {
       throw new HssError(HSS_ERROR.RESET_PLAN_BINDING_MISMATCH, "reset operation binding changed before execution", { planId: binding.planId });
     }
     binding.consumed = true;
-    const resetStartedUs = Date.now() * 1000;
     let result: Record<string, unknown> = {};
     try {
       const before = refreshHssRuntimeIdentity(runtimeIdentity, {
@@ -1041,15 +1151,14 @@ export class HssCaptureService {
       });
       if (!hssRuntimeIdentityMatches(runtimeIdentity, after)) throw new HssError(HSS_ERROR.HSS_RUNTIME_IDENTITY_CHANGED, "runtime or ScriptFile identity changed after reset");
       const stability = await this.waitForTargetStability(plan, runtimeIdentity, target, serial);
-      const resetEndedUs = Date.now() * 1000;
       const auditFile = await appendHssAudit(this.sessionId, "reset", binding, { ok: true, risk: { level: "R3" }, data: { ...result, ...stability, policyHash: binding.policySha256, symbolLayoutHash: binding.layoutSha256 } }, this.cwd());
-      const event = await appendHssTargetControlEvent(metadataFile, {
+      const event = appendHssJcapEvent(journal, "target_control", result.operationAfterQpcCounter ?? journal.qpcEpochCounter.toString(), {
         operation: "reset",
         result: "succeeded",
         captureId: plan.output.captureId,
         resetBeforeCapture: true,
-        startUs: resetStartedUs,
-        endUs: resetEndedUs,
+        operationBeforeQpcCounter: result.operationBeforeQpcCounter,
+        operationAfterQpcCounter: result.operationAfterQpcCounter,
         beforeState: result.beforeState ?? "unknown",
         afterState: result.afterState ?? "running",
         operationDigest: binding.operationDigest,
@@ -1066,13 +1175,13 @@ export class HssCaptureService {
     } catch (error) {
       const hss = error instanceof HssError ? error : new HssError(HSS_ERROR.RESET_FAILED, error instanceof Error ? error.message : String(error));
       const auditFile = await appendHssAudit(this.sessionId, "reset", binding, { ok: false, risk: { level: "R3" }, data: result, error: { code: hss.code, message: hss.message, details: hss.details } }, this.cwd()).catch(() => undefined);
-      await appendHssTargetControlEvent(metadataFile, {
+      appendHssJcapEvent(journal, "target_control", result.operationAfterQpcCounter ?? journal.qpcEpochCounter.toString(), {
         operation: "reset",
         result: "failed",
         captureId: plan.output.captureId,
         resetBeforeCapture: true,
-        startUs: resetStartedUs,
-        endUs: Date.now() * 1000,
+        operationBeforeQpcCounter: result.operationBeforeQpcCounter,
+        operationAfterQpcCounter: result.operationAfterQpcCounter,
         operationDigest: binding.operationDigest,
         targetId: binding.targetId,
         artifactSha256: binding.artifactSha256,
@@ -1087,18 +1196,7 @@ export class HssCaptureService {
         targetReset: result.targetReset === true,
         resetIssued: result.resetIssued === true,
         auditFile,
-      }).catch(() => undefined);
-      const metadata = await readHssMetadata(metadataFile).catch(() => undefined);
-      if (metadata) {
-        metadata.reset = { ...metadata.reset, status: "failed", result: { ...result, errorCode: hss.code, reason: hss.message, auditFile } };
-        metadata.safety = {
-          ...metadata.safety,
-          targetReset: metadata.safety.targetReset || result.targetReset === true,
-          resetIssued: metadata.safety.resetIssued || result.resetIssued === true,
-        };
-        await writeFile(metadataFile, JSON.stringify(metadata, null, 2), "utf8").catch(() => undefined);
-      }
-      await materializeHssCaptureEvents(metadataFile).catch(() => undefined);
+      });
       throw hss;
     }
   }
@@ -1184,7 +1282,7 @@ async function writeHelperPlan(file: string, plan: Record<string, unknown>): Pro
 function artifactList(data: unknown): string[] {
   if (!data || typeof data !== "object") return [];
   const values = Object.values(data as Record<string, unknown>);
-  const direct = values.filter((value): value is string => typeof value === "string" && /(?:capture\.json|capture_0001\.bin|\.csv)$/i.test(value));
+  const direct = values.filter((value): value is string => typeof value === "string" && /(?:\.jcap|capture\.db|\.csv)$/i.test(value));
   const nested = values.flatMap((value) => value && typeof value === "object" ? artifactList(value) : []);
   return [...new Set([...direct, ...nested])];
 }
@@ -1216,75 +1314,37 @@ function assertActiveWritable(active: ActiveCapture): void {
   }
 }
 
-interface LiveQuality {
-  sampleCount: number;
-  validSamples: number;
-  readErrors: number;
-  timeouts: number;
-  overflows: number;
-  droppedSamples: number;
-  elapsedSec: number;
-  actualRateHz: number;
+function requiredText(value: unknown, name: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, `${name} is required`);
+  return value;
 }
 
-function emptyLiveQuality(): LiveQuality {
-  return { sampleCount: 0, validSamples: 0, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, elapsedSec: 0, actualRateHz: 0 };
+function plainJsonRecord(value: unknown): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
 }
 
-function activeQuality(data: Buffer, recordSize: number): LiveQuality {
-  const quality = emptyLiveQuality();
-  quality.sampleCount = Math.floor(data.length / recordSize);
-  if (quality.sampleCount >= 2) {
-    const firstIndex = data.readBigUInt64LE(0);
-    const firstTicks = data.readBigInt64LE(8);
-    const lastOffset = (quality.sampleCount - 1) * recordSize;
-    const lastIndex = data.readBigUInt64LE(lastOffset);
-    const lastTicks = data.readBigInt64LE(lastOffset + 8);
-    quality.elapsedSec = Math.max(0, Number(lastTicks - firstTicks) / 1_000_000_000);
-    quality.actualRateHz = quality.elapsedSec > 0 ? Number(lastIndex - firstIndex) / quality.elapsedSec : 0;
-  }
-  for (let offset = 0; offset < quality.sampleCount * recordSize; offset += recordSize) {
-    const flags = data.readUInt32LE(offset + 16);
-    assertNoMvpAWriteFlags(flags);
-    if ((flags & HSS_STATUS_FLAGS.valid) !== 0) quality.validSamples += 1;
-    if ((flags & HSS_STATUS_FLAGS.read_error) !== 0) quality.readErrors += 1;
-    if ((flags & HSS_STATUS_FLAGS.timeout) !== 0) quality.timeouts += 1;
-    if ((flags & HSS_STATUS_FLAGS.overflow) !== 0) quality.overflows += 1;
-    if ((flags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0) quality.droppedSamples += 1;
-  }
-  return quality;
+function requiredBoundedInteger(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, `${name} must be a non-negative safe integer`);
+  return Number(value);
 }
 
-async function readSampleAnchor(active: ActiveCapture, fallbackStartUs: number): Promise<SampleAnchor | null> {
-  if (!existsSync(active.segmentFile)) return null;
-  const recordSize = 24 + active.plan.symbols.length * 4;
-  const data = await readFile(active.segmentFile);
-  const sampleCount = Math.floor(data.length / recordSize);
-  if (sampleCount < 1) return null;
-  const firstTicks = data.readBigInt64LE(8);
-  const requestedRateHz = active.plan.sampling.requestedRateHz;
-  const fallbackIndex = requestedRateHz > 0 ? Math.round(fallbackStartUs * requestedRateHz / 1_000_000) : 0;
-  let bestOffset = 0;
-  let bestDelta = Number.POSITIVE_INFINITY;
-  for (let index = 0; index < sampleCount; index += 1) {
-    const offset = index * recordSize;
-    const sampleIndex = Number(data.readBigUInt64LE(offset));
-    const delta = Math.abs(sampleIndex - fallbackIndex);
-    if (delta < bestDelta) {
-      bestDelta = delta;
-      bestOffset = offset;
-    }
-  }
-  const sampleIndex = Number(data.readBigUInt64LE(bestOffset));
-  const timestampTicks = data.readBigInt64LE(bestOffset + 8);
-  return {
-    sampleIndex,
-    captureTimeUs: Math.max(0, Number(timestampTicks - firstTicks) / 1000),
-  };
+function secondsToTick(value: unknown, name: string): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, `${name} must be a finite non-negative number`);
+  const nanoseconds = value * 1_000_000_000;
+  if (!Number.isSafeInteger(nanoseconds)) throw new HssError(HSS_ERROR.SYMBOL_UNSAFE, `${name} exceeds exact nanosecond bounds`);
+  return String(nanoseconds);
 }
 
-function isAbandonedMetadata(metadata: HssCaptureMetadata): boolean {
-  return metadata.backend === "jlink-hss" && metadata.state === "failed" && metadata.segments.length === 0 && metadata.failures.length === 0;
+function createEmptySyncedFile(file: string): void {
+  const handle = openSync(file, existsSync(file) ? "r+" : "ax");
+  try { fsyncSync(handle); } finally { closeSync(handle); }
+}
+
+async function sha256FileAsync(file: string): Promise<string> {
+  const hash = createHash("sha256");
+  const stream = createReadStream(file);
+  for await (const chunk of stream) hash.update(chunk as Buffer);
+  return hash.digest("hex");
 }
 
 function outsideScalarTargetPath(input: Pick<HssVariableWritePlanInput, "target" | "targetRef">): string {

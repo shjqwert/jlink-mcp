@@ -18,12 +18,12 @@ Gate acceptance: compile and focused tests pass; Windows x64 resolver and projec
 ## P1 — HSS → JCAP → Query
 
 - [x] 1.1 Select and prove one SQLite adapter for Node 18, standalone MCP, local loopback Web and packaged installation; implement the minimal JCAP v0 raw/rebuild corpus needed by the data path.
-- [ ] 1.2 Integrate the experimental v0 self-describing sample envelope, provenance, type rejection, rollover policy, and valid-prefix/truncated-tail detection with the production HSS writer; defer byte-frozen headers/descriptors/records to a separate v1 change.
-- [ ] 1.3 Implement append-safe `raw/events.bin` for lifecycle, target-control reset, write, flag, and fault events in the shared pre-reset QPC timebase against the same corpus.
-- [ ] 1.4 Implement capture lifecycle and finalization in the order: sync/close samples → sync `finalizing` → validate raw prefix → sync terminal event (or transition to `recoverable`) → close immutable raw journal → build/validate/fsync/rename `capture.db.tmp`; keep `captureState` separate from `indexStatus` and make failed indexes rebuildable without raw mutation.
-- [ ] 1.5 Implement the minimum versioned SQLite schema, final-raw source hashes, integrity checks, buckets, and rebuild from sample/event raw files.
-- [ ] 1.6 Implement bounded `capture_list`, `capture_summary`, `capture_series`, `capture_event_window`, `capture_index_rebuild`, and on-demand CSV export with explicit capture/index states.
-- [ ] 1.7 Add round-trip, script/reset provenance, pre-start failure, terminal-event/source-hash ordering, corruption, crash-recovery, initial-vs-rebuild equivalence, response-limit, and no-default-JSON/CSV tests.
+- [x] 1.2 Integrate the experimental v0 self-describing sample envelope, provenance, type rejection, rollover policy, and valid-prefix/truncated-tail detection with the production HSS writer; defer byte-frozen headers/descriptors/records to a separate v1 change.
+- [x] 1.3 Implement append-safe `raw/events.bin` for lifecycle, target-control reset, write, flag, and fault events in the shared pre-reset QPC timebase against the same corpus.
+- [x] 1.4 Implement capture lifecycle and finalization in the order: sync/close samples → sync `finalizing` → validate raw prefix → sync terminal event (or transition to `recoverable`) → close immutable raw journal → build/validate/fsync/rename `capture.db.tmp`; keep `captureState` separate from `indexStatus` and make failed indexes rebuildable without raw mutation.
+- [x] 1.5 Implement the minimum versioned SQLite schema, final-raw source hashes, integrity checks, buckets, and rebuild from sample/event raw files.
+- [x] 1.6 Implement bounded `capture_list`, `capture_summary`, `capture_series`, `capture_event_window`, `capture_index_rebuild`, and on-demand CSV export with explicit capture/index states.
+- [x] 1.7 Add round-trip, script/reset provenance, pre-start failure, terminal-event/source-hash ordering, corruption, crash-recovery, initial-vs-rebuild equivalence, response-limit, and no-default-JSON/CSV tests.
 
 Gate acceptance: a fixture can record the trusted script and R3 reset before HSS Start, capture/finalize the full post-stability series, close terminal raw before DB build, be queried, have its DB deleted and rebuilt with equivalent metadata/events/quality/provenance, while raw hashes remain unchanged and no terminal event makes the first DB immediately stale.
 

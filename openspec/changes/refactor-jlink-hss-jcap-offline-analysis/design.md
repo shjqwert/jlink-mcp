@@ -41,16 +41,16 @@ External Agent
   → MCP discovery/risk metadata
   → Artifact + Symbol Catalog + Hot Variables
   → HSS Service → validated J-Link DLL adapter → helper/DLL
-  → <storageRoot>/<captureId>.jcap/raw/{capture_*.bin,events.bin}
+  → <storageRoot>/captures/<captureId>.jcap/raw/{samples.bin,events.bin}
   → finalizer → capture.db
   → bounded query/analysis → local loopback Web offline UI
 ```
 
 ```text
 <captureId>.jcap/
-  capture.db
+    capture.db
   raw/
-    capture_0001.bin
+    samples.bin
     events.bin
   export/
     *.csv                 # only when requested
@@ -96,7 +96,7 @@ Experimental JCAP v0 records stable variable identity, capture-relative ticks, q
 
 ### 4. Raw capture is authoritative and rebuildable
 
-JCAP v0 freezes only the package roles (`capture.db`, `raw/samples.bin`, `raw/events.bin`, optional on-demand `export/`) and a self-describing experimental envelope carrying `formatVersion=0`, status, record kind, payload encoding, payload length and payload SHA-256. The current writer uses newline-delimited JSON envelopes as one v0 encoding, but delimiter choice, fixed offsets, header/footer sizes, CRC/TLV algorithms, scalar codes and SQLite schema are not v1 compatibility promises.
+JCAP v0 freezes only the package roles (`capture.db`, `raw/samples.bin`, `raw/events.bin`, optional on-demand `export/`) and a self-describing experimental envelope carrying `formatVersion=0`, status, record kind, payload encoding, payload length and payload SHA-256. Each frame is the UTF-8 header JSON line, the exact declared UTF-8 payload bytes, then LF; readers verify those bytes directly and native HSS produces the same framing. Fixed offsets, header/footer sizes, CRC/TLV algorithms, scalar codes and SQLite schema remain outside the future v1 compatibility promise.
 
 Sample payloads carry increasing sample index, nondecreasing capture-relative nanosecond tick, status flags and named numeric values. Event payloads carry provenance, lifecycle, reset/write/fault facts and the same tick domain. Readers accept only the contiguous length/hash-valid prefix; a partial tail or invalid envelope stops parsing and produces an explicit corrupt-suffix diagnostic without resynchronization.
 
@@ -104,7 +104,7 @@ For `resetBeforeCapture`, the QPC epoch and `planned` journal are created before
 
 Raw files are immutable authority after append/close. `capture.db` is derived, schema-versioned, and source-hash bound. Rebuild reads only validated raw prefixes, records corrupt ranges explicitly, never modifies raw, and restores capture identity, descriptors, timing, quality, segment ranges, and capture-local events.
 
-JCAP v0 uses one shared golden corpus for round-trip, script/reset provenance, pre-start failure, terminal lifecycle, truncated tail, corrupt suffix and rebuild equivalence. A later v1 change may introduce byte-golden vectors and native writer compatibility only after the v0 data path is accepted.
+JCAP v0 uses one shared golden corpus for round-trip, native exact-payload compatibility, script/reset provenance, pre-start failure, terminal lifecycle, truncated tail, corrupt suffix and rebuild equivalence. A later v1 change may freeze byte-golden vectors only after the v0 data path is accepted.
 
 ### 5. Capture lifecycle is explicit
 

@@ -1,6 +1,6 @@
 ﻿import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { appendHssWriteEvent, materializeHssCaptureEvents } from "./hss-events";
 import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-flag-overlay";
@@ -8,12 +8,14 @@ import { crc32File, encodeHssRecord, exportHssCapture } from "./hss-artifact";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 import type { HssVariableWritePlan } from "./hss-write-plan";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
+import { configureHssProjectPaths } from "./project-paths";
 
 test("hss_capture_export writes event-aware CSV without changing normal export", async () => {
   const root = await tempProject();
+  const paths = configureHssProjectPaths(root, testRoots(root));
   try {
     const captureId = "11111111-1111-4111-8111-111111111111";
-    const captureDir = join(root, ".jlink-mcp", "captures", captureId);
+    const captureDir = join(paths.capturesDir, captureId);
     await mkdir(captureDir, { recursive: true });
     const segmentFile = join(captureDir, "capture_0001.bin");
     await writeFile(segmentFile, Buffer.concat(Array.from({ length: 6 }, (_, index) => encodeHssRecord({
@@ -23,7 +25,7 @@ test("hss_capture_export writes event-aware CSV without changing normal export",
       rawValues: [index],
     }, 1))));
     const metadataFile = join(captureDir, "capture.json");
-    await writeMetadata(root, metadataFile, captureId, await crc32File(segmentFile));
+    await writeMetadata(root, paths.exportsDir, metadataFile, captureId, await crc32File(segmentFile));
     const result = writeResult(captureId);
     await appendHssWriteEvent(metadataFile, writePlan(captureId), result, true);
     await appendHssWriteFlagIntervals(metadataFile, { eventId: result.eventId, writeStartUs: 2000, writeEndUs: 3000, requestedRateHz: 100000 });
@@ -49,12 +51,12 @@ test("hss_capture_export writes event-aware CSV without changing normal export",
     assert.equal(rows.every((row) => row.eventId === result.eventId), true);
     assert.notEqual(exported.csvFile, normal.csvFile);
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(dirname(root), { recursive: true, force: true });
   }
 });
 
-async function writeMetadata(root: string, metadataFile: string, captureId: string, crc32: string): Promise<void> {
-  await mkdir(join(root, ".jlink-mcp", "exports"), { recursive: true });
+async function writeMetadata(root: string, exportsDir: string, metadataFile: string, captureId: string, crc32: string): Promise<void> {
+  await mkdir(exportsDir, { recursive: true });
   await writeFile(metadataFile, JSON.stringify({
     version: 1,
     captureId,
@@ -131,8 +133,13 @@ function writeResult(captureId: string): HssVariableWriteExecuteResult {
 }
 
 async function tempProject(): Promise<string> {
-  const root = join(process.cwd(), ".tmp", `hss-export-event-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const root = join(process.cwd(), ".tmp", `hss-export-event-${Date.now()}-${Math.random().toString(16).slice(2)}`, "project");
   await mkdir(root, { recursive: true });
   return root;
+}
+
+function testRoots(root: string): { storageRoot: string; evidenceRoot: string } {
+  const sandbox = dirname(root);
+  return { storageRoot: join(sandbox, "storage"), evidenceRoot: join(sandbox, "evidence") };
 }
 

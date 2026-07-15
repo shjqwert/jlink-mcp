@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { HSS_ERROR, HssError } from "./hss-errors";
 
@@ -30,16 +32,29 @@ export function hssProjectPaths(cwd = process.cwd()): HssProjectPaths {
   const projectRoot = hssProjectRoot(cwd);
   const configured = configuredPaths.get(projectRoot.toLowerCase());
   if (configured) return configured;
+  const roots = defaultExternalRoots(projectRoot);
   const outputRoot = join(projectRoot, ".jlink-mcp");
   return {
     projectRoot,
-    storageRoot: outputRoot,
-    evidenceRoot: outputRoot,
+    storageRoot: roots.storageRoot,
+    evidenceRoot: roots.evidenceRoot,
     outputRoot,
-    capturesDir: join(outputRoot, "captures"),
-    exportsDir: join(outputRoot, "exports"),
-    auditDir: join(outputRoot, "audit"),
-    sessionsDir: join(outputRoot, "sessions"),
+    capturesDir: join(roots.storageRoot, "captures"),
+    exportsDir: join(roots.storageRoot, "exports"),
+    auditDir: join(roots.evidenceRoot, "audit"),
+    sessionsDir: join(roots.evidenceRoot, "sessions"),
+  };
+}
+
+function defaultExternalRoots(projectRoot: string): HssExternalRoots {
+  const localRoot = process.env.LOCALAPPDATA
+    ?? process.env.XDG_STATE_HOME
+    ?? join(homedir(), ".local", "state");
+  const namespace = createHash("sha256").update(projectRoot.toLowerCase()).digest("hex");
+  const base = join(localRoot, "jlink-mcp", namespace);
+  return {
+    storageRoot: externalRoot(join(base, "storage"), projectRoot, "storageRoot"),
+    evidenceRoot: externalRoot(join(base, "evidence"), projectRoot, "evidenceRoot"),
   };
 }
 

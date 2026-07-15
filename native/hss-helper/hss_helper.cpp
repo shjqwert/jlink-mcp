@@ -9,8 +9,10 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -91,14 +93,18 @@ static bool widen_utf8(const std::string& input, std::wstring* output) {
 
 static std::string escape(const std::string& input) {
   std::ostringstream out;
-  for (char ch : input) {
+  out << std::hex << std::setfill('0');
+  for (unsigned char ch : input) {
     switch (ch) {
       case '\\': out << "\\\\"; break;
       case '"': out << "\\\""; break;
       case '\n': out << "\\n"; break;
       case '\r': out << "\\r"; break;
       case '\t': out << "\\t"; break;
-      default: out << ch; break;
+      default:
+        if (ch < 0x20U) out << "\\u00" << std::setw(2) << static_cast<unsigned>(ch);
+        else out << static_cast<char>(ch);
+        break;
     }
   }
   return out.str();
@@ -167,6 +173,32 @@ static bool sha256_file(const std::wstring& file, std::string* sha256) {
   const bool ok = sha256_handle(input, sha256);
   CloseHandle(input);
   return ok;
+}
+
+static bool sha256_bytes(const std::string& bytes, std::string* sha256) {
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  DWORD object_bytes = 0;
+  DWORD hash_bytes = 0;
+  DWORD result_bytes = 0;
+  bool ok = bytes.size() <= (std::numeric_limits<ULONG>::max)()
+    && BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0
+    && BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&object_bytes), sizeof(object_bytes), &result_bytes, 0) >= 0
+    && BCryptGetProperty(algorithm, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hash_bytes), sizeof(hash_bytes), &result_bytes, 0) >= 0
+    && hash_bytes == 32;
+  std::vector<U8> object(object_bytes);
+  std::vector<U8> digest(hash_bytes);
+  if (ok) ok = BCryptCreateHash(algorithm, &hash, object.data(), object_bytes, nullptr, 0, 0) >= 0;
+  if (ok) ok = BCryptHashData(hash, reinterpret_cast<PUCHAR>(const_cast<char*>(bytes.data())), static_cast<ULONG>(bytes.size()), 0) >= 0;
+  if (ok) ok = BCryptFinishHash(hash, digest.data(), hash_bytes, 0) >= 0;
+  if (hash) BCryptDestroyHash(hash);
+  if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+  if (!ok) return false;
+  std::ostringstream out;
+  out << std::hex << std::setfill('0');
+  for (U8 byte : digest) out << std::setw(2) << static_cast<unsigned>(byte);
+  *sha256 = out.str();
+  return true;
 }
 
 static int version() {
@@ -378,21 +410,61 @@ static void call_write_u32(JLINKARM_WriteU32_Fn fn, U32 address, U32 data, bool*
   }
 }
 
-static uint32_t crc32_update(uint32_t crc, const void* data, size_t size) {
-  const auto* bytes = static_cast<const unsigned char*>(data);
-  for (size_t i = 0; i < size; ++i) {
-    crc ^= bytes[i];
-    for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ (0xEDB88320U & (0U - (crc & 1U)));
-  }
-  return crc;
-}
-
 static int64_t now_ns() {
   LARGE_INTEGER counter{};
   LARGE_INTEGER frequency{};
   QueryPerformanceCounter(&counter);
   QueryPerformanceFrequency(&frequency);
   return static_cast<int64_t>((static_cast<long double>(counter.QuadPart) * 1000000000.0L) / static_cast<long double>(frequency.QuadPart));
+}
+
+static int64_t qpc_counter() {
+  LARGE_INTEGER counter{};
+  return QueryPerformanceCounter(&counter) ? counter.QuadPart : -1;
+}
+
+static bool query_qpc_timebase(int64_t* counter, int64_t* frequency) {
+  LARGE_INTEGER qpc_frequency{};
+  LARGE_INTEGER qpc_counter_value{};
+  if (!QueryPerformanceFrequency(&qpc_frequency) || qpc_frequency.QuadPart <= 0
+      || !QueryPerformanceCounter(&qpc_counter_value) || qpc_counter_value.QuadPart < 0) return false;
+  *counter = qpc_counter_value.QuadPart;
+  *frequency = qpc_frequency.QuadPart;
+  return true;
+}
+
+static bool parse_qpc_decimal(const std::string& text, int64_t* value) {
+  if (text.empty() || !std::all_of(text.begin(), text.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; })) return false;
+  try {
+    size_t consumed = 0;
+    const auto parsed = std::stoull(text, &consumed, 10);
+    if (consumed != text.size() || parsed > static_cast<uint64_t>((std::numeric_limits<int64_t>::max)())) return false;
+    *value = static_cast<int64_t>(parsed);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+static bool qpc_delta_ns(int64_t counter, int64_t epoch, int64_t frequency, uint64_t* tick) {
+  if (counter < epoch || epoch < 0 || frequency <= 0) return false;
+  const long double value = static_cast<long double>(counter - epoch) * 1000000000.0L / static_cast<long double>(frequency);
+  if (value < 0 || value > static_cast<long double>((std::numeric_limits<uint64_t>::max)())) return false;
+  *tick = static_cast<uint64_t>(value);
+  return true;
+}
+
+static int qpc_timebase() {
+  int64_t counter = 0;
+  int64_t frequency = 0;
+  if (!query_qpc_timebase(&counter, &frequency)) {
+    error_json("HSS_QPC_UNAVAILABLE", "QueryPerformanceCounter timebase is unavailable");
+    return 0;
+  }
+  std::cout << "{\"status\":\"ok\",\"command\":\"qpc-timebase\",\"qpcCounter\":\"" << counter
+            << "\",\"qpcFrequency\":\"" << frequency
+            << "\",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+  return 0;
 }
 
 static int64_t sample_due_ns(int64_t started_ns, uint64_t sample, int requested_rate) {
@@ -469,10 +541,51 @@ struct HssBlockPlan {
 static std::vector<PlanSymbol> json_symbols(const std::string& text) {
   std::vector<PlanSymbol> symbols;
   std::regex pattern("\\{[^{}]*\"name\"\\s*:\\s*\"([^\"]+)\"[^{}]*\"address\"\\s*:\\s*\"0x([0-9a-fA-F]+)\"[^{}]*\"size\"\\s*:\\s*(\\d+)[^{}]*\\}");
-  for (std::sregex_iterator it(text.begin(), text.end(), pattern), end; it != end; ++it) {
-    symbols.push_back({(*it)[1].str(), static_cast<U32>(std::stoul((*it)[2].str(), nullptr, 16)), static_cast<U32>(std::stoul((*it)[3].str()))});
+  try {
+    for (std::sregex_iterator it(text.begin(), text.end(), pattern), end; it != end; ++it) {
+      const auto address = std::stoull((*it)[2].str(), nullptr, 16);
+      const auto size = std::stoull((*it)[3].str());
+      if (address > (std::numeric_limits<U32>::max)() || size > (std::numeric_limits<U32>::max)()) return {};
+      symbols.push_back({(*it)[1].str(), static_cast<U32>(address), static_cast<U32>(size)});
+    }
+  } catch (...) {
+    return {};
   }
   return symbols;
+}
+
+static bool valid_jcap_symbols(const std::vector<PlanSymbol>& symbols) {
+  std::set<std::string> names;
+  U32 total_bytes = 0;
+  for (const auto& symbol : symbols) {
+    std::wstring wide_name;
+    if (symbol.name.empty() || symbol.name.size() > 256 || !widen_utf8(symbol.name, &wide_name)
+        || !names.insert(symbol.name).second
+        || (symbol.size != 1U && symbol.size != 2U && symbol.size != 4U)
+        || symbol.address > (std::numeric_limits<U32>::max)() - symbol.size
+        || total_bytes > 40U - symbol.size) return false;
+    total_bytes += symbol.size;
+  }
+  return !symbols.empty();
+}
+
+static bool capture_sample_budget(int requested_rate, int duration_sec, uint64_t* requested_samples) {
+  if (requested_rate < 1 || requested_rate > 16000 || duration_sec < 1 || duration_sec > 60) return false;
+  *requested_samples = static_cast<uint64_t>(requested_rate) * static_cast<uint64_t>(duration_sec);
+  return *requested_samples > 0 && *requested_samples <= 960000U && *requested_samples <= (std::numeric_limits<U32>::max)();
+}
+
+static bool valid_jcap_samples_path(const std::string& output_file, const std::string& capture_id, std::wstring* output_path) {
+  std::wstring capture;
+  if (!widen_utf8(output_file, output_path) || !widen_utf8(capture_id, &capture)) return false;
+  std::replace(output_path->begin(), output_path->end(), L'/', L'\\');
+  const bool absolute = (output_path->size() >= 3 && std::iswalpha((*output_path)[0]) && (*output_path)[1] == L':' && (*output_path)[2] == L'\\')
+    || (output_path->size() >= 3 && (*output_path)[0] == L'\\' && (*output_path)[1] == L'\\' && (*output_path)[2] != L'?');
+  const std::wstring suffix = L"\\" + capture + L".jcap\\raw\\samples.bin";
+  if (!absolute || output_path->size() < suffix.size()) return false;
+  return std::equal(suffix.rbegin(), suffix.rend(), output_path->rbegin(), [](wchar_t left, wchar_t right) {
+    return std::towlower(left) == std::towlower(right);
+  });
 }
 
 static HssBlockPlan build_hss_block_plan(const std::vector<PlanSymbol>& symbols) {
@@ -727,20 +840,107 @@ static bool wait_for_post_connect_stability(
   }
 }
 
-static void write_record(std::ofstream& out, uint64_t sample_index, int64_t timestamp_ticks, uint32_t status_flags, const std::vector<uint32_t>& values, uint32_t* crc) {
-  out.write(reinterpret_cast<const char*>(&sample_index), sizeof(sample_index));
-  out.write(reinterpret_cast<const char*>(&timestamp_ticks), sizeof(timestamp_ticks));
-  out.write(reinterpret_cast<const char*>(&status_flags), sizeof(status_flags));
-  uint32_t reserved = 0;
-  out.write(reinterpret_cast<const char*>(&reserved), sizeof(reserved));
-  *crc = crc32_update(*crc, &sample_index, sizeof(sample_index));
-  *crc = crc32_update(*crc, &timestamp_ticks, sizeof(timestamp_ticks));
-  *crc = crc32_update(*crc, &status_flags, sizeof(status_flags));
-  *crc = crc32_update(*crc, &reserved, sizeof(reserved));
-  for (uint32_t value : values) {
-    out.write(reinterpret_cast<const char*>(&value), sizeof(value));
-    *crc = crc32_update(*crc, &value, sizeof(value));
+enum class JcapAppendResult { appended, budgetExhausted, failed };
+
+class JcapSampleWriter {
+ public:
+  static constexpr uint64_t kByteBudget = 512ULL * 1024ULL * 1024ULL;
+
+  explicit JcapSampleWriter(uint64_t byte_budget = kByteBudget) : byte_budget_(byte_budget) {}
+
+  ~JcapSampleWriter() { close(); }
+
+  bool open(const std::wstring& path) {
+    handle_ = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    return handle_ != INVALID_HANDLE_VALUE;
   }
+
+  JcapAppendResult append(
+      uint32_t sample_index,
+      uint64_t tick,
+      uint32_t status_flags,
+      const std::vector<PlanSymbol>& symbols,
+      const std::vector<uint32_t>& values,
+      std::string* frame_for_test = nullptr) {
+    if (handle_ == INVALID_HANDLE_VALUE || symbols.size() != values.size()) return JcapAppendResult::failed;
+    std::ostringstream payload;
+    payload << "{\"sampleIndex\":" << sample_index << ",\"tick\":\"" << tick << "\",\"statusFlags\":" << status_flags << ",\"values\":{";
+    for (size_t index = 0; index < symbols.size(); ++index) {
+      if (index > 0) payload << ',';
+      payload << '"' << escape(symbols[index].name) << "\":" << values[index];
+    }
+    payload << "}}";
+    const std::string payload_bytes = payload.str();
+    std::string payload_sha256;
+    if (!sha256_bytes(payload_bytes, &payload_sha256)) return JcapAppendResult::failed;
+    std::ostringstream header;
+    header << "{\"formatVersion\":0,\"status\":\"experimental\",\"kind\":\"sample\",\"payloadEncoding\":\"json\",\"payloadBytes\":"
+           << payload_bytes.size() << ",\"payloadSha256\":\"" << payload_sha256 << "\"}\n";
+    const std::string frame = header.str() + payload_bytes + '\n';
+    if (bytes_ + frame.size() > byte_budget_) return JcapAppendResult::budgetExhausted;
+    if (!write_all(frame)) return JcapAppendResult::failed;
+    bytes_ += frame.size();
+    if (frame_for_test) *frame_for_test = frame;
+    return JcapAppendResult::appended;
+  }
+
+  bool finalize() {
+    if (handle_ == INVALID_HANDLE_VALUE) return finalized_;
+    const bool flushed = FlushFileBuffers(handle_) != FALSE;
+    const bool closed = CloseHandle(handle_) != FALSE;
+    handle_ = INVALID_HANDLE_VALUE;
+    finalized_ = flushed && closed;
+    return finalized_;
+  }
+
+  uint64_t bytes() const { return bytes_; }
+
+ private:
+  bool write_all(const std::string& bytes) {
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+      const DWORD chunk = static_cast<DWORD>((std::min)(bytes.size() - offset, static_cast<size_t>((std::numeric_limits<DWORD>::max)())));
+      DWORD written = 0;
+      if (!WriteFile(handle_, bytes.data() + offset, chunk, &written, nullptr) || written == 0) return false;
+      offset += written;
+    }
+    return true;
+  }
+
+  void close() {
+    if (handle_ == INVALID_HANDLE_VALUE) return;
+    (void)FlushFileBuffers(handle_);
+    (void)CloseHandle(handle_);
+    handle_ = INVALID_HANDLE_VALUE;
+  }
+
+  HANDLE handle_ = INVALID_HANDLE_VALUE;
+  uint64_t byte_budget_ = kByteBudget;
+  uint64_t bytes_ = 0;
+  bool finalized_ = false;
+};
+
+static void stream_lifecycle(const std::string& capture_id, const char* phase, int64_t counter, const std::string& details = "") {
+  std::cout << "{\"record\":\"lifecycle\",\"phase\":\"" << phase << "\",\"captureId\":\"" << escape(capture_id)
+            << "\"";
+  if (counter >= 0) std::cout << ",\"qpcCounter\":\"" << counter << "\"";
+  else std::cout << ",\"qpcUnavailable\":true";
+  std::cout << details << "}\n" << std::flush;
+}
+
+static void stream_fault(const std::string& capture_id, const std::string& code, const std::string& reason, int64_t counter) {
+  std::cout << "{\"record\":\"fault\",\"captureId\":\"" << escape(capture_id)
+            << "\"";
+  if (counter >= 0) std::cout << ",\"qpcCounter\":\"" << counter << "\"";
+  else std::cout << ",\"qpcUnavailable\":true";
+  std::cout << ",\"errorCode\":\"" << escape(code) << "\",\"reason\":\"" << escape(reason) << "\"}\n" << std::flush;
+}
+
+static std::string hex_bytes(const std::string& bytes) {
+  std::ostringstream out;
+  out << std::hex << std::setfill('0');
+  for (unsigned char byte : bytes) out << std::setw(2) << static_cast<unsigned>(byte);
+  return out.str();
 }
 
 static void required_base_json(bool open, bool close, bool exec, bool tif, bool speed, bool connect) {
@@ -1150,20 +1350,6 @@ static void write_text_file_a(const std::string& path, const std::string& text) 
   MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
-static void write_hss_diag(const std::string& path, const std::string& capture_id, const std::string& stage, uint64_t read_attempts = 0, uint64_t valid_samples = 0, int last_read_rc = 0) {
-  if (path.empty()) return;
-  std::ostringstream out;
-  out
-    << "{\"captureId\":\"" << escape(capture_id)
-    << "\",\"stage\":\"" << escape(stage)
-    << "\",\"timeNs\":" << now_ns()
-    << ",\"readAttempts\":" << read_attempts
-    << ",\"validSamples\":" << valid_samples
-    << ",\"lastReadReturnCode\":" << last_read_rc
-    << "}";
-  write_text_file_a(path, out.str());
-}
-
 static bool suppress_jlink_gui(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed) {
   char out[512] = {};
   (void)call_exec(arm_exec, "SuppressGUI = 1", out, sizeof(out), crashed);
@@ -1543,6 +1729,21 @@ static int self_test() {
     error_json("HSS_SELF_TEST_TIMING_FAILED", "sample pacing calculation failed");
     return 0;
   }
+  int64_t live_qpc = 0;
+  int64_t live_frequency = 0;
+  int64_t parsed_qpc = 0;
+  uint64_t first_epoch_tick = 0;
+  uint64_t second_epoch_tick = 0;
+  if (!query_qpc_timebase(&live_qpc, &live_frequency) || live_qpc < 0 || live_frequency <= 0
+      || !parse_qpc_decimal("123456789", &parsed_qpc) || parsed_qpc != 123456789
+      || parse_qpc_decimal("", &parsed_qpc) || parse_qpc_decimal("-1", &parsed_qpc)
+      || parse_qpc_decimal("9223372036854775808", &parsed_qpc)
+      || !qpc_delta_ns(1250, 1000, 1000, &first_epoch_tick) || first_epoch_tick != 250000000U
+      || !qpc_delta_ns(2250, 2000, 1000, &second_epoch_tick) || second_epoch_tick != first_epoch_tick
+      || qpc_delta_ns(999, 1000, 1000, &first_epoch_tick) || qpc_delta_ns(1000, 1000, 0, &first_epoch_tick)) {
+    error_json("HSS_SELF_TEST_QPC_TIMEBASE_FAILED", "QPC validation or cross-epoch nanosecond conversion failed");
+    return 0;
+  }
   if (hss_buffer_overwritten({0xA5, 0xA5}, 0xA5) || !hss_buffer_overwritten({0xA5, 0x00}, 0xA5)) {
     error_json("HSS_SELF_TEST_SENTINEL_FAILED", "HSS read buffer sentinel check failed");
     return 0;
@@ -1626,22 +1827,83 @@ static int self_test() {
     error_json("HSS_SELF_TEST_BLOCK_PLAN_FAILED", "HSS contiguous block planner failed");
     return 0;
   }
-  const std::string temporaryFile = "hss_selftest_" + std::to_string(GetCurrentProcessId()) + ".bin";
-  std::ofstream out(temporaryFile, std::ios::binary | std::ios::trunc);
-  if (!out) {
-    error_json("HSS_SELF_TEST_WRITE_FAILED", "could not open temp capture");
+  uint64_t sample_budget = 0;
+  if (!capture_sample_budget(16000, 60, &sample_budget) || sample_budget != 960000U
+      || capture_sample_budget(16001, 60, &sample_budget) || capture_sample_budget(16000, 61, &sample_budget)) {
+    error_json("HSS_SELF_TEST_JCAP_BUDGET_FAILED", "JCAP sample budget boundary failed");
     return 0;
   }
-  uint32_t crc = 0xFFFFFFFFU;
-  write_record(out, 0, 0, 1, {1, 2}, &crc);
-  write_record(out, 1, 1000000, 1, {17, 18}, &crc);
-  out.close();
-  crc ^= 0xFFFFFFFFU;
+  const std::string temporaryFile = "hss_selftest_" + std::to_string(GetCurrentProcessId()) + ".bin";
   DeleteFileA(temporaryFile.c_str());
+  std::wstring temporaryPath;
+  if (!widen_utf8(temporaryFile, &temporaryPath)) {
+    error_json("HSS_SELF_TEST_WRITE_FAILED", "could not encode temp JCAP path");
+    return 0;
+  }
+  std::string first_frame;
+  std::string raw_sha256;
+  const std::vector<PlanSymbol> native_symbols{{"counter", 0x20000000U, 4U}, {"pattern", 0x20000004U, 4U}};
+  {
+    JcapSampleWriter writer;
+    if (!writer.open(temporaryPath)
+        || writer.append(0U, 0U, 1U, native_symbols, {1U, 2U}, &first_frame) != JcapAppendResult::appended
+        || writer.append(1U, 1000000U, 1U, native_symbols, {17U, 18U}) != JcapAppendResult::appended
+        || !writer.finalize()) {
+      error_json("HSS_SELF_TEST_JCAP_WRITE_FAILED", "deterministic JCAP framing failed");
+      return 0;
+    }
+  }
+  const std::string expected_first_frame =
+    "{\"formatVersion\":0,\"status\":\"experimental\",\"kind\":\"sample\",\"payloadEncoding\":\"json\",\"payloadBytes\":79,\"payloadSha256\":\"2c6b2742e9ff67a9c2304a380ba8532904f9c5de40e8716dae3028f040c35d52\"}\n"
+    "{\"sampleIndex\":0,\"tick\":\"0\",\"statusFlags\":1,\"values\":{\"counter\":1,\"pattern\":2}}\n";
+  if (first_frame != expected_first_frame || !sha256_file(temporaryPath, &raw_sha256) || !DeleteFileW(temporaryPath.c_str())) {
+    error_json("HSS_SELF_TEST_JCAP_BYTES_FAILED", "JCAP bytes or final close were not deterministic");
+    return 0;
+  }
+  const std::string budgetFile = "hss_selftest_budget_" + std::to_string(GetCurrentProcessId()) + ".bin";
+  DeleteFileA(budgetFile.c_str());
+  std::wstring budgetPath;
+  if (!widen_utf8(budgetFile, &budgetPath)) {
+    error_json("HSS_SELF_TEST_JCAP_BUDGET_FAILED", "could not encode budget-stop path");
+    return 0;
+  }
+  {
+    JcapSampleWriter writer(1U);
+    if (!writer.open(budgetPath)
+        || writer.append(0U, 0U, 1U, native_symbols, {1U, 2U}) != JcapAppendResult::budgetExhausted
+        || writer.bytes() != 0U || !writer.finalize()) {
+      error_json("HSS_SELF_TEST_JCAP_BUDGET_FAILED", "JCAP writer did not stop cleanly at its byte budget");
+      return 0;
+    }
+  }
+  if (!DeleteFileW(budgetPath.c_str())) {
+    error_json("HSS_SELF_TEST_JCAP_BUDGET_FAILED", "budget-stopped JCAP writer did not close its handle");
+    return 0;
+  }
+  const std::string failureFile = "hss_selftest_failure_" + std::to_string(GetCurrentProcessId()) + ".bin";
+  DeleteFileA(failureFile.c_str());
+  std::wstring failurePath;
+  if (!widen_utf8(failureFile, &failurePath)) {
+    error_json("HSS_SELF_TEST_FAILURE_CLOSE_FAILED", "could not encode failure-close path");
+    return 0;
+  }
+  {
+    JcapSampleWriter writer;
+    if (!writer.open(failurePath) || writer.append(0U, 0U, 1U, native_symbols, {1U}) != JcapAppendResult::failed) {
+      error_json("HSS_SELF_TEST_FAILURE_CLOSE_FAILED", "could not exercise failure close");
+      return 0;
+    }
+  }
+  if (!DeleteFileW(failurePath.c_str())) {
+    error_json("HSS_SELF_TEST_FAILURE_CLOSE_FAILED", "failed JCAP writer did not close its handle");
+    return 0;
+  }
   std::cout
-    << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"uint64,int64,uint32,uint32,uint32[]\""
-    << ",\"sampleCount\":2,\"crc32\":\"" << std::hex << crc << std::dec
-    << "\",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
+    << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v0-exact-utf8-envelope\""
+    << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
+    << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
+    << ",\"budgetStopValidated\":true,\"failureCloseValidated\":true,\"qpcTimebaseValidated\":true"
+    << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
     << ",\"droppedSamples\":" << gap_sequence.droppedSamples
@@ -1814,6 +2076,12 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
     error_json("HSS_CPU_CONTROL_PLAN_INVALID", "CPU control requires validated DLL, target, speed, and fixed operation", dll_utf8);
     return 0;
   }
+  int64_t timebase_counter = 0;
+  int64_t qpc_frequency = 0;
+  if (!query_qpc_timebase(&timebase_counter, &qpc_frequency)) {
+    error_json("HSS_QPC_UNAVAILABLE", "QueryPerformanceCounter timebase is unavailable", dll_utf8);
+    return 0;
+  }
   JlinkScriptSelection script_selection;
   std::string script_error_code;
   std::string script_error_reason;
@@ -1892,12 +2160,26 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
     error_json("JLINK_CONNECT_FAILED", "J-Link CPU-control connect failed", dll_utf8);
     return 0;
   }
+  int64_t operation_before_qpc = state_only ? qpc_counter() : -1;
   const int before_halted = call_int0(arm_halted, &crashed);
+  if (crashed || before_halted < 0) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control pre-state check failed", dll_utf8);
+    return 0;
+  }
   bool reset_issued = false;
   bool halt_issued = false;
   bool resume_issued = false;
   if (!state_only) {
     bool control_crashed = false;
+    operation_before_qpc = qpc_counter();
+    if (operation_before_qpc < 0) {
+      call_void0(arm_close, &crashed);
+      FreeLibrary(dll);
+      error_json("HSS_QPC_UNAVAILABLE", "could not timestamp CPU-control before hardware action", dll_utf8);
+      return 0;
+    }
     if (operation == "halt") {
       call_void0(arm_halt, &control_crashed);
       halt_issued = !control_crashed;
@@ -1917,18 +2199,27 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
         }
       }
     }
+    const int64_t operation_after_control_qpc = qpc_counter();
     if (control_crashed) {
       call_void0(arm_close, &crashed);
       FreeLibrary(dll);
       error_json("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control export raised a structured exception", dll_utf8);
       return 0;
     }
+    if (operation_after_control_qpc < operation_before_qpc) {
+      call_void0(arm_close, &crashed);
+      FreeLibrary(dll);
+      error_json("HSS_QPC_UNAVAILABLE", "could not timestamp CPU-control after hardware action", dll_utf8);
+      return 0;
+    }
+    timebase_counter = operation_after_control_qpc;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   const int after_halted = call_int0(arm_halted, &crashed);
+  const int64_t operation_after_qpc = state_only ? qpc_counter() : timebase_counter;
   call_void0(arm_close, &crashed);
   FreeLibrary(dll);
-  if (crashed || before_halted < 0 || after_halted < 0) {
+  if (crashed || after_halted < 0 || operation_before_qpc < 0 || operation_after_qpc < operation_before_qpc) {
     error_json("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control operation or state check failed", dll_utf8);
     return 0;
   }
@@ -1941,6 +2232,9 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
     << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
     << ",\"jlinkScriptSha256\":\"" << script_selection.sha256 << "\""
     << ",\"jlinkScriptReturnCode\":" << script_rc
+    << ",\"qpcFrequency\":\"" << qpc_frequency << "\""
+    << ",\"operationBeforeQpcCounter\":\"" << operation_before_qpc << "\""
+    << ",\"operationAfterQpcCounter\":\"" << operation_after_qpc << "\""
     << ",\"targetWasHalted\":" << (after_halted > 0 ? "true" : "false")
     << ",\"targetWasHaltedRaw\":" << after_halted
     << ",\"beforeState\":\"" << (before_halted > 0 ? "halted" : "running") << "\""
@@ -1972,10 +2266,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const bool runtime_identity_validated = json_bool(plan, "runtimeIdentityValidated", false);
   const std::string output_file = json_string(plan, "outputFile");
   const std::string stop_file = json_string(plan, "stopFile");
-  const std::string diagnostic_file = json_string(plan, "diagnosticFile");
   const std::string write_request_file = json_string(plan, "writeRequestFile");
   const std::string write_response_file = json_string(plan, "writeResponseFile");
   const std::string capture_id = json_string(plan, "captureId");
+  const std::string qpc_epoch_text = json_string(plan, "qpcEpochCounter");
+  const std::string qpc_frequency_text = json_string(plan, "qpcFrequency");
   const std::string device = json_string(plan, "device", "");
   const std::string iface = json_string(plan, "interface", "SWD");
   const std::string serial_text = json_string(plan, "serial");
@@ -1996,8 +2291,20 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const int post_connect_required_checks = json_int(plan, "postConnectRequiredConsecutiveRunningChecks", -1);
   U32 post_connect_counter_address = 0;
   const auto symbols = json_symbols(plan);
-  if (dll_utf8.empty() || output_file.empty() || capture_id.empty() || symbols.empty() || symbols.size() > 10 || requested_rate < 1 || duration_sec < 1) {
+  uint64_t requested_samples = 0;
+  int64_t qpc_epoch = 0;
+  int64_t planned_qpc_frequency = 0;
+  std::wstring output_path;
+  const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}");
+  if (dll_utf8.empty() || output_file.empty() || !std::regex_match(capture_id, uuid) || symbols.size() > 10
+      || !valid_jcap_symbols(symbols) || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
+      || !valid_jcap_samples_path(output_file, capture_id, &output_path)) {
     error_json("HSS_PLAN_INVALID", "plan is missing required fields");
+    return 0;
+  }
+  if (!parse_qpc_decimal(qpc_epoch_text, &qpc_epoch) || !parse_qpc_decimal(qpc_frequency_text, &planned_qpc_frequency)
+      || planned_qpc_frequency <= 0) {
+    error_json("HSS_QPC_TIMEBASE_INVALID", "capture plan requires decimal pre-reset qpcEpochCounter and qpcFrequency");
     return 0;
   }
   if (device.empty() || device == "Unspecified") {
@@ -2043,7 +2350,24 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
 
-  write_hss_diag(diagnostic_file, capture_id, "load_dll");
+  int64_t current_qpc = 0;
+  int64_t actual_qpc_frequency = 0;
+  if (!query_qpc_timebase(&current_qpc, &actual_qpc_frequency)) {
+    error_json("HSS_QPC_UNAVAILABLE", "QueryPerformanceCounter timebase is unavailable", dll_utf8);
+    return 0;
+  }
+  if (planned_qpc_frequency != actual_qpc_frequency || qpc_epoch > current_qpc) {
+    error_json("HSS_QPC_TIMEBASE_INVALID", "capture QPC epoch is future-dated or its frequency does not match this host", dll_utf8);
+    return 0;
+  }
+  JcapSampleWriter raw_writer;
+  if (!raw_writer.open(output_path)) {
+    error_json("HSS_OUTPUT_OPEN_FAILED", "raw/samples.bin must be new and exclusively creatable", output_file);
+    return 0;
+  }
+  stream_lifecycle(capture_id, "qpc_epoch", current_qpc,
+    ",\"qpcEpochCounter\":\"" + std::to_string(qpc_epoch) + "\",\"qpcFrequency\":\"" + std::to_string(actual_qpc_frequency) + "\"");
+
   std::wstring dll_path;
   if (!widen_utf8(dll_utf8, &dll_path)) {
     error_json("HSS_DLL_PATH_INVALID", "DLL path is not valid lossless UTF-8", dll_utf8);
@@ -2108,27 +2432,21 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       return 0;
     }
   }
-  write_hss_diag(diagnostic_file, capture_id, "before_jlink_open");
   int open_rc = call_int0(arm_open, &crashed);
-  write_hss_diag(diagnostic_file, capture_id, "after_jlink_open");
   if (crashed || open_rc < 0) {
     FreeLibrary(dll);
     error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
     return 0;
   }
-  write_hss_diag(diagnostic_file, capture_id, "before_suppress_gui");
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", dll_utf8);
     return 0;
   }
-  write_hss_diag(diagnostic_file, capture_id, "after_suppress_gui");
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
-  write_hss_diag(diagnostic_file, capture_id, "before_exec_device");
   (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
-  write_hss_diag(diagnostic_file, capture_id, "after_exec_device");
   if (crashed) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
@@ -2137,24 +2455,16 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   }
   char script_exec_out[512] = {};
   int script_rc = 0;
-  write_hss_diag(diagnostic_file, capture_id, "before_select_jlink_script");
   if (!apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "approved J-Link script selection failed or changed before target connect", dll_utf8);
     return 0;
   }
-  write_hss_diag(diagnostic_file, capture_id, "after_select_jlink_script");
   const int tif = iface == "JTAG" ? 0 : 1;
-  write_hss_diag(diagnostic_file, capture_id, "before_tif_select");
   (void)call_int1(arm_tif, tif, &crashed);
-  write_hss_diag(diagnostic_file, capture_id, "after_tif_select");
-  write_hss_diag(diagnostic_file, capture_id, "before_set_speed");
   call_void1(arm_speed, speed, &crashed);
-  write_hss_diag(diagnostic_file, capture_id, "after_set_speed");
-  write_hss_diag(diagnostic_file, capture_id, "before_jlink_connect");
   int connect_rc = call_int0(arm_connect, &crashed);
-  write_hss_diag(diagnostic_file, capture_id, "after_jlink_connect");
   if (crashed || connect_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
@@ -2191,7 +2501,6 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   PostConnectStabilityEvidence post_connect_evidence;
   std::string post_connect_error_code;
   std::string post_connect_error_reason;
-  write_hss_diag(diagnostic_file, capture_id, "before_post_connect_stability");
   const bool post_connect_stable = wait_for_post_connect_stability(
     arm_halted,
     arm_read_u32,
@@ -2205,12 +2514,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     &post_connect_evidence,
     &post_connect_error_code,
     &post_connect_error_reason);
-  write_hss_diag(diagnostic_file, capture_id, post_connect_stable ? "after_post_connect_stability" : "post_connect_stability_failed");
   if (!post_connect_stable) {
+    const bool raw_closed = raw_writer.finalize();
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
+    stream_fault(capture_id, post_connect_error_code, post_connect_error_reason, qpc_counter());
     std::cout
-      << "{\"status\":\"error\",\"errorCode\":\"" << post_connect_error_code
+      << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"" << post_connect_error_code
       << "\",\"reason\":\"" << escape(post_connect_error_reason)
       << "\",\"dll\":\"" << escape(dll_utf8)
       << "\",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\""
@@ -2220,7 +2530,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
       << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
       << ",\"jlinkScriptReturnCode\":" << script_rc
-      << ",\"captureId\":\"" << escape(capture_id) << "\"";
+      << ",\"captureId\":\"" << escape(capture_id) << "\",\"rawClosed\":" << (raw_closed ? "true" : "false");
     write_post_connect_evidence(post_connect_evidence);
     std::cout << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
     return 0;
@@ -2233,28 +2543,32 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const U32 hss_sample_header_bytes = 4;
   const U32 hss_sample_stride_bytes = hss_sample_header_bytes + bytes_per_sample;
   const U32 period_us = static_cast<U32>((1000000 / requested_rate) > 1 ? (1000000 / requested_rate) : 1);
-  write_hss_diag(diagnostic_file, capture_id, "before_hss_start");
   int start_rc = call_hss_start(hss_start, blocks.data(), static_cast<U32>(blocks.size()), period_us, &crashed);
-  write_hss_diag(diagnostic_file, capture_id, "after_hss_start");
+  const int64_t hss_start_qpc = qpc_counter();
+  stream_lifecycle(capture_id, "hss_start", hss_start_qpc, ",\"returnCode\":" + std::to_string(start_rc) + ",\"crashed\":" + (crashed ? "true" : "false"));
   if (crashed || start_rc < 0) {
+    const bool raw_closed = raw_writer.finalize();
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("HSS_START_FAILED", "JLINK_HSS_Start failed", dll_utf8);
+    stream_fault(capture_id, "HSS_START_FAILED", "JLINK_HSS_Start failed", qpc_counter());
+    std::cout << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"HSS_START_FAILED\",\"reason\":\"JLINK_HSS_Start failed\",\"rawClosed\":"
+              << (raw_closed ? "true" : "false") << "}";
     return 0;
   }
-
-  std::ofstream out(output_file, std::ios::binary | std::ios::trunc);
-  if (!out) {
-    (void)call_hss_stop(hss_stop, &crashed);
+  uint64_t started_tick = 0;
+  if (!qpc_delta_ns(hss_start_qpc, qpc_epoch, actual_qpc_frequency, &started_tick)) {
+    const bool raw_closed = raw_writer.finalize();
+    bool stop_crashed = false;
+    (void)call_hss_stop(hss_stop, &stop_crashed);
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("HSS_OUTPUT_OPEN_FAILED", "capture output file could not be opened", dll_utf8);
+    error_json("HSS_QPC_TIMEBASE_INVALID", raw_closed
+      ? "HSS Start counter cannot be converted through the pre-reset QPC epoch"
+      : "HSS Start counter conversion and raw close failed");
     return 0;
   }
-  const uint64_t requested_samples = static_cast<uint64_t>(requested_rate) * static_cast<uint64_t>(duration_sec);
   const U32 read_buffer_bytes = (std::max)(hss_sample_stride_bytes, 4096U);
   std::vector<unsigned char> read_buffer(read_buffer_bytes);
-  uint32_t crc = 0xFFFFFFFFU;
   uint64_t valid_samples = 0;
   uint64_t read_errors = 0;
   uint64_t read_attempts = 0;
@@ -2276,6 +2590,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   bool last_read_sample_prefix_changed = false;
   bool target_written = false;
   bool stop_requested = false;
+  bool budget_exhausted = false;
+  bool raw_write_failed = false;
   int first_changed_offset = -1;
   std::string first_changed_bytes;
   int payload_first_changed_offset = -1;
@@ -2293,7 +2609,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   }
   HssRecordSequence record_sequence;
   const HssMemoryIpc memory_ipc{write_request_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32};
-  for (uint64_t attempt = 0; attempt < requested_samples && record_sequence.emittedSamples < requested_samples && !record_sequence.invalid; ++attempt) {
+  for (uint64_t attempt = 0; attempt < requested_samples && record_sequence.emittedSamples < requested_samples
+      && !record_sequence.invalid && !budget_exhausted && !raw_write_failed; ++attempt) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
       stop_requested = true;
       break;
@@ -2307,10 +2624,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       }
     }
     std::fill(read_buffer.begin(), read_buffer.end(), 0xA5);
-    write_hss_diag(diagnostic_file, capture_id, "before_hss_read", read_attempts, valid_samples, last_read_rc);
     int read_rc = call_hss_read(hss_read, read_buffer.data(), read_buffer_bytes, &crashed);
     ++read_attempts;
-    write_hss_diag(diagnostic_file, capture_id, "after_hss_read", read_attempts, valid_samples, read_rc);
     const bool buffer_changed = hss_buffer_overwritten(read_buffer, 0xA5);
     const bool sample_prefix_changed = hss_sample_prefix_overwritten(read_buffer, hss_sample_stride_bytes, 0xA5);
     const bool header_changed = hss_range_overwritten(read_buffer, 0, hss_sample_header_bytes, 0xA5);
@@ -2368,49 +2683,71 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
         }
         values.push_back(raw);
       }
-      ++decoded_samples;
       uint32_t status_flags = 0;
       if (require_first_sample_index_zero && !record_sequence.hasSample && hss_sample_index != 0U) {
         record_sequence.invalid = true;
         break;
       }
-      const HssSampleDecision decision = observe_hss_sample(&record_sequence, hss_sample_index, &status_flags);
-      if (decision == HssSampleDecision::duplicate) continue;
-      if (decision == HssSampleDecision::invalid) break;
+      HssRecordSequence candidate_sequence = record_sequence;
+      const HssSampleDecision decision = observe_hss_sample(&candidate_sequence, hss_sample_index, &status_flags);
+      if (decision == HssSampleDecision::duplicate) {
+        record_sequence = candidate_sequence;
+        ++decoded_samples;
+        continue;
+      }
+      if (decision == HssSampleDecision::invalid) {
+        record_sequence = candidate_sequence;
+        ++decoded_samples;
+        break;
+      }
+      const uint64_t sample_tick = started_tick + static_cast<uint64_t>(hss_sample_index) * 1000000000ULL / static_cast<uint64_t>(requested_rate);
+      const JcapAppendResult append_result = raw_writer.append(hss_sample_index, sample_tick, status_flags, symbols, values);
+      if (append_result == JcapAppendResult::budgetExhausted) {
+        budget_exhausted = true;
+        break;
+      }
+      if (append_result == JcapAppendResult::failed) {
+        raw_write_failed = true;
+        break;
+      }
+      record_sequence = candidate_sequence;
+      ++decoded_samples;
       ++valid_samples;
-      const int64_t sample_ns = started_ns + static_cast<int64_t>(static_cast<uint64_t>(hss_sample_index) * 1000000000ULL / static_cast<uint64_t>(requested_rate));
-      write_record(out, hss_sample_index, sample_ns, status_flags, values, &crc);
     }
-    if (samples_in_read > 0) out.flush();
-    if (crashed || record_sequence.invalid) break;
+    if (crashed || record_sequence.invalid || budget_exhausted || raw_write_failed) break;
   }
-  out.close();
-  write_hss_diag(diagnostic_file, capture_id, "before_hss_stop", read_attempts, valid_samples, last_read_rc);
+  const bool raw_closed = raw_writer.finalize();
+  if (raw_write_failed || !raw_closed) stream_fault(capture_id, "HSS_RAW_WRITE_FAILED", "raw/samples.bin append, flush, or close failed", qpc_counter());
+  if (record_sequence.invalid) stream_fault(capture_id, "HSS_SAMPLE_INDEX_INVALID", "HSS sample index decreased or wrapped", qpc_counter());
+  if (crashed || read_errors > 0) stream_fault(capture_id, "HSS_READ_FAILED", "JLINK_HSS_Read failed or returned a short record", qpc_counter());
+  if (budget_exhausted) stream_lifecycle(capture_id, "sample_budget_stop", qpc_counter(), ",\"samplesBytes\":" + std::to_string(raw_writer.bytes()) + ",\"samplesByteBudget\":" + std::to_string(JcapSampleWriter::kByteBudget));
   const bool read_crashed = crashed;
   bool stop_crashed = false;
   int stop_rc = call_hss_stop(hss_stop, &stop_crashed);
-  write_hss_diag(diagnostic_file, capture_id, "after_hss_stop", read_attempts, valid_samples, last_read_rc);
+  stream_lifecycle(capture_id, "hss_stop", qpc_counter(), ",\"returnCode\":" + std::to_string(stop_rc) + ",\"crashed\":" + (stop_crashed ? "true" : "false"));
+  if (stop_crashed || stop_rc < 0) stream_fault(capture_id, "HSS_STOP_FAILED", "JLINK_HSS_Stop failed", qpc_counter());
   bool close_crashed = false;
   call_void0(arm_close, &close_crashed);
   FreeLibrary(dll);
-  crc ^= 0xFFFFFFFFU;
+  std::string samples_sha256;
+  const bool raw_hashed = raw_closed && sha256_file(output_path, &samples_sha256);
+  if (!raw_hashed) stream_fault(capture_id, "HSS_RAW_HASH_FAILED", "closed raw/samples.bin could not be hashed", qpc_counter());
   const int64_t elapsed_ns = std::max<int64_t>(1, now_ns() - started_ns);
   const double actual_rate = static_cast<double>(record_sequence.emittedSamples) * 1000000000.0 / static_cast<double>(elapsed_ns);
   const uint64_t sample_count = record_sequence.emittedSamples;
   const double header_changed_ratio = read_attempts > 0 ? static_cast<double>(header_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const double payload_changed_ratio = read_attempts > 0 ? static_cast<double>(payload_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const bool read_failed = !stop_requested && hss_capture_failed(read_crashed, record_sequence.emittedSamples);
-  const bool lifecycle_validated = start_rc >= 0 && read_attempts > 0 && decoded_samples > 0 && stop_rc >= 0 && !read_crashed && !stop_crashed && !close_crashed;
+  const bool lifecycle_validated = start_rc >= 0 && read_attempts > 0 && decoded_samples > 0 && stop_rc >= 0
+    && !read_crashed && !stop_crashed && !close_crashed && raw_closed && raw_hashed;
   const bool decoder_semantics_validated = !record_sequence.invalid
     && record_sequence.emittedSamples > 0
     && decoded_samples == record_sequence.emittedSamples + record_sequence.duplicateSamples
-    && (stop_requested || record_sequence.emittedSamples + record_sequence.droppedSamples >= requested_samples)
-    && read_errors == 0;
-  const bool validation_failed = read_failed || !lifecycle_validated || !decoder_semantics_validated;
-  std::ostringstream crc_hex;
-  crc_hex << std::hex << crc;
+    && (stop_requested || budget_exhausted || record_sequence.emittedSamples + record_sequence.droppedSamples >= requested_samples)
+    && read_errors == 0 && !raw_write_failed;
+  const bool validation_failed = read_failed || raw_write_failed || !lifecycle_validated || !decoder_semantics_validated;
   std::cout
-    << "{\"status\":\"" << (validation_failed ? "error" : stop_requested ? "stopped" : "ok") << "\"";
+    << "{\"record\":\"result\",\"status\":\"" << (validation_failed ? "error" : stop_requested || budget_exhausted ? "stopped" : "ok") << "\"";
   if (validation_failed) {
     std::cout << ",\"errorCode\":\"" << (record_sequence.invalid ? "HSS_SAMPLE_INDEX_INVALID" : !lifecycle_validated ? "HSS_LIFECYCLE_VALIDATION_FAILED" : !decoder_semantics_validated ? "HSS_DECODE_VALIDATION_FAILED" : "HSS_READ_FAILED")
               << "\",\"reason\":\"JLINK_HSS Start/Read/Stop or decoded sample validation failed\"";
@@ -2425,7 +2762,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"jlinkScriptReturnCode\":" << script_rc
     << ",\"jlinkScriptExecOutput\":\"" << escape(script_exec_out) << "\""
     << ",\"captureId\":\"" << escape(capture_id)
-    << "\",\"backend\":\"jlink-hss\",\"requestedRateHz\":" << requested_rate
+    << "\",\"qpcEpochCounter\":\"" << qpc_epoch << "\""
+    << ",\"qpcFrequency\":\"" << actual_qpc_frequency << "\""
+    << ",\"backend\":\"jlink-hss\",\"requestedRateHz\":" << requested_rate
      << ",\"readMode\":\"" << read_mode << "\""
      << ",\"resetBeforeCapture\":" << (require_first_sample_index_zero ? "true" : "false")
     << ",\"resumeBeforeStart\":" << (resume_before_start ? "true" : "false")
@@ -2438,6 +2777,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"durationSec\":" << (static_cast<double>(elapsed_ns) / 1000000000.0)
      << ",\"sampleCount\":" << sample_count
      << ",\"requestedSamples\":" << requested_samples
+     << ",\"sampleBudgetExhausted\":" << (budget_exhausted ? "true" : "false")
+     << ",\"samplesByteBudget\":" << JcapSampleWriter::kByteBudget
+     << ",\"samplesBytes\":" << raw_writer.bytes()
+     << ",\"samplesSha256\":\"" << samples_sha256 << "\""
+     << ",\"rawClosed\":" << (raw_closed ? "true" : "false")
      << ",\"validSamples\":" << valid_samples
      << ",\"emittedSamples\":" << record_sequence.emittedSamples
      << ",\"duplicateSamples\":" << record_sequence.duplicateSamples
@@ -2490,9 +2834,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   std::cout
     << ",\"targetReset\":false,\"targetWritten\":" << (target_written ? "true" : "false")
     << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
-     << ",\"segment\":{\"file\":\"capture_0001.bin\",\"sampleStart\":" << (record_sequence.hasSample ? record_sequence.firstSampleIndex : 0)
+     << ",\"segment\":{\"file\":\"samples.bin\",\"sampleStart\":" << (record_sequence.hasSample ? record_sequence.firstSampleIndex : 0)
      << ",\"sampleCount\":" << sample_count
-    << ",\"crc32\":\"" << crc_hex.str() << "\"},\"stopReturnCode\":" << stop_rc << "}";
+    << ",\"sha256\":\"" << samples_sha256 << "\"},\"stopReturnCode\":" << stop_rc << "}";
   return 0;
 }
 
@@ -2506,6 +2850,7 @@ int wmain(int argc, wchar_t** argv) {
   const auto dll_it = options.find(L"--dll");
   const std::wstring dll_path = dll_it == options.end() ? L"" : dll_it->second;
   if (command == L"version") return version();
+  if (command == L"qpc-timebase") return qpc_timebase();
   if ((command == L"preflight" || command == L"getcaps") && dll_path.empty()) {
     error_json("HSS_DLL_PATH_MISSING", "--dll is required");
     return 0;
