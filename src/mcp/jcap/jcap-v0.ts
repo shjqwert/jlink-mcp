@@ -16,6 +16,15 @@ import {
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import sqlite3 from "sqlite3";
+import {
+  ANALYSIS_V0_MAX_POINTS,
+  analyzeJcapV0,
+  type AnalysisV0Event,
+  type AnalysisV0Profile,
+  type AnalysisV0Result,
+  type AnalysisV0Role,
+  type AnalysisV0Source,
+} from "./analysis-v0";
 
 export const JCAP_FORMAT_VERSION = 0 as const;
 export const JCAP_STATUS = "experimental" as const;
@@ -31,6 +40,10 @@ export interface JcapV0Provenance {
   target: Record<string, unknown>;
   script: { mode: "none" | "file"; path?: string; sha256?: string };
   reset?: Record<string, unknown>;
+  artifact?: Record<string, unknown>;
+  variables?: Record<string, unknown>[];
+  artifactMatch?: Record<string, unknown>;
+  warnings?: string[];
 }
 
 export interface JcapV0Sample {
@@ -43,7 +56,7 @@ export interface JcapV0Sample {
 export interface JcapV0Event extends Record<string, unknown> {
   eventId: string;
   eventSequence: number;
-  type: "lifecycle" | "target_control" | "variable_write" | "quality" | "flag" | "fault";
+  type: "lifecycle" | "target_control" | "variable_write" | "quality" | "flag" | "fault" | "artifact_match";
   tick: string;
 }
 
@@ -79,6 +92,7 @@ const LIMITS = {
   eventMs: 60000,
   eventCount: 128,
   eventBytes: 4 * 1024 * 1024,
+  analysisBytes: 4 * 1024 * 1024,
   exportRows: 1_000_000,
 } as const;
 
@@ -110,6 +124,17 @@ interface SourceRow { file: string; sha256: string; bytes: number; valid_bytes: 
 interface ValueRow { sample_index: number; tick: string; status_flags: number; variable: string; value: number }
 interface SampleRow { sample_index: number; tick: string; status_flags: number }
 interface EventRow { event_id: string; event_sequence: number; type: string; tick: string; json: string }
+
+export interface AnalysisV0RunRequest {
+  captureId: string;
+  profile: AnalysisV0Profile;
+  signalRoles: Record<string, AnalysisV0Role>;
+  eventId?: string;
+  beforeMs?: number;
+  afterMs?: number;
+  startTick?: string;
+  endTick?: string;
+}
 
 const activeWriters = new Set<string>();
 const utf8 = new TextDecoder("utf-8", { fatal: true });
@@ -156,6 +181,56 @@ export class JcapV0QueryService {
     return unavailable ?? jcapCaptureEventWindow({ packageDir, eventId: input.eventId, variables: input.variables, beforeMs: input.beforeMs, afterMs: input.afterMs, bucketCount: input.bucketCount });
   }
 
+  async analysisRun(input: AnalysisV0RunRequest): Promise<Record<string, unknown>> {
+    validateAnalysisRunInput(input);
+    const packageDir = this.packageFor(input.captureId);
+    const status = await verifyJcapV0Index(packageDir);
+    const unavailable = readinessResponse(status, true);
+    if (unavailable) return unavailable;
+    const database = await openDatabase(path.join(packageDir, "capture.db"));
+    try {
+      let startTick = input.startTick;
+      let endTick = input.endTick;
+      if (input.eventId) {
+        const event = await get<EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events WHERE event_id=?", [input.eventId]);
+        if (!event) throw new Error("JCAP event was not found");
+        const center = BigInt(event.tick);
+        const before = BigInt(input.beforeMs!) * 1_000_000n;
+        const after = BigInt(input.afterMs!) * 1_000_000n;
+        if (center + after > U64_MAX) throw new JcapBoundsError("analysis event window exceeds u64 ticks");
+        startTick = (center > before ? center - before : 0n).toString();
+        endTick = (center + after).toString();
+      }
+      const variables = Object.keys(input.signalRoles).sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+      const placeholders = variables.map(() => "?").join(",");
+      const rows = variables.length ? await all<ValueRow>(database, `SELECT sample_index,tick,status_flags,variable,value FROM sample_values WHERE variable IN (${placeholders}) AND tick_key BETWEEN ? AND ? ORDER BY tick_key,sample_index,variable LIMIT ?`, [...variables, u64Key(startTick!), u64Key(endTick!), ANALYSIS_V0_MAX_POINTS + 1]) : [];
+      if (rows.length > ANALYSIS_V0_MAX_POINTS) throw new JcapBoundsError(`analysis point limit exceeded: ${ANALYSIS_V0_MAX_POINTS}`);
+      const eventRows = await all<EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events WHERE tick_key BETWEEN ? AND ? ORDER BY tick_key,event_sequence,event_id LIMIT ?", [u64Key(startTick!), u64Key(endTick!), ANALYSIS_V0_MAX_POINTS + 1]);
+      if (eventRows.length > ANALYSIS_V0_MAX_POINTS) throw new JcapBoundsError(`analysis event limit exceeded: ${ANALYSIS_V0_MAX_POINTS}`);
+      const events = eventRows.map((row) => JSON.parse(row.json) as AnalysisV0Event);
+      const rawSources = (await all<SourceRow>(database, "SELECT file,sha256,bytes,valid_bytes,diagnostic FROM raw_sources ORDER BY file")).map<AnalysisV0Source>((source) => ({
+        file: source.file,
+        sha256: source.sha256,
+        bytes: source.bytes,
+        validBytes: source.valid_bytes,
+      }));
+      const result = analyzeJcapV0({
+        captureId: input.captureId,
+        profile: input.profile,
+        signalRoles: input.signalRoles,
+        window: { startTick: startTick!, endTick: endTick!, ...(input.eventId ? { eventId: input.eventId } : {}) },
+        points: rows.map((row) => ({ sampleIndex: row.sample_index, tick: row.tick, statusFlags: row.status_flags, variable: row.variable, value: row.value })),
+        events,
+        rawSources,
+      });
+      bounded(result, LIMITS.analysisBytes);
+      await persistAnalysisRun(database, result);
+      return result;
+    } finally {
+      await closeDatabase(database);
+    }
+  }
+
   async rebuild(input: { captureId: string }): Promise<Record<string, unknown>> {
     const packageDir = this.packageFor(input.captureId);
     const status = await verifyJcapV0Index(packageDir);
@@ -175,6 +250,48 @@ export class JcapV0QueryService {
     const packageDir = path.join(this.capturesDir, `${captureId}.jcap`);
     if (!existsSync(packageDir)) throw new JcapCaptureNotFoundError(`JCAP capture was not found: ${captureId}`);
     return packageDir;
+  }
+}
+
+async function persistAnalysisRun(database: sqlite3.Database, result: AnalysisV0Result): Promise<void> {
+  await run(database, "BEGIN IMMEDIATE");
+  try {
+    await exec(database, `
+      CREATE TABLE IF NOT EXISTS analysis_schema_version (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS analysis_runs (analysis_run_id TEXT PRIMARY KEY, input_digest TEXT NOT NULL, result_json TEXT NOT NULL, raw_source_tuple_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS analysis_findings (analysis_run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, type TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(analysis_run_id, ordinal), FOREIGN KEY(analysis_run_id) REFERENCES analysis_runs(analysis_run_id) ON DELETE CASCADE);
+    `);
+    await run(database, "INSERT OR IGNORE INTO analysis_schema_version(singleton,version) VALUES(1,1)");
+    const schema = await get<{ version: number }>(database, "SELECT version FROM analysis_schema_version WHERE singleton=1");
+    if (schema?.version !== 1) throw new Error("unsupported analysis schema version");
+    await run(database, "INSERT OR REPLACE INTO analysis_runs(analysis_run_id,input_digest,result_json,raw_source_tuple_json) VALUES(?,?,?,?)", [result.analysisRunId, result.analysisRunId, JSON.stringify(result), JSON.stringify(result.rawSources)]);
+    await run(database, "DELETE FROM analysis_findings WHERE analysis_run_id=?", [result.analysisRunId]);
+    for (const [ordinal, finding] of result.findings.entries()) await run(database, "INSERT INTO analysis_findings(analysis_run_id,ordinal,type,json) VALUES(?,?,?,?)", [result.analysisRunId, ordinal, String(finding.type), JSON.stringify(finding)]);
+    await run(database, "COMMIT");
+  } catch (error) {
+    await run(database, "ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+}
+
+function validateAnalysisRunInput(input: AnalysisV0RunRequest): void {
+  const allowed = new Set(["captureId", "profile", "signalRoles", "eventId", "beforeMs", "afterMs", "startTick", "endTick"]);
+  if (!isRecord(input) || Object.keys(input).some((key) => !allowed.has(key))) throw new JcapBoundsError("analysis_run accepts only captureId, profile, signalRoles and one window selector");
+  if (!UUID.test(input.captureId)) throw new JcapBoundsError("captureId must be a UUID");
+  if (input.profile !== "generic_control" && input.profile !== "generic_state_machine") throw new JcapBoundsError("analysis profile must be generic_control or generic_state_machine");
+  if (!isRecord(input.signalRoles)) throw new JcapBoundsError("signalRoles must be an object");
+  const variables = Object.keys(input.signalRoles);
+  if (variables.length > 16) throw new JcapBoundsError("analysis accepts at most 16 signalRoles");
+  validateVariableNames(variables);
+  if (Object.values(input.signalRoles).some((role) => !["command", "feedback", "state"].includes(role))) throw new JcapBoundsError("analysis v0 roles are command, feedback, or state");
+  const eventWindow = input.eventId !== undefined || input.beforeMs !== undefined || input.afterMs !== undefined;
+  const tickWindow = input.startTick !== undefined || input.endTick !== undefined;
+  if (eventWindow === tickWindow) throw new JcapBoundsError("select exactly one event or tick analysis window");
+  if (eventWindow) {
+    if (typeof input.eventId !== "string" || !UUID.test(input.eventId)) throw new JcapBoundsError("eventId must be a UUID");
+    if (!Number.isInteger(input.beforeMs) || input.beforeMs! < 0 || input.beforeMs! > LIMITS.eventMs || !Number.isInteger(input.afterMs) || input.afterMs! < 0 || input.afterMs! > LIMITS.eventMs) throw new JcapBoundsError("analysis event window must be 0..60000 ms");
+  } else if (!isU64(input.startTick) || !isU64(input.endTick) || BigInt(input.startTick!) > BigInt(input.endTick!)) {
+    throw new JcapBoundsError("analysis tick window must be ordered decimal u64 startTick/endTick");
   }
 }
 
@@ -470,6 +587,12 @@ export async function jcapCaptureSummary(packageDir: string): Promise<Record<str
   const database = await openDatabase(databaseFile, sqlite3.OPEN_READONLY);
   try {
     const provenance = JSON.parse((await get<{ json: string }>(database, "SELECT json FROM provenance"))!.json) as JcapV0Provenance;
+    const artifactMatchRow = await get<{ json: string }>(database, "SELECT json FROM events WHERE type='artifact_match' ORDER BY event_sequence DESC LIMIT 1");
+    if (artifactMatchRow) {
+      const artifactMatch = JSON.parse(artifactMatchRow.json) as Record<string, unknown>;
+      provenance.artifactMatch = artifactMatch;
+      provenance.warnings = artifactMatch.targetArtifactMatch === "unverified" && artifactMatch.captureAllowed !== false ? ["target Artifact match is unverified; read-only capture continued"] : [];
+    }
     const sampleCount = (await get<CountRow>(database, "SELECT COUNT(*) AS count FROM samples"))!.count;
     const eventCount = (await get<CountRow>(database, "SELECT COUNT(*) AS count FROM events"))!.count;
     const variables = (await all<{ variable: string }>(database, "SELECT DISTINCT variable FROM sample_values ORDER BY variable")).map((row) => row.variable);
@@ -681,7 +804,7 @@ function validateSample(sample: JcapV0Sample, previousIndex: number, previousTic
 }
 
 function validateEvent(event: JcapV0Event, previousSequence: number, previousTick: bigint, lifecycleState: JcapCaptureState | undefined): void {
-  if (!isRecord(event) || !UUID.test(event.eventId) || !Number.isSafeInteger(event.eventSequence) || event.eventSequence < 0 || event.eventSequence <= previousSequence || !["lifecycle", "target_control", "variable_write", "quality", "flag", "fault"].includes(event.type) || !isU64(event.tick) || BigInt(event.tick) < previousTick) throw new Error("invalid JCAP v0 event sequence");
+  if (!isRecord(event) || !UUID.test(event.eventId) || !Number.isSafeInteger(event.eventSequence) || event.eventSequence < 0 || event.eventSequence <= previousSequence || !["lifecycle", "target_control", "variable_write", "quality", "flag", "fault", "artifact_match"].includes(event.type) || !isU64(event.tick) || BigInt(event.tick) < previousTick) throw new Error("invalid JCAP v0 event sequence");
   if (previousSequence < 0 && (event.type !== "lifecycle" || event.state !== "planned")) throw new Error("JCAP lifecycle must begin with planned");
   if (lifecycleState && ["completed", "stopped", "failed"].includes(lifecycleState)) throw new Error("JCAP terminal event must be last");
   if (event.type === "lifecycle") {

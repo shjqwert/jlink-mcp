@@ -11,7 +11,7 @@ import { resolveHssRuntimeIdentity } from "../hss-dll/hss-dll-adapter";
 import { cacheHssScript, hssTrustProjectIdentity, readHssTrustProfile, saveHssTrustProfile } from "../trust/trust-profile";
 import { appendHssAudit } from "./audit-log";
 import { encodeHssRecord } from "./hss-artifact";
-import { HssCaptureService } from "./hss-capture-service";
+import { HssCaptureService, enforceHssCapability } from "./hss-capture-service";
 import { HSS_SAFETY_FALSE } from "./hss-contract";
 import { hssFail, hssOk } from "./hss-envelope";
 import { HSS_ERROR, HssError } from "./hss-errors";
@@ -20,6 +20,8 @@ import { HM_C095_HSS_VARIABLES, buildHssCapturePlan } from "./hss-plan";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { configureHssProjectPaths, ensureHssProjectDirs, resolveInsideProject } from "./project-paths";
 import { resolveIarMapSymbols } from "./iar-map-parser";
+import { resolveArtifactGeneration } from "../artifact/artifact-catalog";
+import { SymbolCatalog } from "../artifact/symbol-catalog";
 
 const FAKE_HSS_DLL_SHA256 = createHash("sha256").update(fakeHssDllBuffer()).digest("hex");
 const FAKE_JLINK_SCRIPT_FILE = join(process.cwd(), ".tmp", "approved-hss-reset-fixture.JLinkScript");
@@ -92,12 +94,12 @@ test("IAR map fallback resolves HM_C095 symbols and rejects unsafe cases", async
     assert.equal(symbols.length, 10);
     assert.equal(symbols[0].address, "0x20006b28");
     assert.equal(symbols[0].type, "uint32");
-    await assert.rejects(() => buildHssCapturePlan({ artifactFile: "..\\bad.out" }, root), /path escapes/);
+    await assert.rejects(() => buildHssCapturePlan({ artifactFile: "..\\bad.out", acceptanceProfile: "hm_c095" }, root), /path escapes/);
     await assert.rejects(() => buildHssCapturePlan({ symbols: [{ name: "missing", type: "uint32" }] }, root), /symbol not found/);
     await assert.rejects(() => buildHssCapturePlan({ symbols: [{ name: "a->b", type: "uint32" }] }, root), /unsafe selector/);
     await assert.rejects(async () => {
       await writeFile(join(root, "Appl", "Debug", "Exe", "FOC_SCM.out"), ":020000040000FA\n", "utf8");
-      await buildHssCapturePlan({}, root);
+      await buildHssCapturePlan({ acceptanceProfile: "hm_c095" }, root);
     }, /not ELF content/);
   } finally {
     await rm(dirname(root), { recursive: true, force: true });
@@ -110,10 +112,10 @@ test("HSS capture plan resolves one and ten HM_C095 variables without Git", asyn
     await writeHmProject(root);
     const one = await buildHssCapturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32", alias: "counter" }], requestedRateHz: 1000, durationSec: 3 }, root, true);
     assert.equal(one.symbols[0].alias, "counter");
-    assert.equal(one.hmC095.expectedCounterDelta, 8);
-    assert.equal(one.hmC095.counterAddress, one.symbols[0].address);
-    assert.equal(one.hmC095.counterType, "uint32");
-    assert.equal(one.hmC095.modulus, "4294967296");
+    assert.equal(one.hmC095!.expectedCounterDelta, 8);
+    assert.equal(one.hmC095!.counterAddress, one.symbols[0].address);
+    assert.equal(one.hmC095!.counterType, "uint32");
+    assert.equal(one.hmC095!.modulus, "4294967296");
     assert.equal(one.stabilityPolicy.minimumRecoveryMs, 1000);
     assert.equal(one.sampling.estimatedSamples, 3000);
     assert.equal(one.output.firstSegmentFile.endsWith(join("raw", "samples.bin")), true);
@@ -122,11 +124,43 @@ test("HSS capture plan resolves one and ten HM_C095 variables without Git", asyn
     assert.equal(one.target.targetId, "Z20K146M");
     assert.equal(one.target.source, "project-config");
     assert.equal(one.target.confidence, "project-config");
-    const ten = await buildHssCapturePlan({}, root, true);
+    const ten = await buildHssCapturePlan({ acceptanceProfile: "hm_c095" }, root, true);
     assert.equal(ten.symbols.length, 10);
   } finally {
     await rm(dirname(root), { recursive: true, force: true });
   }
+});
+
+test("HSS plan binds current fixed-member references and rejects stale layout before capture", async () => {
+  const root = await tempProject();
+  try {
+    await writeHmProject(root);
+    const generation = await resolveArtifactGeneration({ projectRoot: root });
+    const catalog = new SymbolCatalog(generation, [{ qualifiedName: "g_state", memberPath: "speed", rootAddress: 0x20001000, memberOffset: 4, type: "uint32", size: 4, region: "ram", source: "elf-dwarf", confidence: "dwarf", kind: "fixed-member" }]);
+    const resolved = catalog.resolve("g_state.speed");
+    assert.equal(resolved.ok, true);
+    if (!resolved.ok) return;
+    const input = { variables: [resolved.value], requestedRateHz: 100, durationSec: 1, nonvolatileRanges: [{ start: 0x08000000, end: 0x08000100 }], ramRanges: [{ start: 0x20000000, end: 0x20010000 }] };
+    const plan = await buildHssCapturePlan(input, root, true);
+    assert.equal(plan.symbols[0].name, "g_state.speed");
+    assert.equal(plan.symbols[0].memberOffset, 4);
+    await assert.rejects(() => buildHssCapturePlan({ ...input, variables: [{ ...resolved.value, ref: { ...resolved.value.ref, layoutHash: "0".repeat(64) } }] }, root, true), (error: unknown) => error instanceof HssError && error.code === HSS_ERROR.HOT_VARIABLE_STALE);
+  } finally {
+    await rm(dirname(root), { recursive: true, force: true });
+  }
+});
+
+test("HSS capability gate rejects count, rate, type, duration, and bandwidth with alternatives", () => {
+  const symbol = { name: "x", type: "uint32" as const, address: "0x20000000", size: 4, source: "iar-map" as const, region: "ram" as const };
+  const base = { symbols: [symbol], sampling: { requestedRateHz: 100, durationSec: 1, estimatedSamples: 100, estimatedBytes: 2800, segmentSizeMb: 16 } };
+  const capability = { hss: { maxBlocks: 16, maxFreqHz: 1000 } };
+  const rejects = (plan: typeof base, pattern: RegExp) => assert.throws(() => enforceHssCapability(capability, plan), (error: unknown) => error instanceof HssError && error.code === HSS_ERROR.HSS_CAPABILITY_LIMIT && pattern.test(error.message) && typeof error.details.alternatives === "object");
+  rejects({ ...base, symbols: Array.from({ length: 17 }, (_, index) => ({ ...symbol, name: `x${index}` })) }, /count/);
+  rejects({ ...base, sampling: { ...base.sampling, requestedRateHz: 1001 } }, /rate/);
+  rejects({ ...base, symbols: [{ ...symbol, size: 8 }] }, /type/);
+  rejects({ ...base, sampling: { ...base.sampling, estimatedBytes: 17 * 1024 * 1024 } }, /segment/);
+  const many = Array.from({ length: 20_000 }, (_, index) => ({ ...symbol, name: `x${index}` }));
+  assert.throws(() => enforceHssCapability({ hss: { maxBlocks: 20_000, maxFreqHz: 1000 } }, { ...base, symbols: many }), /bandwidth/);
 });
 
 test("HM_C095 plan derives the DMA counter rate from generated PWM and TDG timing", async () => {
@@ -134,10 +168,10 @@ test("HM_C095 plan derives the DMA counter rate from generated PWM and TDG timin
   try {
     await writeHmProject(root);
     const plan = await buildHssCapturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 1000 }, root, true);
-    assert.equal(plan.hmC095.focIsrFreqHz, 8000);
-    assert.equal(plan.hmC095.expectedCounterDelta, 8);
-    assert.equal(plan.hmC095.rateDerivation.triggerStride, 2);
-    assert.equal(plan.hmC095.rateDerivation.source, "hm-c095-generated-config");
+    assert.equal(plan.hmC095!.focIsrFreqHz, 8000);
+    assert.equal(plan.hmC095!.expectedCounterDelta, 8);
+    assert.equal(plan.hmC095!.rateDerivation.triggerStride, 2);
+    assert.equal(plan.hmC095!.rateDerivation.source, "hm-c095-generated-config");
   } finally {
     await rm(dirname(root), { recursive: true, force: true });
   }
@@ -328,7 +362,7 @@ test("HSS capture service finalizes native samples into JCAP and routes bounded 
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
-  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000, serialNumber: "fixture-probe" }, new ProcessManager());
   const service = new HssCaptureService(probe, {
     cwd: root,
     env: { JLINK_DLL_PATH: dll },
@@ -336,24 +370,45 @@ test("HSS capture service finalizes native samples into JCAP and routes bounded 
     helperArgsPrefix: [helper],
     validatedDllSha256: [FAKE_HSS_DLL_SHA256],
     validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256],
+    stopTimeoutMs: 1000,
   });
   try {
-    await writeHmProject(root);
+    await writeHmProject(root, "fixture-probe");
     await writeFakeHssDll(dll);
     await writeFile(helper, fakeHelperSource(), "utf8");
 
-    const cap = await service.capabilityProbe({ dllPath: dll, device: "Z20K146M", interface: "SWD", speedKhz: 4000 });
+    const cap = await service.capabilityProbe({ dllPath: dll, device: "Z20K146M", interface: "SWD", speedKhz: 4000, serial: "fixture-probe" });
     assert.equal(cap.ok, true, JSON.stringify(cap));
     assert.equal((cap.data?.helper as { exists?: boolean }).exists, true);
     assert.equal((cap.data?.hss as { getCapsValidated?: boolean }).getCapsValidated, true, JSON.stringify(cap));
     assert.equal((cap.data?.hss as { startReadStopValidated?: boolean }).startReadStopValidated, true);
 
-    const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1, readMode: "drain" });
+    const artifactProbe = await service.artifactProbe();
+    assert.equal(artifactProbe.status, "ok", JSON.stringify(artifactProbe));
+    const artifactGeneration = (artifactProbe.artifact as { generation: string }).generation;
+    const symbol = await service.symbolResolve({ artifactGeneration, selector: "g_hssDbgCounterFocIsr", type: "uint32" });
+    assert.equal(symbol.status, "ok", JSON.stringify(symbol));
+    const ref = (symbol.symbol as { ref: { artifactGeneration: string; qualifiedName: string; layoutHash: string } }).ref;
+    const hot = await service.hotVariableAdd({ ref });
+    assert.equal(hot.status, "ok", JSON.stringify(hot));
+    const forged = await service.capturePlan({ variableRefs: [{ source: "symbol", ref: { ...ref, layoutHash: "f".repeat(64) } }], nonvolatileRanges: [{ start: 0, end: 0x20000000 }], ramRanges: [{ start: 0x20000000, end: 0x40000000 }] });
+    assert.equal(forged.ok, false);
+    assert.equal(forged.error?.code, HSS_ERROR.HOT_VARIABLE_STALE);
+    const duplicate = await service.capturePlan({ variableRefs: [{ source: "hot_variable", ref }, { source: "hot_variable", ref }], nonvolatileRanges: [{ start: 0, end: 0x20000000 }], ramRanges: [{ start: 0x20000000, end: 0x40000000 }] });
+    assert.equal(duplicate.ok, false);
+    const plan = await service.capturePlan({ variableRefs: [{ source: "hot_variable", ref }], nonvolatileRanges: [{ start: 0, end: 0x20000000 }], ramRanges: [{ start: 0x20000000, end: 0x40000000 }], requestedRateHz: 10, durationSec: 1, readMode: "drain" });
     assert.equal(plan.ok, true, JSON.stringify(plan));
     assert.equal(plan.data?.startReady, true);
     assert.equal(plan.data?.readMode, "drain");
 
-    const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
+    const policyFile = join(root, ".jlink-mcp", "policy.json");
+    const policy = await readFile(policyFile, "utf8");
+    await writeFile(policyFile, policy.replace('"allowBurstWrite":false', '"allowBurstWrite":true'), "utf8");
+    const staleStart = await service.captureStart({ planId: plan.data!.planId, dllPath: dll, serial: "fixture-probe" });
+    assert.equal(staleStart.ok, false);
+    assert.equal(staleStart.error?.code, HSS_ERROR.HOT_VARIABLE_STALE);
+    await writeFile(policyFile, policy, "utf8");
+    const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll, serial: "fixture-probe" });
     assert.equal(start.ok, true, JSON.stringify(start));
     const helperPlan = JSON.parse(await readFile(plan.data!.output.planFile, "utf8"));
     assert.equal(helperPlan.getCapsValidated, true);
@@ -362,6 +417,12 @@ test("HSS capture service finalizes native samples into JCAP and routes bounded 
     assert.equal(helperPlan.approvedDllSha256, FAKE_HSS_DLL_SHA256);
     assert.equal(helperPlan.runtimeIdentityValidated, true);
     assert.equal(helperPlan.readMode, "drain");
+    assert.equal(helperPlan.artifactGeneration, plan.data!.artifact.generation);
+    assert.equal(helperPlan.artifactSha256, plan.data!.artifact.sha256);
+    assert.deepEqual(helperPlan.layoutHashes, plan.data!.symbols.map((symbol) => symbol.layoutHash));
+    assert.equal(String(helperPlan.artifactMatchManifestPath).startsWith(plan.data!.output.sessionDir), true);
+    assert.match(helperPlan.artifactMatchManifestSha256, /^[0-9a-f]{64}$/);
+    assert.equal(helperPlan.artifactMatchRuntimeIdentitySha256, helperPlan.runtimeIdentity.sha256);
     const captureId = (start.data as { captureId: string }).captureId;
     await waitFor(async () => {
       const status = await service.captureStatus({ captureId });
@@ -396,6 +457,60 @@ test("HSS capture service finalizes native samples into JCAP and routes bounded 
     assert.equal(exported.ok, true);
     assert.equal(existsSync((exported.data as { exportFile: string }).exportFile), true);
     assert.match(await readFile((exported.data as { exportFile: string }).exportFile, "utf8"), /sampleIndex,tick,statusFlags,variable,value/);
+  } finally {
+    await service.dispose();
+    probe.dispose();
+    await rm(dirname(root), { recursive: true, force: true });
+  }
+});
+
+test("Artifact match verified, unverified, and mismatch are gated and persisted", async () => {
+  const root = await tempProject();
+  const helper = join(root, "helper.js");
+  const dll = join(root, "JLink_x64.dll");
+  const probe = new JLinkBackend({ installDir: root, device: "Z20K146M", interface: "SWD", speed: 4000 }, new ProcessManager());
+  const service = new HssCaptureService(probe, { cwd: root, env: { JLINK_DLL_PATH: dll }, helperPath: process.execPath, helperArgsPrefix: [helper], validatedDllSha256: [FAKE_HSS_DLL_SHA256], validatedRuntimeIdentitySha256: [FAKE_HSS_RUNTIME_IDENTITY_SHA256], stopTimeoutMs: 1000 });
+  try {
+    await writeHmProject(root);
+    await writeFakeHssDll(dll);
+    for (const state of ["verified", "unverified"] as const) {
+      await writeFile(helper, fakeHelperSource({ artifactMatch: state }), "utf8");
+      const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1 });
+      assert.equal(plan.ok, true, JSON.stringify(plan));
+      const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
+      assert.equal(start.ok, true, JSON.stringify(start));
+      assert.equal(start.data?.targetArtifactMatch, state);
+      if (state === "unverified") assert.match(String(start.data?.warnings), /unverified/);
+      const captureId = String(start.data!.captureId);
+      await waitFor(async () => (await service.captureStatus({ captureId })).data?.captureState === "completed");
+      const status = await service.captureStatus({ captureId });
+      assert.equal((status.data?.provenance as { artifactMatch?: { targetArtifactMatch?: string } }).artifactMatch?.targetArtifactMatch, state);
+    }
+    await writeFile(helper, fakeHelperSource({ artifactMatch: "unverified", artifactMatchGateError: true }), "utf8");
+    const rejectedPlan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1 });
+    assert.equal(rejectedPlan.ok, true, JSON.stringify(rejectedPlan));
+    const rejected = await service.captureStart({ planId: rejectedPlan.data!.planId, dllPath: dll });
+    assert.equal(rejected.ok, false, JSON.stringify(rejected));
+    assert.equal(rejected.error?.code, HSS_ERROR.ARTIFACT_MATCH_UNVERIFIED);
+    const rejectedRaw = readJcapV0Raw(rejectedPlan.data!.output.packageDir);
+    assert.equal(rejectedRaw.events.some((event) => event.phase === "hss_start"), false);
+    assert.equal(rejectedRaw.events.find((event) => event.type === "artifact_match")?.captureAllowed, false);
+    const rejectedStatus = await service.captureStatus({ captureId: rejectedPlan.data!.output.captureId });
+    assert.deepEqual((rejectedStatus.data?.provenance as { warnings?: string[] }).warnings, []);
+
+    await writeFile(helper, fakeHelperSource({ artifactMatch: "missing" }), "utf8");
+    const missingPlan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1 });
+    const missing = await service.captureStart({ planId: missingPlan.data!.planId, dllPath: dll });
+    assert.equal(missing.ok, false, JSON.stringify(missing));
+    assert.equal(missing.error?.code, HSS_ERROR.ARTIFACT_MATCH_UNVERIFIED);
+
+    await writeFile(helper, fakeHelperSource({ artifactMatch: "mismatch" }), "utf8");
+    const plan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1 });
+    assert.equal(plan.ok, true, JSON.stringify(plan));
+    const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
+    assert.equal(start.ok, false, JSON.stringify(start));
+    assert.equal(start.error?.code, HSS_ERROR.ARTIFACT_MATCH_MISMATCH);
+    assert.equal(existsSync(plan.data!.output.packageDir), false);
   } finally {
     await service.dispose();
     probe.dispose();
@@ -507,16 +622,16 @@ test("resetBeforeCapture binds R3 reset, stabilizes before HSS start, and reject
     assert.equal(plan.ok, true, JSON.stringify(plan));
     assert.equal(plan.risk.level, "R3");
     assert.equal(plan.data?.resetOperation?.risk, "R3");
-    assert.equal(plan.data?.resetOperation?.targetId, "Z20K146M");
-    assert.equal(plan.data?.resetOperation?.artifactSha256, plan.data?.artifact.sha256);
-    assert.equal(plan.data?.resetOperation?.consumed, false);
+    assert.equal(plan.data?.resetOperation?.target.targetId, "Z20K146M");
+    assert.equal(plan.data?.resetOperation?.artifact.sha256, plan.data?.artifact.sha256);
+    assert.equal(plan.data?.resetOperation?.state, "planned");
 
     const start = await service.captureStart({ planId: plan.data!.planId, dllPath: dll });
     assert.equal(start.ok, true, JSON.stringify(start));
     const helperPlan = JSON.parse(await readFile(plan.data!.output.planFile, "utf8")) as Record<string, unknown>;
     assert.equal(helperPlan.resetBeforeCapture, true);
     assert.equal(helperPlan.requireFirstSampleIndexZero, true);
-    assert.equal(helperPlan.postConnectCounterAddress, plan.data!.hmC095.counterAddress);
+    assert.equal(helperPlan.postConnectCounterAddress, plan.data!.hmC095!.counterAddress);
     assert.equal(helperPlan.postConnectCounterType, "uint32");
     assert.equal(helperPlan.postConnectCounterModulus, "4294967296");
     assert.equal(helperPlan.postConnectExpectedRateHz, 8000);
@@ -563,8 +678,9 @@ test("resetBeforeCapture binds R3 reset, stabilizes before HSS start, and reject
     const standalone = await service.cpuControl("reset", { halt: true });
     assert.equal(standalone.ok, true, JSON.stringify(standalone));
     assert.equal(standalone.risk.level, "R3");
-    assert.equal((standalone.data?.binding as Record<string, unknown>).captureId, "outside-capture");
-    assert.deepEqual((standalone.data?.binding as Record<string, unknown>).arguments, { halt: true });
+    const standaloneBinding = standalone.data?.binding as { session: { captureId?: string }; canonicalArgs: Record<string, unknown> };
+    assert.equal(standaloneBinding.session.captureId, "outside-capture");
+    assert.deepEqual(standaloneBinding.canonicalArgs, { halt: true });
   } finally {
     await service.dispose();
     probe.dispose();
@@ -572,7 +688,7 @@ test("resetBeforeCapture binds R3 reset, stabilizes before HSS start, and reject
   }
 });
 
-test("HSS capture plan records GetCaps maxFreq without gating requested rate", async () => {
+test("HSS capture plan rejects rates above GetCaps maxFreq with alternatives", async () => {
   const root = await tempProject();
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
@@ -590,8 +706,9 @@ test("HSS capture plan records GetCaps maxFreq without gating requested rate", a
     await writeFakeHssDll(dll);
     await writeFile(helper, fakeHelperSource({ maxFreq: 1000 }), "utf8");
     const plan = await service.capturePlan({ dllPath: dll, symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 8000, durationSec: 1 });
-    assert.equal(plan.ok, true, JSON.stringify(plan));
-    assert.equal(plan.data?.sampling.requestedRateHz, 8000);
+    assert.equal(plan.ok, false, JSON.stringify(plan));
+    assert.equal(plan.error?.code, HSS_ERROR.HSS_CAPABILITY_LIMIT);
+    assert.equal((plan.error?.details.alternatives as { maxRateHz?: number }).maxRateHz, 1000);
   } finally {
     await service.dispose();
     probe.dispose();
@@ -1095,7 +1212,7 @@ async function writeHmProject(root: string, serial?: string): Promise<string> {
     writeFile(join(bsw, "Tdg_Adc_Drv_PBcfg.c"), "DelayOutputConfig_Group1_Channel0 = { TDG_ADC_DRV_DELAY_OUTPUT_0, 1238U };\nTdg_Adc_Drv_Config_1 = { (Tdg_Adc_Drv_ClockDivideType)1U, 1241U, /* ModulateValue */ };\nTdg_Adc_Drv_GroupConfig_1 = { (boolean)FALSE };\n", "utf8"),
     writeFile(join(bsw, "Tmu_Drv_Cfg.c"), "TMU_DRV_INPUT_CHANNEL_MCPWM1_INIT_TRIG0, TMU_DRV_OUTPUT_CHANNEL_TDG1_TRIG_IN", "utf8"),
   ]);
-  await writeFile(join(exe, "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
+  await writeFile(join(exe, "FOC_SCM.out"), artifactElfFixture());
   const map = join(list, "FOC_SCM.map");
   await writeFile(map, [
     "g_hssDbgCounterFocIsr   0x2000'6b28     0x4  Data  Gb  AppCurrentSense.o [1]",
@@ -1112,6 +1229,27 @@ async function writeHmProject(root: string, serial?: string): Promise<string> {
   return map;
 }
 
+function artifactElfFixture(): Buffer {
+  const data = Buffer.alloc(0x104);
+  data.set(Buffer.from([0x7f, 0x45, 0x4c, 0x46]), 0);
+  data[4] = 1;
+  data[5] = 1;
+  data.writeUInt32LE(52, 28);
+  data.writeUInt16LE(52, 40);
+  data.writeUInt16LE(32, 42);
+  data.writeUInt16LE(1, 44);
+  data.writeUInt32LE(1, 52);
+  data.writeUInt32LE(0x100, 56);
+  data.writeUInt32LE(0x08000000, 60);
+  data.writeUInt32LE(0x08000000, 64);
+  data.writeUInt32LE(4, 68);
+  data.writeUInt32LE(4, 72);
+  data.writeUInt32LE(5, 76);
+  data.writeUInt32LE(4, 80);
+  data.set(Buffer.from([0x11, 0x22, 0x33, 0x44]), 0x100);
+  return data;
+}
+
 interface FakeHelperOptions {
   getCapsOk?: boolean;
   maxFreq?: number;
@@ -1126,6 +1264,8 @@ interface FakeHelperOptions {
   lifecycleValidated?: boolean;
   decoderSemanticsValidated?: boolean;
   mutateDllAfterCapture?: boolean;
+  artifactMatch?: "verified" | "unverified" | "mismatch" | "missing";
+  artifactMatchGateError?: boolean;
 }
 
 function fakeHelperSource(options: FakeHelperOptions = {}): string {
@@ -1173,6 +1313,16 @@ if (command !== "hss-capture") {
 if (process.env.HSS_ORDER_LOG) fs.appendFileSync(process.env.HSS_ORDER_LOG, "hss-capture\\n");
 const plan = JSON.parse(fs.readFileSync(option("--plan"), "utf8"));
 const crypto = require("crypto");
+const artifactMatch = "${options.artifactMatch === "missing" ? "" : options.artifactMatch ?? "verified"}";
+const artifactEvidence = { captureId: plan.captureId, helperPid: process.pid, connectOrdinal: 1, runtimeIdentitySha256: plan.artifactMatchRuntimeIdentitySha256, artifactSha256: plan.artifactSha256, manifestSha256: plan.artifactMatchManifestSha256, captureAllowed: ${options.artifactMatchGateError ? "false" : "true"}, gateErrorCode: ${options.artifactMatchGateError ? '"ARTIFACT_MATCH_READ_INCOMPLETE"' : '""'}, reason: ${options.artifactMatchGateError ? '"Artifact comparison read was incomplete"' : '""'} };
+if (artifactMatch === "mismatch" || ${options.artifactMatchGateError ? "true" : "false"}) {
+  const lines = [
+    { record: "artifact_match", captureId: plan.captureId, targetArtifactMatch: artifactMatch, artifactMatch: artifactEvidence },
+    { record: "result", captureId: plan.captureId, status: "error", errorCode: artifactEvidence.gateErrorCode || "ARTIFACT_MATCH_MISMATCH", reason: artifactEvidence.reason || "target mismatch", targetArtifactMatch: artifactMatch, artifactMatch: artifactEvidence, rawOpened: false, qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
+  ].map((value) => JSON.stringify(value) + "\\n").join("");
+  fs.writeSync(1, lines);
+  process.exit(0);
+}
 const records = [];
 const symbolCount = plan.symbols.length;
 const totalSamples = Math.min(plan.requestedRateHz * plan.durationSec, 20);
@@ -1216,6 +1366,7 @@ const result = { record: "result", status: "${helperStatus}", ${helperError} hel
 result.resetBeforeCapture = plan.resetBeforeCapture === true;
 const finish = () => {
   const lines = [
+    ...(artifactMatch ? [{ record: "artifact_match", captureId: plan.captureId, targetArtifactMatch: artifactMatch, artifactMatch: artifactEvidence }] : []),
     { record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
     { record: "lifecycle", phase: "hss_start", captureId: plan.captureId, qpcCounter: "100001", returnCode: 0, crashed: false },
     { record: "lifecycle", phase: "hss_stop", captureId: plan.captureId, qpcCounter: "100002", returnCode: 0, crashed: false },

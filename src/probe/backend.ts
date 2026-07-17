@@ -27,6 +27,8 @@ export enum ProbeErrorCode {
   RTT_NOT_AVAILABLE = "RTT_NOT_AVAILABLE",
   TIMEOUT = "TIMEOUT",
   PROBE_BUSY = "PROBE_BUSY",
+  APPROVAL_REQUIRED = "APPROVAL_REQUIRED",
+  R5_FORBIDDEN = "R5_FORBIDDEN",
 }
 
 export interface CommandResult {
@@ -111,6 +113,9 @@ export abstract class ProbeBackend {
   getExclusiveOwner(): string | null { return this._exclusiveOwner; }
 
   getCaptureConfig(): CaptureProbeConfig | null { return null; }
+
+  /** Generation of the current or most recently attempted physical connection. */
+  getConnectionGeneration(): number { return 0; }
 
   protected beginHardwareOperation(): boolean {
     if (this._exclusiveOwner) return false;

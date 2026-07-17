@@ -195,6 +195,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "bundle": "node esbuild.mjs",
+    "ui": "node out/mcp/ui.js",
     "build:capture": "node scripts/build-capture.mjs",
     "build:hss": "node scripts/build-hss-helper.mjs",
     "watch": "tsc -watch -p ./",

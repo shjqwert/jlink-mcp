@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from "node:fs/promises";
+import { mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 import { hssProjectPaths } from "./project-paths";
 import type { HssToolOperation } from "./hss-contract";
@@ -12,7 +12,13 @@ export async function appendHssAudit(
 ): Promise<string> {
   const file = join(hssProjectPaths(cwd).auditDir, sessionId, "audit.jsonl");
   await mkdir(join(hssProjectPaths(cwd).auditDir, sessionId), { recursive: true });
-  await appendFile(file, JSON.stringify(auditRecord(sessionId, operation, input, output)) + "\n", "utf8");
+  const handle = await open(file, "a");
+  try {
+    await handle.writeFile(JSON.stringify(auditRecord(sessionId, operation, input, output)) + "\n", "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   return file;
 }
 
@@ -27,6 +33,8 @@ function auditRecord(sessionId: string, operation: HssToolOperation, input: unkn
     sessionId,
     captureId: field(input, "captureId") ?? field(data, "captureId") ?? field(details, "captureId"),
     operation,
+    auditId: field(input, "auditId") ?? field(data, "auditId") ?? field(details, "auditId"),
+    phase: field(output, "phase") ?? (field(output, "ok") === undefined ? "intent" : "outcome"),
     target: field(input, "target") ?? field(data, "canonicalTarget") ?? field(details, "canonicalTarget"),
     canonicalTarget: field(data, "canonicalTarget") ?? field(details, "canonicalTarget"),
     targetRef: field(input, "targetRef") ?? field(data, "targetRef") ?? field(details, "targetRef"),

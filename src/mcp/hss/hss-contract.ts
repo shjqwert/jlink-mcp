@@ -80,6 +80,14 @@ export interface HssResolvedSymbol extends Required<Pick<HssRequestedSymbol, "na
   address: string;
   size: number;
   source: "elf-dwarf" | "iar-map";
+  artifactGeneration?: string;
+  qualifiedName?: string;
+  memberPath?: string;
+  layoutHash?: string;
+  region?: "ram";
+  confidence?: "dwarf" | "map";
+  rootAddress?: string;
+  memberOffset?: number;
 }
 
 export interface HssSegmentMetadata {
@@ -117,6 +125,8 @@ export interface HssCaptureMetadata {
     mapSha256?: string;
     sha256: string;
     resolver: "elf-dwarf" | "iar-map" | "mixed";
+    generation?: string;
+    format?: "elf";
   };
   target: {
     device: string;

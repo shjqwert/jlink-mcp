@@ -1,66 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
-import type { ProbeBackend } from "../../probe/backend";
 import { HSS_ERROR, HssError } from "./hss-errors";
-import type { HssTargetEndian } from "./hss-typed-value";
 
 export interface HssVariableMemoryIo {
   read(address: number, length: number): Promise<Buffer>;
-  write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<void>;
+  write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<void | HssMemoryWriteReceipt>;
 }
 
-export class ProbeHssVariableMemoryIo implements HssVariableMemoryIo {
-  constructor(private readonly probe: ProbeBackend, private readonly owner: string) {}
-
-  async read(address: number, length: number): Promise<Buffer> {
-    const result = await this.probe.readMemoryForExclusiveOwner(this.owner, address, length);
-    if (!result.success) throw new HssError(HSS_ERROR.OLD_VALUE_READ_FAILED, "probe memory read failed", { address, length, output: result.output, error: result.error });
-    const bytes = this.probe.parseMemoryDump(result.rawOutput || result.output)
-      .flatMap((line) => line.hex.split(/\s+/).filter(Boolean).map((hex) => Number.parseInt(hex, 16)))
-      .filter((value) => Number.isFinite(value));
-    if (bytes.length < length) throw new HssError(HSS_ERROR.OLD_VALUE_READ_FAILED, "probe memory read returned too few bytes", { address, length, bytes: bytes.length });
-    return Buffer.from(bytes.slice(0, length));
-  }
-
-  async write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<void> {
-    const result = await this.probe.writeMemoryForExclusiveOwner(this.owner, address, bytes, accessSize);
-    if (!result.success) throw new HssError(HSS_ERROR.UNKNOWN_WRITE_STATE, "probe memory write failed after issue attempt", { address, length: bytes.length, output: result.output, error: result.error, writeIssued: true });
-  }
-}
-
-export class ProbeDirectHssVariableMemoryIo implements HssVariableMemoryIo {
-  private readonly immediateReadback = new Map<string, Buffer>();
-
-  constructor(private readonly probe: ProbeBackend, private readonly endian: HssTargetEndian) {}
-
-  async read(address: number, length: number): Promise<Buffer> {
-    const cached = this.immediateReadback.get(cacheKey(address, length));
-    if (cached) {
-      this.immediateReadback.delete(cacheKey(address, length));
-      return cached;
-    }
-    const result = await this.probe.readMemory(address, length);
-    if (!result.success) throw new HssError(HSS_ERROR.OLD_VALUE_READ_FAILED, "probe memory read failed", { address, length, output: result.output, error: result.error });
-    const bytes = this.probe.parseMemoryDump(result.rawOutput || result.output)
-      .flatMap((line) => line.hex.split(/\s+/).filter(Boolean).map((hex) => Number.parseInt(hex, 16)))
-      .filter((value) => Number.isFinite(value));
-    if (bytes.length < length) throw new HssError(HSS_ERROR.OLD_VALUE_READ_FAILED, "probe memory read returned too few bytes", { address, length, bytes: bytes.length });
-    return Buffer.from(bytes.slice(0, length));
-  }
-
-  async write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<void> {
-    if (accessSize !== 4 || bytes.length !== 4) {
-      throw new HssError(HSS_ERROR.SYMBOL_KIND_UNSUPPORTED, "direct probe writes support 32-bit scalar targets only", { address, length: bytes.length, accessSize });
-    }
-    const value = this.endian === "little" ? bytes.readUInt32LE(0) : bytes.readUInt32BE(0);
-    const result = await this.probe.executeRaw([`w4 0x${address.toString(16)}, 0x${value.toString(16)}`, `mem 0x${address.toString(16)}, ${bytes.length}`]);
-    if (!result.success) throw new HssError(HSS_ERROR.UNKNOWN_WRITE_STATE, "probe memory write failed after issue attempt", { address, length: bytes.length, output: result.output, error: result.error, writeIssued: true });
-    const readback = this.probe.parseMemoryDump(result.rawOutput || result.output)
-      .flatMap((line) => line.hex.split(/\s+/).filter(Boolean).map((hex) => Number.parseInt(hex, 16)))
-      .filter((item) => Number.isFinite(item));
-    if (readback.length >= bytes.length) this.immediateReadback.set(cacheKey(address, bytes.length), Buffer.from(readback.slice(0, bytes.length)));
-  }
+export interface HssMemoryWriteReceipt {
+  operationBeforeQpcCounter?: string;
+  operationAfterQpcCounter?: string;
 }
 
 export class HelperHssVariableMemoryIo implements HssVariableMemoryIo {
@@ -78,8 +28,16 @@ export class HelperHssVariableMemoryIo implements HssVariableMemoryIo {
     return bytes.subarray(0, length);
   }
 
-  async write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<void> {
-    await this.request({ op: "write", address: hexAddress(address), length: bytes.length, accessSize, bytesHex: bytes.toString("hex") });
+  async write(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<HssMemoryWriteReceipt> {
+    const response = await this.request({ op: "write", address: hexAddress(address), length: bytes.length, accessSize, bytesHex: bytes.toString("hex") });
+    return {
+      operationBeforeQpcCounter: decimalU64(response.operationBeforeQpcCounter),
+      operationAfterQpcCounter: decimalU64(response.operationAfterQpcCounter),
+    };
+  }
+
+  async resume(): Promise<Record<string, unknown>> {
+    return this.request({ op: "resume" });
   }
 
   private async request(input: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -130,6 +88,6 @@ function hexAddress(address: number): string {
   return `0x${address.toString(16)}`;
 }
 
-function cacheKey(address: number, length: number): string {
-  return `${address}:${length}`;
+function decimalU64(value: unknown): string | undefined {
+  return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value) ? value : undefined;
 }

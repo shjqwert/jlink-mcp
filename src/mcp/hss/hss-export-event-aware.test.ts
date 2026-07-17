@@ -7,6 +7,7 @@ import { appendHssWriteFlagIntervals, materializeHssFlagIntervals } from "./hss-
 import { crc32File, encodeHssRecord, exportHssCapture } from "./hss-artifact";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 import type { HssVariableWritePlan } from "./hss-write-plan";
+import { createOperationPlan, type VariableWriteOperationPlan } from "../operation-contract";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 import { configureHssProjectPaths } from "./project-paths";
 
@@ -85,6 +86,7 @@ async function writeMetadata(root: string, exportsDir: string, metadataFile: str
 }
 
 function writePlan(captureId: string): HssVariableWritePlan {
+  const operationPlan = testOperationPlan(captureId);
   return {
     writePlanId: "wp_test",
     captureId,
@@ -108,7 +110,12 @@ function writePlan(captureId: string): HssVariableWritePlan {
     backend: "jlink-hss",
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 10000).toISOString(),
+    operationPlan,
   };
+}
+
+function testOperationPlan(captureId: string): VariableWriteOperationPlan {
+  return createOperationPlan<VariableWriteOperationPlan>({ kind: "variable_write", tool: "variable_write_execute", canonicalArgs: {}, risk: "R2", runtime: { identitySha256: "runtime", scriptApprovalSha256: "script" }, target: { targetId: "target", connectionGeneration: 1 }, artifact: { generation: "generation", sha256: "artifact", match: "verified", evidenceGeneration: "evidence" }, layout: { sha256: "layout" }, policy: { sha256: "policy", rule: "rule", maxWrites: 1, remainingWrites: 1, maxElements: 1, remainingElements: 1 }, session: { id: "session", captureId, captureGeneration: 1 }, readback: { required: true }, ttlMs: 10000 });
 }
 
 function writeResult(captureId: string): HssVariableWriteExecuteResult {

@@ -7,6 +7,7 @@ import { appendHssJcapEvent, appendHssWriteEvent, hssEventsFile, materializeHssC
 import { JcapV0Writer, readJcapV0Raw } from "../jcap/jcap-v0";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 import type { HssVariableWritePlan } from "./hss-write-plan";
+import { createOperationPlan, type VariableWriteOperationPlan } from "../operation-contract";
 
 test("capture write events append to jsonl and materialize into capture.json", async () => {
   const root = await tempProject();
@@ -122,6 +123,7 @@ async function writeMetadata(root: string): Promise<string> {
 }
 
 function plan(path: string): HssVariableWritePlan {
+  const operationPlan = testOperationPlan();
   return {
     writePlanId: "wp_test",
     captureId: "11111111-1111-4111-8111-111111111111",
@@ -145,7 +147,12 @@ function plan(path: string): HssVariableWritePlan {
     backend: "jlink-hss",
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 10000).toISOString(),
+    operationPlan,
   };
+}
+
+function testOperationPlan(): VariableWriteOperationPlan {
+  return createOperationPlan<VariableWriteOperationPlan>({ kind: "variable_write", tool: "variable_write_execute", canonicalArgs: {}, risk: "R2", runtime: { identitySha256: "runtime", scriptApprovalSha256: "script" }, target: { targetId: "target", connectionGeneration: 1 }, artifact: { generation: "generation", sha256: "artifact", match: "verified", evidenceGeneration: "evidence" }, layout: { sha256: "layout" }, policy: { sha256: "policy", rule: "rule", maxWrites: 1, remainingWrites: 1, maxElements: 1, remainingElements: 1 }, session: { id: "session", captureId: "11111111-1111-4111-8111-111111111111", captureGeneration: 1 }, readback: { required: true }, ttlMs: 10000 });
 }
 
 function result(overrides: Partial<HssVariableWriteExecuteResult>): HssVariableWriteExecuteResult {

@@ -43,6 +43,7 @@ import { JLinkMcpServer } from "./server";
 import { ProbeFactoryConfig, ProbeType } from "../probe/factory";
 import { initLogger } from "../utils/logger";
 import { runTrustValidate } from "./trust/trust-cli";
+import { runApprovalBrokerCli, startApprovalBrokerIpc } from "./approval-broker";
 export { JcapV0QueryService, jcapCaptureEventWindow, jcapCaptureExportCsv, jcapCaptureList, jcapCaptureSeries, jcapCaptureSummary, rebuildJcapV0Index, verifyJcapV0Index, writeJcapV0Raw } from "./jcap/jcap-v0";
 
 // Stderr logger for standalone mode
@@ -100,12 +101,17 @@ function buildProbeConfig(): ProbeFactoryConfig {
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === "approve") {
+    process.exitCode = await runApprovalBrokerCli(args.slice(1));
+    return;
+  }
   if (args[0] === "trust" && args[1] === "validate") {
     process.exitCode = await runTrustValidate(args.slice(2));
     return;
   }
   const probeConfig = buildProbeConfig();
   process.stderr.write(`Starting MCP server with probe: ${probeConfig.type}\n`);
+  const approvalBroker = await startApprovalBrokerIpc();
 
   const server = new JLinkMcpServer(
     probeConfig,
@@ -122,7 +128,7 @@ async function main() {
     }
   );
 
-  const shutdown = async () => { await server.dispose(); process.exit(0); };
+  const shutdown = async () => { await server.dispose(); await approvalBroker.close(); process.exit(0); };
   process.on("SIGINT", () => { void shutdown(); });
   process.on("SIGTERM", () => { void shutdown(); });
 

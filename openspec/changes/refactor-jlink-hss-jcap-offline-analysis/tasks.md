@@ -29,33 +29,38 @@ Gate acceptance: a fixture can record the trusted script and R3 reset before HSS
 
 ## P2 — Artifact, symbols, and controlled writes
 
-- [ ] 2.1 Implement bounded content-driven Artifact probing, candidate pairing and SHA-256 generations, then compute `targetArtifactMatch` by exact read-only comparison of every Artifact-defined nonvolatile load byte (`PT_LOAD.p_filesz` or OUT/AXF equivalent; excluding RAM/BSS/NOLOAD/gaps); bind evidence to target/probe/connection/runtime identities and invalidate it on reconnect, Artifact/target/probe changes, Flash/Erase, or possibly-Flash-modifying Raw.
-- [ ] 2.2 Implement Symbol Catalog search/resolve, stable logical identity, layout hash, region/type eligibility, and structured rejection of unsafe kinds.
-- [ ] 2.3 Implement process-local Hot Variables with stale detection and targeted refresh; remove project-specific default symbol assumptions.
-- [ ] 2.4 Build HSS plans from catalog references and enforce reported variable/rate/duration/bandwidth/type limits before hardware access.
-- [ ] 2.5 Migrate HSS start/status/stop to JCAP raw/finalizer and record DLL/helper/adapter/script-mode/cache-script plus Artifact provenance.
+- [x] 2.1 Implement bounded content-driven Artifact probing, candidate pairing and SHA-256 generations, then compute `targetArtifactMatch` by exact read-only comparison of every Artifact-defined nonvolatile load byte (`PT_LOAD.p_filesz` or OUT/AXF equivalent; excluding RAM/BSS/NOLOAD/gaps); bind evidence to target/probe/connection/runtime identities and invalidate it on reconnect, Artifact/target/probe changes, Flash/Erase, or possibly-Flash-modifying Raw.
+- [x] 2.2 Implement Symbol Catalog search/resolve, stable logical identity, layout hash, region/type eligibility, and structured rejection of unsafe kinds.
+- [x] 2.3 Implement process-local Hot Variables with stale detection and targeted refresh; remove project-specific default symbol assumptions.
+- [x] 2.4 Build HSS plans from catalog references and enforce reported variable/rate/duration/bandwidth/type limits before hardware access.
+- [x] 2.5 Migrate HSS start/status/stop to JCAP raw/finalizer and record DLL/helper/adapter/script-mode/cache-script plus Artifact provenance.
 - [x] 2.6 Run targeted fixtures and the authorized hardware sequence `GetCaps → state check → R3 resetBeforeCapture → bounded stability → HSS Start/Read/Stop` against the named HM_C095 target project without modifying or rebuilding it automatically; resolve `g_hssDbgCounterFocIsr` dynamically and enforce the recorded modular-delta/rate/window oracle over every post-stability record.
 
 Gate acceptance: HSS uses only the validated DLL and trusted script-mode/cache identities, records reset and capture evidence in rebuildable JCAP, rejects mismatches/unsupported or expired plans, and passes the independently known semantic fixture without dropping any post-stability capture prefix.
 
 ### P2 continuation — Controlled writes and audit
 
-- [ ] 3.1 Make verified, policy-allowlisted RAM scalar, fixed-array element, and contiguous slice writes R2 using `variable_write_plan` with RAM/type/value/range checks, `maxWrites`, Artifact/layout/policy/session/TTL binding, old-value read and readback; require no R3 operation plan or user approval.
-- [ ] 3.2 Enforce verified target identity for normal writes, explicit R4 policy exceptions for unverified identity, and hard reject mismatch.
-- [ ] 3.3 Serialize active-capture writes through the capture owner; enforce allowlist/budget/readback and append aligned raw events plus audit references.
-- [ ] 3.4 Implement R4 planning companions and retained execution endpoints (`flash_plan→flash`, `erase_plan→erase`, `gdb_command_plan→gdb_command`, `probe_command_plan→probe_command`, optional `write_memory_plan→write_memory`, and `variable_write_plan→variable_write_execute` for unverified exceptions); require trusted local host/CLI confirmation and `approvalToken`, bind challenge/digest/arguments/target/hashes/session/connection/TTL/nonce, atomically consume once, remove token-free paths, and keep Agent/offline UI unable to issue approval and R5 unconditionally rejected.
-- [ ] 3.5 Test R2 stale plans and failed readback; R4 missing/expired/mismatched/forged/replayed approvals; capture ownership/queue ordering; and event/sample alignment.
-- [ ] 3.6 Keep `halt`, `resume`, and `reset` names, input schemas and required output semantics unchanged; route them through J-Link only and implement each R3 call as internal deterministic plan→preflight/revalidate→execute→consume→audit, returning `capture_conflict` for halt/reset during active HSS capture.
+- [x] 3.1 Make verified, policy-allowlisted RAM scalar, fixed-array element, and contiguous slice writes R2 using `variable_write_plan` with RAM/type/value/range checks, `maxWrites`, Artifact/layout/policy/session/TTL binding, old-value read and readback; require no R3 operation plan or user approval.
+- [x] 3.2 Enforce verified target identity for normal writes, explicit R4 policy exceptions for unverified identity, and hard reject mismatch.
+- [x] 3.3 Serialize active-capture writes through the capture owner; enforce allowlist/budget/readback and append aligned raw events plus audit references.
+  - Evidence: the capture queue now retains claim/read/write/readback/event sync through `AUDIT_APPEND` outcome fsync; a concurrent-write regression proves first event → first outcome audit → second hardware entry and one outcome per consumed attempt.
+- [x] 3.4 Implement R4 planning companions and retained execution endpoints (`flash_plan→flash`, `erase_plan→erase`, `gdb_command_plan→gdb_command`, `probe_command_plan→probe_command`, optional `write_memory_plan→write_memory`, and `variable_write_plan→variable_write_execute` for unverified exceptions); require trusted local host/CLI confirmation and `approvalToken`, bind challenge/digest/arguments/target/hashes/session/connection/TTL/nonce, atomically consume once, remove token-free paths, and keep Agent/offline UI unable to issue approval and R5 unconditionally rejected.
+  - Evidence: the Node→Native unverified-variable boundary is frozen as the canonical `jlink-mcp-r4-native-exception` v1 external-session envelope and distinct fail-closed `variable-write-r4` helper invocation; token/secret/signature/raw nonce are not persisted.
+  - Evidence: public RTT/TraceAgent target-RAM writes and their ring parameter aliases are absent; read-only RTT uses logs or caller-provided snapshots and server no longer constructs direct ring memory IO.
+- [x] 3.5 Test R2 stale plans and failed readback; R4 missing/expired/mismatched/forged/replayed approvals; capture ownership/queue ordering; and event/sample alignment.
+  - Evidence: contract and fake-helper tests cover canonical summary/arguments, missing/tampered/noncanonical/state/policy rejection, unsupported zero-write, consumed replay rejection and unchanged verified R2 behavior.
+- [x] 3.6 Keep `halt`, `resume`, and `reset` names, input schemas and required output semantics unchanged; route them through J-Link only and implement each R3 call as internal deterministic plan→preflight/revalidate→execute→consume→audit, returning `capture_conflict` for halt/reset during active HSS capture.
+  - Evidence: the MCP handlers preserve compatibility text and return the service R3 envelope as structured content; public `step`/breakpoint mutators are absent and active-capture conflict reports `hardwareActionIssued=false` before the CPU executor.
 
 Gate acceptance: normal verified RAM writes execute only as R2 with readback and no user confirmation; unverified exceptions require R4; no write or CPU control bypasses policy or capture ownership; Agent self-approval and approval replay fail; active-capture halt/reset causes no hardware action; every attempted state change has deterministic result and append-safe audit evidence.
 
 ## P3 — Analysis, offline UI, and discovery
 
-- [ ] 4.1 Implement only write-window comparison, peak/steady-state/overshoot, state transition and duration analyzers over bounded capture records.
-- [ ] 4.2 Add deterministic fixtures for those metrics, transitions, missing evidence and invalid-quality ranges.
-- [ ] 4.3 Implement only the local loopback Web offline UI/query service and `npm run ui -- --project|--open`; do not add VS Code/webview integration, hardware controls, or raw parsing.
-- [ ] 4.4 Implement timeline brush/events/quality, variable visibility, multi-variable curves and basic auto-fit; defer colors, line styles, complex axes, unit editing and preference persistence.
-- [ ] 4.5 Publish tool schemas, risk metadata, resources/prompts, and a reference Agent skill/client conformance test; state that third-party Agent review is not server-enforceable.
+- [x] 4.1 Implement only write-window comparison, peak/steady-state/overshoot, state transition and duration analyzers over bounded capture records.
+- [x] 4.2 Add deterministic fixtures for those metrics, transitions, missing evidence and invalid-quality ranges.
+- [x] 4.3 Implement only the local loopback Web offline UI/query service and `npm run ui -- --project|--open`; do not add VS Code/webview integration, hardware controls, or raw parsing.
+- [x] 4.4 Implement timeline brush/events/quality, variable visibility, multi-variable curves and basic auto-fit; defer colors, line styles, complex axes, unit editing and preference persistence.
+- [x] 4.5 Publish tool schemas, risk metadata, resources/prompts, and a reference Agent skill/client conformance test; state that third-party Agent review is not server-enforceable.
 
 Gate acceptance: offline UI opens a completed capture without hardware; analysis is deterministic and raw hashes do not change; discovery exposes the intended workflow and risk boundary.
 

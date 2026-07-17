@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
@@ -21,6 +23,9 @@ test("production tool surface exposes HSS only through HssCaptureService", async
     assert.equal(tools.includes("capture_import_experiment"), false);
     assert.deepEqual(tools.filter((name) => name.startsWith("hss_dll_")), []);
     assert.deepEqual(tools.filter((name) => /trust|approve|promote/i.test(name)), []);
+    assert.ok(tools.includes("analysis_profiles"));
+    assert.ok(tools.includes("analysis_run"));
+    for (const name of ["experiment_analyze", "experiment_compare", "evidence_for_codegraph"]) assert.equal(tools.includes(name), false);
     assert.deepEqual(tools.filter((name) => ["capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_index_rebuild", "capture_export"].includes(name)).sort(), [
       "capture_event_window",
       "capture_export",
@@ -34,6 +39,12 @@ test("production tool surface exposes HSS only through HssCaptureService", async
     }
 
     for (const name of [
+      "artifact_probe",
+      "symbol_search",
+      "symbol_resolve",
+      "hot_variable_add",
+      "hot_variable_list",
+      "hot_variable_refresh",
       "hss_capability_probe",
       "hss_capture_plan",
       "hss_capture_start",
@@ -45,15 +56,11 @@ test("production tool surface exposes HSS only through HssCaptureService", async
       "halt",
       "resume",
       "reset",
-      "step",
       "read_memory",
-      "write_memory",
       "read_registers",
       "read_register",
       "flash",
       "erase",
-      "set_breakpoint",
-      "clear_breakpoints",
       "probe_command",
       "gdb_server_start",
       "gdb_server_stop",
@@ -68,18 +75,21 @@ test("production tool surface exposes HSS only through HssCaptureService", async
       "rtt_disconnect",
       "rtt_read",
       "rtt_search",
-      "rtt_send",
       "rtt_clear",
       "rtt_channel_list",
       "rtt_channel_read",
-      "rtt_channel_write",
       "rtt_stream_capture",
       "rtt_stream_decode",
       "traceagent_decode_stream",
-      "traceagent_write_signal",
     ]) {
       assert.ok(tools.includes(name), `${name} must remain registered`);
     }
+    for (const name of ["flash_plan", "erase_plan", "gdb_command_plan", "probe_command_plan", "variable_write_plan", "variable_write_execute"]) {
+      assert.ok(tools.includes(name), `${name} must remain registered`);
+    }
+    assert.equal(tools.includes("write_memory"), false);
+    for (const name of ["step", "set_breakpoint", "clear_breakpoints", "rtt_send", "rtt_channel_write", "traceagent_write_signal"]) assert.equal(tools.includes(name), false, `${name} token-free mutator must not be registered`);
+    assert.deepEqual(tools.filter((name) => /^(artifact|symbol|hot_variable)_/.test(name) && /(write|flash|execute|delete)/.test(name)), []);
 
     const hssDescriptions = tools
       .filter((name) => name === "hss_capability_probe" || name.startsWith("hss_capture_"))
@@ -92,6 +102,12 @@ test("production tool surface exposes HSS only through HssCaptureService", async
     assert.match(jcapDescriptions, /Indexed JCAP/);
     assert.match(jcapDescriptions, /no hardware|hardware side effects|hardware access/);
     assert.doesNotMatch(jcapDescriptions, /legacy|fallback|Direct RTT|RSP|external import/i);
+    for (const name of ["artifact_probe", "hss_capture_plan", "hss_capture_start", "capture_summary", "analysis_run"]) {
+      const discovered = registry[name] as { description?: string; annotations?: Record<string, boolean>; _meta?: Record<string, unknown> };
+      assert.match(discovered.description ?? "", /Preconditions:.*Hardware side effects:.*Risk:.*Approval:.*Output:.*Common next:/);
+      assert.ok(discovered.annotations);
+      assert.ok(discovered._meta?.["jlinkMcp/discovery"]);
+    }
     assert.deepEqual(JSON.parse((await registry.capture_list.handler({ limit: 101 })).content[0].text), {
       status: "error",
       code: "bounds_error",
@@ -100,8 +116,63 @@ test("production tool surface exposes HSS only through HssCaptureService", async
 
     const source = await readFile(join(process.cwd(), "src", "mcp", "server.ts"), "utf8");
     assert.doesNotMatch(source, /capture_backend_|capture_import_experiment|hss_dll_/);
+    assert.doesNotMatch(source, /experimentAnalyzeTool|experimentCompareTool|evidenceForCodegraphTool/);
     assert.doesNotMatch(source, /from ["']\.\/capture["']|new CaptureService\b/);
+    assert.match(source, /variableRefs: z\.array\(variableRef\)/);
+    assert.match(source, /artifactGeneration:[\s\S]*qualifiedName:[\s\S]*layoutHash:/);
+    assert.doesNotMatch(source, /symbols: z\.array\(/);
+    assert.doesNotMatch(source, /variables: z\.array\(variableSchema\)/);
+    assert.match(source, /hss_capture_start[\s\S]*planId: z\.string\(\)\.uuid\(\),/);
+    assert.doesNotMatch(source, /this\.server\.tool\("write_memory"/);
+    assert.doesNotMatch(source, /this\.server\.tool\("(?:step|set_breakpoint|clear_breakpoints)"/);
+    assert.doesNotMatch(source, /probe\.(?:step|setBreakpoint|clearBreakpoints)\(/);
+    assert.doesNotMatch(source, /DirectRttMemoryIo|RspMemoryIo|writeDirectRttRing|writeByte|writeUInt32|downRing|upRing/);
+    assert.match(source, /flash_plan[\s\S]*approvalToken/);
+    assert.match(source, /erase_plan[\s\S]*approvalToken/);
+    assert.match(source, /gdb_command_plan[\s\S]*approvalToken/);
+    assert.match(source, /probe_command_plan[\s\S]*approvalToken/);
+    assert.match(source, /gdb_load never flashes/);
   } finally {
+    await instance.dispose();
+  }
+});
+
+test("removed RTT writes are rejected without reaching write stubs while read-only RTT remains usable", async () => {
+  const instance = new JLinkMcpServer();
+  const typed = instance as unknown as {
+    rttClient: { send(data: string): boolean };
+    probe: { writeMemory(address: number, value: number): Promise<unknown> };
+    server: {
+      connect(transport: InMemoryTransport): Promise<void>;
+      _registeredTools: Record<string, { handler(input: Record<string, unknown>): Promise<{ content: Array<{ text: string }> }> }>;
+    };
+  };
+  let writes = 0;
+  typed.rttClient.send = () => { writes += 1; return true; };
+  typed.probe.writeMemory = async () => { writes += 1; return {}; };
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "rtt-surface-test", version: "1" });
+  try {
+    await Promise.all([typed.server.connect(serverTransport), client.connect(clientTransport)]);
+    for (const name of ["rtt_send", "rtt_channel_write", "traceagent_write_signal"]) {
+      const rejected = await client.callTool({ name, arguments: {} });
+      assert.equal(rejected.isError, true);
+      assert.match(JSON.stringify(rejected), /not found/i);
+    }
+    assert.equal(writes, 0);
+
+    const read = JSON.parse((await typed.server._registeredTools.rtt_channel_read.handler({
+      selector: "AI_TRACE",
+      controlBlockAddress: "0x20000000",
+      upChannels: [{ index: 1, name: "AI_TRACE", direction: "up", size: 4 }],
+      ring: { bufferHex: "aabb0000", rdOff: 0, wrOff: 2 },
+      maxBytes: 4,
+    })).content[0].text);
+    assert.deepEqual(read, { channel: 1, dataHex: "aabb", nextRdOff: 2 });
+    assert.ok(typed.server._registeredTools.traceagent_decode_stream);
+    assert.equal(writes, 0);
+  } finally {
+    await client.close();
     await instance.dispose();
   }
 });

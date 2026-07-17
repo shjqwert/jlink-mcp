@@ -5,6 +5,7 @@ import type { HssVariableMemoryIo } from "./hss-memory-io";
 import { encodeHssValues } from "./hss-typed-value";
 import { executeHssVariableWritePlan } from "./hss-write-execute";
 import type { HssVariableWritePlan } from "./hss-write-plan";
+import { createOperationPlan, type VariableWriteOperationPlan } from "../operation-contract";
 
 test("variable_write_execute writes scalar, array element, and array slice with readback", async () => {
   const memory = new FakeMemory();
@@ -82,6 +83,7 @@ function seeded(options: ConstructorParameters<typeof FakeMemory>[0]): FakeMemor
 }
 
 function plan(overrides: Partial<HssVariableWritePlan>): HssVariableWritePlan {
+  const operationPlan = testOperationPlan();
   return {
     writePlanId: "wp_test",
     captureId: "11111111-1111-4111-8111-111111111111",
@@ -102,8 +104,13 @@ function plan(overrides: Partial<HssVariableWritePlan>): HssVariableWritePlan {
     backend: "jlink-hss",
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 10000).toISOString(),
+    operationPlan,
     ...overrides,
   };
+}
+
+function testOperationPlan(): VariableWriteOperationPlan {
+  return createOperationPlan<VariableWriteOperationPlan>({ kind: "variable_write", tool: "variable_write_execute", canonicalArgs: {}, risk: "R2", runtime: { identitySha256: "runtime", scriptApprovalSha256: "script" }, target: { targetId: "target", connectionGeneration: 1 }, artifact: { generation: "generation", sha256: "artifact", match: "verified", evidenceGeneration: "evidence" }, layout: { sha256: "layout" }, policy: { sha256: "policy", rule: "rule", maxWrites: 1, remainingWrites: 1, maxElements: 1, remainingElements: 1 }, session: { id: "session", captureId: "11111111-1111-4111-8111-111111111111", captureGeneration: 1 }, readback: { required: true }, ttlMs: 10000 });
 }
 
 function hssError(code: string, inspect?: (details: Record<string, unknown>) => void): (error: unknown) => boolean {

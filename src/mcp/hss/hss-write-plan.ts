@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { HssScalarType } from "./hss-contract";
 import { HSS_ERROR, HssError } from "./hss-errors";
 import {
@@ -12,6 +11,7 @@ import {
   type HssPolicyEntry,
 } from "./hss-policy";
 import { resolveIarMapWriteTargetLayout } from "./hss-write-layout";
+import { claimOperationPlan, createOperationPlan, type TargetArtifactMatch, type VariableWriteOperationPlan } from "../operation-contract";
 
 export type HssWriteTargetRef =
   | { kind: "scalar"; path: string }
@@ -48,7 +48,7 @@ export interface HssVariableWritePlan {
   writeByteCount: number;
   newValue?: number;
   newValues?: number[];
-  risk: "R2" | "R3";
+  risk: "R2" | "R4";
   policyMatched: true;
   policyHash: string;
   symbolLayoutHash: string;
@@ -60,11 +60,11 @@ export interface HssVariableWritePlan {
   backend: "jlink-hss";
   createdAt: string;
   expiresAt: string;
+  operationPlan: VariableWriteOperationPlan;
 }
 
 interface StoredWritePlan {
   plan: HssVariableWritePlan;
-  executed: boolean;
 }
 
 export interface HssWritePlanRevalidateContext {
@@ -74,21 +74,39 @@ export interface HssWritePlanRevalidateContext {
   mapFile: string;
   expectedPolicyHash?: string;
   expectedSymbolLayoutHash?: string;
+  runtimeIdentitySha256: string;
+  scriptApprovalSha256: string;
+  targetId: string;
+  probeSerial?: string;
+  artifactGeneration: string;
+  artifactSha256: string;
+  targetArtifactMatch: TargetArtifactMatch;
+  evidenceGeneration: string;
+  connectionGeneration: number;
+  sessionId: string;
+  writeOpsUsed: number;
+  elementsUsed: number;
 }
 
 export class HssWritePlanStore {
   private readonly plans = new Map<string, StoredWritePlan>();
 
   put(plan: HssVariableWritePlan): HssVariableWritePlan {
-    this.plans.set(plan.writePlanId, { plan, executed: false });
+    this.plans.set(plan.writePlanId, { plan });
     return plan;
+  }
+
+  peek(writePlanId: string): HssVariableWritePlan {
+    const stored = this.plans.get(writePlanId);
+    if (!stored) throw new HssError(HSS_ERROR.WRITE_PLAN_NOT_FOUND, "write plan was not found", { writePlanId });
+    return stored.plan;
   }
 
   get(writePlanId: string, context: HssWritePlanRevalidateContext): HssVariableWritePlan {
     const stored = this.plans.get(writePlanId);
     if (!stored) throw new HssError(HSS_ERROR.WRITE_PLAN_NOT_FOUND, "write plan was not found", { writePlanId });
     const plan = stored.plan;
-    if (stored.executed) throw new HssError(HSS_ERROR.WRITE_PLAN_ALREADY_EXECUTED, "write plan was already executed", { writePlanId });
+    if (plan.operationPlan.state !== "planned") throw new HssError(HSS_ERROR.WRITE_PLAN_ALREADY_EXECUTED, "write plan was already consumed", { writePlanId });
     if (Date.now() > Date.parse(plan.expiresAt)) throw new HssError(HSS_ERROR.WRITE_PLAN_EXPIRED, "write plan expired", { writePlanId, expiresAt: plan.expiresAt });
     if (plan.captureId !== context.captureId || plan.captureGeneration !== context.captureGeneration) {
       throw new HssError(HSS_ERROR.WRITE_PLAN_CAPTURE_MISMATCH, "write plan does not match active capture", { writePlanId, captureId: context.captureId });
@@ -98,6 +116,25 @@ export class HssWritePlanStore {
     }
     if (context.expectedSymbolLayoutHash && context.expectedSymbolLayoutHash !== plan.symbolLayoutHash) {
       throw new HssError(HSS_ERROR.WRITE_PLAN_SYMBOL_HASH_MISMATCH, "write plan symbol layout hash is stale", { writePlanId });
+    }
+    const operation = plan.operationPlan;
+    if (operation.runtime.identitySha256 !== context.runtimeIdentitySha256
+        || operation.runtime.scriptApprovalSha256 !== context.scriptApprovalSha256
+        || operation.target.targetId !== context.targetId
+        || operation.target.probeSerial !== context.probeSerial
+        || operation.target.connectionGeneration !== context.connectionGeneration
+        || operation.artifact.generation !== context.artifactGeneration
+        || operation.artifact.sha256 !== context.artifactSha256
+        || operation.artifact.match !== context.targetArtifactMatch
+        || operation.artifact.evidenceGeneration !== context.evidenceGeneration
+        || operation.session.id !== context.sessionId
+        || operation.session.captureId !== context.captureId
+        || operation.session.captureGeneration !== context.captureGeneration) {
+      throw new HssError(HSS_ERROR.WRITE_PLAN_CAPTURE_MISMATCH, "write plan operation binding is stale", { writePlanId });
+    }
+    if (operation.policy.remainingWrites !== operation.policy.maxWrites - context.writeOpsUsed
+        || operation.policy.remainingElements !== operation.policy.maxElements - context.elementsUsed) {
+      throw new HssError(HSS_ERROR.POLICY_MAX_WRITES_EXCEEDED, "write plan budget changed before execution", { writePlanId });
     }
     const entry = policyEntryForPath(context.policy, plan.targetRef.path, plan.targetRef.kind === "scalar" ? "scalar" : "fixed_array");
     let layout: ReturnType<typeof resolveIarMapWriteTargetLayout>;
@@ -110,10 +147,18 @@ export class HssWritePlanStore {
     return plan;
   }
 
-  markExecuted(writePlanId: string): void {
-    const stored = this.plans.get(writePlanId);
-    if (!stored) throw new HssError(HSS_ERROR.WRITE_PLAN_NOT_FOUND, "write plan was not found", { writePlanId });
-    stored.executed = true;
+  claim(writePlanId: string, context: HssWritePlanRevalidateContext): HssVariableWritePlan {
+    const plan = this.get(writePlanId, context);
+    try {
+      claimOperationPlan(plan.operationPlan);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const code = /expired/.test(message) ? HSS_ERROR.WRITE_PLAN_EXPIRED
+        : /already consumed/.test(message) ? HSS_ERROR.WRITE_PLAN_ALREADY_EXECUTED
+          : HSS_ERROR.WRITE_PLAN_LAYOUT_CHANGED;
+      throw new HssError(code, message, { writePlanId });
+    }
+    return plan;
   }
 
   invalidateCapture(captureId: string, captureGeneration?: number): void {
@@ -134,6 +179,16 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
   writeOpsUsed?: number;
   elementsUsed?: number;
   willEnterCaptureQueue?: boolean;
+  runtimeIdentitySha256: string;
+  scriptApprovalSha256: string;
+  targetId: string;
+  probeSerial?: string;
+  artifactGeneration: string;
+  artifactSha256: string;
+  targetArtifactMatch: TargetArtifactMatch;
+  evidenceGeneration: string;
+  connectionGeneration: number;
+  sessionId: string;
 }): HssVariableWritePlan {
   if (input.captureId !== undefined && input.captureId !== context.captureId) throw new HssError(HSS_ERROR.HSS_CAPTURE_NOT_FOUND, "captureId is not active", { captureId: input.captureId });
   const targetRef = canonicalTargetRef(input);
@@ -143,6 +198,10 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
   }
   if (!entry.captureTimeWrite) throw new HssError(HSS_ERROR.POLICY_CAPTURE_TIME_WRITE_DISABLED, "capture-time writes are disabled by policy", { path: entry.path });
   if (!entry.requireReadback) throw new HssError(HSS_ERROR.POLICY_TYPE_MISMATCH, "variable writes require readback", { path: entry.path });
+  if (context.targetArtifactMatch === "mismatch") throw new HssError(HSS_ERROR.ARTIFACT_MATCH_MISMATCH, "target Artifact mismatch is never writable", { targetArtifactMatch: context.targetArtifactMatch });
+  const r4Exception = context.targetArtifactMatch === "unverified" && entry.risk === "R4" && entry.unverifiedTargetWriteException;
+  if (context.targetArtifactMatch === "verified" && (entry.risk !== "R2" || !entry.executable)) throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "verified variable writes require an executable R2 policy entry", { path: entry.path, risk: entry.risk });
+  if (context.targetArtifactMatch === "unverified" && !r4Exception) throw new HssError(HSS_ERROR.ARTIFACT_MATCH_UNVERIFIED, "unverified variable writes require an explicit R4 policy exception", { targetArtifactMatch: context.targetArtifactMatch, policyRisk: entry.risk, unverifiedTargetWriteException: entry.unverifiedTargetWriteException });
   const layout = resolveIarMapWriteTargetLayout(context.mapFile, entry);
   const values = valuesForTarget(input, targetRef);
   assertTargetAccess(entry, targetRef, values.length);
@@ -154,8 +213,8 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
   if (maxWriteOpsRemaining <= 0) throw new HssError(HSS_ERROR.POLICY_MAX_WRITES_EXCEEDED, "policy maxWriteOps exceeded", { path: entry.path });
   if (maxElementsRemaining < writeElementCount) throw new HssError(HSS_ERROR.POLICY_MAX_ELEMENTS_EXCEEDED, "policy maxElementsTotal exceeded", { path: entry.path });
   if (writeByteCount > entry.maxBytesPerWrite) throw new HssError(HSS_ERROR.POLICY_MAX_BYTES_EXCEEDED, "write exceeds policy maxBytesPerWrite", { path: entry.path, writeByteCount, maxBytesPerWrite: entry.maxBytesPerWrite });
-  const createdAt = new Date().toISOString();
-  const expiresAt = new Date(Date.parse(createdAt) + (input.expiresInMs ?? 300000)).toISOString();
+  const ttlMs = input.expiresInMs ?? 300000;
+  if (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 300000) throw new HssError(HSS_ERROR.WRITE_PLAN_EXPIRED, "write plan TTL must be 1..300000ms", { ttlMs });
   const base = {
     captureId: context.captureId,
     captureGeneration: context.captureGeneration,
@@ -163,7 +222,7 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
     canonicalTarget: canonicalTarget(targetRef, writeElementCount),
     writeElementCount,
     writeByteCount,
-    risk: entry.risk,
+    risk: r4Exception ? "R4" as const : "R2" as const,
     policyMatched: true as const,
     policyHash: context.policy.policyHash,
     symbolLayoutHash: layout.symbolLayoutHash,
@@ -171,10 +230,8 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
     maxWriteOpsRemaining,
     maxElementsRemaining,
     willEnterCaptureQueue: context.willEnterCaptureQueue ?? true,
-    executable: entry.risk === "R2",
+    executable: !r4Exception,
     backend: context.backend,
-    createdAt,
-    expiresAt,
   };
   const plan = layout.kind === "scalar"
     ? {
@@ -194,7 +251,21 @@ export function createHssVariableWritePlan(input: HssVariableWritePlanInput, con
       newValue: targetRef.kind === "array_element" ? values[0] : undefined,
       newValues: targetRef.kind === "array_slice" ? values : undefined,
     };
-  return { ...plan, writePlanId: `wp_${hashStable(plan).slice(0, 32)}` };
+  const operationPlan = createOperationPlan<VariableWriteOperationPlan>({
+    kind: "variable_write",
+    tool: "variable_write_execute",
+    canonicalArgs: { targetRef, canonicalTarget: base.canonicalTarget, values },
+    risk: base.risk,
+    runtime: { identitySha256: context.runtimeIdentitySha256, scriptApprovalSha256: context.scriptApprovalSha256 },
+    target: { targetId: context.targetId, ...(context.probeSerial ? { probeSerial: context.probeSerial } : {}), connectionGeneration: context.connectionGeneration },
+    artifact: { generation: context.artifactGeneration, sha256: context.artifactSha256, match: context.targetArtifactMatch, evidenceGeneration: context.evidenceGeneration },
+    layout: { sha256: layout.symbolLayoutHash },
+    policy: { sha256: context.policy.policyHash, rule: entry.path, maxWrites: entry.maxWriteOps, remainingWrites: maxWriteOpsRemaining, maxElements: entry.maxElementsTotal, remainingElements: maxElementsRemaining },
+    session: { id: context.sessionId, captureId: context.captureId, captureGeneration: context.captureGeneration },
+    readback: { required: true },
+    ttlMs,
+  });
+  return { ...plan, writePlanId: operationPlan.planId, createdAt: operationPlan.issuedAt, expiresAt: operationPlan.expiresAt, operationPlan };
 }
 
 function canonicalTargetRef(input: HssVariableWritePlanInput): HssWriteTargetRef {
@@ -231,20 +302,4 @@ function canonicalTarget(targetRef: HssWriteTargetRef, elementCount: number): st
 function elementAddress(baseAddress: number, elementSize: number, targetRef: HssWriteTargetRef): number {
   if (targetRef.kind === "scalar") return baseAddress;
   return baseAddress + (targetRef.kind === "array_element" ? targetRef.index : targetRef.startIndex) * elementSize;
-}
-
-function hashStable(value: unknown): string {
-  return createHash("sha256").update(stableStringify(value)).digest("hex");
-}
-
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
 }

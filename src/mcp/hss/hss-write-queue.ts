@@ -6,34 +6,52 @@ export interface HssWriteQueueStageRecord {
   timeUs: number;
 }
 
+export type HssWriteQueueOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown };
+
 export class HssCaptureWriteQueue {
-  private busy = false;
   private stopping = false;
+  private tail: Promise<void> = Promise.resolve();
   private inFlight: Promise<unknown> | null = null;
   private readonly stageHistory: HssWriteQueueStageRecord[] = [];
   state: HssWriteQueueState = "IDLE";
 
-  async run<T>(job: () => Promise<T>): Promise<T> {
+  async run<T>(job: () => Promise<T>, beforeRelease?: (outcome: HssWriteQueueOutcome<T>) => Promise<void>): Promise<T> {
     if (this.stopping) throw new HssError(HSS_ERROR.CAPTURE_STOPPING, "capture is stopping; new writes are rejected");
-    if (this.busy) throw new HssError(HSS_ERROR.CAPTURE_WRITE_BUSY, "capture write queue is busy");
-    this.busy = true;
-    this.stageHistory.length = 0;
-    this.setStage("QUEUED");
-    const inFlight = job()
-      .then((value) => {
-        this.setStage("DONE");
-        return value;
-      })
-      .catch((error) => {
+    const run = this.tail.then(async () => {
+      if (this.stopping) throw new HssError(HSS_ERROR.CAPTURE_STOPPING, "capture is stopping; queued writes are rejected");
+      this.stageHistory.length = 0;
+      this.setStage("QUEUED");
+      let value: T;
+      try {
+        value = await job();
+      } catch (error) {
+        try {
+          await beforeRelease?.({ ok: false, error });
+        } catch (auditError) {
+          this.stopping = true;
+          throw auditError;
+        } finally {
+          this.setStage("FAILED");
+        }
+        throw error;
+      }
+      try {
+        await beforeRelease?.({ ok: true, value });
+      } catch (error) {
+        this.stopping = true;
         this.setStage("FAILED");
         throw error;
-      })
-      .finally(() => {
-        this.busy = false;
-        this.inFlight = null;
-      });
-    this.inFlight = inFlight;
-    return inFlight;
+      }
+      this.setStage("DONE");
+      return value;
+    });
+    this.tail = run.then(() => undefined, () => undefined);
+    const completion = this.tail;
+    this.inFlight = completion;
+    void completion.finally(() => {
+      if (this.inFlight === completion) this.inFlight = null;
+    });
+    return run;
   }
 
   setStage(stage: HssWriteQueueState): void {

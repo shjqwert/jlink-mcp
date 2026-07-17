@@ -38,7 +38,13 @@ R4 SHALL be reserved for an explicit policy exception on an unverified target, F
 
 The token SHALL bind tool name, canonical arguments, target identity, Artifact/layout/policy hashes, session and connection generation, operation digest, expiry, challenge ID, and nonce. `*_execute` SHALL receive the token together with the canonical operation, revalidate every binding immediately before hardware access, and atomically consume the nonce before issuing the operation. The token SHALL remain consumed after success, failure, timeout, or indeterminate outcome, and every outcome SHALL be audited. Missing, expired, mismatched, forged, or replayed approval SHALL return `approval_required` or a structured approval error without hardware action.
 
+For an unverified-target variable exception, Node SHALL create exactly one versioned Native envelope after lock, binding revalidation, durable intent audit and atomic approval consumption. The envelope SHALL use `schema=jlink-mcp-r4-native-exception`, `version=1`, `kind=unverified_variable_write`; bind approval-consumption evidence, operation/write-plan identities and digests, exact write bytes/readback, target/probe/runtime/Artifact/evidence/layout/policy/session/capture and reserved physical connection generation; and require `artifactMatch=unverified` plus `unverifiedWriteException=true`. Its `summarySha256` SHALL be SHA-256 of the envelope without `summarySha256`, serialized as UTF-8 JSON with recursively ordinal-sorted object keys, omitted `undefined`, retained array order and finite JSON values only.
+
+The external session plan SHALL NOT persist the approval token, authority secret, signature or raw nonce. Node SHALL pass only that plan, its summary SHA-256 and the already-bound helper/runtime/Artifact/write arguments to the distinct `variable-write-r4` helper command. Native SHALL treat the envelope as consumed authorization evidence rather than derive or mint approval, and SHALL validate every field, canonical form and summary before DLL load, connect or write. Missing, noncanonical or inconsistent fields, summary mismatch, `verified|mismatch`, or absent policy exception SHALL fail closed. Until Native implements the command, structured unsupported with `writeIssued=false` is the only valid result; Node SHALL NOT retry through verified R2, ProbeDirect, legacy `variable-write` or another fallback.
+
 V1 SHALL map the logical plan/execute pairs to the retained tool surface as `flash_plan → flash`, `erase_plan → erase`, `gdb_command_plan → gdb_command`, and `probe_command_plan → probe_command`; if direct `write_memory` remains, it SHALL use `write_memory_plan → write_memory`. The existing action tool is the execute endpoint and SHALL require `approvalToken` together with its original canonical arguments. An unverified-target variable exception SHALL use `variable_write_plan → variable_write_execute`, with the execute call requiring the R4 token in addition to its write plan reference. No legacy immediate-execute alias or token-free code path SHALL remain.
+
+The public MCP surface SHALL NOT expose `rtt_send`, `rtt_channel_write`, `traceagent_write_signal`, or down-ring/up-ring parameter variants that can mutate target RAM. Read-only RTT log, caller-provided snapshot parsing, and TraceAgent decode tools may remain, but the server SHALL NOT instantiate a direct RTT memory writer or advance target ring offsets on their behalf.
 
 #### Scenario: flash or raw command is executed
 
@@ -59,15 +65,36 @@ V1 SHALL map the logical plan/execute pairs to the retained tool surface as `fla
 - **WHEN** the bound execute attempt has consumed its nonce and the token is submitted again
 - **THEN** the replay is rejected regardless of the first attempt's result.
 
+#### Scenario: Native R4 variable exception is unsupported
+
+- **GIVEN** Node has consumed a valid approval and persisted the canonical external-session envelope without token or secret material
+- **WHEN** the installed Native helper does not implement `variable-write-r4`
+- **THEN** it returns structured unsupported before hardware access and the approval remains consumed
+- **AND** Node does not synthesize `verified` or invoke another write path.
+
+#### Scenario: Native R4 exception envelope is invalid
+
+- **WHEN** an envelope is missing a field, uses a noncanonical value, has a different summary, reports `verified|mismatch`, or lacks the explicit unverified-write policy exception
+- **THEN** Node or Native rejects it before helper hardware access
+- **AND** no token-free or legacy helper fallback executes.
+
 ### Requirement: Risk operations are audited
 
 Variable writes, CPU control, flash, erase, raw commands, policy changes, and capture lifecycle operations SHALL create append-safe audit records.
+
+For an active-capture variable write, plan claim/consumption, old-value read, write, readback, capture-relative event append/sync, and the same-`auditId` outcome audit append/fsync SHALL execute in one capture-owner queue segment. The queue SHALL enter `AUDIT_APPEND` and SHALL NOT admit the next accepted write until the outcome audit is durable. Success, failure, timeout, and indeterminate results SHALL produce exactly one outcome record for the consumed attempt.
 
 #### Scenario: write readback fails
 
 - **WHEN** a write was issued but readback does not match
 - **THEN** the audit records requested value, old value if known, readback, error, layout/policy hashes, session, capture, and timing
 - **AND** the capture remains recoverable.
+
+#### Scenario: two writes are submitted concurrently during capture
+
+- **WHEN** the first write reaches capture event sync and the second write is already waiting
+- **THEN** the first write's outcome audit is appended and fsynced before the second write enters old-value read or hardware I/O
+- **AND** the first consumed attempt has exactly one outcome audit even if execution failed or became indeterminate.
 
 ### Requirement: CPU control tools are R3 and capture-aware
 

@@ -68,6 +68,36 @@ test("JCAP v0 accepts native exact UTF-8 payload bytes without reserializing for
   }
 });
 
+test("JCAP v0 persists Artifact match provenance without packaging external session files", async () => {
+  const root = workspace();
+  const packageDir = path.join(root, "artifact-match.jcap");
+  try {
+    const captureId = "31000000-0000-4000-8000-000000000000";
+    const id = (suffix: number) => `31000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`;
+    writeJcapV0Raw({
+      packageDir,
+      provenance: { ...JCAP_V0_GOLDEN.provenance, captureId, artifact: { generation: "a".repeat(64) }, variables: [{ qualifiedName: "g_counter", layoutHash: "b".repeat(64) }], artifactMatch: { targetArtifactMatch: "unverified", status: "pending" } },
+      samples: [],
+      events: [
+        { eventId: id(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "planned" },
+        { eventId: id(2), eventSequence: 1, type: "artifact_match", tick: "0", targetArtifactMatch: "unverified", captureId, helperPid: 42, connectOrdinal: 1 },
+        { eventId: id(3), eventSequence: 2, type: "lifecycle", tick: "1", state: "active" },
+        { eventId: id(4), eventSequence: 3, type: "lifecycle", tick: "2", state: "finalizing" },
+        { eventId: id(5), eventSequence: 4, type: "lifecycle", tick: "3", state: "completed" },
+      ],
+    });
+    await rebuildJcapV0Index(packageDir);
+    const summary = await jcapCaptureSummary(packageDir);
+    const provenance = summary.provenance as { artifactMatch: { targetArtifactMatch: string; helperPid: number }; warnings: string[] };
+    assert.equal(provenance.artifactMatch.targetArtifactMatch, "unverified");
+    assert.equal(provenance.artifactMatch.helperPid, 42);
+    assert.match(provenance.warnings[0], /unverified/);
+    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.db", "raw"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("JCAP v0 single writer enforces sequence, budget, one journal pair, and close ordering", async () => {
   const root = workspace();
   const packageDir = path.join(root, "writer.jcap");

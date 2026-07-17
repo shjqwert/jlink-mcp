@@ -6,8 +6,8 @@ export interface HssEnvelope<T> {
   operation: HssToolOperation;
   data: T | null;
   risk: {
-    level: "R0" | "R1" | "R2" | "R3";
-    requiresUserApproval: false;
+    level: "R0" | "R1" | "R2" | "R3" | "R4";
+    requiresUserApproval: boolean;
   };
   backend: {
     selected: "jlink-hss" | null;

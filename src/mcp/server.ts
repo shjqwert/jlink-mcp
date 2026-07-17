@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { ProbeBackend } from "../probe/backend";
@@ -8,17 +8,16 @@ import { RTTClient, ParsedLogLine } from "../rtt/rtt-client";
 import { TelnetProxy } from "../telnet/telnet-proxy";
 import { ProcessManager } from "../utils/process-manager";
 import { log } from "../utils/logger";
-import { analysisProfilesTool, experimentAnalyzeTool, experimentCompareTool } from "./analysis/tools";
-import { evidenceForCodegraphTool } from "./bridge/tools";
 import { HssCaptureService } from "./hss/hss-capture-service";
 import { hssProjectPaths } from "./hss/project-paths";
 import { JcapBoundsError, JcapCaptureNotFoundError, JcapV0QueryService } from "./jcap/jcap-v0";
 import type { HssVariableWritePlanInput } from "./hss/hss-write-plan";
 import type { HssVariableWriteExecuteInput } from "./hss/hss-write-execute";
-import { parseRttRingAddresses, readDirectRttRing, writeDirectRttRing, type DirectRttMemoryIo } from "./rtt-channel/direct-rtt-memory-transport";
-import { rttChannelListTool, rttChannelReadTool, rttChannelWriteTool } from "./rtt-channel/rtt-channel-tools";
-import { RspMemoryIo } from "./rtt-channel/rsp-memory-transport";
-import { traceagentDecodeStream, traceagentWriteSignal } from "./rtt-protocols/traceagent-tools";
+import { rttChannelListTool, rttChannelReadTool } from "./rtt-channel/rtt-channel-tools";
+import { traceagentDecodeStream } from "./rtt-protocols/traceagent-tools";
+import { canonicalR4Args, erasePlan, executeR4Operation, flashPlan, gdbCommandPlan, probeCommandPlan, unverifiedVariableWritePlan, type R4PlanInput } from "./risk-operations";
+import type { R4ExecuteTool } from "./approval-broker";
+import { ANALYSIS_PROFILES, DISCOVERY_CATALOG, discoveryToolConfig, OFFLINE_JCAP_PROMPT } from "./discovery";
 
 export interface JLinkMcpServerOptions {
   cwd?: string;
@@ -306,36 +305,25 @@ export class JLinkMcpServer {
       }
     );
 
-    this.server.tool("halt", "Halt the target CPU", {},
+    this.discoveredTool("halt", {},
       async () => {
         const r = await this.hssCapture.cpuControl("halt");
-        return { content: [{ type: "text", text: r.ok ? "CPU halted" : `Failed: ${r.error?.code}: ${r.error?.message}` }] };
+        return { content: [{ type: "text", text: r.ok ? "CPU halted" : `Failed: ${r.error?.code}: ${r.error?.message}` }], structuredContent: { ...r } };
       }
     );
 
-    this.server.tool("resume", "Resume the target CPU", {},
+    this.discoveredTool("resume", {},
       async () => {
         const r = await this.hssCapture.cpuControl("resume");
-        return { content: [{ type: "text", text: r.ok ? "CPU resumed" : `Failed: ${r.error?.code}: ${r.error?.message}` }] };
+        return { content: [{ type: "text", text: r.ok ? "CPU resumed" : `Failed: ${r.error?.code}: ${r.error?.message}` }], structuredContent: { ...r } };
       }
     );
 
-    this.server.tool("reset", "Reset the target device",
+    this.discoveredTool("reset",
       { halt: z.boolean().optional().describe("Halt after reset (default: false)") },
       async ({ halt }) => {
         const r = await this.hssCapture.cpuControl("reset", { halt: halt ?? false });
-        return { content: [{ type: "text", text: r.ok ? `Device reset${halt ? " (halted)" : " (running)"}` : `Failed: ${r.error?.code}: ${r.error?.message}` }] };
-      }
-    );
-
-    this.server.tool("step", "Step one CPU instruction",
-      {},
-      async () => {
-        const g = this.requireDevice(); if (g) return g;
-        const r = await probe.step();
-        const regs = probe.parseRegisters(r.rawOutput);
-        if (regs) return { content: [{ type: "text", text: `Stepped. PC=${regs["PC"] || "?"} LR=${regs["LR"] || "?"} SP=${regs["SP"] || "?"}` }] };
-        return { content: [{ type: "text", text: r.output }] };
+        return { content: [{ type: "text", text: r.ok ? `Device reset${halt ? " (halted)" : " (running)"}` : `Failed: ${r.error?.code}: ${r.error?.message}` }], structuredContent: { ...r } };
       }
     );
 
@@ -356,20 +344,6 @@ export class JLinkMcpServer {
         const dump = probe.parseMemoryDump(r.rawOutput);
         if (dump.length > 0) return { content: [{ type: "text", text: dump.map((d) => `${d.address}: ${d.hex}  ${d.ascii}`).join("\n") }] };
         return { content: [{ type: "text", text: r.output || "Could not read memory" }] };
-      }
-    );
-
-    this.server.tool("write_memory", "Write a 32-bit value to memory",
-      {
-        address: z.string().describe("Hex address"),
-        value: z.string().describe("Hex value (e.g., '0xDEADBEEF')"),
-      },
-      async ({ address, value }) => {
-        const g = this.requireDevice(); if (g) return g;
-        const addr = parseInt(address, 16), val = parseInt(value, 16);
-        if (isNaN(addr) || isNaN(val)) return { content: [{ type: "text", text: "Error: invalid hex" }] };
-        const r = await probe.writeMemory(addr, val);
-        return { content: [{ type: "text", text: r.success ? `Wrote 0x${val.toString(16)} to 0x${addr.toString(16)}` : `Failed: ${r.output}` }] };
       }
     );
 
@@ -400,43 +374,33 @@ export class JLinkMcpServer {
     // FLASH
     // ═══════════════════════════════════════════════════════════════
 
-    this.server.tool("flash", "Flash firmware to the target device",
+    this.discoveredTool("flash_plan",
       {
         filePath: z.string().describe("Path to firmware file (.hex, .bin, .elf)"),
         baseAddress: z.string().optional().describe("Base address for .bin files (hex)"),
       },
-      async ({ filePath, baseAddress }) => {
+      async ({ filePath, baseAddress }) => this.r4PlanResponse("flash", { filePath, ...(baseAddress !== undefined ? { baseAddress: this.parseBaseAddress(baseAddress) } : {}) })
+    );
+    this.discoveredTool("flash",
+      {
+        filePath: z.string().describe("Path to firmware file (.hex, .bin, .elf)"),
+        baseAddress: z.string().optional().describe("Base address for .bin files (hex)"),
+        challengeId: z.string().uuid(),
+        approvalToken: z.string().min(1),
+      },
+      async ({ filePath, baseAddress, challengeId, approvalToken }) => {
         const g = this.requireDevice(); if (g) return g;
-        const addr = baseAddress ? parseInt(baseAddress, 16) : undefined;
-        const r = await probe.flash(filePath, addr);
-        return { content: [{ type: "text", text: r.success ? `Flashed ${filePath}` : `Flash failed: ${r.output}` }] };
+        const addr = baseAddress === undefined ? undefined : this.parseBaseAddress(baseAddress);
+        return this.r4ExecuteResponse("flash", { filePath, ...(addr !== undefined ? { baseAddress: addr } : {}) }, challengeId, approvalToken, () => probe.flash(filePath, addr));
       }
     );
 
-    this.server.tool("erase", "Erase target flash memory", {},
-      async () => {
+    this.discoveredTool("erase_plan", {}, async () => this.r4PlanResponse("erase", {}));
+    this.discoveredTool("erase", { challengeId: z.string().uuid(), approvalToken: z.string().min(1) },
+      async ({ challengeId, approvalToken }) => {
         const g = this.requireDevice(); if (g) return g;
-        const r = await probe.erase();
-        return { content: [{ type: "text", text: r.success ? "Chip erased" : `Erase failed: ${r.output}` }] };
+        return this.r4ExecuteResponse("erase", {}, challengeId, approvalToken, () => probe.erase());
       }
-    );
-
-    // ═══════════════════════════════════════════════════════════════
-    // BREAKPOINTS
-    // ═══════════════════════════════════════════════════════════════
-
-    this.server.tool("set_breakpoint", "Set a hardware breakpoint",
-      { address: z.string().describe("Hex address") },
-      async ({ address }) => {
-        const addr = parseInt(address, 16);
-        const g = this.requireDevice(); if (g) return g;
-        const r = await probe.setBreakpoint(addr);
-        return { content: [{ type: "text", text: r.success ? `Breakpoint set at 0x${addr.toString(16)}` : `Failed: ${r.output}` }] };
-      }
-    );
-
-    this.server.tool("clear_breakpoints", "Clear all breakpoints", {},
-      async () => { const g = this.requireDevice(); if (g) return g; await probe.clearBreakpoints(); return { content: [{ type: "text", text: "Breakpoints cleared" }] }; }
     );
 
     // ═══════════════════════════════════════════════════════════════
@@ -484,22 +448,25 @@ export class JLinkMcpServer {
       }
     );
 
-    this.server.tool(
+    this.discoveredTool(
+      "gdb_command_plan",
+      {
+        command: z.string().describe("One canonical GDB command"),
+        timeout: z.number().optional().describe("Timeout in ms (default 15000)"),
+      },
+      async ({ command, timeout }) => this.r4PlanResponse("gdb_command", { command, timeout: timeout ?? 15000 })
+    );
+    this.discoveredTool(
       "gdb_command",
-      "Send any GDB command and get the response. For execution commands (continue, step, next, finish, until), blocks until the target stops or times out. If the target doesn't stop, use gdb_wait to poll. Examples: 'bt' (backtrace), 'info threads', 'print myVar', 'break main', 'continue', 'next', 'step', 'finish', 'info registers', 'x/10xw 0x20000000'",
       {
         command: z.string().describe("GDB command to execute"),
         timeout: z.number().optional().describe("Timeout in ms for run commands (default 15000)"),
+        challengeId: z.string().uuid(),
+        approvalToken: z.string().min(1),
       },
-      async ({ command, timeout }) => {
-        // Don't early-return if disconnected — gdb.command() will auto-reconnect
-        const result = await this.gdb.command(command, timeout ?? 15000);
-        let text = result.output;
-        if (result.stopReason && result.stopReason !== "running") {
-          text += `\n\nStopped: ${result.stopReason}`;
-        }
-        if (result.error) text += `\nError: ${result.error}`;
-        return { content: [{ type: "text", text: text || "(no output)" }] };
+      async ({ command, timeout, challengeId, approvalToken }) => {
+        const effectiveTimeout = timeout ?? 15000;
+        return this.r4ExecuteResponse("gdb_command", { command, timeout: effectiveTimeout }, challengeId, approvalToken, () => this.gdb.command(command, effectiveTimeout));
       }
     );
 
@@ -520,18 +487,15 @@ export class JLinkMcpServer {
 
     this.server.tool(
       "gdb_load",
-      "Load an ELF file into GDB. By default loads symbols only (for source-level debugging: backtraces with file:line, variable names). Set flash=true to also program it onto the target.",
+      "Load an ELF file into GDB for symbols only. Flashing must use flash_plan followed by flash with a trusted-local approval token.",
       {
         elfFile: z.string().describe("Path to .elf file with debug symbols"),
-        flash: z.boolean().optional().describe("Also flash the ELF to the target (default: false, symbols only)"),
+        flash: z.boolean().optional().describe("Deprecated: flashing through gdb_load is rejected; use flash_plan then flash"),
       },
       async ({ elfFile, flash }) => {
+        if (flash) return { content: [{ type: "text", text: "gdb_load never flashes. Use flash_plan followed by flash with the exact trusted-local approval token." }] };
         const loadSymbols = await this.gdb.loadSymbols(elfFile);
-        if (!flash) {
-          return { content: [{ type: "text", text: `Symbols loaded: ${loadSymbols.output}\n\nBacktraces and variable inspection will now show source file:line info. Use flash=true to also program the target.` }] };
-        }
-        const loadFlash = await this.gdb.command("load", 60000);
-        return { content: [{ type: "text", text: `Symbols: ${loadSymbols.output}\nFlash: ${loadFlash.output}` }] };
+        return { content: [{ type: "text", text: `Symbols loaded: ${loadSymbols.output}\n\nBacktraces and variable inspection will now show source file:line info.` }] };
       }
     );
 
@@ -608,49 +572,6 @@ export class JLinkMcpServer {
       }
     );
 
-    this.server.tool("rtt_send", "Send data to device via RTT down-channel",
-      {
-        data: z.string().describe("Data to send"),
-        channel: z.number().int().nonnegative().optional().describe("Optional RTT down-channel index. Omit for legacy channel-0 telnet behavior."),
-        channelName: z.string().optional().describe("Optional RTT down-channel name. Omit for legacy channel-0 telnet behavior."),
-        downRing: z.object({
-          bufferAddress: z.union([z.string(), z.number()]),
-          size: z.number().int().positive().max(65536),
-          rdOffAddress: z.union([z.string(), z.number()]),
-          wrOffAddress: z.union([z.string(), z.number()]),
-        }).strict().optional(),
-      },
-      async ({ data, channel, channelName, downRing }) => {
-        const guard = this.requireDevice(); if (guard) return guard;
-        if (channel !== undefined || channelName !== undefined) {
-          if (downRing) {
-            return this.directRttResult(async () => {
-              const io = await this.createDirectRttMemoryIo();
-              try {
-                const written = await writeDirectRttRing(io, parseRttRingAddresses(downRing), Buffer.from(data, "utf8"));
-                return { status: written.ok ? "ok" : "rejected", requestedChannel: channelName ?? channel, ...written };
-              } finally {
-                await io.dispose?.();
-              }
-            });
-          }
-          return {
-            content: [{
-              type: "text",
-              text: JSON.stringify({
-                status: "unavailable",
-                reason: "direct RTT channel transport not configured",
-                requestedChannel: channelName ?? channel,
-                legacyChannel0Used: false,
-              }, null, 2),
-            }],
-          };
-        }
-        const sent = this.rttClient.send(data);
-        return { content: [{ type: "text", text: sent ? `Sent ${data.length} bytes` : "Failed: RTT not connected" }] };
-      }
-    );
-
     this.server.tool("rtt_clear", "Clear RTT buffer", {},
       async () => { this.rttClient.clearBuffer(); return { content: [{ type: "text", text: "RTT buffer cleared" }] }; }
     );
@@ -680,12 +601,15 @@ export class JLinkMcpServer {
     // RAW / CONFIG
     // ═══════════════════════════════════════════════════════════════
 
-    this.server.tool("probe_command", `Execute raw ${probe.displayName} commands`,
-      { commands: z.array(z.string()).describe("Commands to execute") },
-      async ({ commands }) => {
+    this.discoveredTool("probe_command_plan",
+      { commands: z.array(z.string()).describe("Canonical probe commands") },
+      async ({ commands }) => this.r4PlanResponse("probe_command", { commands })
+    );
+    this.discoveredTool("probe_command",
+      { commands: z.array(z.string()).describe("Canonical probe commands"), challengeId: z.string().uuid(), approvalToken: z.string().min(1) },
+      async ({ commands, challengeId, approvalToken }) => {
         const g = this.requireDevice(); if (g) return g;
-        const r = await probe.executeRaw(commands);
-        return { content: [{ type: "text", text: r.output || "(no output)" }] };
+        return this.r4ExecuteResponse("probe_command", { commands }, challengeId, approvalToken, () => probe.executeRaw(commands));
       }
     );
 
@@ -698,61 +622,32 @@ export class JLinkMcpServer {
 
   private registerAnalysisTools(): void {
     const result = async (operation: () => Promise<unknown> | unknown) => {
-      return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
+      try {
+        return { content: [{ type: "text" as const, text: JSON.stringify(await operation(), null, 2) }] };
+      } catch (error) {
+        const code = error instanceof JcapBoundsError
+          ? "bounds_error"
+          : error instanceof JcapCaptureNotFoundError
+            ? "capture_not_found"
+            : "analysis_error";
+        return { content: [{ type: "text" as const, text: JSON.stringify({ status: "error", code, message: error instanceof Error ? error.message : String(error) }) }] };
+      }
     };
 
-    this.server.tool("analysis_profiles", "List offline experiment analysis profiles.", {},
-      async () => result(() => analysisProfilesTool()));
-    this.server.tool(
-      "experiment_analyze",
-      "Analyze a saved experiment, fixture, capture metadata file, or captureId/outputDir with a read-only generic profile.",
+    this.discoveredTool("analysis_profiles", {}, async () => result(() => ANALYSIS_PROFILES));
+    this.discoveredTool(
+      "analysis_run",
       {
-        experimentId: z.string().optional(),
-        fixturePath: z.string().optional(),
-        experimentPath: z.string().optional(),
-        metadataFile: z.string().optional(),
-        captureId: z.string().optional(),
-        outputDir: z.string().optional(),
-        analysisProfile: z.string(),
-        signals: z.array(z.string()).optional(),
-        signalRoles: z.record(z.string(), z.enum(["command", "feedback", "error", "state", "fault", "limit", "counter", "timestamp", "event", "raw", "derived"])).optional(),
-        windowMs: z.tuple([z.number(), z.number()]).optional(),
-        maxSamples: z.number().optional(),
+        captureId: z.string().uuid(),
+        profile: z.enum(["generic_control", "generic_state_machine"]),
+        signalRoles: z.record(z.string().min(1).max(256), z.enum(["command", "feedback", "state"])).refine((roles) => Object.keys(roles).length <= 16, "at most 16 signal roles"),
+        eventId: z.string().uuid().optional(),
+        beforeMs: z.number().int().min(0).max(60000).optional(),
+        afterMs: z.number().int().min(0).max(60000).optional(),
+        startTick: z.string().regex(/^\d+$/).optional(),
+        endTick: z.string().regex(/^\d+$/).optional(),
       },
-      async (input) => result(() => experimentAnalyzeTool(input)),
-    );
-    this.server.tool(
-      "experiment_compare",
-      "Compare two saved experiments, fixtures, or capture metadata files with the same read-only generic profile.",
-      {
-        baselineExperimentId: z.string().optional(),
-        baselineExperimentPath: z.string().optional(),
-        baselineMetadataFile: z.string().optional(),
-        candidateExperimentId: z.string().optional(),
-        candidateExperimentPath: z.string().optional(),
-        candidateMetadataFile: z.string().optional(),
-        analysisProfile: z.string(),
-        metrics: z.array(z.string()).optional(),
-        signalRoles: z.record(z.string(), z.enum(["command", "feedback", "error", "state", "fault", "limit", "counter", "timestamp", "event", "raw", "derived"])).optional(),
-        windowMs: z.tuple([z.number(), z.number()]).optional(),
-        maxSamples: z.number().optional(),
-      },
-      async (input) => result(() => experimentCompareTool(input)),
-    );
-    this.server.tool(
-      "evidence_for_codegraph",
-      "Generate Runtime Evidence and CodeGraph query suggestions from offline experiment or capture-backed analysis without calling CodeGraph.",
-      {
-        experimentId: z.string().optional(),
-        fixturePath: z.string().optional(),
-        experimentPath: z.string().optional(),
-        metadataFile: z.string().optional(),
-        captureId: z.string().optional(),
-        outputDir: z.string().optional(),
-        signalRoles: z.record(z.string(), z.enum(["command", "feedback", "error", "state", "fault", "limit", "counter", "timestamp", "event", "raw", "derived"])).optional(),
-        analysisResult: z.unknown(),
-      },
-      async (input) => result(() => evidenceForCodegraphTool(input)),
+      async (input) => result(() => this.jcapCapture.analysisRun(input)),
     );
   }
 
@@ -771,20 +666,20 @@ export class JLinkMcpServer {
     };
 
     const captureId = { captureId: z.string().uuid().describe("Indexed JCAP capture UUID under the configured captures root") };
-    this.server.tool("capture_list", "List Indexed JCAP v0 packages only. Default 50, maximum 100, cursor at most 1024 bytes, response at most 256 KiB; rejects bounds and has no hardware side effects.", {
+    this.discoveredTool("capture_list", {
       limit: z.number().int().min(1).max(100).optional(),
       cursor: z.string().max(1024).optional(),
     }, async (input) => result(() => this.jcapCapture.list(input)));
-    this.server.tool("capture_summary", "Read an Indexed JCAP v0 summary (maximum 1 MiB). Returns independent captureState/indexStatus and structured not_ready or rebuild_required; never reads full raw or touches hardware.", captureId,
+    this.discoveredTool("capture_summary", captureId,
       async (input) => result(() => this.jcapCapture.summary(input)));
-    this.server.tool("capture_series", "Read Indexed JCAP v0 buckets from capture.db only. Requires 1..32 variables, decimal u64 tick window, 1..4096 buckets, at most 65536 points and 8 MiB; rejects bounds without clamping and has no hardware side effects.", {
+    this.discoveredTool("capture_series", {
       ...captureId,
       variables: z.array(z.string().min(1).max(256)).min(1).max(32),
       startTick: z.string().regex(/^\d+$/),
       endTick: z.string().regex(/^\d+$/),
       bucketCount: z.number().int().min(1).max(4096),
     }, async (input) => result(() => this.jcapCapture.series(input)));
-    this.server.tool("capture_event_window", "Read an Indexed JCAP v0 event window from capture.db only. Requires an event UUID; each side 0..60000 ms, at most 16 variables, 2048 buckets, 128 events and 4 MiB; rejects bounds and has no hardware side effects.", {
+    this.discoveredTool("capture_event_window", {
       ...captureId,
       eventId: z.string().uuid(),
       variables: z.array(z.string().min(1).max(256)).max(16),
@@ -792,10 +687,14 @@ export class JLinkMcpServer {
       afterMs: z.number().int().min(0).max(60000),
       bucketCount: z.number().int().min(1).max(2048),
     }, async (input) => result(() => this.jcapCapture.eventWindow(input)));
-    this.server.tool("capture_index_rebuild", "Rebuild only capture.db from validated immutable JCAP v0 raw prefixes. Active/finalizing captures return not_ready; raw is never modified and no hardware is accessed.", captureId,
+    this.discoveredTool("capture_index_rebuild", captureId,
       async (input) => result(() => this.jcapCapture.rebuild(input)));
-    this.server.tool("capture_export", "Explicitly create package/export/samples.csv from a ready Indexed JCAP v0 database. Refuses overwrite, traversal, active/finalizing captures and hardware access; default query/rebuild paths create no export.", captureId,
+    this.discoveredTool("capture_export", captureId,
       async (input) => result(() => this.jcapCapture.exportCsv(input)));
+  }
+
+  private discoveredTool<Args extends Record<string, z.ZodType>>(name: string, inputSchema: Args, callback: ToolCallback<Args>): void {
+    this.server.registerTool(name, { ...discoveryToolConfig(name), inputSchema }, callback);
   }
 
   private registerRttChannelTools(): void {
@@ -812,101 +711,35 @@ export class JLinkMcpServer {
       upChannels: z.array(z.object({ index: z.number().int().nonnegative(), name: z.string().optional(), direction: z.literal("up"), size: z.number().optional() })).optional(),
       downChannels: z.array(z.object({ index: z.number().int().nonnegative(), name: z.string().optional(), direction: z.literal("down"), size: z.number().optional() })).optional(),
     }, async (input) => result(() => rttChannelListTool({ controlBlockAddress: input.controlBlockAddress, upChannels: input.upChannels ?? [], downChannels: input.downChannels ?? [] })));
-    const ringSchema = z.object({
-      bufferAddress: z.union([z.string(), z.number()]),
-      size: z.number().int().positive().max(65536),
-      rdOffAddress: z.union([z.string(), z.number()]),
-      wrOffAddress: z.union([z.string(), z.number()]),
-    }).strict();
-
-    this.server.tool("rtt_channel_read", "Read an RTT up-channel through direct RTT ring memory.", {
+    this.server.tool("rtt_channel_read", "Read an RTT up-channel from a caller-provided read-only ring snapshot.", {
       selector: z.union([z.number().int().nonnegative(), z.string()]),
-      ring: ringSchema.optional(),
+      controlBlockAddress: z.string(),
+      upChannels: z.array(z.object({ index: z.number().int().nonnegative(), name: z.string().optional(), direction: z.literal("up"), size: z.number().optional() })).min(1),
+      ring: z.object({ bufferHex: z.string(), rdOff: z.number().int().nonnegative(), wrOff: z.number().int().nonnegative() }).strict(),
       maxBytes: z.number().int().positive().max(65536).optional(),
-    }, async ({ selector, ring, maxBytes }) => {
-      if (!ring) return result(() => rttChannelReadTool({ snapshot: { upChannels: [], downChannels: [] }, selector }));
-      return this.directRttResult(async () => {
-        const io = await this.createDirectRttMemoryIo();
-        try {
-          const read = await readDirectRttRing(io, parseRttRingAddresses(ring), maxBytes);
-          return { status: "ok", selector, dataHex: Buffer.from(read.data).toString("hex"), ...read };
-        } finally {
-          await io.dispose?.();
-        }
-      });
-    });
-    this.server.tool("rtt_channel_write", "Write an RTT down-channel through direct RTT ring memory.", {
-      selector: z.union([z.number().int().nonnegative(), z.string()]),
-      dataHex: z.string(),
-      ring: ringSchema.optional(),
-    }, async ({ selector, dataHex, ring }) => {
-      if (!ring) return result(() => rttChannelWriteTool({ snapshot: { upChannels: [], downChannels: [] }, selector, data: Buffer.from(dataHex, "hex") }));
-      return this.directRttResult(async () => {
-        const io = await this.createDirectRttMemoryIo();
-        try {
-          const write = await writeDirectRttRing(io, parseRttRingAddresses(ring), Buffer.from(dataHex, "hex"));
-          return { status: write.ok ? "ok" : "rejected", selector, ...write };
-        } finally {
-          await io.dispose?.();
-        }
-      });
-    });
+    }, async ({ selector, controlBlockAddress, upChannels, ring, maxBytes }) => result(() => rttChannelReadTool({
+      snapshot: { controlBlockAddress, upChannels, downChannels: [] },
+      selector,
+      ring: { buffer: Buffer.from(ring.bufferHex, "hex"), rdOff: ring.rdOff, wrOff: ring.wrOff },
+      maxBytes,
+    })));
 
-    this.server.tool("rtt_stream_capture", "Capture an RTT stream when a direct RTT transport is configured.", {
+    this.server.tool("rtt_stream_capture", "Report direct RTT stream capture as unavailable; use validated HSS capture or read-only RTT logs.", {
       channel: z.number().int().nonnegative().optional(),
       channelName: z.string().optional(),
       durationSec: z.number().positive().optional(),
-      pollIntervalMs: z.number().int().positive().max(1000).optional(),
-      ring: ringSchema.optional(),
-    }, async (input) => {
-      if (!input.ring) return result(() => ({
-        status: "unavailable",
-        reason: "direct RTT stream transport not configured",
-        requestedChannel: input.channelName ?? input.channel ?? null,
-        durationSec: input.durationSec ?? null,
-      }));
-      return this.directRttResult(async () => {
-        const data = await this.captureDirectRttStream(parseRttRingAddresses(input.ring!), input.durationSec ?? 1, input.pollIntervalMs ?? 20);
-        const decoded = traceagentDecodeStream(data);
-        return { status: "ok", requestedChannel: input.channelName ?? input.channel ?? null, bytes: data.length, decoded };
-      });
-    });
+    }, async (input) => result(() => ({
+      status: "unavailable",
+      reason: "direct RTT stream transport is not exposed by the public MCP surface",
+      requestedChannel: input.channelName ?? input.channel ?? null,
+      durationSec: input.durationSec ?? null,
+    })));
     this.server.tool("rtt_stream_decode", "Decode a TraceAgent RTT byte stream from hex.", {
       dataHex: z.string(),
     }, async ({ dataHex }) => result(() => traceagentDecodeStream(Buffer.from(dataHex, "hex"))));
     this.server.tool("traceagent_decode_stream", "Decode a TraceAgent RTT byte stream from hex.", {
       dataHex: z.string(),
     }, async ({ dataHex }) => result(() => traceagentDecodeStream(Buffer.from(dataHex, "hex"))));
-    this.server.tool("traceagent_write_signal", "Encode and optionally send an allowlisted TraceAgent signal write.", {
-      signal: z.string(),
-      value: z.number(),
-      cmdId: z.number().int().nonnegative(),
-      downRing: ringSchema.optional(),
-      upRing: ringSchema.optional(),
-      timeoutMs: z.number().int().positive().max(5000).optional(),
-      pollIntervalMs: z.number().int().positive().max(1000).optional(),
-    }, async (input) => {
-      if (!input.downRing || !input.upRing) return result(() => traceagentWriteSignal(input));
-      return this.directRttResult(async () => {
-        const io = await this.createDirectRttMemoryIo();
-        try {
-          const downRing = parseRttRingAddresses(input.downRing!);
-          const upRing = parseRttRingAddresses(input.upRing!);
-          return traceagentWriteSignal({
-            ...input,
-            transport: {
-              write: async (frame) => {
-                const written = await writeDirectRttRing(io, downRing, frame);
-                if (!written.ok) throw new Error(written.reason ?? "direct RTT down ring write failed");
-              },
-              readAck: async () => this.waitForTraceAgentAck(io, upRing, input.timeoutMs ?? 1000, input.pollIntervalMs ?? 20),
-            },
-          });
-        } finally {
-          await io.dispose?.();
-        }
-      });
-    });
   }
 
   private registerHssCaptureTools(): void {
@@ -928,16 +761,23 @@ export class JLinkMcpServer {
       ]),
     };
     const scalarType = z.enum(["uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"]);
-    const symbolSchema = z.object({
-      name: z.string().min(1),
-      alias: z.string().optional(),
-      type: scalarType.optional(),
-      unit: z.string().optional(),
+    const symbolRef = z.object({
+      artifactGeneration: z.string().regex(/^[0-9a-f]{64}$/i),
+      qualifiedName: z.string().min(1),
+      memberPath: z.string().min(1).optional(),
+      layoutHash: z.string().regex(/^[0-9a-f]{64}$/i),
     }).strict();
+    const variableRef = z.object({
+      source: z.enum(["symbol", "hot_variable"]),
+      ref: symbolRef,
+    }).strict();
+    const addressRange = z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).strict();
     const planInput = {
       artifactFile: z.string().optional(),
       mapFile: z.string().optional(),
-      symbols: z.array(symbolSchema).min(1).max(10).optional(),
+      variableRefs: z.array(variableRef).min(1).max(10),
+      nonvolatileRanges: z.array(addressRange).min(1).max(64).optional(),
+      ramRanges: z.array(addressRange).min(1).max(64).optional(),
       requestedRateHz: z.number().int().min(1).max(16000).optional(),
       durationSec: z.number().int().min(1).max(60).optional(),
       segmentSizeMb: z.number().int().min(16).max(512).optional(),
@@ -961,23 +801,45 @@ export class JLinkMcpServer {
       startIndex: z.number().int().optional(),
     }).strict();
 
-    this.server.tool("hss_capability_probe", "Probe read-only J-Link HSS MVP-A availability without reset, halt, flash, raw-command, or target-memory writes.", hssDllInput,
+    this.discoveredTool("artifact_probe", {
+      artifactFile: z.string().optional(),
+      mapFile: z.string().optional(),
+    }, async (input) => result(() => this.hssCapture.artifactProbe(input)));
+    this.discoveredTool("symbol_search", {
+      artifactGeneration: z.string().regex(/^[0-9a-f]{64}$/i),
+      query: z.string().min(1).max(256),
+      limit: z.number().int().min(1).max(128).optional(),
+    }, async (input) => result(() => this.hssCapture.symbolSearch(input)));
+    this.discoveredTool("symbol_resolve", {
+      artifactGeneration: z.string().regex(/^[0-9a-f]{64}$/i),
+      selector: z.string().min(1).max(512),
+      type: scalarType,
+    }, async (input) => result(() => this.hssCapture.symbolResolve(input)));
+    this.discoveredTool("hot_variable_add", {
+      ref: symbolRef,
+    }, async (input) => result(() => this.hssCapture.hotVariableAdd(input)));
+    this.discoveredTool("hot_variable_list", {},
+      async () => result(() => this.hssCapture.hotVariableList()));
+    this.discoveredTool("hot_variable_refresh", {
+      refs: z.array(symbolRef).min(1).max(128),
+    }, async (input) => result(() => this.hssCapture.hotVariableRefresh(input)));
+
+    this.discoveredTool("hss_capability_probe", hssDllInput,
       async (input) => result(() => this.hssCapture.capabilityProbe(input)));
-    this.server.tool("hss_capture_plan", "Resolve an HSS plan with explicit script.mode=none|file; resetBeforeCapture=true composes one bounded R3 reset before HSS Start.", {
+    this.discoveredTool("hss_capture_plan", {
       ...hssDllInput,
       ...planInput,
     },
       async (input) => result(() => this.hssCapture.capturePlan(input)));
-    this.server.tool("hss_capture_start", "Start one HSS capture from a plan; an enabled reset is bound, audited, stabilized, and completed before HSS Start.", {
-      planId: z.string().uuid().optional(),
+    this.discoveredTool("hss_capture_start", {
+      planId: z.string().uuid(),
       ...hssDllInput,
-      ...planInput,
     }, async (input) => result(() => this.hssCapture.captureStart(input)));
-    this.server.tool("hss_capture_status", "Return live or terminal HSS MVP-A capture status.", captureId,
+    this.discoveredTool("hss_capture_status", captureId,
       async (input) => result(() => this.hssCapture.captureStatus(input)));
-    this.server.tool("hss_capture_stop", "Stop/finalize one read-only HSS MVP-A capture.", captureId,
+    this.discoveredTool("hss_capture_stop", captureId,
       async (input) => result(() => this.hssCapture.captureStop(input)));
-    this.server.tool("hss_capture_query", "Query a terminal HSS MVP-A capture and run HM_C095 validation metrics.", {
+    this.discoveredTool("hss_capture_query", {
       ...captureId,
       metadataFile: z.string().optional(),
       variables: z.array(z.string()).min(1).max(10).optional(),
@@ -997,7 +859,7 @@ export class JLinkMcpServer {
       }).strict().optional(),
       summary: z.array(z.enum(["avg", "min", "max", "first", "last", "delta"])).optional(),
     }, async (input) => result(() => this.hssCapture.captureQuery(input)));
-    this.server.tool("hss_capture_export", "Export a terminal HSS MVP-A capture to CSV under .jlink-mcp/exports.", {
+    this.discoveredTool("hss_capture_export", {
       ...captureId,
       metadataFile: z.string().optional(),
       format: z.literal("csv").optional(),
@@ -1007,10 +869,10 @@ export class JLinkMcpServer {
       windowBeforeMs: z.number().nonnegative().optional(),
       windowAfterMs: z.number().nonnegative().optional(),
     }, async (input) => result(() => this.hssCapture.captureExport(input)));
-    this.server.tool("hss_session_recover", "Mark abandoned local HSS capture metadata from a previous process as failed without touching target hardware.", {
+    this.discoveredTool("hss_session_recover", {
       captureId: z.string().uuid().optional(),
     }, async (input) => result(() => this.hssCapture.sessionRecover(input)));
-    this.server.tool("variable_write_plan", "Plan an allowlisted RAM scalar or active-capture fixed-array write. This does not write target memory.", {
+    this.discoveredTool("variable_write_plan", {
       captureId: z.string().uuid().optional(),
       artifactFile: z.string().optional(),
       mapFile: z.string().optional(),
@@ -1020,69 +882,76 @@ export class JLinkMcpServer {
       value: z.number().optional(),
       values: z.array(z.number()).optional(),
       expiresInMs: z.number().int().positive().max(3600000).optional(),
-    }, async (input) => result(() => this.hssCapture.variableWritePlan(input as HssVariableWritePlanInput)));
-    this.server.tool("variable_write_execute", "Execute a planned or implicit allowlisted RAM write with old-value read and readback verification.", {
-      writePlanId: z.string().startsWith("wp_").optional(),
-      artifactFile: z.string().optional(),
-      mapFile: z.string().optional(),
-      target: z.string().optional(),
-      targetRef: writeTargetRef.optional(),
-      type: scalarType.optional(),
-      value: z.number().optional(),
-      values: z.array(z.number()).optional(),
+    }, async (input) => result(() => this.variableWritePlan(input as HssVariableWritePlanInput)));
+    this.discoveredTool("variable_write_execute", {
+      writePlanId: z.string().startsWith("op_"),
       dryRun: z.boolean().optional(),
-    }, async (input) => result(() => this.hssCapture.variableWriteExecute(input as HssVariableWriteExecuteInput)));
+      challengeId: z.string().uuid().optional(),
+      approvalToken: z.string().min(1).optional(),
+    }, async (input) => result(() => this.variableWriteExecute(input as HssVariableWriteExecuteInput)));
   }
 
-  private directRttResult(operation: () => Promise<unknown>) {
-    return operation()
-      .then((value) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] }))
-      .catch((error) => ({ content: [{ type: "text" as const, text: JSON.stringify({ status: "error", reason: error instanceof Error ? error.message : String(error) }, null, 2) }] }));
+  private async variableWritePlan(input: HssVariableWritePlanInput) {
+    const envelope = await this.hssCapture.variableWritePlan(input);
+    if (!envelope.ok || envelope.data?.risk !== "R4") return envelope;
+    const binding = await this.hssCapture.variableWriteApprovalBinding(envelope.data.writePlanId);
+    const challenge = unverifiedVariableWritePlan(binding);
+    envelope.risk = { level: "R4", requiresUserApproval: true };
+    return { ...envelope, data: { ...envelope.data, challenge } };
   }
 
-  private async createDirectRttMemoryIo(): Promise<DirectRttMemoryIo> {
-    if (this.probe.type !== "jlink") throw new Error("direct RTT ring memory access currently requires the J-Link backend");
-    if (!this.probe.isGDBServerRunning()) {
-      throw new Error("direct RTT ring access requires a running J-Link GDB server for persistent non-resetting memory access");
-    }
-    const config = this.probe.getCaptureConfig();
-    if (!config) throw new Error("direct RTT ring access requires capture-capable probe configuration");
-    return RspMemoryIo.connect({ host: "127.0.0.1", port: config.gdbPort });
+  private async variableWriteExecute(input: HssVariableWriteExecuteInput) {
+    if (!input.writePlanId || this.hssCapture.variableWriteRisk(input.writePlanId) === "R2") return this.hssCapture.variableWriteExecute(input);
+    const outcome = await executeR4Operation({ challengeId: input.challengeId ?? "", approvalToken: input.approvalToken, cwd: undefined }, {
+      revalidate: () => this.hssCapture.variableWriteApprovalBinding(input.writePlanId!),
+      execute: (approval) => this.hssCapture.executeR4VariableWrite(input.writePlanId!, approval),
+    });
+    return { operation: "variable_write_execute", risk: { level: "R4", requiresUserApproval: true }, ...outcome };
   }
 
-  private async captureDirectRttStream(ring: ReturnType<typeof parseRttRingAddresses>, durationSec: number, pollIntervalMs: number): Promise<Buffer> {
-    if (durationSec > 60) throw new Error("rtt_stream_capture durationSec max is 60");
-    const io = await this.createDirectRttMemoryIo();
-    const chunks: Buffer[] = [];
+  private async r4PlanResponse(tool: R4ExecuteTool, args: Record<string, unknown>) {
     try {
-      const deadline = Date.now() + durationSec * 1000;
-      while (Date.now() < deadline) {
-        const read = await readDirectRttRing(io, ring);
-        if (read.data.length > 0) chunks.push(Buffer.from(read.data));
-        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-      }
-    } finally {
-      await io.dispose?.();
-    }
-    return Buffer.concat(chunks);
+      const input = await this.r4PlanInput(tool, args);
+      const challenge = tool === "flash" ? flashPlan(input) : tool === "erase" ? erasePlan(input) : tool === "gdb_command" ? gdbCommandPlan(input) : probeCommandPlan(input);
+      return { content: [{ type: "text" as const, text: JSON.stringify({ risk: { level: "R4", requiresUserApproval: true }, challenge }, null, 2) }] };
+    } catch (error) { return this.r4ErrorResponse(error); }
   }
 
-  private async waitForTraceAgentAck(io: DirectRttMemoryIo, ring: ReturnType<typeof parseRttRingAddresses>, timeoutMs: number, pollIntervalMs: number): Promise<Uint8Array> {
-    const chunks: Buffer[] = [];
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const read = await readDirectRttRing(io, ring);
-      if (read.data.length > 0) {
-        chunks.push(Buffer.from(read.data));
-        const data = Buffer.concat(chunks);
-        if (traceagentDecodeStream(data).ackFrames > 0) return data;
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    }
-    throw new Error("TraceAgent ACK timeout");
+  private async r4ExecuteResponse(tool: R4ExecuteTool, args: Record<string, unknown>, challengeId: string, approvalToken: string, execute: () => Promise<unknown>) {
+    try {
+      const outcome = await executeR4Operation({ challengeId, approvalToken }, {
+        revalidate: () => this.r4PlanInput(tool, args),
+        execute,
+      });
+      return { content: [{ type: "text" as const, text: JSON.stringify({ risk: { level: "R4", requiresUserApproval: true }, ...outcome }, null, 2) }] };
+    } catch (error) { return this.r4ErrorResponse(error); }
+  }
+
+  private async r4PlanInput(tool: R4ExecuteTool, args: Record<string, unknown>): Promise<R4PlanInput> {
+    if (this.probe.type !== "jlink") throw new Error("R4 hardware mutation is available only through the J-Link backend");
+    if (!this.probe.isDeviceConfigured()) throw new Error("target device must be configured before creating an R4 challenge");
+    if (tool === "gdb_command" && !this.gdb.isConnected()) throw new Error("GDB must be connected before creating an R4 raw-command challenge");
+    const canonicalArgs = canonicalR4Args(tool, args);
+    return this.hssCapture.r4Binding(tool as Exclude<R4ExecuteTool, "variable_write_execute">, canonicalArgs, tool === "gdb_command" ? this.gdb.getConnectionGeneration() : undefined);
+  }
+
+  private parseBaseAddress(value: string): number {
+    const parsed = Number.parseInt(value, 16);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("baseAddress must be a non-negative hexadecimal integer");
+    return parsed;
+  }
+
+  private r4ErrorResponse(error: unknown) {
+    const typed = error as { code?: string; message?: string };
+    return { content: [{ type: "text" as const, text: JSON.stringify({ risk: { level: "R4", requiresUserApproval: true }, ok: false, error: { code: typed.code ?? "approval_required", message: typed.message ?? String(error) } }, null, 2) }] };
   }
 
   private registerResources(): void {
+    this.server.resource("discovery-catalog", "jlink://discovery/catalog",
+      { description: "Deterministic J-Link MCP workflow, tool facts, and R2/R3/R4/R5 enforcement model", mimeType: "application/json" },
+      async () => ({ contents: [{ uri: "jlink://discovery/catalog", text: JSON.stringify(DISCOVERY_CATALOG, null, 2), mimeType: "application/json" }] })
+    );
+
     this.server.resource("rtt-output", "rtt://output",
       { description: "Clean RTT output (ANSI stripped, Zephyr logs parsed)", mimeType: "text/plain" },
       async () => ({ contents: [{ uri: "rtt://output", text: this.rttClient.getLines(200).join("\n"), mimeType: "text/plain" }] })
@@ -1105,6 +974,10 @@ export class JLinkMcpServer {
   private registerPrompts(): void {
     const probeName = this.probe.displayName;
 
+    this.server.prompt("offline-jcap-analysis", "Use the deterministic Artifact-to-JCAP capture, query, analysis, and risk workflow.", {},
+      async () => ({ messages: [{ role: "user", content: { type: "text", text: OFFLINE_JCAP_PROMPT } }] })
+    );
+
     this.server.prompt("debug-embedded", "Start an embedded debugging session.", {},
       async () => ({
         messages: [{ role: "user", content: { type: "text", text:
@@ -1123,10 +996,10 @@ Then call **start_debug_session** to begin.
 - **snapshot** - Full device state in one call
 - **diagnose_crash** - Auto-decode fault registers
 - **gdb_connect** / **gdb_command** - Full GDB debugging (source-level with .elf symbols)
-- **gdb_load** - Load .elf for symbols (set flash=true to also program)
+- **gdb_load** - Load .elf for symbols only; programming requires flash_plan → trusted local broker → flash
 - **rtt_read** / **rtt_search** - Device logs (${this.probe.supportsRTT() ? "supported" : "not supported by " + probeName})
 - **read_memory** / **read_registers** - Inspect device state
-- halt/resume/reset/step - CPU control
+- halt/resume/reset - CPU control
 - flash/erase - Firmware programming
 
 ## HSS capture and indexed JCAP queries

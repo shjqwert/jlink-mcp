@@ -6,7 +6,7 @@ import { assertInsideProject, hssProjectPaths } from "./project-paths";
 import type { HssScalarType } from "./hss-contract";
 
 export type HssPolicyVersion = 2;
-export type HssPolicyRisk = "R2" | "R3";
+export type HssPolicyRisk = "R2" | "R3" | "R4";
 export type HssPolicyKind = "scalar" | "fixed_array";
 export type HssPolicyMaxWritesScope = "capture" | "session";
 
@@ -36,6 +36,7 @@ export interface HssPolicyBaseEntry {
   risk: HssPolicyRisk;
   executable: boolean;
   captureTimeWrite: boolean;
+  unverifiedTargetWriteException: boolean;
   description?: string;
 }
 
@@ -172,6 +173,7 @@ function normalizeEntry(raw: unknown, index: number, rootRequireReadback: boolea
     risk,
     executable: risk === "R2",
     captureTimeWrite: optionalBoolean(entry, "captureTimeWrite") ?? true,
+    unverifiedTargetWriteException: optionalBoolean(entry, "unverifiedTargetWriteException") ?? false,
     description: optionalString(entry, "description"),
   };
   if (kind === "scalar") {
@@ -310,7 +312,7 @@ function scalarType(value: string): HssScalarType {
 }
 
 function policyRisk(value: string): HssPolicyRisk {
-  if (value !== "R2" && value !== "R3") throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "policy risk must be R2 or R3", { risk: value });
+  if (value !== "R2" && value !== "R3" && value !== "R4") throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "policy risk must be R2, R3, or R4", { risk: value });
   return value;
 }
 

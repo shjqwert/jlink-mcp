@@ -111,6 +111,17 @@ test("policy v2 preserves slice disabled and R3 plan-only entries", () => {
   assert.equal(entry.executable, false);
 });
 
+test("policy v2 records an explicit unverified-target R4 exception without making it directly executable", () => {
+  const policy = normalizeHssPolicy({
+    version: 2,
+    variableWriteAllowlist: [{ path: "Debug_R4", kind: "scalar", type: "int32", risk: "R4", unverifiedTargetWriteException: true }],
+  });
+  const entry = policyEntryForPath(policy, "Debug_R4", "scalar");
+  assert.equal(entry.risk, "R4");
+  assert.equal(entry.unverifiedTargetWriteException, true);
+  assert.equal(entry.executable, false);
+});
+
 test("policy loader reports malformed JSON and unsupported version", async () => {
   const root = await tempProject();
   try {

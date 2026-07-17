@@ -49,7 +49,7 @@ test("variable_write_plan rejects unsafe target and policy cases", async () => {
   }
 });
 
-test("variable_write_plan enforces counters, bytes, R3 plan-only, and RAM layout", async () => {
+test("variable_write_plan enforces counters, bytes, rejects legacy R3 writes, and RAM layout", async () => {
   const root = await tempProject();
   try {
     const context = await planContext(root);
@@ -58,9 +58,23 @@ test("variable_write_plan enforces counters, bytes, R3 plan-only, and RAM layout
     assertPlanError(context, { captureId: context.captureId, targetRef: { kind: "scalar", path: "Debug_TooNarrow" }, value: 1 }, HSS_ERROR.POLICY_MAX_BYTES_EXCEEDED);
     assertPlanError(context, { captureId: context.captureId, targetRef: { kind: "array_element", path: "FlashArray", index: 0 }, value: 1 }, HSS_ERROR.SYMBOL_NOT_RAM);
     assertPlanError(context, { captureId: context.captureId, targetRef: { kind: "array_element", path: "Debug_TargetPtr", index: 0 }, value: 1 }, HSS_ERROR.SYMBOL_POINTER_NOT_ALLOWED);
-    const r3 = createHssVariableWritePlan({ captureId: context.captureId, targetRef: { kind: "scalar", path: "Debug_R3" }, value: 1 }, context);
-    assert.equal(r3.risk, "R3");
-    assert.equal(r3.executable, false);
+    assertPlanError(context, { captureId: context.captureId, targetRef: { kind: "scalar", path: "Debug_R3" }, value: 1 }, HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unverified target creates only an explicit R4 approval plan while verified R2 remains approval-free", async () => {
+  const root = await tempProject();
+  try {
+    const context = await planContext(root);
+    const verified = createHssVariableWritePlan({ captureId: context.captureId, targetRef: { kind: "scalar", path: "Debug_IqRef" }, value: 1 }, context);
+    assert.equal(verified.risk, "R2");
+    assert.equal(verified.executable, true);
+    const exception = createHssVariableWritePlan({ captureId: context.captureId, targetRef: { kind: "scalar", path: "Debug_R4" }, value: 1 }, { ...context, targetArtifactMatch: "unverified" });
+    assert.equal(exception.risk, "R4");
+    assert.equal(exception.executable, false);
+    assert.equal(exception.operationPlan.risk, "R4");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -74,6 +88,7 @@ async function planContext(root: string): Promise<PlanContext> {
     "Debug_IqRef              0x2000'0000     0x4  Data  Gb  app.o [1]",
     "Debug_TooNarrow          0x2000'0004     0x4  Data  Gb  app.o [1]",
     "Debug_R3                 0x2000'0008     0x4  Data  Gb  app.o [1]",
+    "Debug_R4                 0x2000'000c     0x4  Data  Gb  app.o [1]",
     "Debug_TargetTable        0x2000'0010     0x8  Data  Gb  app.o [1]",
     "Debug_ProfileTable       0x2000'0020     0x20 Data  Gb  app.o [1]",
     "FlashArray               0x0800'0000     0x8  Data  Gb  app.o [1]",
@@ -85,6 +100,15 @@ async function planContext(root: string): Promise<PlanContext> {
     backend: "jlink-hss",
     mapFile,
     policy: policy(),
+    runtimeIdentitySha256: "runtime",
+    scriptApprovalSha256: "script",
+    targetId: "target",
+    artifactGeneration: "generation",
+    artifactSha256: "artifact",
+    targetArtifactMatch: "verified",
+    evidenceGeneration: "evidence",
+    connectionGeneration: 1,
+    sessionId: "session",
   };
 }
 
@@ -95,6 +119,7 @@ function policy(): HssPolicy {
       { path: "Debug_IqRef", kind: "scalar", type: "int32", min: -200, max: 200, maxWriteOps: 2, maxElementsTotal: 2 },
       { path: "Debug_TooNarrow", kind: "scalar", type: "int32", maxBytesPerWrite: 2 },
       { path: "Debug_R3", kind: "scalar", type: "int32", risk: "R3" },
+      { path: "Debug_R4", kind: "scalar", type: "int32", risk: "R4", unverifiedTargetWriteException: true },
       { path: "Debug_TargetTable", kind: "fixed_array", elementType: "int16", arrayLength: 4, allowedIndices: [0, 2], allowArraySliceWrite: false },
       { path: "Debug_ProfileTable", kind: "fixed_array", elementType: "int16", arrayLength: 16, allowedIndexRange: { start: 4, end: 7 }, allowArraySliceWrite: true, maxElementsPerWrite: 4, maxElementsTotal: 4 },
       { path: "FlashArray", kind: "fixed_array", elementType: "int16", arrayLength: 4 },

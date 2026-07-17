@@ -25,7 +25,7 @@ test("write plan store validates lookup and invalidates stale plans", async () =
   }
 });
 
-test("write plan store rejects expired and already executed plans", async () => {
+test("write plan store rejects expired plans and atomically consumes concurrent claims", async () => {
   const root = await tempProject();
   try {
     const context = await contextFor(root, "0x4");
@@ -33,9 +33,13 @@ test("write plan store rejects expired and already executed plans", async () => 
     const expired = store.put(createHssVariableWritePlan({ captureId: context.captureId, target: "Debug_IqRef", value: 12, expiresInMs: 1 }, { ...context, backend: "jlink-hss" }));
     await new Promise((resolve) => setTimeout(resolve, 5));
     assertStoreError(store, expired.writePlanId, context, HSS_ERROR.WRITE_PLAN_EXPIRED);
-    const executed = store.put(createHssVariableWritePlan({ captureId: context.captureId, target: "Debug_IqRef", value: 13 }, { ...context, backend: "jlink-hss" }));
-    store.markExecuted(executed.writePlanId);
-    assertStoreError(store, executed.writePlanId, context, HSS_ERROR.WRITE_PLAN_ALREADY_EXECUTED);
+    const claimed = store.put(createHssVariableWritePlan({ captureId: context.captureId, target: "Debug_IqRef", value: 13 }, { ...context, backend: "jlink-hss" }));
+    const outcomes = await Promise.allSettled([
+      Promise.resolve().then(() => store.claim(claimed.writePlanId, context)),
+      Promise.resolve().then(() => store.claim(claimed.writePlanId, context)),
+    ]);
+    assert.deepEqual(outcomes.map((outcome) => outcome.status).sort(), ["fulfilled", "rejected"]);
+    assertStoreError(store, claimed.writePlanId, context, HSS_ERROR.WRITE_PLAN_ALREADY_EXECUTED);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -49,6 +53,17 @@ async function contextFor(root: string, size: string): Promise<HssWritePlanReval
     backend: "jlink-hss",
     mapFile,
     policy: policy("Debug_IqRef", "int32"),
+    runtimeIdentitySha256: "runtime",
+    scriptApprovalSha256: "script",
+    targetId: "target",
+    artifactGeneration: "generation",
+    artifactSha256: "artifact",
+    targetArtifactMatch: "verified",
+    evidenceGeneration: "evidence",
+    connectionGeneration: 1,
+    sessionId: "session",
+    writeOpsUsed: 0,
+    elementsUsed: 0,
   };
 }
 

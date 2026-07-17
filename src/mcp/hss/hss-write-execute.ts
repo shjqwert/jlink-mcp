@@ -15,6 +15,8 @@ export interface HssVariableWriteExecuteInput {
   value?: number;
   values?: number[];
   dryRun?: boolean;
+  challengeId?: string;
+  approvalToken?: string;
 }
 
 export interface HssVariableWriteExecuteResult {
@@ -43,10 +45,15 @@ export interface HssVariableWriteExecuteResult {
   consumedElements: number;
   dryRun?: boolean;
   queueStages?: Array<{ stage: string; timeUs: number }>;
+  operationBeforeQpcCounter?: string;
+  operationAfterQpcCounter?: string;
+  auditId?: string;
+  policyHash?: string;
+  symbolLayoutHash?: string;
 }
 
 export async function executeHssVariableWritePlan(plan: HssVariableWritePlan, io: HssVariableMemoryIo, endian: HssTargetEndian, dryRun = false, setStage: (stage: "PRE_READ_OLD" | "WRITING" | "READBACK") => void = () => undefined): Promise<HssVariableWriteExecuteResult> {
-  if (!plan.executable) throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "write plan risk is not executable", { writePlanId: plan.writePlanId, risk: plan.risk, operationPlanRequired: true });
+  if (!plan.executable || plan.risk !== "R2") throw new HssError(HSS_ERROR.POLICY_RISK_NOT_EXECUTABLE, "R4 variable writes require the dedicated approval executor and same-connection Native contract", { writePlanId: plan.writePlanId, risk: plan.risk, approvalRequired: plan.risk === "R4" });
   const type = (plan.dataType ?? plan.elementType) as HssScalarType;
   const values = plan.newValues ?? [plan.newValue as number];
   const address = plan.address ?? plan.elementAddress;
@@ -65,9 +72,14 @@ export async function executeHssVariableWritePlan(plan: HssVariableWritePlan, io
     throw hssStageError(error, HSS_ERROR.OLD_VALUE_READ_FAILED, "old value read failed", false);
   }
   const oldValues = decodeHssValues(type, oldBytes, endian);
+  const resultQpc: { operationBeforeQpcCounter?: string; operationAfterQpcCounter?: string } = {};
   try {
     setStage("WRITING");
-    await io.write(address, encoded, accessSize);
+    const receipt = await io.write(address, encoded, accessSize);
+    if (receipt) {
+      resultQpc.operationBeforeQpcCounter = receipt.operationBeforeQpcCounter;
+      resultQpc.operationAfterQpcCounter = receipt.operationAfterQpcCounter;
+    }
   } catch (error) {
     throw hssStageError(error, HSS_ERROR.UNKNOWN_WRITE_STATE, "write memory failed; target state is unknown", true);
   }
@@ -76,16 +88,39 @@ export async function executeHssVariableWritePlan(plan: HssVariableWritePlan, io
     setStage("READBACK");
     readbackBytes = await io.read(address, plan.writeByteCount);
   } catch (error) {
-    const result = resultFor(plan, oldValues, values, [], writeStartUs, nowUs(), false, [], false);
+    const result = { ...resultFor(plan, oldValues, values, [], writeStartUs, nowUs(), false, [], false), ...resultQpc };
     throw new HssError(HSS_ERROR.READBACK_FAILED, "readback failed after write; target state is unknown", { ...result, reason: error instanceof Error ? error.message : String(error), writeIssued: true });
   }
   const readbackValues = decodeHssValues(type, readbackBytes, endian);
   const mismatches = mismatchValues(values, readbackValues);
   if (!hssBytesEqual(encoded, readbackBytes)) {
-    const result = resultFor(plan, oldValues, values, readbackValues, writeStartUs, nowUs(), false, mismatches, false);
+    const result = { ...resultFor(plan, oldValues, values, readbackValues, writeStartUs, nowUs(), false, mismatches, false), ...resultQpc };
     throw new HssError(HSS_ERROR.READBACK_MISMATCH, "readback does not match written bytes; target state is unknown", { ...result, writeIssued: true });
   }
-  return resultFor(plan, oldValues, values, readbackValues, writeStartUs, nowUs(), true, [], false);
+  return { ...resultFor(plan, oldValues, values, readbackValues, writeStartUs, nowUs(), true, [], false), ...resultQpc };
+}
+
+export function hssVariableWriteResultFromBytes(
+  plan: HssVariableWritePlan,
+  oldBytes: Buffer,
+  readbackBytes: Buffer,
+  endian: HssTargetEndian,
+  operationBeforeQpcCounter: string,
+  operationAfterQpcCounter: string,
+): HssVariableWriteExecuteResult {
+  const type = (plan.dataType ?? plan.elementType) as HssScalarType;
+  const values = plan.newValues ?? [plan.newValue as number];
+  const encoded = encodeHssValues(type, values, endian);
+  const oldValues = decodeHssValues(type, oldBytes, endian);
+  const readbackValues = decodeHssValues(type, readbackBytes, endian);
+  const mismatches = mismatchValues(values, readbackValues);
+  const result = {
+    ...resultFor(plan, oldValues, values, readbackValues, nowUs(), nowUs(), hssBytesEqual(encoded, readbackBytes), mismatches, false),
+    operationBeforeQpcCounter,
+    operationAfterQpcCounter,
+  };
+  if (!result.readbackOk) throw new HssError(HSS_ERROR.READBACK_MISMATCH, "readback does not match written bytes; target state is unknown", { ...result, writeIssued: true });
+  return result;
 }
 
 function resultFor(plan: HssVariableWritePlan, oldValues: number[], newValues: number[], readbackValues: number[], writeStartUs: number, writeEndUs: number, readbackOk: boolean, mismatches: Array<{ index: number; expected: number; readback: number }>, dryRun: boolean): HssVariableWriteExecuteResult {

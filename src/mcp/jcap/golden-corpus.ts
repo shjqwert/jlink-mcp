@@ -36,3 +36,27 @@ export const JCAP_V0_PRESTART_FAILURE: { provenance: JcapV0Provenance; samples: 
     { eventId: "20000000-0000-4000-8000-000000000003", eventSequence: 2, type: "lifecycle", tick: "2", state: "failed", reason: "HSS_START_FAILED" },
   ],
 };
+
+export const JCAP_V0_ANALYSIS: { provenance: JcapV0Provenance; samples: JcapV0Sample[]; events: JcapV0Event[] } = {
+  provenance: { ...JCAP_V0_GOLDEN.provenance, captureId: "30000000-0000-4000-8000-000000000001", sessionName: "analysis-v0" },
+  samples: [
+    { sampleIndex: 0, tick: "0", statusFlags: 1, values: { command: 0, feedback: 0, state: 0 } },
+    { sampleIndex: 1, tick: "10000000", statusFlags: 1, values: { command: 0, feedback: 0, state: 0 } },
+    { sampleIndex: 2, tick: "21000000", statusFlags: 1, values: { command: 10, feedback: 1, state: 1 } },
+    { sampleIndex: 3, tick: "30000000", statusFlags: 1, values: { command: 10, feedback: 8, state: 1 } },
+    { sampleIndex: 4, tick: "40000000", statusFlags: 1, values: { command: 10, feedback: 12, state: 2 } },
+    { sampleIndex: 5, tick: "50000000", statusFlags: 1, values: { command: 10, feedback: 10.5, state: 2 } },
+    { sampleIndex: 6, tick: "60000000", statusFlags: 1, values: { command: 10, feedback: 10.2, state: 2 } },
+    { sampleIndex: 7, tick: "70000000", statusFlags: 1, values: { command: 10, feedback: 10, state: 2 } },
+    { sampleIndex: 8, tick: "80000000", statusFlags: 1, values: { command: 10, feedback: 10, state: 2 } },
+    { sampleIndex: 9, tick: "90000000", statusFlags: 1, values: { command: 10, feedback: 10, state: 2 } },
+    { sampleIndex: 10, tick: "100000000", statusFlags: 1, values: { command: 10, feedback: 10, state: 2 } },
+  ],
+  events: [
+    { eventId: "30000000-0000-4000-8000-000000000001", eventSequence: 0, type: "lifecycle", tick: "0", state: "planned" },
+    { eventId: "30000000-0000-4000-8000-000000000002", eventSequence: 1, type: "variable_write", tick: "20000000", variable: "command", oldValue: 0, newValue: 10, readback: 10 },
+    { eventId: "30000000-0000-4000-8000-000000000003", eventSequence: 2, type: "lifecycle", tick: "20000000", state: "active" },
+    { eventId: "30000000-0000-4000-8000-000000000004", eventSequence: 3, type: "lifecycle", tick: "101000000", state: "finalizing" },
+    { eventId: "30000000-0000-4000-8000-000000000005", eventSequence: 4, type: "lifecycle", tick: "102000000", state: "completed" },
+  ],
+};

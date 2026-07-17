@@ -1,0 +1,4 @@
+interface:
+  display_name: "J-Link MCP Agent"
+  short_description: "Use the safe JCAP capture and analysis workflow"
+  default_prompt: "Use J-Link MCP discovery metadata and the deterministic Artifact-to-JCAP workflow."

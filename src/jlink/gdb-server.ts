@@ -12,6 +12,7 @@ export class GDBServerManager {
   private processManager: ProcessManager;
   private outputBuffer: string[] = [];
   private maxOutputLines = 1000;
+  private connectionGeneration = 0;
 
   constructor(processManager: ProcessManager) {
     this.processManager = processManager;
@@ -45,6 +46,7 @@ export class GDBServerManager {
     }
 
     try {
+      this.connectionGeneration += 1;
       const managed = this.processManager.spawn(
         GDB_SERVER_PROCESS_NAME,
         gdbServerPath,
@@ -97,6 +99,8 @@ export class GDBServerManager {
   isRunning(): boolean {
     return !!this.processManager.get(GDB_SERVER_PROCESS_NAME);
   }
+
+  getConnectionGeneration(): number { return this.connectionGeneration; }
 
   /** Get recent output */
   getRecentOutput(lines: number = 50): string[] {

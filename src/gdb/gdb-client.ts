@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from "child_process";
 import { log, logError } from "../utils/logger";
+import { checkR4ExecutionPermit, classifyR4Operation, type RiskOperationErrorCode } from "../mcp/risk-operations";
 
 export interface GDBResponse {
   success: boolean;
@@ -7,6 +8,7 @@ export interface GDBResponse {
   /** If the target stopped, why (breakpoint, signal, exit, etc.) */
   stopReason?: string;
   error?: string;
+  code?: RiskOperationErrorCode;
 }
 
 /**
@@ -33,6 +35,8 @@ export class GDBClient {
   private lastCommandTime = 0;
   private commandThrottleMs = 50;
   private hardwareGuard?: () => string | null;
+  private connectionGeneration = 0;
+  private loadedSymbolFile: string | null = null;
 
   constructor(gdbPath: string = "arm-none-eabi-gdb", hardwareGuard?: () => string | null) {
     this.gdbPath = gdbPath;
@@ -49,7 +53,7 @@ export class GDBClient {
       return { success: true, output: "GDB already connected" };
     }
 
-    const args = ["--interpreter=mi2", "--quiet", "--nx"];
+    const args = ["--interpreter=mi2", "--quiet", "--nx", "-iex", "set auto-load off"];
     if (elfFile) args.push(elfFile);
 
     log(`[GDB] Starting: ${this.gdbPath} ${args.join(" ")}`);
@@ -90,6 +94,7 @@ export class GDBClient {
             clearInterval(checkInterval);
             this.outputBuffer = "";
             // Now send the connect command
+            this.connectionGeneration += 1;
             this.sendCommand(`target remote ${host}:${port}`, 15000).then((connectResult) => {
               if (connectResult.includes("Remote debugging") || connectResult.includes("connected") || connectResult.includes("stopped")) {
                 this.connected = true;
@@ -122,10 +127,29 @@ export class GDBClient {
    * If the target doesn't stop in time, returns with a "target running" message.
    */
   async command(cmd: string, timeout: number = 15000): Promise<GDBResponse> {
+    const trimmed = cmd.trim();
+    const isLoad = /^load(?:\s|$)/i.test(trimmed);
+    const tool = isLoad ? "flash" : "gdb_command";
+    const canonicalArgs = isLoad
+      ? { filePath: this.loadedSymbolFile ?? "" }
+      : { command: cmd, timeout };
+    if (!isLoad) {
+      const forbidden = classifyR4Operation("gdb_command", canonicalArgs);
+      if (forbidden) return { success: false, output: "", error: forbidden.message, code: forbidden.code };
+    }
+    const rejected = checkR4ExecutionPermit(tool, canonicalArgs, this.connectionGeneration);
+    if (rejected) return { success: false, output: "", error: rejected.message, code: rejected.code };
+    if (!this.proc || !this.connected) {
+      return { success: false, output: "", error: "raw GDB execution requires the same connected generation used by its R4 challenge", code: "approval_mismatch" };
+    }
+    return this.commandInternal(cmd, timeout, false);
+  }
+
+  private async commandInternal(cmd: string, timeout: number, allowReconnect: boolean): Promise<GDBResponse> {
     const blocked = this.hardwareGuard?.();
     if (blocked) return { success: false, output: "", error: blocked };
     // Auto-reconnect if connection dropped
-    if ((!this.proc || !this.connected) && this.lastConnectParams) {
+    if (allowReconnect && (!this.proc || !this.connected) && this.lastConnectParams) {
       log("[GDB] Connection lost, attempting auto-reconnect...");
       const reconnect = await this.connect(
         this.lastConnectParams.host,
@@ -227,23 +251,32 @@ export class GDBClient {
 
   /** Load an ELF file for symbol-aware debugging */
   async loadSymbols(elfPath: string): Promise<GDBResponse> {
-    return this.command(`file ${elfPath}`);
+    if (!elfPath || /[\r\n\0]/.test(elfPath)) return { success: false, output: "", error: "symbol path contains forbidden control characters", code: "r5_forbidden" };
+    const quoted = `"${elfPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    const result = await this.commandInternal(`file ${quoted}`, 15_000, true);
+    if (result.success) this.loadedSymbolFile = elfPath;
+    return result;
   }
 
   /** Get a backtrace */
   async backtrace(full: boolean = false): Promise<GDBResponse> {
-    return this.command(full ? "bt full" : "bt");
+    return this.commandInternal(full ? "bt full" : "bt", 15_000, true);
   }
 
   /** List threads (useful for RTOS debugging) */
   async listThreads(): Promise<GDBResponse> {
-    return this.command("info threads");
+    return this.commandInternal("info threads", 15_000, true);
   }
 
   /** Read a C variable by name (requires debug symbols) */
   async readVariable(name: string): Promise<GDBResponse> {
-    return this.command(`print ${name}`);
+    if (!/^[A-Za-z_]\w*(?:(?:\.[A-Za-z_]\w*)|(?:\[\d+\]))*$/.test(name)) {
+      return { success: false, output: "", error: "variable selector cannot be proven below R5", code: "r5_forbidden" };
+    }
+    return this.commandInternal(`print ${name}`, 15_000, true);
   }
+
+  getConnectionGeneration(): number { return this.connectionGeneration; }
 
   /** Get recent command history */
   getHistory(count: number = 20): string[] {
@@ -270,6 +303,7 @@ export class GDBClient {
     this.outputBuffer = "";
     this.pendingResolve = null;
     this.stopEvent = null;
+    this.loadedSymbolFile = null;
   }
 
   // ── Internal ─────────────────────────────────────────────────────
