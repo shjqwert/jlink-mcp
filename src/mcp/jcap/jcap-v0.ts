@@ -595,9 +595,18 @@ export async function jcapCaptureSummary(packageDir: string): Promise<Record<str
     }
     const sampleCount = (await get<CountRow>(database, "SELECT COUNT(*) AS count FROM samples"))!.count;
     const eventCount = (await get<CountRow>(database, "SELECT COUNT(*) AS count FROM events"))!.count;
+    const tickRange = await get<{ start_tick: string | null; end_tick: string | null }>(database, "SELECT (SELECT tick FROM samples ORDER BY tick_key,sample_index LIMIT 1) AS start_tick, (SELECT tick FROM samples ORDER BY tick_key DESC,sample_index DESC LIMIT 1) AS end_tick");
     const variables = (await all<{ variable: string }>(database, "SELECT DISTINCT variable FROM sample_values ORDER BY variable")).map((row) => row.variable);
     const sources = await all<SourceRow>(database, "SELECT file,sha256,bytes,valid_bytes,diagnostic FROM raw_sources ORDER BY file");
-    return bounded({ ...status, provenance, sampleCount, eventCount, variables, sources }, LIMITS.summaryBytes);
+    return bounded({
+      ...status,
+      provenance,
+      sampleCount,
+      eventCount,
+      ...(typeof tickRange?.start_tick === "string" && typeof tickRange.end_tick === "string" ? { startTick: tickRange.start_tick, endTick: tickRange.end_tick } : {}),
+      variables,
+      sources,
+    }, LIMITS.summaryBytes);
   } finally {
     await closeDatabase(database);
   }

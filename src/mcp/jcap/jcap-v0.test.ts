@@ -160,6 +160,8 @@ test("JCAP v0 round-trips raw through SQLite and bounded queries without default
     assert.equal(summary.captureState, "completed");
     assert.equal(summary.indexStatus, "ready");
     assert.equal(summary.sampleCount, 3);
+    assert.equal(summary.startTick, "10000000");
+    assert.equal(summary.endTick, "30000000");
     assert.equal((summary.provenance as typeof JCAP_V0_GOLDEN.provenance).script.sha256, JCAP_V0_GOLDEN.provenance.script.sha256);
     assert.deepEqual((summary.provenance as typeof JCAP_V0_GOLDEN.provenance).reset, JCAP_V0_GOLDEN.provenance.reset);
 

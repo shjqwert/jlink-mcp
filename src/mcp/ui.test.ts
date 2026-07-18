@@ -160,6 +160,8 @@ test("static page is accessible and references only the five read-only query rou
   assert.match(UI_HTML, /id="canvasAlt">No series loaded/);
   assert.match(UI_HTML, /<label[^>]*>/);
   for (const route of ["/api/list", "/api/summary", "/api/series", "/api/event-window", "/api/analysis"]) assert.match(UI_SCRIPT, new RegExp(route.replace("/", "\\/")));
+  assert.match(UI_SCRIPT, /byId\("startTick"\)\.value = summary\.startTick/);
+  assert.match(UI_SCRIPT, /byId\("endTick"\)\.value = summary\.endTick/);
   for (const route of ["/api/raw", "/api/rebuild", "/api/export", "/api/probe", "/api/capture", "/api/write", "/api/flash", "/api/broker", "/api/approval", "/api/file"]) assert.doesNotMatch(UI_SCRIPT, new RegExp(route.replace("/", "\\/")));
   for (const field of ["min", "max", "average", "last", "count", "statusFlags"]) assert.match(UI_SCRIPT, new RegExp(`\\.${field}\\b`));
   assert.doesNotMatch(UI_HTML, /\b(?:probe|flash|approval|raw command|raw parser)\b/i);

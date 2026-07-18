@@ -107,6 +107,10 @@ export const UI_SCRIPT = `
       byId("session").textContent = "Session: " + (provenance.sessionName || "Ungrouped");
       byId("status").textContent = "Capture " + captureId + " — " + summary.captureState + "/" + summary.indexStatus;
       byId("quality").textContent = JSON.stringify({ captureState: summary.captureState, indexStatus: summary.indexStatus, warnings: provenance.warnings || [], sources: summary.sources || [] }, null, 2);
+      if (typeof summary.startTick === "string" && typeof summary.endTick === "string") {
+        byId("startTick").value = summary.startTick;
+        byId("endTick").value = summary.endTick;
+      }
       renderVariables(summary.variables || []);
       if (summary.indexStatus === "ready" && ["completed", "stopped"].includes(summary.captureState)) await refreshSeries();
     } catch (error) { report(error); }
