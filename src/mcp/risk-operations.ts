@@ -8,7 +8,7 @@ import {
   getApprovalChallenge,
   operationDigest,
   registerApprovalChallenge,
-  verifyApprovalToken,
+  verifyRetainedApproval,
   type ApprovalErrorCode,
   type R4Challenge,
   type R4ExecuteTool,
@@ -69,7 +69,7 @@ export function planR4Operation(input: R4PlanInput): R4Challenge {
   const normalized = { ...input, canonicalArgs: canonicalR4Args(input.tool, input.canonicalArgs) };
   const binding = canonicalBinding(normalized);
   assertR4Allowed(normalized);
-  return registerApprovalChallenge(binding, operationSummary(binding), input.ttlSeconds ?? 60);
+  return registerApprovalChallenge(binding, operationSummary(binding), input.ttlSeconds ?? 300);
 }
 
 export function flashPlan(input: Omit<R4PlanInput, "tool">): R4Challenge { return planR4Operation({ ...input, tool: "flash" }); }
@@ -79,7 +79,7 @@ export function probeCommandPlan(input: Omit<R4PlanInput, "tool">): R4Challenge 
 export function unverifiedVariableWritePlan(input: Omit<R4PlanInput, "tool">): R4Challenge { return planR4Operation({ ...input, tool: "variable_write_execute" }); }
 
 export async function executeR4Operation<T>(
-  request: { challengeId: string; approvalToken?: string; cwd?: string },
+  request: { challengeId: string; cwd?: string },
   hooks: R4ExecutionHooks<T>,
 ): Promise<RiskOperationSuccess<T> | RiskOperationFailure> {
   return withOperationLock(async () => {
@@ -87,6 +87,7 @@ export async function executeR4Operation<T>(
     let consumed = false;
     try {
       challenge = getApprovalChallenge(request.challengeId);
+      const verified = verifyRetainedApproval(request.challengeId);
       const revalidated = await hooks.revalidate();
       const currentInput = { ...revalidated, canonicalArgs: canonicalR4Args(revalidated.tool, revalidated.canonicalArgs) };
       assertR4Allowed(currentInput);
@@ -94,7 +95,6 @@ export async function executeR4Operation<T>(
       if (operationDigest(current) !== challenge.operationDigest || !sameBinding(current, challenge)) {
         throw new RiskOperationError("operation_binding_changed", "operation context changed after approval planning");
       }
-      const verified = verifyApprovalToken(request.challengeId, request.approvalToken);
       try { await appendRiskAudit(challenge, "intent", { approvalVerified: true }, request.cwd); }
       catch (error) { throw new RiskOperationError("audit_failed", errorMessage(error)); }
       consumeApproval(request.challengeId, verified.nonce);
@@ -143,7 +143,7 @@ export function checkR4ExecutionPermit(
   connectionGeneration: number,
 ): { code: RiskOperationErrorCode; message: string } | null {
   const permit = authority.getStore();
-  if (!permit) return { code: "approval_required", message: "a current trusted-host R4 approvalToken is required" };
+  if (!permit) return { code: "approval_required", message: "a current retained trusted-host R4 approval is required" };
   const expected = canonicalBinding({ ...permit.challenge, canonicalArgs: canonicalR4Args(tool, canonicalArgs) });
   if (
     permit.remainingHardwareCalls !== 1

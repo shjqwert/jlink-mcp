@@ -1,0 +1,8 @@
+{
+  "schema": "p5-hardware-status-v1",
+  "state": "failed",
+  "updatedAt": "2026-07-18T05:04:40.263Z",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T13-20-00-000+08-00-v10-flash",
+  "message": "same retained approval was not rejected on replay\n+ actual - expected\n\n+ 'operation_binding_changed'\n- 'approval_replayed'\n",
+  "stack": "AssertionError [ERR_ASSERTION]: same retained approval was not rejected on replay\n+ actual - expected\n\n+ 'operation_binding_changed'\n- 'approval_replayed'\n\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:205:12"
+}

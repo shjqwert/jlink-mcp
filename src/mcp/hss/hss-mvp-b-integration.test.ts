@@ -16,7 +16,7 @@ import { encodeHssValues } from "./hss-typed-value";
 import { HSS_STATUS_FLAGS } from "./hss-status-flags";
 import type { HssVariableWriteExecuteResult } from "./hss-write-execute";
 import { readJcapV0Raw, rebuildJcapV0Index, writeJcapV0Raw } from "../jcap/jcap-v0";
-import { runApprovalBrokerCli } from "../approval-broker";
+import { approvalBrokerEndpoint, runApprovalBrokerCli, startApprovalBrokerIpc } from "../approval-broker";
 import { executeR4Operation, unverifiedVariableWritePlan } from "../risk-operations";
 
 const FAKE_HSS_DLL_SHA256 = createHash("sha256").update(fakeHssDllBuffer()).digest("hex");
@@ -300,6 +300,8 @@ test("outside-capture production path does not synthesize verified Artifact evid
 
 test("unverified R4 exception persists the canonical envelope and invokes only the unsupported Native command", async () => {
   const root = await tempProject();
+  const approvalStateRoot = join(dirname(root), "approval-broker");
+  const approvalBroker = await startApprovalBrokerIpc(approvalBrokerEndpoint(root, approvalStateRoot), root, approvalStateRoot, () => true);
   const helper = join(root, "helper.js");
   const dll = join(root, "JLink_x64.dll");
   const captured = join(root, "r4-helper-invocation.json");
@@ -320,9 +322,12 @@ test("unverified R4 exception persists the canonical envelope and invokes only t
     const writePlanId = planned.data!.writePlanId;
     const binding = await service.variableWriteApprovalBinding(writePlanId);
     const challenge = unverifiedVariableWritePlan(binding);
-    let token = "";
-    assert.equal(await runApprovalBrokerCli([challenge.challengeId, "--user-authorized", "true"], root, (value) => { token = value; }), 0);
-    const outcome = await executeR4Operation({ challengeId: challenge.challengeId, approvalToken: token, cwd: root }, {
+    assert.equal(await runApprovalBrokerCli([challenge.challengeId], root, approvalStateRoot, {
+      input: { isTTY: true } as NodeJS.ReadStream,
+      output: { isTTY: true, write: () => true } as unknown as NodeJS.WriteStream,
+      question: async () => challenge.challengeId,
+    }), 0);
+    const outcome = await executeR4Operation({ challengeId: challenge.challengeId, cwd: root }, {
       revalidate: () => service.variableWriteApprovalBinding(writePlanId),
       execute: (approval) => service.executeR4VariableWrite(writePlanId, approval),
     });
@@ -340,6 +345,7 @@ test("unverified R4 exception persists the canonical envelope and invokes only t
     const persisted = JSON.stringify(invocation.plan);
     for (const forbidden of ["approvalToken", "secret", "signature", '"nonce"']) assert.equal(persisted.includes(forbidden), false);
   } finally {
+    await approvalBroker.close();
     await service.dispose();
     probe.dispose();
     await rm(dirname(root), { recursive: true, force: true });

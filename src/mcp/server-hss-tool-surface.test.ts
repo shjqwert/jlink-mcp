@@ -78,9 +78,6 @@ test("production tool surface exposes HSS only through HssCaptureService", async
       "rtt_clear",
       "rtt_channel_list",
       "rtt_channel_read",
-      "rtt_stream_capture",
-      "rtt_stream_decode",
-      "traceagent_decode_stream",
     ]) {
       assert.ok(tools.includes(name), `${name} must remain registered`);
     }
@@ -88,7 +85,7 @@ test("production tool surface exposes HSS only through HssCaptureService", async
       assert.ok(tools.includes(name), `${name} must remain registered`);
     }
     assert.equal(tools.includes("write_memory"), false);
-    for (const name of ["step", "set_breakpoint", "clear_breakpoints", "rtt_send", "rtt_channel_write", "traceagent_write_signal"]) assert.equal(tools.includes(name), false, `${name} token-free mutator must not be registered`);
+    for (const name of ["step", "set_breakpoint", "clear_breakpoints", "rtt_send", "rtt_channel_write", "traceagent_write_signal", "rtt_stream_capture", "rtt_stream_decode", "traceagent_decode_stream", "telnet_proxy_start", "telnet_proxy_stop", "telnet_proxy_status", "telnet_proxy_read"]) assert.equal(tools.includes(name), false, `${name} removed tool must not be registered`);
     assert.deepEqual(tools.filter((name) => /^(artifact|symbol|hot_variable)_/.test(name) && /(write|flash|execute|delete)/.test(name)), []);
 
     const hssDescriptions = tools
@@ -127,10 +124,7 @@ test("production tool surface exposes HSS only through HssCaptureService", async
     assert.doesNotMatch(source, /this\.server\.tool\("(?:step|set_breakpoint|clear_breakpoints)"/);
     assert.doesNotMatch(source, /probe\.(?:step|setBreakpoint|clearBreakpoints)\(/);
     assert.doesNotMatch(source, /DirectRttMemoryIo|RspMemoryIo|writeDirectRttRing|writeByte|writeUInt32|downRing|upRing/);
-    assert.match(source, /flash_plan[\s\S]*approvalToken/);
-    assert.match(source, /erase_plan[\s\S]*approvalToken/);
-    assert.match(source, /gdb_command_plan[\s\S]*approvalToken/);
-    assert.match(source, /probe_command_plan[\s\S]*approvalToken/);
+    assert.doesNotMatch(source, /approvalToken/);
     assert.match(source, /gdb_load never flashes/);
   } finally {
     await instance.dispose();
@@ -169,7 +163,6 @@ test("removed RTT writes are rejected without reaching write stubs while read-on
       maxBytes: 4,
     })).content[0].text);
     assert.deepEqual(read, { channel: 1, dataHex: "aabb", nextRdOff: 2 });
-    assert.ok(typed.server._registeredTools.traceagent_decode_stream);
     assert.equal(writes, 0);
   } finally {
     await client.close();
@@ -204,7 +197,7 @@ test("server shares explicit external roots with HSS and Indexed JCAP", async ()
   const storageRoot = await mkdtemp(join(tmpdir(), "jcap-storage-"));
   const evidenceRoot = await mkdtemp(join(tmpdir(), "jcap-evidence-"));
   const defaults = hssProjectPaths(projectRoot);
-  const instance = new JLinkMcpServer(undefined, undefined, undefined, undefined, { cwd: projectRoot, storageRoot, evidenceRoot });
+  const instance = new JLinkMcpServer(undefined, undefined, undefined, { cwd: projectRoot, storageRoot, evidenceRoot });
   try {
     const hssPaths = (instance as unknown as { hssCapture: { paths: { storageRoot: string; evidenceRoot: string; capturesDir: string; sessionsDir: string; auditDir: string } } }).hssCapture.paths;
     const jcapCapturesDir = (instance as unknown as { jcapCapture: { capturesDir: string } }).jcapCapture.capturesDir;

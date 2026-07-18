@@ -67,13 +67,13 @@ export const DISCOVERY_TOOLS: Record<string, DiscoveryTool> = {
   resume: tool("state-change", "Resume the target CPU through one internal deterministic plan.", ["configured current target"], "resumes CPU", "R3", false, "structured plan, state and audit outcome", ["capture_summary"]),
   reset: tool("state-change", "Reset the target through one internal deterministic plan.", ["configured current target", "no active capture conflict"], "resets target and may halt it", "R3", false, "structured plan, state and audit outcome", ["hss_capture_plan"]),
   flash_plan: tool("state-change", "Create a read-only R4 Flash challenge.", ["canonical firmware path and arguments"], "none while planning", "R4", false, "challenge for trusted local broker", ["flash"]),
-  flash: tool("state-change", "Execute the exact approved Flash challenge.", ["matching unexpired challengeId", "approvalToken from trusted local broker"], "programs target nonvolatile memory", "R4", true, "audited execution outcome", ["artifact_probe"]),
+  flash: tool("state-change", "Execute the exact approved Flash challenge.", ["matching unexpired challengeId", "retained approval from protected local CLI"], "programs target nonvolatile memory", "R4", true, "audited execution outcome", ["artifact_probe"]),
   erase_plan: tool("state-change", "Create a read-only R4 erase challenge.", ["current target binding"], "none while planning", "R4", false, "challenge for trusted local broker", ["erase"]),
-  erase: tool("state-change", "Execute the exact approved erase challenge.", ["matching unexpired challengeId", "approvalToken from trusted local broker"], "erases target nonvolatile memory", "R4", true, "audited execution outcome", ["artifact_probe"]),
+  erase: tool("state-change", "Execute the exact approved erase challenge.", ["matching unexpired challengeId", "retained approval from protected local CLI"], "erases target nonvolatile memory", "R4", true, "audited execution outcome", ["artifact_probe"]),
   gdb_command_plan: tool("state-change", "Create a read-only R4 raw GDB challenge; this auxiliary is not the HSS capture default.", ["canonical GDB command"], "none while planning", "R4", false, "challenge for trusted local broker", ["gdb_command"]),
-  gdb_command: tool("state-change", "Execute the exact approved raw GDB challenge.", ["matching unexpired challengeId", "approvalToken from trusted local broker"], "arbitrary target/debug state effects", "R4", true, "audited GDB result", ["capture_summary"]),
+  gdb_command: tool("state-change", "Execute the exact approved raw GDB challenge.", ["matching unexpired challengeId", "retained approval from protected local CLI"], "arbitrary target/debug state effects", "R4", true, "audited GDB result", ["capture_summary"]),
   probe_command_plan: tool("state-change", "Create a read-only R4 raw probe challenge.", ["canonical probe commands"], "none while planning", "R4", false, "challenge for trusted local broker", ["probe_command"]),
-  probe_command: tool("state-change", "Execute the exact approved raw probe challenge.", ["matching unexpired challengeId", "approvalToken from trusted local broker"], "arbitrary target/probe state effects", "R4", true, "audited probe result", ["artifact_probe"]),
+  probe_command: tool("state-change", "Execute the exact approved raw probe challenge.", ["matching unexpired challengeId", "retained approval from protected local CLI"], "arbitrary target/probe state effects", "R4", true, "audited probe result", ["artifact_probe"]),
 };
 
 export function discoveryToolConfig(name: string): { description: string; annotations: Record<string, boolean>; _meta: Record<string, unknown> } {
@@ -81,7 +81,7 @@ export function discoveryToolConfig(name: string): { description: string; annota
   if (!facts) throw new Error(`missing discovery facts for ${name}`);
   const mutates = new Set(["hot_variable_add", "hot_variable_refresh", "hss_capture_plan", "hss_capture_start", "hss_capture_stop", "hss_capture_export", "hss_session_recover", "capture_index_rebuild", "capture_export", "analysis_run", "variable_write_execute", "halt", "resume", "reset", "flash", "erase", "gdb_command", "probe_command"]);
   return {
-    description: `Use: ${facts.purpose} Preconditions: ${facts.preconditions.join("; ") || "none"}. Hardware side effects: ${facts.hardwareSideEffects}. Risk: ${facts.riskLevel}. Approval: ${facts.requiresUserApproval === "conditional" ? "none for verified R2; trusted local broker token required for R4" : facts.requiresUserApproval ? "trusted local broker token required" : "no user approval required for this call"}. Output: ${facts.output}. Common next: ${facts.next.join(", ") || "none"}.`,
+    description: `Use: ${facts.purpose} Preconditions: ${facts.preconditions.join("; ") || "none"}. Hardware side effects: ${facts.hardwareSideEffects}. Risk: ${facts.riskLevel}. Approval: ${facts.requiresUserApproval === "conditional" ? "none for verified R2; retained protected-local-CLI approval required for R4" : facts.requiresUserApproval ? "retained protected-local-CLI approval required" : "no user approval required for this call"}. Output: ${facts.output}. Common next: ${facts.next.join(", ") || "none"}.`,
     annotations: {
       readOnlyHint: !mutates.has(name),
       destructiveHint: facts.riskLevel === "R4" && facts.requiresUserApproval === true,

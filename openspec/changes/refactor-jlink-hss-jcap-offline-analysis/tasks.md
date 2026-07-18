@@ -66,20 +66,20 @@ Gate acceptance: offline UI opens a completed capture without hardware; analysis
 
 ## P4 — Replacement-first deletion and final acceptance
 
-- [ ] 5.1 Extract shared ELF/GDB/process/CRC/typed-value logic from old owners before deletion.
-- [ ] 5.2 Remove `ai-debug-workflow`, backend benchmark/routing, global capture query index, Direct RTT capture, old viewer lifecycle API, Runtime Evidence, and CodeGraph Bridge registrations and implementation.
-- [ ] 5.3 Remove OpenOCD/BMP, Telnet Proxy, TraceAgent, legacy CaptureService/helper, external-import capture path, obsolete scripts/tests/docs/config, and dead exports.
-- [ ] 5.4 After each deletion batch run compile, targeted tests, tool-catalog checks, import/reference search, and accepted HSS regression evidence.
-- [ ] 5.5 Update README/examples/package metadata and resolve or close the superseded `add-ai-hss-debug-workflow` change separately.
+- [x] 5.1 Extract shared ELF/GDB/process/CRC/typed-value logic from old owners before deletion.
+- [x] 5.2 Remove `ai-debug-workflow`, backend benchmark/routing, global capture query index, Direct RTT capture, old viewer lifecycle API, Runtime Evidence, and CodeGraph Bridge registrations and implementation.
+- [x] 5.3 Remove OpenOCD/BMP, Telnet Proxy, TraceAgent, legacy CaptureService/helper, external-import capture path, obsolete scripts/tests/docs/config, and dead exports.
+- [x] 5.4 After each deletion batch run compile, targeted tests, tool-catalog checks, import/reference search, and accepted HSS regression evidence.
+- [x] 5.5 Update README/examples/package metadata and resolve or close the superseded `add-ai-hss-debug-workflow` change separately.
 
 Gate acceptance: no removed capability remains registered or documented; retained RTT/GDB/CPU/Flash/Raw tools remain risk-classified auxiliaries; `halt`/`resume`/`reset` contracts and J-Link execution remain intact; final capture path is HSS → JCAP → query/analysis/UI.
 
 ### P4 continuation — End-to-end acceptance
 
-- [ ] 6.1 In the non-Git HM_C095 project root, probe the current `.out/.map`, resolve and cache variables, and create a validated HSS plan without guessing filenames.
-- [ ] 6.2 Run read-only capture and one verified policy-allowed R2 RAM write with readback; separately exercise one R4 approval rejection/authorization path without conflating it with the normal write; stop/finalize and verify package contents and provenance.
-- [ ] 6.3 Verify summary/series/event-window/analysis/UI, delete and rebuild the DB, and compare critical results and raw hashes.
-- [ ] 6.4 Change the fixture Artifact generation and verify old Hot Variables/plans become stale and targeted refresh restores only referenced variables.
-- [ ] 6.5 Run compile, focused/unit/integration/UI tests and the accepted hardware suite; publish exact commands, identities, results, limitations, and evidence locations.
+- [x] 6.1 In the non-Git HM_C095 project root, probe the current `.out/.map`, resolve and cache variables, and create a validated HSS plan without guessing filenames.
+- [x] 6.2 Run read-only capture and one verified policy-allowed R2 RAM write with readback; separately exercise one R4 approval rejection/authorization path without conflating it with the normal write; stop/finalize and verify package contents and provenance.
+- [x] 6.3 Verify summary/series/event-window/analysis/UI, delete and rebuild the DB, and compare critical results and raw hashes.
+- [x] 6.4 Change the fixture Artifact generation and verify old Hot Variables/plans become stale and targeted refresh restores only referenced variables.
+- [x] 6.5 Run compile, focused/unit/integration/UI tests and the accepted hardware suite; publish exact commands, identities, results, limitations, and evidence locations.
 
 Final acceptance: the project-supported experimental DLL adapter is the only HSS main path; it is identity-gated and semantically validated; Agent and UI consume bounded rebuildable JCAP evidence; normal verified RAM writes remain R2 policy/readback/audit controlled while R4 remains trusted-user-approved; no official SEGGER SDK claim or dependency exists.

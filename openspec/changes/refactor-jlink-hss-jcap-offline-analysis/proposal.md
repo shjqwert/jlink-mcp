@@ -51,9 +51,9 @@
 
 ## Impact
 
-- 变更集中在 `src/mcp/hss/`、`src/mcp/analysis/`、`src/mcp/server.ts`、`src/probe/`，并新增 artifact、symbol、hot-variable、jcap、capture-query 与 UI 模块。
+- 变更集中在 `src/mcp/hss/`、`src/mcp/jcap/analysis-v0.ts`、`src/mcp/server.ts`、`src/probe/`，并新增 artifact、symbol、hot-variable、jcap、capture-query 与 UI 模块。
 - 最终 capture 目录为 `<projectRoot>/.jlink-mcp/captures/<captureId>.jcap/`。
-- 活跃变更 `add-ai-hss-debug-workflow` 的 MCP 内部编排方向被本变更取代；后续需单独同步或关闭，避免两套规格并行。
+- 当前 `openspec/changes` 不存在 `add-ai-hss-debug-workflow`；本变更仅记录其已被取代，不伪造 archive 或删除记录。
 - 删除采用 replacement-first 门禁；每批删除前后都必须有编译、目标测试和已接受 HSS 证据。
 - 本变更不自动构建或烧录目标工程，也不修改目标工程源码。
 - `resetBeforeCapture` 不改变既有 `halt`、`resume`、`reset` 工具名称或输入输出合同；它复用同一 J-Link 主 backend、R3 operation-plan、capture-conflict 和 append-safe audit 边界。

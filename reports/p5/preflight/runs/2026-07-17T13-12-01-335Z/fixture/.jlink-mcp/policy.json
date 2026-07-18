@@ -1,0 +1,18 @@
+﻿{
+    "version":  2,
+    "requireReadback":  true,
+    "variableWriteAllowlist":  [
+                                   {
+                                       "description":  "HssDbg AppCurrentSense uint32 write probe",
+                                       "maxBytesPerWrite":  4,
+                                       "path":  "g_hssDbgWriteProbe",
+                                       "kind":  "scalar",
+                                       "type":  "uint32",
+                                       "captureTimeWrite":  true,
+                                       "maxWriteOps":  3,
+                                       "min":  0,
+                                       "max":  4294967295,
+                                       "risk":  "R2"
+                                   }
+                               ]
+}

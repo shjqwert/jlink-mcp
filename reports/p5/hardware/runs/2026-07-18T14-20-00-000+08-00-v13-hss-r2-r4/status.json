@@ -1,0 +1,8 @@
+{
+  "schema": "p5-hardware-status-v1",
+  "state": "failed",
+  "updatedAt": "2026-07-18T05:17:16.050Z",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-20-00-000+08-00-v13-hss-r2-r4",
+  "message": "Expected values to be strictly equal:\n+ actual - expected\n\n+ undefined\n- true\n",
+  "stack": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ undefined\n- true\n\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:258:10"
+}

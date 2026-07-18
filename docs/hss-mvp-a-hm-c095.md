@@ -46,6 +46,6 @@ Commands after `npm run compile`:
 - `node scripts/hss-hm-c095-smoke.mjs core4 16000 2`
 - `node scripts/hss-hm-c095-smoke.mjs full10 4000 5`
 - `node scripts/hss-hm-c095-smoke.mjs full10 8000 5`
-- `node scripts/hss-validate-capture.mjs <captureId>`
+- `npm run validate:hss-mvp-b-capture -- <capture.json>`
 
 Safety metadata in every `capture.json` must keep `targetReset`, `targetWritten`, `flashIssued`, `resetIssued`, and `haltIssued` false.

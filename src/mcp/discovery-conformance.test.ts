@@ -16,7 +16,7 @@ test("real MCP client discovers one safe workflow, risk model, resource, prompt,
   const storageRoot = join(root, "storage");
   const evidenceRoot = join(root, "evidence");
   await mkdir(projectRoot);
-  const instance = new JLinkMcpServer(undefined, undefined, undefined, undefined, { cwd: projectRoot, storageRoot, evidenceRoot });
+  const instance = new JLinkMcpServer(undefined, undefined, undefined, { cwd: projectRoot, storageRoot, evidenceRoot });
   const server = (instance as unknown as { server: { connect(transport: InMemoryTransport): Promise<void> } }).server;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "discovery-conformance", version: "1" });
@@ -85,7 +85,7 @@ test("analysis surface calls the unique JCAP query owner through a real MCP clie
   const packageDir = join(storageRoot, "captures", `${JCAP_V0_ANALYSIS.provenance.captureId}.jcap`);
   writeJcapV0Raw({ packageDir, ...JCAP_V0_ANALYSIS });
   await rebuildJcapV0Index(packageDir);
-  const instance = new JLinkMcpServer(undefined, undefined, undefined, undefined, { cwd: projectRoot, storageRoot, evidenceRoot });
+  const instance = new JLinkMcpServer(undefined, undefined, undefined, { cwd: projectRoot, storageRoot, evidenceRoot });
   const server = (instance as unknown as { server: { connect(transport: InMemoryTransport): Promise<void> } }).server;
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "analysis-conformance", version: "1" });

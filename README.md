@@ -38,10 +38,8 @@ Instead of manually typing J-Link commands, your AI assistant can:
 - **Flash firmware** and reset devices
 - **Stream RTT logs** and search them by level/module/regex
 - **Diagnose crashes** by auto-decoding ARM Cortex-M fault registers
-- **Control execution** — halt, step, resume, breakpoints
+- **Control execution** — halt, resume, reset
 - **Start GDB servers** for full debugging sessions
-
-> Also supports **OpenOCD** (ST-Link, CMSIS-DAP, FTDI) and **Black Magic Probe** backends.
 
 ## Quick Start
 
@@ -90,7 +88,7 @@ Install the extension (requires VSCode 1.99+). It auto-registers the MCP server 
 jlinkMcp.jlink.device = "nRF52840_XXAA"
 ```
 
-Copilot Chat and Claude in VSCode will automatically discover all 31 tools.
+Copilot Chat and Claude in VSCode will automatically discover the registered tools.
 
 ### From Source
 
@@ -102,7 +100,7 @@ npm run compile
 JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
 ```
 
-## Tools (31)
+## Tools
 
 ### Workflow Tools (start here)
 
@@ -120,14 +118,12 @@ JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
 | `halt` | Halt CPU |
 | `resume` | Resume CPU |
 | `reset` | Reset device (optionally halt after reset) |
-| `step` | Single-step one instruction |
 
 ### Memory & Registers
 
 | Tool | Description |
 |------|-------------|
 | `read_memory` | Read memory at address (clean hex dump output) |
-| `write_memory` | Write 32-bit value to address |
 | `read_registers` | All CPU registers in compact format |
 | `read_register` | Read specific register (PC, SP, R0-R12, etc.) |
 
@@ -135,15 +131,10 @@ JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
 
 | Tool | Description |
 |------|-------------|
-| `flash` | Flash .hex/.bin/.elf firmware to device |
-| `erase` | Erase entire flash |
+| `flash_plan` → `flash` | Plan and execute an approved firmware flash |
+| `erase_plan` → `erase` | Plan and execute an approved flash erase |
 
-### Breakpoints
-
-| Tool | Description |
-|------|-------------|
-| `set_breakpoint` | Set hardware breakpoint at address |
-| `clear_breakpoints` | Clear all breakpoints |
+R4 execution uses one protected local step: run `jlink-mcp approve <challengeId>` in a real TTY, verify the displayed digest and summary, and type the exact challenge ID once. The broker retains that approval in memory for one execution; no approval token is printed or passed through the Agent.
 
 ### GDB Server
 
@@ -151,7 +142,7 @@ JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
 |------|-------------|
 | `gdb_server_start` | Start probe's GDB server |
 | `gdb_server_stop` | Stop GDB server + disconnect RTT |
-| `gdb_server_status` | GDB server, RTT, and proxy status |
+| `gdb_server_status` | GDB server and RTT status |
 
 ### RTT (Real-Time Transfer)
 
@@ -161,52 +152,33 @@ JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
 | `rtt_disconnect` | Disconnect from RTT |
 | `rtt_read` | Read recent log lines (ANSI stripped, Zephyr format parsed) |
 | `rtt_search` | **Filter logs** by level (`err`/`wrn`/`inf`/`dbg`), module, or regex |
-| `rtt_send` | Send data to device via RTT down-channel |
 | `rtt_clear` | Clear RTT buffer |
 
-### Telnet Proxy (Trice / Pigweed)
+### Artifact, HSS, and JCAP
 
 | Tool | Description |
 |------|-------------|
-| `telnet_proxy_start` | Start TCP proxy that tees RTT for external detokenizers |
-| `telnet_proxy_stop` | Stop proxy |
-| `telnet_proxy_status` | Proxy connection status |
-| `telnet_proxy_read` | Read raw proxy buffer |
+| `artifact_probe` | Discover content-identified target artifacts |
+| `symbol_search` / `symbol_resolve` | Resolve safe runtime variable layouts |
+| `hot_variable_add` / `hot_variable_refresh` | Cache and refresh validated layouts |
+| `hss_capture_plan` / `hss_capture_start` | Plan and start the validated J-Link HSS path |
+| `hss_capture_status` / `hss_capture_stop` | Inspect and finalize HSS captures |
+| `capture_summary` / `capture_series` / `capture_event_window` | Query bounded Indexed JCAP evidence |
+| `analysis_profiles` / `analysis_run` | Run deterministic analysis-v0 profiles |
 
 ### Advanced
 
 | Tool | Description |
 |------|-------------|
-| `probe_command` | Execute raw probe commands |
+| `probe_command_plan` → `probe_command` | Plan and execute an approved raw probe command |
 | `get_config` | Current probe and server configuration |
 
-## Multi-Probe Support
+## Probe Backend
 
-jlink-mcp supports multiple debug probe backends through a common `ProbeBackend` abstraction:
-
-| Backend | Probe Hardware | Status | RTT Support |
-|---------|---------------|--------|-------------|
-| **J-Link** | SEGGER J-Link, J-Link OB, J-Link EDU | Production | Yes |
-| **OpenOCD** | ST-Link, CMSIS-DAP, FTDI, J-Link (via OpenOCD) | Beta | No |
-| **Black Magic Probe** | BMP (built-in GDB server on serial) | Beta | No |
-| **probe-rs** | All probe-rs supported probes | Planned | Planned |
-
-### Selecting a Backend
+jlink-mcp uses the SEGGER J-Link backend in production:
 
 ```bash
-# J-Link (default)
 PROBE_TYPE=jlink JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
-
-# OpenOCD with ST-Link
-PROBE_TYPE=openocd \
-  OPENOCD_INTERFACE=interface/stlink.cfg \
-  OPENOCD_TARGET=target/stm32f4x.cfg \
-  node out/mcp/standalone.js
-
-# Black Magic Probe
-PROBE_TYPE=blackmagic \
-  BMP_SERIAL_PORT=/dev/ttyACM0 \
-  node out/mcp/standalone.js
 ```
 
 ## Architecture
@@ -221,19 +193,17 @@ PROBE_TYPE=blackmagic \
 │                  jlink-mcp                           │
 │                                                      │
 │  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │ 31 Tools │  │4 Resources│  │    4 Prompts      │  │
+│  │   Tools  │  │ Resources │  │      Prompts      │  │
 │  └────┬─────┘  └────┬─────┘  └───────┬───────────┘  │
 │       │              │                │              │
 │  ┌────▼──────────────▼────────────────▼───────────┐  │
 │  │              ProbeBackend                       │  │
-│  │  ┌─────────┐ ┌─────────┐ ┌──────────────────┐  │  │
-│  │  │ J-Link  │ │ OpenOCD │ │ Black Magic Probe│  │  │
-│  │  └────┬────┘ └────┬────┘ └────────┬─────────┘  │  │
-│  └───────┼───────────┼───────────────┼─────────────┘  │
-│          │           │               │              │
-│  ┌───────▼───┐ ┌─────▼────┐ ┌───────▼──────────┐  │
-│  │ RTTClient │ │TelnetProxy│ │  ProcessManager  │  │
-│  └───────────┘ └──────────┘ └──────────────────┘  │
+│  │                   J-Link                      │  │
+│  └────────────────────┬──────────────────────────┘  │
+│                       │                             │
+│  ┌────────────────────▼─────┐ ┌──────────────────┐  │
+│  │        RTTClient         │ │  ProcessManager  │  │
+│  └──────────────────────────┘ └──────────────────┘  │
 └─────────────────────────────────────────────────────┘
                        │
           ┌────────────▼────────────┐
@@ -249,16 +219,12 @@ src/
 ├── probe/
 │   ├── backend.ts      # ProbeBackend abstract class + shared utilities
 │   ├── jlink.ts        # SEGGER J-Link implementation
-│   ├── openocd.ts      # OpenOCD implementation
-│   ├── blackmagic.ts   # Black Magic Probe implementation
 │   └── factory.ts      # Probe creation from config
 ├── mcp/
-│   ├── server.ts       # MCP server (31 tools, 4 resources, 4 prompts)
+│   ├── server.ts       # MCP server
 │   └── standalone.ts   # Standalone entry (stdio transport)
 ├── rtt/
 │   └── rtt-client.ts   # RTT client with ANSI stripping + Zephyr log parsing
-├── telnet/
-│   └── telnet-proxy.ts # TCP proxy for Trice/Pigweed detokenizer
 ├── utils/
 │   ├── config.ts       # VSCode settings / env var config
 │   ├── logger.ts       # Logging
@@ -280,9 +246,9 @@ This server was built by having an AI use it against real hardware, then fixing 
 
 ## Continuous variable capture
 
-Windows x64 builds can capture ELF-resolved RAM scalars through the official J-Link GDB Server and one persistent RSP connection. See [docs/jlink-variable-capture.md](docs/jlink-variable-capture.md) for prerequisites, the reviewed motor-control allowlist, safety sequence, outputs, and acceptance limits.
+Windows x64 builds can capture ELF-resolved RAM scalars through validated HSS sessions and store them as JCAP packages.
 
-Saved fixtures and terminal capture artifacts can also be analyzed offline with generic experiment profiles and Runtime Evidence. See [docs/runtime-experiment-analysis.md](docs/runtime-experiment-analysis.md).
+Saved JCAP packages can be queried and analyzed offline with the production analysis tools.
 
 ### HSS MVP-B Scalar baseline
 
@@ -294,7 +260,7 @@ MVP-B Scalar is the current release baseline for HM_C095 HSS capture-time writes
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROBE_TYPE` | `jlink` | Probe backend: `jlink`, `openocd`, `blackmagic` |
+| `PROBE_TYPE` | `jlink` | Production probe backend; other values are rejected |
 | `JLINK_DEVICE` | `Unspecified` | Target device (e.g., `nRF52840_XXAA`, `STM32F407VG`) |
 | `JLINK_INSTALL_DIR` | Auto-detect | Path to SEGGER J-Link installation |
 | `JLINK_INTERFACE` | `SWD` | Debug interface: `SWD` or `JTAG` |
@@ -303,39 +269,11 @@ MVP-B Scalar is the current release baseline for HM_C095 HSS capture-time writes
 | `JLINK_GDB_PORT` | `2331` | GDB server port |
 | `JLINK_RTT_PORT` | `19021` | RTT telnet port |
 
-### OpenOCD
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENOCD_BINARY` | `openocd` | Path to openocd binary |
-| `OPENOCD_INTERFACE` | `interface/stlink.cfg` | Interface config file |
-| `OPENOCD_TARGET` | `target/stm32f4x.cfg` | Target config file |
-| `OPENOCD_GDB_PORT` | `3333` | GDB server port |
-| `OPENOCD_TELNET_PORT` | `4444` | Telnet command port |
-
-### Black Magic Probe
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `BMP_GDB_PATH` | `arm-none-eabi-gdb` | Path to GDB binary |
-| `BMP_SERIAL_PORT` | `/dev/ttyACM0` | BMP serial port |
-| `BMP_TARGET_INDEX` | `1` | Target index after scan |
-
 ## Prerequisites
 
 - **[SEGGER J-Link Software](https://www.segger.com/downloads/jlink/)** installed (JLinkExe, JLinkGDBServer)
 - A J-Link debug probe connected to an ARM Cortex-M target
 - Node.js 18+
-
-For other backends: OpenOCD or arm-none-eabi-gdb as appropriate.
-
-## Contributing
-
-Adding a new probe backend:
-
-1. Create `src/probe/yourprobe.ts` implementing `ProbeBackend`
-2. Add a case to `src/probe/factory.ts`
-3. That's it — all 31 MCP tools work automatically
 
 ## License
 

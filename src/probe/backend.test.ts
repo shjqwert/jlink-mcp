@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ProbeBackend, type CommandResult, type GDBServerInfo } from "./backend";
+import { createProbeBackend } from "./factory";
+import { ProcessManager } from "../utils/process-manager";
 
 test("parseMemoryDump accepts J-Link prompt-prefixed memory lines", () => {
   const probe = new TestProbe();
@@ -9,6 +11,13 @@ test("parseMemoryDump accepts J-Link prompt-prefixed memory lines", () => {
     { address: "0x20006B30", hex: "00 00 00 00", ascii: "...." },
   ];
   assert.deepEqual(probe.parseMemoryDump(raw), expected);
+});
+
+test("probe factory rejects non-J-Link runtime input", () => {
+  assert.throws(
+    () => createProbeBackend({ type: "openocd" } as never, new ProcessManager()),
+    /Unsupported probe type: openocd\. Supported: jlink/
+  );
 });
 
 class TestProbe extends ProbeBackend {

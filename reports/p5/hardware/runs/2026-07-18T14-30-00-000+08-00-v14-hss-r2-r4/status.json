@@ -1,0 +1,8 @@
+{
+  "schema": "p5-hardware-status-v1",
+  "state": "failed",
+  "updatedAt": "2026-07-18T05:18:50.616Z",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-30-00-000+08-00-v14-hss-r2-r4",
+  "message": "gdb_command_plan did not return an exact challenge",
+  "stack": "AssertionError [ERR_ASSERTION]: gdb_command_plan did not return an exact challenge\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:282:10"
+}

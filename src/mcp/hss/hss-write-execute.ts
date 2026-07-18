@@ -16,7 +16,6 @@ export interface HssVariableWriteExecuteInput {
   values?: number[];
   dryRun?: boolean;
   challengeId?: string;
-  approvalToken?: string;
 }
 
 export interface HssVariableWriteExecuteResult {

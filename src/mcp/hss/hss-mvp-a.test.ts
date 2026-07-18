@@ -86,6 +86,37 @@ test("HSS envelope, risk, project paths, status flags, and audit are stable", as
   }
 });
 
+test("HSS helper NDJSON requires one exact QPC epoch before later records", () => {
+  const captureId = "11111111-1111-4111-8111-111111111111";
+  const service = Object.create(HssCaptureService.prototype) as HssCaptureService;
+  const active = {
+    captureId,
+    qpcEpochSeen: false,
+    helperResultCount: 0,
+    artifactMatchStatus: "verified",
+    journal: { qpcEpochCounter: 100n, qpcFrequency: 10n },
+  };
+  const accept = (record: Record<string, unknown>): void => {
+    (service as unknown as {
+      acceptHelperRecord(activeCapture: typeof active, helperRecord: Record<string, unknown>): void;
+    }).acceptHelperRecord(active, record);
+  };
+
+  assert.throws(() => accept({ record: "lifecycle", phase: "qpc_epoch", captureId: "wrong", qpcEpochCounter: "100", qpcFrequency: "10" }), /captureId mismatch/);
+  assert.throws(() => accept({ record: "artifact_match", captureId }), /before qpc_epoch/);
+  assert.throws(() => accept({ record: "lifecycle", phase: "qpc_epoch", captureId, qpcEpochCounter: 100, qpcFrequency: "10" }), /decimal u64/);
+  assert.throws(() => accept({ record: "lifecycle", phase: "qpc_epoch", captureId, qpcEpochCounter: "101", qpcFrequency: "10" }), /timebase mismatch/);
+
+  accept({ record: "lifecycle", phase: "qpc_epoch", captureId, qpcEpochCounter: "100", qpcFrequency: "10" });
+  assert.throws(() => accept({ record: "lifecycle", phase: "qpc_epoch", captureId, qpcEpochCounter: "100", qpcFrequency: "10" }), /duplicate qpc_epoch/);
+  assert.throws(() => accept({ record: "artifact_match", captureId, targetArtifactMatch: "verified", artifactMatch: {} }), /duplicate Artifact match/);
+  assert.throws(() => accept({ record: "result", captureId, status: "error" }), /decimal u64/);
+  assert.throws(() => accept({ record: "result", captureId, status: "error", qpcEpochCounter: "100", qpcFrequency: "11" }), /result QPC timebase mismatch/);
+  accept({ record: "result", captureId, status: "error", qpcEpochCounter: "100", qpcFrequency: "10" });
+  assert.equal(active.helperResultCount, 1);
+  assert.throws(() => accept({ record: "result", captureId, status: "error", qpcEpochCounter: "100", qpcFrequency: "10" }), /more than one result/);
+});
+
 test("IAR map fallback resolves HM_C095 symbols and rejects unsafe cases", async () => {
   const root = await tempProject();
   try {
@@ -323,6 +354,40 @@ test("HSS capture rejects an unvalidated DLL before invoking the helper", async 
       await writeFile(planFile, JSON.stringify({ ...plan, runtimeIdentityValidated: false, approvedDllSha256 }), "utf8");
       assert.equal(invoke().errorCode, "HSS_RUNTIME_IDENTITY_UNVALIDATED");
 
+      const qpcProbe = spawnSync(nativeHelper, ["qpc-timebase"], { encoding: "utf8", windowsHide: true });
+      assert.equal(qpcProbe.status, 0, qpcProbe.stderr);
+      const qpc = JSON.parse(qpcProbe.stdout) as { qpcCounter: string; qpcFrequency: string };
+      const qpcCaptureId = "22222222-2222-4222-8222-222222222222";
+      const qpcPackage = join(root, `${qpcCaptureId}.jcap`);
+      const absentDll = join(root, "must-not-load.dll");
+      await mkdir(join(qpcPackage, "raw"), { recursive: true });
+      await writeFile(planFile, JSON.stringify({
+        ...plan,
+        captureId: qpcCaptureId,
+        dllPath: absentDll,
+        outputFile: join(qpcPackage, "raw", "samples.bin"),
+        qpcEpochCounter: qpc.qpcCounter,
+        qpcFrequency: qpc.qpcFrequency,
+        runtimeIdentityValidated: true,
+        approvedDllSha256: "a".repeat(64),
+        artifactMatchManifestPath: join(root, "missing-artifact-match.json"),
+        artifactMatchManifestSha256: "b".repeat(64),
+        artifactMatchRuntimeIdentitySha256: "c".repeat(64),
+        artifactGeneration: "d".repeat(64),
+        artifactSha256: "e".repeat(64),
+        serial: "fixture-serial",
+      }), "utf8");
+      const qpcFailure = spawnSync(nativeHelper, ["hss-capture", "--jlink-script-mode", "none", "--plan", planFile], { encoding: "utf8", windowsHide: true });
+      assert.equal(qpcFailure.status, 0, qpcFailure.stderr);
+      const qpcRecords = qpcFailure.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.equal(qpcRecords.length, 2, qpcFailure.stdout);
+      assert.deepEqual(qpcRecords.map((record) => [record.record, record.phase]), [["lifecycle", "qpc_epoch"], ["result", undefined]]);
+      assert.equal(qpcRecords[1].captureId, qpcCaptureId);
+      assert.equal(qpcRecords[1].qpcEpochCounter, qpc.qpcCounter);
+      assert.equal(qpcRecords[1].qpcFrequency, qpc.qpcFrequency);
+      assert.match(String(qpcRecords[1].errorCode), /^ARTIFACT_MATCH_/);
+      assert.equal(existsSync(absentDll), false);
+
     }
   } finally {
     await service.dispose();
@@ -497,6 +562,14 @@ test("Artifact match verified, unverified, and mismatch are gated and persisted"
     assert.equal(rejectedRaw.events.find((event) => event.type === "artifact_match")?.captureAllowed, false);
     const rejectedStatus = await service.captureStatus({ captureId: rejectedPlan.data!.output.captureId });
     assert.deepEqual((rejectedStatus.data?.provenance as { warnings?: string[] }).warnings, []);
+
+    await writeFile(helper, fakeHelperSource({ zeroArtifactFailure: true }), "utf8");
+    const fidelityPlan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1 });
+    assert.equal(fidelityPlan.ok, true, JSON.stringify(fidelityPlan));
+    const fidelity = await service.captureStart({ planId: fidelityPlan.data!.planId, dllPath: dll });
+    assert.equal(fidelity.ok, false, JSON.stringify(fidelity));
+    assert.equal(fidelity.error?.code, "ARTIFACT_MATCH_MANIFEST_READ_FAILED");
+    assert.equal(fidelity.error?.message, "artifact match manifest is missing");
 
     await writeFile(helper, fakeHelperSource({ artifactMatch: "missing" }), "utf8");
     const missingPlan = await service.capturePlan({ symbols: [{ name: "g_hssDbgCounterFocIsr", type: "uint32" }], requestedRateHz: 10, durationSec: 1 });
@@ -1266,6 +1339,7 @@ interface FakeHelperOptions {
   mutateDllAfterCapture?: boolean;
   artifactMatch?: "verified" | "unverified" | "mismatch" | "missing";
   artifactMatchGateError?: boolean;
+  zeroArtifactFailure?: boolean;
 }
 
 function fakeHelperSource(options: FakeHelperOptions = {}): string {
@@ -1315,8 +1389,16 @@ const plan = JSON.parse(fs.readFileSync(option("--plan"), "utf8"));
 const crypto = require("crypto");
 const artifactMatch = "${options.artifactMatch === "missing" ? "" : options.artifactMatch ?? "verified"}";
 const artifactEvidence = { captureId: plan.captureId, helperPid: process.pid, connectOrdinal: 1, runtimeIdentitySha256: plan.artifactMatchRuntimeIdentitySha256, artifactSha256: plan.artifactSha256, manifestSha256: plan.artifactMatchManifestSha256, captureAllowed: ${options.artifactMatchGateError ? "false" : "true"}, gateErrorCode: ${options.artifactMatchGateError ? '"ARTIFACT_MATCH_READ_INCOMPLETE"' : '""'}, reason: ${options.artifactMatchGateError ? '"Artifact comparison read was incomplete"' : '""'} };
+if (${options.zeroArtifactFailure ? "true" : "false"}) {
+  fs.writeSync(1, [
+    { record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
+    { record: "result", captureId: plan.captureId, status: "error", errorCode: "ARTIFACT_MATCH_MANIFEST_READ_FAILED", reason: "artifact match manifest is missing", rawOpened: false, qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
+  ].map((value) => JSON.stringify(value) + "\\n").join(""));
+  process.exit(0);
+}
 if (artifactMatch === "mismatch" || ${options.artifactMatchGateError ? "true" : "false"}) {
   const lines = [
+    { record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
     { record: "artifact_match", captureId: plan.captureId, targetArtifactMatch: artifactMatch, artifactMatch: artifactEvidence },
     { record: "result", captureId: plan.captureId, status: "error", errorCode: artifactEvidence.gateErrorCode || "ARTIFACT_MATCH_MISMATCH", reason: artifactEvidence.reason || "target mismatch", targetArtifactMatch: artifactMatch, artifactMatch: artifactEvidence, rawOpened: false, qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
   ].map((value) => JSON.stringify(value) + "\\n").join("");
@@ -1366,8 +1448,8 @@ const result = { record: "result", status: "${helperStatus}", ${helperError} hel
 result.resetBeforeCapture = plan.resetBeforeCapture === true;
 const finish = () => {
   const lines = [
-    ...(artifactMatch ? [{ record: "artifact_match", captureId: plan.captureId, targetArtifactMatch: artifactMatch, artifactMatch: artifactEvidence }] : []),
     { record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency },
+    ...(artifactMatch ? [{ record: "artifact_match", captureId: plan.captureId, targetArtifactMatch: artifactMatch, artifactMatch: artifactEvidence }] : []),
     { record: "lifecycle", phase: "hss_start", captureId: plan.captureId, qpcCounter: "100001", returnCode: 0, crashed: false },
     { record: "lifecycle", phase: "hss_stop", captureId: plan.captureId, qpcCounter: "100002", returnCode: 0, crashed: false },
     result,

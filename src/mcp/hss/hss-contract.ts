@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export type HssRiskLevel = "R0" | "R1" | "R2" | "R3";
 export type HssToolOperation =
   | "hss_capability_probe"
@@ -48,7 +50,9 @@ export const HSS_SAFETY_FALSE: HssSafety = {
   resumeIssued: false,
 };
 
-export type HssScalarType = "uint8" | "int8" | "uint16" | "int16" | "uint32" | "int32" | "float32";
+export const HSS_SCALAR_TYPES = ["uint8", "int8", "uint16", "int16", "uint32", "int32", "float32"] as const;
+export const MAX_HSS_SYMBOLS = 32;
+export type HssScalarType = typeof HSS_SCALAR_TYPES[number];
 export type HssCaptureState = "planned" | "starting" | "capturing" | "stopping" | "completed" | "stopped" | "failed";
 export type HssTransportStatus = "pass" | "failed";
 export type HssValidationStatus = "pass" | "failed" | "warning" | "not_run";
@@ -73,6 +77,33 @@ export interface HssRequestedSymbol {
   type?: HssScalarType;
   unit?: string;
 }
+
+const projectControlSelectorSchema = z.string()
+  .min(1)
+  .max(512)
+  .regex(/^(?:[A-Za-z0-9_./\\\\ -]+::)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/, "selector must be a scalar or fixed member path")
+  .refine((value) => !value.includes("->") && !value.includes("[") && !value.includes("]"), "pointer and array traversal are forbidden");
+const projectControlScalarTypeSchema = z.enum(HSS_SCALAR_TYPES);
+const projectControlConditionSchema = z.object({
+  selector: projectControlSelectorSchema,
+  type: projectControlScalarTypeSchema,
+  operator: z.enum(["eq", "ne", "lt", "lte", "gt", "gte"]),
+  value: z.number().finite(),
+}).strict();
+const projectControlCommandSchema = z.object({
+  selector: projectControlSelectorSchema,
+  type: projectControlScalarTypeSchema,
+  value: z.number().finite(),
+  verify: projectControlConditionSchema,
+  timeoutMs: z.number().int().min(1).max(10000).optional(),
+}).strict();
+export const projectControlConfigSchema = z.object({
+  version: z.literal(1),
+  preStartMs: z.number().int().min(0).max(5000).default(500),
+  postStopMs: z.number().int().min(0).max(10000).default(1000),
+  commands: z.object({ start: projectControlCommandSchema, stop: projectControlCommandSchema }).strict(),
+}).strict();
+export type ProjectControlConfig = z.infer<typeof projectControlConfigSchema>;
 
 export interface HssResolvedSymbol extends Required<Pick<HssRequestedSymbol, "name" | "type">> {
   alias?: string;

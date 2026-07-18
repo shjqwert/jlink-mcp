@@ -1,0 +1,8 @@
+{
+  "schema": "p5-hardware-status-v1",
+  "state": "failed",
+  "updatedAt": "2026-07-17T14:07:58.643Z",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-07-55-868+08-00",
+  "message": "artifact_probe did not return one selected OUT/MAP generation",
+  "stack": "AssertionError [ERR_ASSERTION]: artifact_probe did not return one selected OUT/MAP generation\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:102:10"
+}

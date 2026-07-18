@@ -98,7 +98,7 @@ export const HSS_ERROR = {
   WRITE_EVENT_APPEND_FAILED: "WRITE_EVENT_APPEND_FAILED",
 } as const;
 
-export type HssErrorCode = typeof HSS_ERROR[keyof typeof HSS_ERROR];
+export type HssErrorCode = typeof HSS_ERROR[keyof typeof HSS_ERROR] | `ARTIFACT_MATCH_${string}`;
 
 export class HssError extends Error {
   constructor(

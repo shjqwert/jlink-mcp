@@ -253,7 +253,7 @@ async function writeFakeProject(fakeRoot, dll) {
   await mkdir(list, { recursive: true });
   await mkdir(join(fakeRoot, "EB_Project", "config"), { recursive: true });
   await mkdir(bsw, { recursive: true });
-  await writeFile(join(fakeRoot, "Appl", "Debug", "Exe", "FOC_SCM.out"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1, 0]));
+  await writeFile(join(fakeRoot, "Appl", "Debug", "Exe", "FOC_SCM.out"), fakeArtifactElf());
   await writeFile(join(list, "FOC_SCM.map"), [
     "g_hssDbgCounterFocIsr   0x2000'0100     0x4  Data  Gb  app.o [1]",
     "Debug_IqRef              0x2000'0000     0x4  Data  Gb  app.o [1]",
@@ -278,6 +278,35 @@ async function writeFakeProject(fakeRoot, dll) {
   await writeFile(dll, fakeDll);
   await writeFile(join(fakeRoot, "helper.js"), fakeHelperSource(), "utf8");
   return { dllSha256: createHash("sha256").update(fakeDll).digest("hex"), scriptPath, scriptSha256 };
+}
+
+function fakeArtifactElf() {
+  const data = Buffer.alloc(0x104);
+  data.set(Buffer.from([0x7f, 0x45, 0x4c, 0x46]), 0);
+  data[4] = 1;
+  data[5] = 1;
+  data.writeUInt32LE(52, 28);
+  data.writeUInt16LE(52, 40);
+  data.writeUInt16LE(32, 42);
+  data.writeUInt16LE(2, 44);
+  data.writeUInt32LE(1, 52);
+  data.writeUInt32LE(0x100, 56);
+  data.writeUInt32LE(0x08000000, 60);
+  data.writeUInt32LE(0x08000000, 64);
+  data.writeUInt32LE(4, 68);
+  data.writeUInt32LE(4, 72);
+  data.writeUInt32LE(5, 76);
+  data.writeUInt32LE(4, 80);
+  data.writeUInt32LE(1, 84);
+  data.writeUInt32LE(0x104, 88);
+  data.writeUInt32LE(0x20000000, 92);
+  data.writeUInt32LE(0x20000000, 96);
+  data.writeUInt32LE(0, 100);
+  data.writeUInt32LE(0x1000, 104);
+  data.writeUInt32LE(6, 108);
+  data.writeUInt32LE(4, 112);
+  data.set(Buffer.from([0x11, 0x22, 0x33, 0x44]), 0x100);
+  return data;
 }
 
 function fakeHssDllBuffer() {
@@ -313,6 +342,7 @@ for (let i = 0; i < Math.min(plan.requestedRateHz * plan.durationSec, 20); i++) 
 }
 fs.writeFileSync(plan.outputFile, Buffer.concat(records));
 console.log(JSON.stringify({ record: "lifecycle", phase: "qpc_epoch", captureId: plan.captureId, qpcCounter: "100000", qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency }));
+console.log(JSON.stringify({ record: "artifact_match", captureId: plan.captureId, targetArtifactMatch: "verified", artifactMatch: { captureAllowed: true, fixture: "hss-mvp-b" } }));
 console.log(JSON.stringify({ record: "lifecycle", phase: "hss_start", captureId: plan.captureId, qpcCounter: "100001", returnCode: 0, crashed: false }));
 let valueHex = "00000000";
 let targetWritten = false;
@@ -321,13 +351,13 @@ function handleWriteRequest() {
   const request = JSON.parse(fs.readFileSync(plan.writeRequestFile, "utf8"));
   fs.rmSync(plan.writeRequestFile, { force: true });
   if (request.op === "read") fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "ok", bytesHex: valueHex }));
-  else if (request.op === "write") { valueHex = request.bytesHex; targetWritten = true; fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "ok", writeIssued: true })); }
+  else if (request.op === "write") { valueHex = request.bytesHex; targetWritten = true; fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "ok", writeIssued: true, operationBeforeQpcCounter: "100002", operationAfterQpcCounter: "100003" })); }
   else fs.writeFileSync(plan.writeResponseFile, JSON.stringify({ requestId: request.requestId, status: "error", reason: "bad op" }));
 }
 const timer = setInterval(handleWriteRequest, 5);
 setTimeout(() => {
   clearInterval(timer);
-  console.log(JSON.stringify({ record: "lifecycle", phase: "hss_stop", captureId: plan.captureId, qpcCounter: "100002", returnCode: 0, crashed: false }));
+  console.log(JSON.stringify({ record: "lifecycle", phase: "hss_stop", captureId: plan.captureId, qpcCounter: "100004", returnCode: 0, crashed: false }));
   console.log(JSON.stringify({ record: "result", status: "ok", helperVersion: "1", helperProtocolVersion: 1, dllVersion: 88400, lifecycleValidated: true, decoderSemanticsValidated: true, jlinkScriptMode: plan.jlinkScriptMode, jlinkScriptFile: plan.jlinkScriptFile, jlinkScriptSha256: plan.approvedJlinkScriptSha256, jlinkScriptReturnCode: 0, resetBeforeCapture: plan.resetBeforeCapture === true, captureId: plan.captureId, qpcEpochCounter: plan.qpcEpochCounter, qpcFrequency: plan.qpcFrequency, rawClosed: true, samplesSha256: crypto.createHash("sha256").update(Buffer.concat(records)).digest("hex"), requestedRateHz: plan.requestedRateHz, actualRateHz: plan.requestedRateHz, durationSec: plan.durationSec, sampleCount: records.length, validSamples: records.length, readErrors: 0, timeouts: 0, overflows: 0, droppedSamples: 0, readMode: plan.readMode, resumeBeforeStart: false, resumeIssued: false, targetWasHaltedBeforeResume: false, targetWasHaltedAfterResume: false, targetReset: false, targetWritten, flashIssued: false, resetIssued: false, haltIssued: false }));
 }, 1000);
 `;

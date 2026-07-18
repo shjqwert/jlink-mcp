@@ -100,7 +100,7 @@ export class JLinkBackend extends ProbeBackend {
    * Raw JLinkExe execution. Does NOT include preflight/locking.
    * Use the public methods (which call withPreflight) instead.
    */
-  private async execRaw(commands: string[], speedOverride?: number): Promise<CommandResult> {
+  private async execRaw(commands: string[], speedOverride?: number, timeoutMs = 30000): Promise<CommandResult> {
     this.connectionGeneration += 1;
     const speed = speedOverride ?? this.config.speed;
     const args = [
@@ -120,6 +120,14 @@ export class JLinkBackend extends ProbeBackend {
     return new Promise<CommandResult>((resolve) => {
       const proc = spawn(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "", stderr = "";
+      let settled = false;
+      let timeout: NodeJS.Timeout;
+      const finish = (result: CommandResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(result);
+      };
 
       proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
       proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
@@ -130,7 +138,7 @@ export class JLinkBackend extends ProbeBackend {
       proc.on("error", (err) => {
         logError("J-Link spawn error", err);
         this.setState(ProbeState.DISCONNECTED);
-        resolve({ success: false, rawOutput: stdout, output: stdout, error: `Failed to spawn JLinkExe: ${err.message}`, errorCode: ProbeErrorCode.PROBE_NOT_FOUND });
+        finish({ success: false, rawOutput: stdout, output: stdout, error: `Failed to spawn JLinkExe: ${err.message}`, errorCode: ProbeErrorCode.PROBE_NOT_FOUND });
       });
       proc.on("exit", (code) => {
         if (code !== 0) logError(`J-Link exited with code ${code}`);
@@ -147,13 +155,13 @@ export class JLinkBackend extends ProbeBackend {
             result.suggestedAction = "No J-Link probe found. Check USB connection.";
           }
         }
-        resolve(result);
+        finish(result);
       });
 
-      setTimeout(() => {
+      timeout = setTimeout(() => {
         proc.kill("SIGTERM");
-        resolve({ success: false, rawOutput: stdout, output: stripBoilerplate(stdout), error: "J-Link timed out after 30s", errorCode: ProbeErrorCode.TIMEOUT });
-      }, 30000);
+        finish({ success: false, rawOutput: stdout, output: stripBoilerplate(stdout), error: `J-Link timed out after ${timeoutMs}ms`, errorCode: ProbeErrorCode.TIMEOUT });
+      }, timeoutMs);
     });
   }
 
@@ -275,7 +283,7 @@ export class JLinkBackend extends ProbeBackend {
 
   async flash(filePath: string, baseAddress?: number): Promise<CommandResult> {
     const addr = baseAddress !== undefined ? ` 0x${baseAddress.toString(16)}` : "";
-    return this.executeApproved("flash", { filePath, ...(baseAddress !== undefined ? { baseAddress } : {}) }, ["r", "halt", `loadfile ${filePath}${addr}`, "r", "go"]);
+    return this.executeApproved("flash", { filePath, ...(baseAddress !== undefined ? { baseAddress } : {}) }, ["r", "halt", `loadfile ${filePath}${addr}`, "r", "go"], 180000);
   }
   async erase(): Promise<CommandResult> {
     return this.executeApproved("erase", {}, ["erase"]);
@@ -292,7 +300,7 @@ export class JLinkBackend extends ProbeBackend {
     return this.executeApproved("probe_command", { commands }, commands);
   }
 
-  private async executeApproved(tool: "flash" | "erase" | "probe_command", canonicalArgs: Record<string, unknown>, commands: string[]): Promise<CommandResult> {
+  private async executeApproved(tool: "flash" | "erase" | "probe_command", canonicalArgs: Record<string, unknown>, commands: string[], timeoutMs = 30000): Promise<CommandResult> {
     const forbidden = classifyR4Operation(tool, canonicalArgs);
     if (forbidden) return this.approvalRejected(forbidden.code, forbidden.message);
     if (!this.beginHardwareOperation()) {
@@ -303,7 +311,7 @@ export class JLinkBackend extends ProbeBackend {
         const generation = this.connectionGeneration + 1;
         const rejected = checkR4ExecutionPermit(tool, canonicalArgs, generation);
         if (rejected) return this.approvalRejected(rejected.code, rejected.message);
-        return this.execRaw(["mem 0xE000EDF0, 4", ...commands]);
+        return this.execRaw(["mem 0xE000EDF0, 4", ...commands], undefined, timeoutMs);
       });
     } finally {
       this.endHardwareOperation();

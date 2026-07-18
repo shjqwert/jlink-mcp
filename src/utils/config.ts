@@ -21,36 +21,8 @@ export interface JLinkConfig {
   swoTelnetPort: number;
 }
 
-export interface TelnetProxyConfig {
-  /** Port for the telnet proxy (for Trice/Pigweed) */
-  listenPort: number;
-  /** Source port to proxy from (usually RTT telnet port) */
-  sourcePort: number;
-  /** Source host */
-  sourceHost: string;
-}
-
-export interface TriceConfig {
-  /** Path to trice binary */
-  binaryPath: string;
-  /** Path to til.json (Trice ID List) */
-  idListPath: string;
-  /** Encoding format */
-  encoding: string;
-}
-
-export interface PigweedConfig {
-  /** Path to detokenizer database (.csv or .elf) */
-  tokenDatabase: string;
-  /** Path to Python or pw command */
-  pythonPath: string;
-}
-
 export interface ExtensionConfig {
   jlink: JLinkConfig;
-  telnetProxy: TelnetProxyConfig;
-  trice: TriceConfig;
-  pigweed: PigweedConfig;
 }
 
 function findJLinkInstallDir(): string {
@@ -93,20 +65,6 @@ export function getConfig(): ExtensionConfig {
       gdbPort: cfg.get<number>("jlink.gdbPort") || 2331,
       rttTelnetPort: cfg.get<number>("jlink.rttTelnetPort") || 19021,
       swoTelnetPort: cfg.get<number>("jlink.swoTelnetPort") || 2332,
-    },
-    telnetProxy: {
-      listenPort: cfg.get<number>("telnetProxy.listenPort") || 19400,
-      sourcePort: cfg.get<number>("telnetProxy.sourcePort") || 19021,
-      sourceHost: cfg.get<string>("telnetProxy.sourceHost") || "localhost",
-    },
-    trice: {
-      binaryPath: cfg.get<string>("trice.binaryPath") || "trice",
-      idListPath: cfg.get<string>("trice.idListPath") || "",
-      encoding: cfg.get<string>("trice.encoding") || "TREX",
-    },
-    pigweed: {
-      tokenDatabase: cfg.get<string>("pigweed.tokenDatabase") || "",
-      pythonPath: cfg.get<string>("pigweed.pythonPath") || "python3",
     },
   };
 }

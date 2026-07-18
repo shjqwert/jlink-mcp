@@ -2,7 +2,6 @@ import * as vscode from "vscode";
 import { JLinkMcpServer } from "./mcp/server";
 import { GDBServerManager } from "./jlink/gdb-server";
 import { RTTClient } from "./rtt/rtt-client";
-import { TelnetProxy } from "./telnet/telnet-proxy";
 import { ProcessManager } from "./utils/process-manager";
 import { initLogger, log, logError } from "./utils/logger";
 import { getConfig } from "./utils/config";
@@ -11,7 +10,6 @@ let mcpServer: JLinkMcpServer | undefined;
 let processManager: ProcessManager | undefined;
 let gdbServer: GDBServerManager | undefined;
 let rttClient: RTTClient | undefined;
-let telnetProxy: TelnetProxy | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
 let rttOutputChannel: vscode.OutputChannel | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
@@ -99,12 +97,6 @@ export function activate(context: vscode.ExtensionContext) {
   const config = getConfig();
   gdbServer = new GDBServerManager(processManager);
   rttClient = new RTTClient("localhost", config.jlink.rttTelnetPort);
-  telnetProxy = new TelnetProxy(
-    config.telnetProxy.listenPort,
-    config.telnetProxy.sourceHost,
-    config.telnetProxy.sourcePort
-  );
-
   // RTT data → output channel (cleaned)
   rttClient.on("data", (msg) => {
     for (const line of msg.lines) {
@@ -130,7 +122,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("jlinkMcp.showStatus", async () => {
       const gdbStatus = gdbServer!.getStatus();
       const rttStats = rttClient!.getStats();
-      const proxyStatus = telnetProxy!.getStatus();
       const configInfo = getConfig();
 
       const statusText = [
@@ -148,12 +139,6 @@ export function activate(context: vscode.ExtensionContext) {
         "## RTT",
         `- Connected: ${rttStats.connected ? "Yes" : "No"}`,
         `- Messages buffered: ${rttStats.messageCount}`,
-        "",
-        "## Telnet Proxy",
-        `- Running: ${proxyStatus.running ? "Yes" : "No"}`,
-        `- Listen Port: ${proxyStatus.listenPort}`,
-        `- Clients Connected: ${proxyStatus.clientCount}`,
-        `- Buffered Lines: ${proxyStatus.bufferedLines}`,
       ].join("\n");
 
       const doc = await vscode.workspace.openTextDocument({
@@ -206,24 +191,6 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("jlinkMcp.startTelnetProxy", async () => {
-      const result = await telnetProxy!.start();
-      if (result.success) {
-        vscode.window.showInformationMessage(result.message);
-      } else {
-        vscode.window.showErrorMessage(result.message);
-      }
-    })
-  );
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand("jlinkMcp.stopTelnetProxy", () => {
-      telnetProxy!.stop();
-      vscode.window.showInformationMessage("Telnet proxy stopped");
-    })
-  );
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("jlinkMcp.flashFirmware", async () => {
       const uri = await vscode.window.showOpenDialog({
         canSelectMany: false,
@@ -269,7 +236,6 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push({
     dispose() {
       rttClient?.disconnect();
-      telnetProxy?.stop();
       processManager?.killAll();
       void mcpServer?.dispose();
     },
@@ -293,7 +259,6 @@ function updateStatusBar(gdbRunning: boolean) {
 export async function deactivate() {
   log("J-Link MCP Extension deactivating...");
   rttClient?.disconnect();
-  telnetProxy?.stop();
   processManager?.killAll();
   await mcpServer?.dispose();
 }

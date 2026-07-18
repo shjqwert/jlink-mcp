@@ -1,0 +1,3 @@
+reports/p5/**/*.bin binary
+reports/p5/**/*.db binary
+reports/p5/**/*.out binary

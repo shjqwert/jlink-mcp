@@ -85,7 +85,14 @@ test("production HSS events use one strict QPC epoch and only the JCAP event jou
     assert.deepEqual(raw.events.map((event) => [event.eventSequence, event.tick]), [[0, "0"], [1, "100000000"]]);
     assert.equal(existsSync(join(packageDir, "capture.json")), false);
     assert.equal(existsSync(join(packageDir, "capture.events.jsonl")), false);
-    assert.throws(() => parseHssQpcTimebase({ qpcEpochCounter: "1.0", qpcFrequency: "10" }), /decimal u64/);
+    for (const malformed of [
+      {},
+      { qpcEpochCounter: 1, qpcFrequency: "10" },
+      { qpcEpochCounter: "1.0", qpcFrequency: "10" },
+      { qpcEpochCounter: "1", qpcFrequency: 10 },
+      { qpcEpochCounter: "1", qpcFrequency: "0" },
+      { qpcEpochCounter: "18446744073709551616", qpcFrequency: "10" },
+    ]) assert.throws(() => parseHssQpcTimebase(malformed), /decimal u64|outside decimal u64 bounds/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

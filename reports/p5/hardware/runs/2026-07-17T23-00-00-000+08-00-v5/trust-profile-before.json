@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "suiteVersion": "hss-runtime-v1",
+  "validatedAt": "2026-07-15T14:40:27.420Z",
+  "runtime": {
+    "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+    "dllSha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+    "dllVersion": "88400",
+    "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+    "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91",
+    "helperVersion": "1",
+    "helperProtocolVersion": 1,
+    "adapterPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\hss-dll\\hss-dll-adapter.js",
+    "adapterSha256": "ad5f7f3c5b6a1cc840e3a0c4adc1f649ef107e96d1dd4c22d1f7a33e58d61f1e",
+    "adapterVersion": "1",
+    "sha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d"
+  },
+  "script": {
+    "mode": "none"
+  },
+  "project": {
+    "root": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+    "namespaceSha256": "2b10ed8984a24df7f04ba9298f5c8e13c2d9256b2fff676a83b3cddd6fccd9c6"
+  },
+  "target": {
+    "targetId": "Z20K146M"
+  },
+  "probe": {
+    "serial": "69401227",
+    "interface": "SWD",
+    "speedKhz": 4000
+  },
+  "validation": {
+    "getCaps": true,
+    "lifecycle": true,
+    "decoderSemantics": true
+  },
+  "profileSha256": "5a4781a0d1450446133c93e5d9e480e9f80fca1a7dac4d909e43986bca1d341c"
+}

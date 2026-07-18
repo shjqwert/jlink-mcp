@@ -1,0 +1,8 @@
+{
+  "schema": "p5-hardware-status-v1",
+  "state": "failed",
+  "updatedAt": "2026-07-18T05:00:36.601Z",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T13-10-00-000+08-00-v9-flash",
+  "message": "MCP error -32001: Request timed out",
+  "stack": "McpError: MCP error -32001: Request timed out\n    at McpError.fromError (file:///D:/AI_Project/Trunk/Jlink_mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js:2048:16)\n    at Timeout.timeoutHandler (file:///D:/AI_Project/Trunk/Jlink_mcp/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js:713:58)\n    at listOnTimeout (node:internal/timers:605:17)\n    at process.processTimers (node:internal/timers:541:7)"
+}

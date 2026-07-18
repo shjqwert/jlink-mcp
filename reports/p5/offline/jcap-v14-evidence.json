@@ -1,0 +1,50 @@
+{
+  "schema": "p5-offline-jcap-acceptance-v1",
+  "state": "completed",
+  "packageDir": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-30-00-000+08-00-v14-hss-r2-r4\\storage\\captures\\fa734840-f61e-4c00-9253-689bf996ef58.jcap",
+  "captureId": "fa734840-f61e-4c00-9253-689bf996ef58",
+  "inputs": {
+    "variables": [
+      "g_hssDbgCounterFocIsr",
+      "g_hssDbgWriteProbe"
+    ],
+    "startTick": "5566374800",
+    "endTick": "6866374800",
+    "eventId": "cf013796-5e00-42ca-a970-9141e73c821c"
+  },
+  "rawBefore": {
+    "samples.bin": "f81a8720a41be76cb5abab0d593156c839d1b7dc48d255911649f76d81a534b1",
+    "events.bin": "302dde660d10cbd8f6a2338545df7eb00db60c13b2023781d59931dc9fce0470"
+  },
+  "rawAfter": {
+    "samples.bin": "f81a8720a41be76cb5abab0d593156c839d1b7dc48d255911649f76d81a534b1",
+    "events.bin": "302dde660d10cbd8f6a2338545df7eb00db60c13b2023781d59931dc9fce0470"
+  },
+  "criticalResultSha256": "8ca725ee5de97e48f346bce52e82736b0e6df82cdf44cb2029b1e930436ea2fb",
+  "rebuild": {
+    "captureState": "stopped",
+    "indexStatus": "ready",
+    "databaseFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-30-00-000+08-00-v14-hss-r2-r4\\storage\\captures\\fa734840-f61e-4c00-9253-689bf996ef58.jcap\\capture.db",
+    "diagnostics": []
+  },
+  "explicitExport": {
+    "captureState": "stopped",
+    "indexStatus": "ready",
+    "exportFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-30-00-000+08-00-v14-hss-r2-r4\\storage\\captures\\fa734840-f61e-4c00-9253-689bf996ef58.jcap\\export\\samples.csv",
+    "rows": 28
+  },
+  "ui": {
+    "origin": "http://127.0.0.1:<ephemeral>",
+    "rootStatus": 200,
+    "unauthorizedApiStatus": 401,
+    "summaryStatus": 200,
+    "cspPresent": true
+  },
+  "packageEntries": [
+    "capture.db",
+    "export/samples.csv",
+    "raw/events.bin",
+    "raw/samples.bin"
+  ],
+  "hardwareCalls": 0
+}

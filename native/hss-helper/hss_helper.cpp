@@ -1906,6 +1906,7 @@ enum class ArtifactMatchStatus { verified, mismatch, unverified };
 struct ArtifactMatchResult {
   ArtifactMatchStatus status = ArtifactMatchStatus::unverified;
   uint64_t bytesCompared = 0;
+  uint64_t transientMismatches = 0;
   U32 address = 0;
   std::string reason;
   std::string gateErrorCode;
@@ -1957,8 +1958,6 @@ static bool parse_manifest_ranges(const std::string& text, ArtifactMatchManifest
   }
   size_t position = ranges_key + sizeof("\"ranges\":[") - 1U;
   uint64_t total = 0;
-  uint64_t previous_end = 0;
-  bool has_previous = false;
   while (position < text.size()) {
     if (text[position] == ']') {
       ++position;
@@ -2013,12 +2012,6 @@ static bool parse_manifest_ranges(const std::string& text, ArtifactMatchManifest
       *reason = "manifest range dataHex does not match its length";
       return false;
     }
-    if (has_previous && address < previous_end) {
-      *reason = "manifest ranges overlap or are unsorted";
-      return false;
-    }
-    previous_end = static_cast<uint64_t>(address) + length;
-    has_previous = true;
     total += length;
     if (manifest->ranges.size() >= 4096U || total > 64U * 1024U * 1024U) {
       *reason = "manifest exceeds its range or byte bound";
@@ -2030,6 +2023,16 @@ static bool parse_manifest_ranges(const std::string& text, ArtifactMatchManifest
   if (manifest->ranges.empty() || position > text.size() || total != manifest->totalBytes) {
     *reason = "manifest totalBytes does not match its nonvolatile ranges";
     return false;
+  }
+  std::sort(manifest->ranges.begin(), manifest->ranges.end(), [](const ArtifactMatchRange& left, const ArtifactMatchRange& right) {
+    return left.address < right.address;
+  });
+  for (size_t index = 1; index < manifest->ranges.size(); ++index) {
+    const auto& previous = manifest->ranges[index - 1U];
+    if (manifest->ranges[index].address < static_cast<uint64_t>(previous.address) + previous.expected.size()) {
+      *reason = "manifest ranges overlap";
+      return false;
+    }
   }
   return true;
 }
@@ -2130,7 +2133,7 @@ static bool load_artifact_match_manifest(
 
 static ArtifactMatchResult compare_artifact_ranges(const ArtifactMatchManifest& manifest, const ArtifactReadChunk& read_chunk) {
   ArtifactMatchResult result;
-  constexpr U32 kChunkBytes = 4096U;
+  constexpr U32 kChunkBytes = 256U;
   for (const auto& range : manifest.ranges) {
     for (size_t offset = 0; offset < range.expected.size(); offset += kChunkBytes) {
       const U32 count = static_cast<U32>((std::min)(static_cast<size_t>(kChunkBytes), range.expected.size() - offset));
@@ -2146,6 +2149,22 @@ static ArtifactMatchResult compare_artifact_ranges(const ArtifactMatchManifest& 
       for (U32 index = 0; index < count; ++index) {
         ++result.bytesCompared;
         if (actual[index] != range.expected[offset + index]) {
+          bool confirmedExpected = true;
+          for (int confirmation = 0; confirmation < 3; ++confirmation) {
+            U8 confirmed = 0;
+            std::string confirmationReason;
+            if (!read_chunk(address + index, 1U, &confirmed, &confirmationReason)) {
+              result.address = address + index;
+              result.reason = confirmationReason.empty() ? "target returned an incomplete mismatch confirmation read" : confirmationReason;
+              result.gateErrorCode = "ARTIFACT_MATCH_READ_INCOMPLETE";
+              return result;
+            }
+            if (confirmed != range.expected[offset + index]) confirmedExpected = false;
+          }
+          if (confirmedExpected) {
+            ++result.transientMismatches;
+            continue;
+          }
           result.status = ArtifactMatchStatus::mismatch;
           result.address = address + index;
           result.reason = "target nonvolatile byte differs from the selected Artifact generation";
@@ -2185,6 +2204,7 @@ static void write_artifact_match_evidence(
     << ",\"rangeCount\":" << manifest.ranges.size()
     << ",\"totalBytes\":" << manifest.totalBytes
     << ",\"bytesCompared\":" << result.bytesCompared
+    << ",\"transientMismatches\":" << result.transientMismatches
     << ",\"address\":\"" << hex_u32(result.address) << "\""
     << ",\"captureAllowed\":" << (artifact_match_capture_allowed(result) ? "true" : "false")
     << ",\"writeAllowed\":" << (artifact_match_write_allowed(result) ? "true" : "false")
@@ -2210,7 +2230,9 @@ static void artifact_match_gate_error(
     const std::string& capture_id,
     const std::string& manifest_sha256,
     const ArtifactMatchManifest* manifest = nullptr,
-    const ArtifactMatchResult* result = nullptr) {
+    const ArtifactMatchResult* result = nullptr,
+    int64_t qpc_epoch = -1,
+    int64_t qpc_frequency = -1) {
   std::cout
     << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"" << escape(code)
     << "\",\"reason\":\"" << escape(reason)
@@ -2220,6 +2242,10 @@ static void artifact_match_gate_error(
     << ",\"helperPid\":" << GetCurrentProcessId()
     << ",\"manifestSha256\":\"" << escape(manifest_sha256)
     << "\",\"hssStartIssued\":false,\"rawOpened\":false";
+  if (qpc_epoch >= 0 && qpc_frequency > 0) {
+    std::cout << ",\"qpcEpochCounter\":\"" << qpc_epoch
+              << "\",\"qpcFrequency\":\"" << qpc_frequency << "\"";
+  }
   if (manifest && result) write_artifact_match_evidence(*manifest, manifest_sha256, *result);
   std::cout << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
 }
@@ -2889,6 +2915,25 @@ static int self_test() {
     error_json("HSS_SELF_TEST_ARTIFACT_MANIFEST_FAILED", match_reason);
     return 0;
   }
+  const std::string unsorted_match_manifest_text =
+    "{\"schema\":\"artifact-match-v0\",\"historyOnly\":false,\"captureId\":\"11111111-1111-4111-8111-111111111111\","
+    "\"targetId\":\"fixture\",\"probeSerial\":\"123\",\"runtimeIdentitySha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+    "\"artifactGeneration\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+    "\"artifactSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\","
+    "\"connectOrdinal\":1,\"totalBytes\":8,\"ranges\":[{\"address\":\"0x8000004\",\"length\":4,\"dataHex\":\"55667788\"},{\"address\":\"0x8000000\",\"length\":4,\"dataHex\":\"11223344\"}]}";
+  ArtifactMatchManifest unsorted_match_manifest;
+  if (!parse_artifact_match_manifest(unsorted_match_manifest_text, &unsorted_match_manifest, &match_reason)
+      || unsorted_match_manifest.ranges.size() != 2U || unsorted_match_manifest.ranges[0].address != 0x08000000U) {
+    error_json("HSS_SELF_TEST_ARTIFACT_MANIFEST_ORDER_FAILED", match_reason);
+    return 0;
+  }
+  std::string overlapping_match_manifest_text = unsorted_match_manifest_text;
+  overlapping_match_manifest_text.replace(overlapping_match_manifest_text.rfind("0x8000000"), 9U, "0x8000006");
+  ArtifactMatchManifest overlapping_match_manifest;
+  if (parse_artifact_match_manifest(overlapping_match_manifest_text, &overlapping_match_manifest, &match_reason)) {
+    error_json("HSS_SELF_TEST_ARTIFACT_MANIFEST_OVERLAP_FAILED", "overlapping Artifact ranges did not fail closed");
+    return 0;
+  }
   std::string match_manifest_sha256;
   const std::string match_directory = "hss_selftest_match_" + std::to_string(GetCurrentProcessId());
   const std::string match_plan_file = match_directory + "\\plan.json";
@@ -2948,8 +2993,18 @@ static int self_test() {
   });
   const ArtifactMatchResult mismatch = compare_artifact_ranges(match_manifest, [](U32 address, U32 count, U8* data, std::string*) {
     const U8 actual[] = {0x11U, 0x22U, 0x00U, 0x44U};
-    if (address != 0x08000000U || count != 4U) return false;
-    std::copy(std::begin(actual), std::end(actual), data);
+    if (address == 0x08000000U && count == 4U) std::copy(std::begin(actual), std::end(actual), data);
+    else if (address == 0x08000002U && count == 1U) data[0] = 0x00U;
+    else return false;
+    return true;
+  });
+  const ArtifactMatchResult transient_mismatch = compare_artifact_ranges(match_manifest, [](U32 address, U32 count, U8* data, std::string*) {
+    const U8 expected[] = {0x11U, 0x22U, 0x33U, 0x44U};
+    if (address == 0x08000000U && count == 4U) {
+      std::copy(std::begin(expected), std::end(expected), data);
+      data[2] = 0x00U;
+    } else if (address == 0x08000002U && count == 1U) data[0] = 0x33U;
+    else return false;
     return true;
   });
   const ArtifactMatchResult partial_read = compare_artifact_ranges(match_manifest, [](U32, U32, U8*, std::string* reason) {
@@ -2967,6 +3022,8 @@ static int self_test() {
       || !artifact_match_capture_allowed(complete_match) || !artifact_match_write_allowed(complete_match)
       || mismatch.status != ArtifactMatchStatus::mismatch || mismatch.address != 0x08000002U
       || artifact_match_capture_allowed(mismatch) || artifact_match_write_allowed(mismatch)
+      || transient_mismatch.status != ArtifactMatchStatus::verified || transient_mismatch.transientMismatches != 1U
+      || !artifact_match_capture_allowed(transient_mismatch) || !artifact_match_write_allowed(transient_mismatch)
       || partial_read.status != ArtifactMatchStatus::unverified || partial_read.bytesCompared != 0U
       || partial_read.gateErrorCode != "ARTIFACT_MATCH_READ_INCOMPLETE" || artifact_match_capture_allowed(partial_read)
       || unsupported_reader.status != ArtifactMatchStatus::unverified || !artifact_match_capture_allowed(unsupported_reader)
@@ -3521,7 +3578,7 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   auto arm_write_u8 = reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8"));
   auto arm_write_u16 = reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16"));
   auto arm_write_u32 = reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_version || !arm_read_mem || !arm_write_mem || !arm_read_u8) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_version || !arm_read_mem || !arm_write_mem) {
     FreeLibrary(dll); error_json("HSS_WRITE_EXPORT_MISSING", "required J-Link write export is missing", narrow(dll_path)); return 0;
   }
   bool crashed = false;
@@ -3548,10 +3605,9 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
     call_void0(arm_close, &crashed); FreeLibrary(dll); artifact_match_gate_error("ARTIFACT_MATCH_BINDING_MISMATCH", "variable-write connection does not match the plan", capture_id, manifest_sha256); return 0;
   }
   ArtifactMatchResult match = compare_artifact_ranges(manifest, [&](U32 read_address, U32 count, U8* data, std::string* reason) {
-    std::vector<U8> status(count, 0xFFU);
     bool read_crashed = false;
-    const int rc = call_read_mem_u8(arm_read_u8, read_address, count, data, status.data(), &read_crashed);
-    if (read_crashed || rc < 0 || std::any_of(status.begin(), status.end(), [](U8 value) { return value != 0U; })) { *reason = "JLINKARM_ReadMemU8 returned a failed or partial nonvolatile read"; return false; }
+    const int rc = call_read_mem(arm_read_mem, read_address, count, data, &read_crashed);
+    if (read_crashed || rc < 0) { *reason = "JLINKARM_ReadMem failed the nonvolatile read"; return false; }
     return true;
   });
   if (match.status == ArtifactMatchStatus::verified) connection.recordVerified(connect_ordinal);
@@ -3959,9 +4015,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("HSS_QPC_TIMEBASE_INVALID", "capture QPC epoch is future-dated or its frequency does not match this host", dll_utf8);
     return 0;
   }
+  stream_lifecycle(capture_id, "qpc_epoch", current_qpc,
+    ",\"qpcEpochCounter\":\"" + std::to_string(qpc_epoch) + "\",\"qpcFrequency\":\"" + std::to_string(actual_qpc_frequency) + "\"");
   std::wstring artifact_match_manifest_path;
   if (!widen_utf8(artifact_match_manifest_utf8, &artifact_match_manifest_path)) {
-    artifact_match_gate_error("ARTIFACT_MATCH_MANIFEST_PATH_INVALID", "artifact match manifest path is not valid lossless UTF-8", capture_id, artifact_match_manifest_sha256);
+    artifact_match_gate_error("ARTIFACT_MATCH_MANIFEST_PATH_INVALID", "artifact match manifest path is not valid lossless UTF-8", capture_id, artifact_match_manifest_sha256, nullptr, nullptr, qpc_epoch, actual_qpc_frequency);
     return 0;
   }
   ArtifactMatchManifest artifact_match_manifest;
@@ -3980,12 +4038,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       &artifact_match_manifest,
       &artifact_match_error_code,
       &artifact_match_error_reason)) {
-    artifact_match_gate_error(artifact_match_error_code, artifact_match_error_reason, capture_id, artifact_match_manifest_sha256);
+    artifact_match_gate_error(artifact_match_error_code, artifact_match_error_reason, capture_id, artifact_match_manifest_sha256, nullptr, nullptr, qpc_epoch, actual_qpc_frequency);
     return 0;
   }
   JcapSampleWriter raw_writer;
-  stream_lifecycle(capture_id, "qpc_epoch", current_qpc,
-    ",\"qpcEpochCounter\":\"" + std::to_string(qpc_epoch) + "\",\"qpcFrequency\":\"" + std::to_string(actual_qpc_frequency) + "\"");
 
   std::wstring dll_path;
   if (!widen_utf8(dll_utf8, &dll_path)) {
@@ -4150,7 +4206,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       << ",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8) << "\""
       << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
       << ",\"jlinkScriptReturnCode\":" << script_rc
-      << ",\"captureId\":\"" << escape(capture_id) << "\",\"hssStartIssued\":false,\"rawOpened\":false,\"rawClosed\":false";
+      << ",\"captureId\":\"" << escape(capture_id)
+      << "\",\"qpcEpochCounter\":\"" << qpc_epoch << "\",\"qpcFrequency\":\"" << actual_qpc_frequency
+      << "\",\"hssStartIssued\":false,\"rawOpened\":false,\"rawClosed\":false";
     write_post_connect_evidence(post_connect_evidence);
     std::cout << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
     return 0;
@@ -4160,15 +4218,14 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (connect_ordinal != artifact_match_manifest.connectOrdinal) {
     artifact_match_result.reason = "artifact match connectOrdinal does not bind the current J-Link connection";
     artifact_match_result.gateErrorCode = "ARTIFACT_MATCH_BINDING_MISMATCH";
-  } else if (!arm_read_u8) {
-    artifact_match_result.reason = "JLINKARM_ReadMemU8 export is unavailable; read-only capture continued";
+  } else if (!arm_read_mem) {
+    artifact_match_result.reason = "JLINKARM_ReadMem export is unavailable; read-only capture continued";
   } else {
     artifact_match_result = compare_artifact_ranges(artifact_match_manifest, [&](U32 address, U32 count, U8* data, std::string* reason) {
-      std::vector<U8> status(count, 0xFFU);
       bool read_crashed = false;
-      const int read_rc = call_read_mem_u8(arm_read_u8, address, count, data, status.data(), &read_crashed);
-      if (read_crashed || read_rc < 0 || std::any_of(status.begin(), status.end(), [](U8 value) { return value != 0U; })) {
-        *reason = "JLINKARM_ReadMemU8 returned a failed or partial nonvolatile read";
+      const int read_rc = call_read_mem(arm_read_mem, address, count, data, &read_crashed);
+      if (read_crashed || read_rc < 0) {
+        *reason = "JLINKARM_ReadMem failed the nonvolatile read";
         return false;
       }
       return true;
@@ -4191,13 +4248,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     FreeLibrary(dll);
     const std::string& code = artifact_match_result.gateErrorCode;
     stream_fault(capture_id, code, artifact_match_result.reason, qpc_counter());
-    artifact_match_gate_error(code, artifact_match_result.reason, capture_id, artifact_match_manifest_sha256, &artifact_match_manifest, &artifact_match_result);
+    artifact_match_gate_error(code, artifact_match_result.reason, capture_id, artifact_match_manifest_sha256, &artifact_match_manifest, &artifact_match_result, qpc_epoch, actual_qpc_frequency);
     return 0;
   }
   if (!raw_writer.open(output_path)) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    artifact_match_gate_error("HSS_OUTPUT_OPEN_FAILED", "raw/samples.bin must be new and exclusively creatable", capture_id, artifact_match_manifest_sha256, &artifact_match_manifest, &artifact_match_result);
+    artifact_match_gate_error("HSS_OUTPUT_OPEN_FAILED", "raw/samples.bin must be new and exclusively creatable", capture_id, artifact_match_manifest_sha256, &artifact_match_manifest, &artifact_match_result, qpc_epoch, actual_qpc_frequency);
     return 0;
   }
 
@@ -4216,7 +4273,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     stream_fault(capture_id, "HSS_START_FAILED", "JLINK_HSS_Start failed", qpc_counter());
-    std::cout << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"HSS_START_FAILED\",\"reason\":\"JLINK_HSS_Start failed\",\"hssStartIssued\":true,\"rawOpened\":true,\"rawClosed\":"
+    std::cout << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"HSS_START_FAILED\",\"reason\":\"JLINK_HSS_Start failed\",\"captureId\":\"" << escape(capture_id)
+              << "\",\"qpcEpochCounter\":\"" << qpc_epoch << "\",\"qpcFrequency\":\"" << actual_qpc_frequency
+              << "\",\"hssStartIssued\":true,\"rawOpened\":true,\"rawClosed\":"
               << (raw_closed ? "true" : "false");
     write_artifact_match_evidence(artifact_match_manifest, artifact_match_manifest_sha256, artifact_match_result);
     std::cout << "}";

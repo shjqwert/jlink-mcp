@@ -1,8 +1,30 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { JLinkMcpServer } from "./server";
-import { runApprovalBrokerCli, type R4OperationBinding } from "./approval-broker";
+import { approvalBrokerEndpoint, runApprovalBrokerCli, startApprovalBrokerIpc, type R4OperationBinding } from "./approval-broker";
+import { configureHssProjectPaths } from "./hss/project-paths";
+
+const approvalTestRoot = join(tmpdir(), `server-risk-approval-${process.pid}-${randomUUID()}`);
+const approvalStateRoot = join(approvalTestRoot, "approval-broker");
+let approvalBroker: Awaited<ReturnType<typeof startApprovalBrokerIpc>>;
+
+test.before(async () => {
+  await mkdir(approvalTestRoot, { recursive: true });
+  configureHssProjectPaths(process.cwd(), {
+    storageRoot: join(approvalTestRoot, "storage"),
+    evidenceRoot: join(approvalTestRoot, "evidence"),
+  });
+  approvalBroker = await startApprovalBrokerIpc(approvalBrokerEndpoint(approvalTestRoot, approvalStateRoot), approvalTestRoot, approvalStateRoot, () => true);
+});
+
+test.after(async () => {
+  await approvalBroker.close();
+  await rm(approvalTestRoot, { recursive: true, force: true });
+});
 
 test("CPU tools preserve text semantics and expose the complete structured R3 envelope", async () => {
   const instance = new JLinkMcpServer();
@@ -97,9 +119,9 @@ test("public R4 execution re-reads owner state and rejects physical-generation d
     let executions = 0;
     typed.probe.erase = async () => { executions += 1; return { success: true }; };
     const planned = JSON.parse((await typed.server._registeredTools.erase_plan.handler({})).content[0].text);
-    const token = await approve(planned.challenge.challengeId);
+    await approve(planned.challenge.challengeId);
     generation += 1;
-    const rejected = JSON.parse((await typed.server._registeredTools.erase.handler({ challengeId: planned.challenge.challengeId, approvalToken: token })).content[0].text);
+    const rejected = JSON.parse((await typed.server._registeredTools.erase.handler({ challengeId: planned.challenge.challengeId })).content[0].text);
     assert.equal(rejected.ok, false);
     assert.equal(rejected.error.code, "operation_binding_changed");
     assert.equal(executions, 0);
@@ -127,9 +149,9 @@ test("unverified variable exception exposes a challenge and consumes no Native w
     typed.hssCapture.variableWriteApprovalBinding = async () => binding("variable_write_execute", { writePlanId: "op_fixture" }, generation, true);
     typed.hssCapture.executeR4VariableWrite = async () => { executions += 1; return { success: false, code: "native_r4_unavailable" }; };
     const planned = JSON.parse((await typed.server._registeredTools.variable_write_plan.handler({ target: "Debug_R4", value: 1 })).content[0].text);
-    const token = await approve(planned.data.challenge.challengeId);
+    await approve(planned.data.challenge.challengeId);
     generation += 1;
-    const rejected = JSON.parse((await typed.server._registeredTools.variable_write_execute.handler({ writePlanId: "op_fixture", challengeId: planned.data.challenge.challengeId, approvalToken: token })).content[0].text);
+    const rejected = JSON.parse((await typed.server._registeredTools.variable_write_execute.handler({ writePlanId: "op_fixture", challengeId: planned.data.challenge.challengeId })).content[0].text);
     assert.equal(rejected.ok, false);
     assert.equal(rejected.error.code, "operation_binding_changed");
     assert.equal(executions, 0);
@@ -160,9 +182,9 @@ test("unverified variable exception consumes approval but remains fail-closed wi
       return { success: false, code: "native_r4_unavailable", message: "same-connection Native contract is unavailable" };
     };
     const planned = JSON.parse((await typed.server._registeredTools.variable_write_plan.handler({ target: "Debug_R4", value: 1 })).content[0].text);
-    const token = await approve(planned.data.challenge.challengeId);
-    const first = JSON.parse((await typed.server._registeredTools.variable_write_execute.handler({ writePlanId: "op_fixture", challengeId: planned.data.challenge.challengeId, approvalToken: token })).content[0].text);
-    const replay = JSON.parse((await typed.server._registeredTools.variable_write_execute.handler({ writePlanId: "op_fixture", challengeId: planned.data.challenge.challengeId, approvalToken: token })).content[0].text);
+    await approve(planned.data.challenge.challengeId);
+    const first = JSON.parse((await typed.server._registeredTools.variable_write_execute.handler({ writePlanId: "op_fixture", challengeId: planned.data.challenge.challengeId })).content[0].text);
+    const replay = JSON.parse((await typed.server._registeredTools.variable_write_execute.handler({ writePlanId: "op_fixture", challengeId: planned.data.challenge.challengeId })).content[0].text);
     assert.equal(first.ok, false);
     assert.equal(first.error.code, "native_r4_unavailable");
     assert.equal(replay.error.code, "approval_replayed");
@@ -186,8 +208,10 @@ function binding(tool: R4OperationBinding["tool"], canonicalArgs: Record<string,
   };
 }
 
-async function approve(challengeId: string): Promise<string> {
-  let token = "";
-  assert.equal(await runApprovalBrokerCli([challengeId, "--user-authorized", "true"], process.cwd(), (value) => { token = value; }), 0);
-  return token;
+async function approve(challengeId: string): Promise<void> {
+  assert.equal(await runApprovalBrokerCli([challengeId], approvalTestRoot, approvalStateRoot, {
+    input: { isTTY: true } as NodeJS.ReadStream,
+    output: { isTTY: true, write: () => true } as unknown as NodeJS.WriteStream,
+    question: async () => challengeId,
+  }), 0);
 }

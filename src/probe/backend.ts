@@ -1,7 +1,6 @@
 /**
  * ProbeBackend is the abstraction layer for debug probes.
- * Each probe type (J-Link, OpenOCD, Black Magic Probe, probe-rs)
- * implements this interface. The MCP server calls only these methods.
+ * J-Link implements this generic contract. The MCP server calls only these methods.
  */
 
 // ══════════════════════════════════════════════════════════════════════
@@ -78,7 +77,7 @@ export interface CaptureProbeConfig {
   gdbPort: number;
 }
 
-export type ProbeType = "jlink" | "openocd" | "blackmagic" | "probe-rs";
+export type ProbeType = "jlink";
 
 /**
  * Abstract base for all debug probe backends.
@@ -426,7 +425,7 @@ export abstract class ProbeBackend {
         results.push({ address: `0x${jlinkMatch[1]}`, hex: jlinkMatch[2].trim(), ascii: jlinkMatch[3].trim() });
         continue;
       }
-      // OpenOCD / GDB format: "0xe000ed28: 00 00 00 00 ..."
+      // GDB memory format: "0xe000ed28: 00 00 00 00 ..."
       const ocdMatch = line.match(/^(0x[0-9a-fA-F]+)\s*:\s*(.+?)(?:\s{2,}(.*))?$/);
       if (ocdMatch) {
         results.push({ address: ocdMatch[1], hex: ocdMatch[2].trim(), ascii: (ocdMatch[3] || "").trim() });

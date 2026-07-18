@@ -1,0 +1,918 @@
+{
+  "schema": "p5-hardware-r2-r4-v1",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00",
+  "targetRoot": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+  "commands": [
+    {
+      "command": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink.exe -NoGui 1",
+      "stdin": [
+        "ShowEmuList USB",
+        "exit"
+      ],
+      "cwd": "D:\\AI_Project\\Trunk\\Jlink_mcp"
+    },
+    {
+      "command": "C:\\Program Files\\nodejs\\node.exe D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\standalone.js",
+      "cwd": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+      "env": {
+        "PROBE_TYPE": "jlink",
+        "JLINK_DEVICE": "Z20K146M",
+        "JLINK_INTERFACE": "SWD",
+        "JLINK_SPEED": "4000",
+        "JLINK_SERIAL": "69401227",
+        "JLINK_DLL_PATH": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+        "JLINK_MCP_HSS_HELPER_PATH": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+        "JLINK_MCP_STORAGE_ROOT": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\storage",
+        "JLINK_MCP_EVIDENCE_ROOT": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\evidence"
+      }
+    }
+  ],
+  "forbiddenActions": {
+    "flash": 0,
+    "erase": 0,
+    "reset": 0,
+    "halt": 0,
+    "resume": 0,
+    "r5": 0
+  },
+  "calls": [
+    {
+      "at": "2026-07-17T14:11:56.471Z",
+      "name": "artifact_probe",
+      "arguments": {
+        "artifactFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+        "mapFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifact": {
+          "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+          "format": "elf",
+          "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+          "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "size": 3404434,
+          "supportedOperations": [
+            "symbols",
+            "flash",
+            "verify"
+          ],
+          "mapPath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+          "mapSha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf"
+        },
+        "candidates": [
+          {
+            "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+            "format": "elf",
+            "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+            "generation": "dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6",
+            "size": 3404434,
+            "supportedOperations": [
+              "symbols",
+              "flash",
+              "verify"
+            ]
+          }
+        ],
+        "mapCandidates": [
+          "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-17T14:11:56.492Z",
+      "name": "symbol_search",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "query": "g_hssDbgCounterFocIsr",
+        "limit": 8
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "refs": [
+          {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgCounterFocIsr",
+            "layoutHash": "16ab18bd82b6939ff47f48f44a7690a65b4f7900cf087d024249373899bf2e67"
+          }
+        ]
+      }
+    },
+    {
+      "at": "2026-07-17T14:11:56.513Z",
+      "name": "symbol_resolve",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "selector": "g_hssDbgCounterFocIsr",
+        "type": "uint32"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "symbol": {
+          "ref": {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgCounterFocIsr",
+            "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+          },
+          "rootAddress": 536898348,
+          "memberOffset": 0,
+          "address": 536898348,
+          "type": "uint32",
+          "size": 4,
+          "region": "ram",
+          "hssEligible": true,
+          "source": "iar-map",
+          "confidence": "map"
+        }
+      }
+    },
+    {
+      "at": "2026-07-17T14:11:56.526Z",
+      "name": "hot_variable_add",
+      "arguments": {
+        "ref": {
+          "qualifiedName": "g_hssDbgCounterFocIsr",
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+        }
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "ref": {
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "qualifiedName": "g_hssDbgCounterFocIsr",
+          "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+        },
+        "logicalIdentity": "g_hssDbgCounterFocIsr",
+        "validatedAt": "2026-07-17T14:11:56.526Z"
+      }
+    },
+    {
+      "at": "2026-07-17T14:11:56.537Z",
+      "name": "symbol_search",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "query": "g_hssDbgWriteProbe",
+        "limit": 8
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "refs": [
+          {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgWriteProbe",
+            "layoutHash": "2cc8c79393046db2650372060bc196d3e87151ca86658bfa0d0376343cf57748"
+          }
+        ]
+      }
+    },
+    {
+      "at": "2026-07-17T14:11:56.559Z",
+      "name": "symbol_resolve",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "selector": "g_hssDbgWriteProbe",
+        "type": "uint32"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "symbol": {
+          "ref": {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgWriteProbe",
+            "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+          },
+          "rootAddress": 536872964,
+          "memberOffset": 0,
+          "address": 536872964,
+          "type": "uint32",
+          "size": 4,
+          "region": "ram",
+          "hssEligible": true,
+          "source": "iar-map",
+          "confidence": "map"
+        }
+      }
+    },
+    {
+      "at": "2026-07-17T14:11:56.576Z",
+      "name": "hot_variable_add",
+      "arguments": {
+        "ref": {
+          "qualifiedName": "g_hssDbgWriteProbe",
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+        }
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "ref": {
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "qualifiedName": "g_hssDbgWriteProbe",
+          "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+        },
+        "logicalIdentity": "g_hssDbgWriteProbe",
+        "validatedAt": "2026-07-17T14:11:56.576Z"
+      }
+    },
+    {
+      "at": "2026-07-17T14:12:03.318Z",
+      "name": "hss_capability_probe",
+      "arguments": {
+        "projectRoot": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+        "targetId": "Z20K146M",
+        "device": "Z20K146M",
+        "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+        "interface": "SWD",
+        "speedKhz": 4000,
+        "serial": "69401227",
+        "script": {
+          "mode": "none"
+        }
+      },
+      "isError": false,
+      "payload": {
+        "ok": true,
+        "operation": "hss_capability_probe",
+        "data": {
+          "target": {
+            "targetId": "Z20K146M",
+            "source": "explicit",
+            "confidence": "explicit"
+          },
+          "jlink": {
+            "installDir": "C:\\Program Files\\SEGGER\\JLink_V884",
+            "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+            "dllExists": true,
+            "dllVersion": 88400,
+            "device": "Z20K146M",
+            "requestedDevice": "Z20K146M",
+            "resolvedDevice": "Z20K146M",
+            "targetId": "Z20K146M",
+            "targetSource": "explicit",
+            "targetConfidence": "explicit",
+            "interface": "SWD",
+            "speedKhz": 4000,
+            "probeSerial": "69401227"
+          },
+          "hss": {
+            "availability": "available",
+            "exports": {
+              "JLINK_HSS_GetCaps": true,
+              "JLINK_HSS_Start": true,
+              "JLINK_HSS_Read": true,
+              "JLINK_HSS_Stop": true
+            },
+            "exportsFound": true,
+            "exportsValidated": true,
+            "getCapsAllowed": true,
+            "getCapsOk": true,
+            "maxBlocks": 10,
+            "maxFreqHz": 1000,
+            "targetWasHalted": false,
+            "targetWasHaltedRaw": 0,
+            "getCapsValidated": true,
+            "runtimeIdentityValidated": true,
+            "startReadStopValidated": true,
+            "startReadStopAttemptAllowed": true,
+            "startReadStopReady": true
+          },
+          "helper": {
+            "path": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+            "exists": true,
+            "version": "1",
+            "sha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91"
+          },
+          "adapter": {
+            "path": "D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\hss-dll\\hss-dll-adapter.js",
+            "version": "1",
+            "sha256": "ad5f7f3c5b6a1cc840e3a0c4adc1f649ef107e96d1dd4c22d1f7a33e58d61f1e"
+          },
+          "runtimeIdentity": {
+            "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+            "dllSha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+            "dllVersion": 88400,
+            "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+            "helperVersion": "1",
+            "helperProtocolVersion": 1,
+            "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91",
+            "adapterPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\hss-dll\\hss-dll-adapter.js",
+            "adapterVersion": "1",
+            "adapterSha256": "ad5f7f3c5b6a1cc840e3a0c4adc1f649ef107e96d1dd4c22d1f7a33e58d61f1e",
+            "jlinkScriptMode": "none",
+            "jlinkScriptApprovalSha256": "7f517f97e00a688b0b402e4005866127e5c928bf44a94ca53477ac34e24b5ef1",
+            "sha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d",
+            "validated": true
+          },
+          "project": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+          "safety": {
+            "targetReset": false,
+            "targetWritten": false,
+            "flashIssued": false,
+            "resetIssued": false,
+            "haltIssued": false,
+            "resumeIssued": false
+          },
+          "preflight": {
+            "status": "candidate",
+            "hssStatus": "candidate",
+            "reason": "HSS DLL candidate found; GetCaps and lifecycle validation remain required",
+            "candidateApi": {
+              "notice": "HSS_PUBLIC_PROTOTYPE_CANDIDATE_USED_FOR_EXPERIMENT",
+              "candidateSource": "public header evidence, not official local SDK",
+              "functionNames": [
+                "JLINK_HSS_GetCaps",
+                "JLINK_HSS_Start",
+                "JLINK_HSS_Read",
+                "JLINK_HSS_Stop"
+              ],
+              "structs": {
+                "HssMemBlockDesc": {
+                  "sizeBytes": 16,
+                  "fields": [
+                    {
+                      "name": "Addr",
+                      "type": "uint32",
+                      "offsetBytes": 0
+                    },
+                    {
+                      "name": "NumBytes",
+                      "type": "uint32",
+                      "offsetBytes": 4
+                    },
+                    {
+                      "name": "Flags",
+                      "type": "uint32",
+                      "offsetBytes": 8
+                    },
+                    {
+                      "name": "Dummy",
+                      "type": "uint32",
+                      "offsetBytes": 12
+                    }
+                  ]
+                },
+                "HssCaps": {
+                  "sizeBytes": 32,
+                  "fields": [
+                    {
+                      "name": "MaxBlocks",
+                      "type": "uint32",
+                      "offsetBytes": 0
+                    },
+                    {
+                      "name": "MaxFreq",
+                      "type": "uint32",
+                      "offsetBytes": 4
+                    },
+                    {
+                      "name": "Caps",
+                      "type": "uint32",
+                      "offsetBytes": 8
+                    },
+                    {
+                      "name": "aDummy[0]",
+                      "type": "uint32",
+                      "offsetBytes": 12
+                    },
+                    {
+                      "name": "aDummy[1]",
+                      "type": "uint32",
+                      "offsetBytes": 16
+                    },
+                    {
+                      "name": "aDummy[2]",
+                      "type": "uint32",
+                      "offsetBytes": 20
+                    },
+                    {
+                      "name": "aDummy[3]",
+                      "type": "uint32",
+                      "offsetBytes": 24
+                    },
+                    {
+                      "name": "aDummy[4]",
+                      "type": "uint32",
+                      "offsetBytes": 28
+                    }
+                  ]
+                }
+              },
+              "callingConventionCandidate": "Windows x64 default ABI; unverified candidate",
+              "officialSdkHeaderFound": false,
+              "publicPrototypeCandidate": true,
+              "riskLevel": "experimental",
+              "productionReady": false
+            },
+            "discovery": {
+              "searchPaths": [
+                "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+                "C:\\Program Files\\SEGGER\\JLink\\JLink_x64.dll",
+                "C:\\Program Files (x86)\\SEGGER\\JLink_V644c\\JLink_x64.dll",
+                "C:\\Program Files\\Eclipse Adoptium\\jdk-17.0.18.8-hotspot\\bin\\JLink_x64.dll",
+                "C:\\Program Files (x86)\\SEGGER\\JLink\\JLink_x64.dll"
+              ],
+              "selectedDllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+              "resolutionSource": "explicit",
+              "dllExists": true,
+              "runtimePlatform": "win32",
+              "runtimeArchitecture": "x64",
+              "architecture": "x64",
+              "sha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+              "exports": {
+                "JLINK_HSS_GetCaps": true,
+                "JLINK_HSS_Start": true,
+                "JLINK_HSS_Read": true,
+                "JLINK_HSS_Stop": true
+              },
+              "exportsFound": true,
+              "identityValidated": true,
+              "availability": "candidate",
+              "officialSdkHeaderFound": false,
+              "publicPrototypeCandidate": true
+            },
+            "runtimeIdentity": {
+              "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+              "dllSha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+              "dllVersion": "88400",
+              "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+              "helperVersion": "1",
+              "helperProtocolVersion": 1,
+              "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91",
+              "adapterPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\hss-dll\\hss-dll-adapter.js",
+              "adapterVersion": "1",
+              "adapterSha256": "ad5f7f3c5b6a1cc840e3a0c4adc1f649ef107e96d1dd4c22d1f7a33e58d61f1e",
+              "jlinkScriptMode": "none",
+              "jlinkScriptApprovalSha256": "7f517f97e00a688b0b402e4005866127e5c928bf44a94ca53477ac34e24b5ef1",
+              "sha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d",
+              "validated": true
+            },
+            "getcapsAllowed": true,
+            "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+            "helperExists": true,
+            "benchmarkReady": false,
+            "jscopeUsed": false,
+            "scriptIdentity": {
+              "mode": "none",
+              "approvalSha256": "7f517f97e00a688b0b402e4005866127e5c928bf44a94ca53477ac34e24b5ef1",
+              "approvalSource": "trust-profile",
+              "validated": true
+            },
+            "helperPreflight": {
+              "helperExitCode": 0,
+              "status": "ok",
+              "dll": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+              "exports": {
+                "JLINK_HSS_GetCaps": true,
+                "JLINK_HSS_Start": true,
+                "JLINK_HSS_Read": true,
+                "JLINK_HSS_Stop": true
+              },
+              "exportsFound": true,
+              "dllVersion": 88400,
+              "helperVersion": "1",
+              "helperProtocolVersion": 1,
+              "baseExports": {
+                "JLINKARM_Open": true,
+                "JLINKARM_Close": true,
+                "JLINKARM_ExecCommand": true,
+                "JLINKARM_TIF_Select": true,
+                "JLINKARM_SetSpeed": true,
+                "JLINKARM_Connect": true
+              },
+              "baseApiCandidate": "AUTHORIZED_UNVERIFIED_BASE_API_CANDIDATE",
+              "candidateApi": "HSS_PUBLIC_PROTOTYPE_CANDIDATE_USED_FOR_EXPERIMENT"
+            },
+            "helperVersion": {
+              "helperExitCode": 0,
+              "status": "ok",
+              "helperVersion": "1",
+              "helperProtocolVersion": 1
+            },
+            "exportsValidated": true,
+            "safetyStatus": "not_evaluated"
+          },
+          "getCaps": {
+            "helperExitCode": 0,
+            "status": "ok",
+            "api": "JLINK_HSS_GetCaps",
+            "dll": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+            "dllVersion": 88400,
+            "returnCode": 0,
+            "helperVersion": "1",
+            "helperProtocolVersion": 1,
+            "device": "Z20K146M",
+            "interface": "SWD",
+            "speedKhz": 4000,
+            "connectReturnCode": 0,
+            "execOutput": "",
+            "jlinkScriptMode": "none",
+            "jlinkScriptFile": "",
+            "jlinkScriptSha256": "",
+            "jlinkScriptReturnCode": 0,
+            "jlinkScriptExecOutput": "",
+            "caps": {
+              "maxBlocks": 10,
+              "maxFreq": 1000,
+              "caps": 2,
+              "raw": [
+                10,
+                1000,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            },
+            "error": null,
+            "runtimeIdentity": {
+              "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+              "dllSha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+              "dllVersion": "88400",
+              "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+              "helperVersion": "1",
+              "helperProtocolVersion": 1,
+              "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91",
+              "adapterPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\hss-dll\\hss-dll-adapter.js",
+              "adapterVersion": "1",
+              "adapterSha256": "ad5f7f3c5b6a1cc840e3a0c4adc1f649ef107e96d1dd4c22d1f7a33e58d61f1e",
+              "jlinkScriptMode": "none",
+              "jlinkScriptApprovalSha256": "7f517f97e00a688b0b402e4005866127e5c928bf44a94ca53477ac34e24b5ef1",
+              "sha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d",
+              "validated": true
+            }
+          },
+          "targetState": {
+            "helperExitCode": 0,
+            "status": "ok",
+            "operation": "target-state",
+            "dllVersion": 88400,
+            "helperVersion": "1",
+            "helperProtocolVersion": 1,
+            "jlinkScriptMode": "none",
+            "jlinkScriptFile": "",
+            "jlinkScriptSha256": "",
+            "jlinkScriptReturnCode": 0,
+            "qpcFrequency": "10000000",
+            "operationBeforeQpcCounter": "908088723373",
+            "operationAfterQpcCounter": "908088738606",
+            "targetWasHalted": false,
+            "targetWasHaltedRaw": 0,
+            "beforeState": "running",
+            "afterState": "running",
+            "targetReset": false,
+            "resetIssued": false,
+            "haltIssued": false,
+            "resumeIssued": false,
+            "targetWritten": false,
+            "flashIssued": false,
+            "runtimeIdentity": {
+              "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+              "dllSha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+              "dllVersion": "88400",
+              "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+              "helperVersion": "1",
+              "helperProtocolVersion": 1,
+              "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91",
+              "adapterPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\hss-dll\\hss-dll-adapter.js",
+              "adapterVersion": "1",
+              "adapterSha256": "ad5f7f3c5b6a1cc840e3a0c4adc1f649ef107e96d1dd4c22d1f7a33e58d61f1e",
+              "jlinkScriptMode": "none",
+              "jlinkScriptApprovalSha256": "7f517f97e00a688b0b402e4005866127e5c928bf44a94ca53477ac34e24b5ef1",
+              "sha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d",
+              "validated": true
+            }
+          }
+        },
+        "risk": {
+          "level": "R0",
+          "requiresUserApproval": false
+        },
+        "backend": {
+          "selected": "jlink-hss",
+          "fallbackFrom": null,
+          "reason": null
+        },
+        "artifacts": [],
+        "warnings": [],
+        "message": "completed"
+      }
+    },
+    {
+      "at": "2026-07-17T14:12:10.488Z",
+      "name": "hss_capture_plan",
+      "arguments": {
+        "projectRoot": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+        "targetId": "Z20K146M",
+        "device": "Z20K146M",
+        "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+        "interface": "SWD",
+        "speedKhz": 4000,
+        "serial": "69401227",
+        "script": {
+          "mode": "none"
+        },
+        "artifactFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+        "mapFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+        "variableRefs": [
+          {
+            "source": "hot_variable",
+            "ref": {
+              "qualifiedName": "g_hssDbgCounterFocIsr",
+              "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+              "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+            }
+          },
+          {
+            "source": "hot_variable",
+            "ref": {
+              "qualifiedName": "g_hssDbgWriteProbe",
+              "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+              "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+            }
+          }
+        ],
+        "requestedRateHz": 100,
+        "durationSec": 10,
+        "nonvolatileRanges": [
+          {
+            "start": 0,
+            "end": 536870912
+          }
+        ],
+        "ramRanges": [
+          {
+            "start": 536870912,
+            "end": 1073741824
+          }
+        ],
+        "resetBeforeCapture": false,
+        "resumeBeforeStart": false,
+        "sessionName": "p5-hardware-r2-r4-v2"
+      },
+      "isError": false,
+      "payload": {
+        "ok": true,
+        "operation": "hss_capture_plan",
+        "data": {
+          "planId": "dc20920f-5428-4568-857a-5baf91a567ff",
+          "backend": "jlink-hss",
+          "projectRoot": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+          "storageRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\storage",
+          "evidenceRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\evidence",
+          "target": {
+            "targetId": "Z20K146M",
+            "source": "explicit",
+            "confidence": "explicit"
+          },
+          "artifact": {
+            "file": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+            "mapFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+            "mapSha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf",
+            "resolver": "iar-map",
+            "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+            "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "format": "elf",
+            "size": 3404434,
+            "supportedOperations": [
+              "symbols",
+              "flash",
+              "verify"
+            ]
+          },
+          "symbols": [
+            {
+              "name": "g_hssDbgCounterFocIsr",
+              "type": "uint32",
+              "address": "0x20006b2c",
+              "size": 4,
+              "source": "iar-map",
+              "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+              "qualifiedName": "g_hssDbgCounterFocIsr",
+              "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4",
+              "region": "ram",
+              "confidence": "map",
+              "rootAddress": "0x20006b2c",
+              "memberOffset": 0
+            },
+            {
+              "name": "g_hssDbgWriteProbe",
+              "type": "uint32",
+              "address": "0x20000804",
+              "size": 4,
+              "source": "iar-map",
+              "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+              "qualifiedName": "g_hssDbgWriteProbe",
+              "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328",
+              "region": "ram",
+              "confidence": "map",
+              "rootAddress": "0x20000804",
+              "memberOffset": 0
+            }
+          ],
+          "sampling": {
+            "requestedRateHz": 100,
+            "durationSec": 10,
+            "estimatedSamples": 1000,
+            "estimatedBytes": 32000,
+            "segmentSizeMb": 64
+          },
+          "output": {
+            "captureId": "67b996bf-6956-471a-8909-af1933bf8b59",
+            "packageDir": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\storage\\captures\\67b996bf-6956-471a-8909-af1933bf8b59.jcap",
+            "sessionDir": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\evidence\\sessions\\67b996bf-6956-471a-8909-af1933bf8b59",
+            "outputDir": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\storage\\captures\\67b996bf-6956-471a-8909-af1933bf8b59.jcap",
+            "metadataFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\evidence\\sessions\\67b996bf-6956-471a-8909-af1933bf8b59\\session.json",
+            "firstSegmentFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\storage\\captures\\67b996bf-6956-471a-8909-af1933bf8b59.jcap\\raw\\samples.bin",
+            "planFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\evidence\\sessions\\67b996bf-6956-471a-8909-af1933bf8b59\\plan.json"
+          },
+          "artifactMatch": {
+            "nonvolatileRanges": [
+              {
+                "start": 0,
+                "end": 536870912
+              }
+            ],
+            "ramRanges": [
+              {
+                "start": 536870912,
+                "end": 1073741824
+              }
+            ]
+          },
+          "safety": {
+            "targetReset": false,
+            "targetWritten": false,
+            "flashIssued": false,
+            "resetIssued": false,
+            "haltIssued": false,
+            "resumeIssued": false
+          },
+          "startReady": true,
+          "readMode": "periodic",
+          "resumeBeforeStart": false,
+          "resetBeforeCapture": false,
+          "stabilityPolicy": {
+            "minimumRecoveryMs": 1000,
+            "timeoutMs": 10000,
+            "pollIntervalMs": 100,
+            "requiredConsecutiveRunningChecks": 3
+          },
+          "scriptIdentity": {
+            "mode": "none",
+            "approvalSha256": "7f517f97e00a688b0b402e4005866127e5c928bf44a94ca53477ac34e24b5ef1",
+            "approvalSource": "trust-profile",
+            "validated": true
+          },
+          "runtimeIdentity": {
+            "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+            "dllSha256": "1d53e8ba1ce09fd8719075bd24ba88b7e92192143e521d83a096991f4d6ee875",
+            "dllVersion": 88400,
+            "helperPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+            "helperVersion": "1",
+            "helperProtocolVersion": 1,
+            "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91",
+            "adapterPath": "D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\hss-dll\\hss-dll-adapter.js",
+            "adapterVersion": "1",
+            "adapterSha256": "ad5f7f3c5b6a1cc840e3a0c4adc1f649ef107e96d1dd4c22d1f7a33e58d61f1e",
+            "jlinkScriptMode": "none",
+            "jlinkScriptApprovalSha256": "7f517f97e00a688b0b402e4005866127e5c928bf44a94ca53477ac34e24b5ef1",
+            "sha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d",
+            "validated": true
+          }
+        },
+        "risk": {
+          "level": "R1",
+          "requiresUserApproval": false
+        },
+        "backend": {
+          "selected": "jlink-hss",
+          "fallbackFrom": null,
+          "reason": null
+        },
+        "artifacts": [
+          "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-11-54-559+08-00\\storage\\captures\\67b996bf-6956-471a-8909-af1933bf8b59.jcap"
+        ],
+        "warnings": [],
+        "message": "completed"
+      }
+    },
+    {
+      "at": "2026-07-17T14:12:17.608Z",
+      "name": "hss_capture_start",
+      "arguments": {
+        "projectRoot": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+        "targetId": "Z20K146M",
+        "device": "Z20K146M",
+        "dllPath": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+        "interface": "SWD",
+        "speedKhz": 4000,
+        "serial": "69401227",
+        "script": {
+          "mode": "none"
+        },
+        "planId": "dc20920f-5428-4568-857a-5baf91a567ff"
+      },
+      "isError": false,
+      "payload": {
+        "ok": false,
+        "operation": "hss_capture_start",
+        "data": null,
+        "risk": {
+          "level": "R1",
+          "requiresUserApproval": false
+        },
+        "backend": {
+          "selected": null,
+          "fallbackFrom": null,
+          "reason": "helper QPC timebase must contain decimal u64 qpcEpochCounter/qpcFrequency"
+        },
+        "artifacts": [],
+        "warnings": [],
+        "message": "failed",
+        "error": {
+          "code": "HSS_HELPER_BAD_JSON",
+          "message": "helper QPC timebase must contain decimal u64 qpcEpochCounter/qpcFrequency",
+          "details": {}
+        }
+      }
+    }
+  ],
+  "manifestBefore": {
+    "files": 1813,
+    "digest": "a366f917c6a2f46da86b5cc4e04d933ffdca4aaf69c4ced8e8817cfeeb911b93"
+  },
+  "probeEnumeration": {
+    "serials": [
+      "69401227"
+    ],
+    "stdoutSha256": "e8997349fe978e37407ebf3e686697d09bd1a626c61245b7756eb19653528cc4",
+    "stdout": "SEGGER J-Link Commander V8.84 (Compiled Nov  5 2025 18:39:12)\r\nDLL version V8.84, compiled Nov  5 2025 18:38:15\r\n\r\nConnecting to J-Link via USB...O.K.\r\nFirmware: J-Link V9 compiled May  7 2021 16:26:12\r\nHardware version: V9.40\r\nJ-Link uptime (since boot): N/A (Not supported by this model)\r\nS/N: 69401227\r\nLicense(s): RDI, GDB, FlashDL, FlashBP, JFlash\r\nVTref=4.714V\r\n\r\n\r\nType \"connect\" to establish a target connection, '?' for help\r\nJ-Link>J-Link[0]: Connection: USB, Serial number: 69401227, ProductName: J-Link CE, Nickname: <not set>\r\nJ-Link>"
+  },
+  "artifact": {
+    "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+    "format": "elf",
+    "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+    "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+    "size": 3404434,
+    "supportedOperations": [
+      "symbols",
+      "flash",
+      "verify"
+    ],
+    "mapPath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+    "mapSha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf"
+  },
+  "variableRefs": [
+    {
+      "source": "hot_variable",
+      "ref": {
+        "qualifiedName": "g_hssDbgCounterFocIsr",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+      }
+    },
+    {
+      "source": "hot_variable",
+      "ref": {
+        "qualifiedName": "g_hssDbgWriteProbe",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+      }
+    }
+  ],
+  "trustRefresh": {
+    "authorizedChanges": [],
+    "alreadyCurrent": true,
+    "before": {
+      "path": "C:\\Users\\SHJ\\AppData\\Local\\jlink-mcp\\trust\\projects\\2b10ed8984a24df7f04ba9298f5c8e13c2d9256b2fff676a83b3cddd6fccd9c6\\trust-profile.json",
+      "fileSha256": "ef7cc209239ce9a30bb18dbaff8dd2a63917c17b657c2d909a58ccdd66f4b2d4",
+      "bytes": 1385,
+      "profileSha256": "5a4781a0d1450446133c93e5d9e480e9f80fca1a7dac4d909e43986bca1d341c",
+      "runtimeSha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d",
+      "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91"
+    },
+    "after": {
+      "path": "C:\\Users\\SHJ\\AppData\\Local\\jlink-mcp\\trust\\projects\\2b10ed8984a24df7f04ba9298f5c8e13c2d9256b2fff676a83b3cddd6fccd9c6\\trust-profile.json",
+      "fileSha256": "ef7cc209239ce9a30bb18dbaff8dd2a63917c17b657c2d909a58ccdd66f4b2d4",
+      "bytes": 1385,
+      "profileSha256": "5a4781a0d1450446133c93e5d9e480e9f80fca1a7dac4d909e43986bca1d341c",
+      "runtimeSha256": "980b022d5300dd3267cd3f874679b9d9356f28d230a3181b614c154eb989796d",
+      "helperSha256": "b1626febb191ab16a9fee1d5293b3fea812da3c0f4b91fda5147acf4d1268b91"
+    }
+  },
+  "failure": {
+    "message": "Expected values to be strictly equal:\n\u001b[32mactual\u001b[39m \u001b[31mexpected\u001b[39m\n\n\u001b[39m'\u001b[39m\u001b[32mu\u001b[39m\u001b[32mn\u001b[39m\u001b[32md\u001b[39m\u001b[32me\u001b[39m\u001b[32mf\u001b[39m\u001b[31ms\u001b[39m\u001b[31mt\u001b[39m\u001b[31mr\u001b[39m\u001b[39mi\u001b[39m\u001b[39mn\u001b[39m\u001b[32me\u001b[39m\u001b[32md\u001b[39m\u001b[31mg\u001b[39m\u001b[39m'\u001b[39m\n",
+    "stack": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\u001b[32mactual\u001b[39m \u001b[31mexpected\u001b[39m\n\n\u001b[39m'\u001b[39m\u001b[32mu\u001b[39m\u001b[32mn\u001b[39m\u001b[32md\u001b[39m\u001b[32me\u001b[39m\u001b[32mf\u001b[39m\u001b[31ms\u001b[39m\u001b[31mt\u001b[39m\u001b[31mr\u001b[39m\u001b[39mi\u001b[39m\u001b[39mn\u001b[39m\u001b[32me\u001b[39m\u001b[32md\u001b[39m\u001b[31mg\u001b[39m\u001b[39m'\u001b[39m\n\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:167:10"
+  }
+}

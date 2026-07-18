@@ -4,12 +4,11 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
 import {
-  CaptureSymbol,
-  MAX_CAPTURE_SYMBOLS,
-  ProjectControlConfig,
-  ScalarType,
+  MAX_HSS_SYMBOLS,
   projectControlConfigSchema,
-} from "../mcp/capture-contract";
+  type HssScalarType,
+  type ProjectControlConfig,
+} from "../mcp/hss/hss-contract";
 
 const execFileAsync = promisify(execFile);
 const selectorPattern = /^(?:[A-Za-z0-9_./\\ -]+::)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
@@ -35,10 +34,16 @@ export interface FlashSection extends ElfSection {
 export interface ElfResolution {
   elfPath: string;
   elfSha256: string;
-  symbols: CaptureSymbol[];
+  symbols: ElfResolvedSymbol[];
   sections: ElfSection[];
   ramRanges: Array<{ start: number; end: number }>;
   flashSections: FlashSection[];
+}
+
+export interface ElfResolvedSymbol extends RequestedCaptureSymbol {
+  address: number;
+  size: number;
+  type: HssScalarType;
 }
 
 export interface LoadedProjectConfig {
@@ -65,7 +70,7 @@ export function parseGdbSections(output: string): ElfSection[] {
   return sections;
 }
 
-function scalarType(typeText: string, size: number): ScalarType | null {
+function scalarType(typeText: string, size: number): HssScalarType | null {
   const type = typeText
     .replace(/^type\s*=\s*/i, "")
     .replace(/\b(const|volatile|restrict|__attribute__\s*\(\([^)]*\)\))\b/g, "")
@@ -81,9 +86,9 @@ function scalarType(typeText: string, size: number): ScalarType | null {
   return null;
 }
 
-export function parseGdbSymbolOutput(output: string, requested: RequestedCaptureSymbol[], sections: ElfSection[]): CaptureSymbol[] {
+export function parseGdbSymbolOutput(output: string, requested: RequestedCaptureSymbol[], sections: ElfSection[]): ElfResolvedSymbol[] {
   const errors: string[] = [];
-  const symbols: CaptureSymbol[] = [];
+  const symbols: ElfResolvedSymbol[] = [];
   for (let index = 0; index < requested.length; index += 1) {
     const block = output.match(new RegExp(`__JL_BEGIN_${index}__([\\s\\S]*?)__JL_END_${index}__`))?.[1] ?? "";
     const rootBlock = output.match(new RegExp(`__JL_ROOT_BEGIN_${index}__([\\s\\S]*?)__JL_ROOT_END_${index}__`))?.[1] ?? "";
@@ -194,7 +199,7 @@ export function parseElfFlashSegments(data: Buffer, ramRanges: Array<{ start: nu
 
 export async function resolveElfSymbols(gdbPath: string, elfFile: string, requested: RequestedCaptureSymbol[]): Promise<ElfResolution> {
   if (!isAbsolute(elfFile)) throw new Error("elfFile must be an absolute path");
-  if (requested.length < 1 || requested.length > MAX_CAPTURE_SYMBOLS + 4) throw new Error(`ELF resolution accepts at most ${MAX_CAPTURE_SYMBOLS} capture symbols plus four control selectors`);
+  if (requested.length < 1 || requested.length > MAX_HSS_SYMBOLS + 4) throw new Error(`ELF resolution accepts at most ${MAX_HSS_SYMBOLS} capture symbols plus four control selectors`);
   for (const symbol of requested) validateSelector(symbol.name);
   const elfPath = await realpath(elfFile);
   if (!(await stat(elfPath)).isFile()) throw new Error("elfFile must select a regular file");

@@ -5,7 +5,6 @@ import { ProbeBackend } from "../probe/backend";
 import { createProbeBackend, ProbeFactoryConfig } from "../probe/factory";
 import { GDBClient } from "../gdb/gdb-client";
 import { RTTClient, ParsedLogLine } from "../rtt/rtt-client";
-import { TelnetProxy } from "../telnet/telnet-proxy";
 import { ProcessManager } from "../utils/process-manager";
 import { log } from "../utils/logger";
 import { HssCaptureService } from "./hss/hss-capture-service";
@@ -14,7 +13,6 @@ import { JcapBoundsError, JcapCaptureNotFoundError, JcapV0QueryService } from ".
 import type { HssVariableWritePlanInput } from "./hss/hss-write-plan";
 import type { HssVariableWriteExecuteInput } from "./hss/hss-write-execute";
 import { rttChannelListTool, rttChannelReadTool } from "./rtt-channel/rtt-channel-tools";
-import { traceagentDecodeStream } from "./rtt-protocols/traceagent-tools";
 import { canonicalR4Args, erasePlan, executeR4Operation, flashPlan, gdbCommandPlan, probeCommandPlan, unverifiedVariableWritePlan, type R4PlanInput } from "./risk-operations";
 import type { R4ExecuteTool } from "./approval-broker";
 import { ANALYSIS_PROFILES, DISCOVERY_CATALOG, discoveryToolConfig, OFFLINE_JCAP_PROMPT } from "./discovery";
@@ -31,11 +29,10 @@ export class JLinkMcpServer {
   private probe: ProbeBackend;
   private gdb: GDBClient;
   private rttClient: RTTClient;
-  private telnetProxy: TelnetProxy;
   private jcapCapture: JcapV0QueryService;
   private hssCapture: HssCaptureService;
 
-  constructor(probeConfig?: ProbeFactoryConfig, rttPort?: number, telnetConfig?: { listenPort?: number; sourceHost?: string; sourcePort?: number }, gdbPath?: string, options: JLinkMcpServerOptions = {}) {
+  constructor(probeConfig?: ProbeFactoryConfig, rttPort?: number, gdbPath?: string, options: JLinkMcpServerOptions = {}) {
     this.processManager = new ProcessManager();
     this.probe = createProbeBackend(
       probeConfig || { type: "jlink" },
@@ -48,12 +45,6 @@ export class JLinkMcpServer {
     this.jcapCapture = new JcapV0QueryService(hssProjectPaths(options.cwd).capturesDir);
     const effectiveRttPort = rttPort ?? this.probe.getRTTPort();
     this.rttClient = new RTTClient("localhost", effectiveRttPort > 0 ? effectiveRttPort : 19021);
-    this.telnetProxy = new TelnetProxy(
-      telnetConfig?.listenPort ?? 19400,
-      telnetConfig?.sourceHost ?? "localhost",
-      telnetConfig?.sourcePort ?? (effectiveRttPort > 0 ? effectiveRttPort : 19021)
-    );
-
     this.server = new McpServer({
       name: "jlink-mcp",
       version: "0.3.2",
@@ -386,20 +377,19 @@ export class JLinkMcpServer {
         filePath: z.string().describe("Path to firmware file (.hex, .bin, .elf)"),
         baseAddress: z.string().optional().describe("Base address for .bin files (hex)"),
         challengeId: z.string().uuid(),
-        approvalToken: z.string().min(1),
       },
-      async ({ filePath, baseAddress, challengeId, approvalToken }) => {
+      async ({ filePath, baseAddress, challengeId }) => {
         const g = this.requireDevice(); if (g) return g;
         const addr = baseAddress === undefined ? undefined : this.parseBaseAddress(baseAddress);
-        return this.r4ExecuteResponse("flash", { filePath, ...(addr !== undefined ? { baseAddress: addr } : {}) }, challengeId, approvalToken, () => probe.flash(filePath, addr));
+        return this.r4ExecuteResponse("flash", { filePath, ...(addr !== undefined ? { baseAddress: addr } : {}) }, challengeId, () => probe.flash(filePath, addr));
       }
     );
 
     this.discoveredTool("erase_plan", {}, async () => this.r4PlanResponse("erase", {}));
-    this.discoveredTool("erase", { challengeId: z.string().uuid(), approvalToken: z.string().min(1) },
-      async ({ challengeId, approvalToken }) => {
+    this.discoveredTool("erase", { challengeId: z.string().uuid() },
+      async ({ challengeId }) => {
         const g = this.requireDevice(); if (g) return g;
-        return this.r4ExecuteResponse("erase", {}, challengeId, approvalToken, () => probe.erase());
+        return this.r4ExecuteResponse("erase", {}, challengeId, () => probe.erase());
       }
     );
 
@@ -415,9 +405,9 @@ export class JLinkMcpServer {
       async () => { const g = this.requireDevice(); if (g) return g; this.rttClient.disconnect(); probe.rttConnected = false; const r = probe.stopGDBServer(); return { content: [{ type: "text", text: r.message }] }; }
     );
 
-    this.server.tool("gdb_server_status", "Get GDB server, RTT, and telnet proxy status", {},
+    this.server.tool("gdb_server_status", "Get GDB server and RTT status", {},
       async () => {
-        const status = { probeState: probe.getStatus(), rtt: this.rttClient.getStats(), telnetProxy: this.telnetProxy.getStatus() };
+        const status = { probeState: probe.getStatus(), rtt: this.rttClient.getStats() };
         return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }] };
       }
     );
@@ -462,11 +452,10 @@ export class JLinkMcpServer {
         command: z.string().describe("GDB command to execute"),
         timeout: z.number().optional().describe("Timeout in ms for run commands (default 15000)"),
         challengeId: z.string().uuid(),
-        approvalToken: z.string().min(1),
       },
-      async ({ command, timeout, challengeId, approvalToken }) => {
+      async ({ command, timeout, challengeId }) => {
         const effectiveTimeout = timeout ?? 15000;
-        return this.r4ExecuteResponse("gdb_command", { command, timeout: effectiveTimeout }, challengeId, approvalToken, () => this.gdb.command(command, effectiveTimeout));
+        return this.r4ExecuteResponse("gdb_command", { command, timeout: effectiveTimeout }, challengeId, () => this.gdb.command(command, effectiveTimeout));
       }
     );
 
@@ -487,13 +476,13 @@ export class JLinkMcpServer {
 
     this.server.tool(
       "gdb_load",
-      "Load an ELF file into GDB for symbols only. Flashing must use flash_plan followed by flash with a trusted-local approval token.",
+      "Load an ELF file into GDB for symbols only. Flashing must use flash_plan, one protected local CLI approval, then flash.",
       {
         elfFile: z.string().describe("Path to .elf file with debug symbols"),
         flash: z.boolean().optional().describe("Deprecated: flashing through gdb_load is rejected; use flash_plan then flash"),
       },
       async ({ elfFile, flash }) => {
-        if (flash) return { content: [{ type: "text", text: "gdb_load never flashes. Use flash_plan followed by flash with the exact trusted-local approval token." }] };
+        if (flash) return { content: [{ type: "text", text: "gdb_load never flashes. Use flash_plan, approve the exact challenge once in the protected local CLI, then call flash." }] };
         const loadSymbols = await this.gdb.loadSymbols(elfFile);
         return { content: [{ type: "text", text: `Symbols loaded: ${loadSymbols.output}\n\nBacktraces and variable inspection will now show source file:line info.` }] };
       }
@@ -577,27 +566,6 @@ export class JLinkMcpServer {
     );
 
     // ═══════════════════════════════════════════════════════════════
-    // TELNET PROXY
-    // ═══════════════════════════════════════════════════════════════
-
-    this.server.tool("telnet_proxy_start", "Start TCP proxy for Trice/Pigweed detokenizer", {},
-      async () => { const r = await this.telnetProxy.start(); return { content: [{ type: "text", text: r.message }] }; }
-    );
-    this.server.tool("telnet_proxy_stop", "Stop telnet proxy", {},
-      async () => { this.telnetProxy.stop(); return { content: [{ type: "text", text: "Telnet proxy stopped" }] }; }
-    );
-    this.server.tool("telnet_proxy_status", "Get telnet proxy status", {},
-      async () => { return { content: [{ type: "text", text: JSON.stringify(this.telnetProxy.getStatus(), null, 2) }] }; }
-    );
-    this.server.tool("telnet_proxy_read", "Read raw data from telnet proxy buffer",
-      { lines: z.number().min(1).max(500).optional().describe("Lines (default 100)") },
-      async ({ lines }) => {
-        const data = this.telnetProxy.getBuffer(lines ?? 100);
-        return { content: [{ type: "text", text: data.length > 0 ? data.join("\n") : "No data" }] };
-      }
-    );
-
-    // ═══════════════════════════════════════════════════════════════
     // RAW / CONFIG
     // ═══════════════════════════════════════════════════════════════
 
@@ -606,10 +574,10 @@ export class JLinkMcpServer {
       async ({ commands }) => this.r4PlanResponse("probe_command", { commands })
     );
     this.discoveredTool("probe_command",
-      { commands: z.array(z.string()).describe("Canonical probe commands"), challengeId: z.string().uuid(), approvalToken: z.string().min(1) },
-      async ({ commands, challengeId, approvalToken }) => {
+      { commands: z.array(z.string()).describe("Canonical probe commands"), challengeId: z.string().uuid() },
+      async ({ commands, challengeId }) => {
         const g = this.requireDevice(); if (g) return g;
-        return this.r4ExecuteResponse("probe_command", { commands }, challengeId, approvalToken, () => probe.executeRaw(commands));
+        return this.r4ExecuteResponse("probe_command", { commands }, challengeId, () => probe.executeRaw(commands));
       }
     );
 
@@ -724,22 +692,6 @@ export class JLinkMcpServer {
       maxBytes,
     })));
 
-    this.server.tool("rtt_stream_capture", "Report direct RTT stream capture as unavailable; use validated HSS capture or read-only RTT logs.", {
-      channel: z.number().int().nonnegative().optional(),
-      channelName: z.string().optional(),
-      durationSec: z.number().positive().optional(),
-    }, async (input) => result(() => ({
-      status: "unavailable",
-      reason: "direct RTT stream transport is not exposed by the public MCP surface",
-      requestedChannel: input.channelName ?? input.channel ?? null,
-      durationSec: input.durationSec ?? null,
-    })));
-    this.server.tool("rtt_stream_decode", "Decode a TraceAgent RTT byte stream from hex.", {
-      dataHex: z.string(),
-    }, async ({ dataHex }) => result(() => traceagentDecodeStream(Buffer.from(dataHex, "hex"))));
-    this.server.tool("traceagent_decode_stream", "Decode a TraceAgent RTT byte stream from hex.", {
-      dataHex: z.string(),
-    }, async ({ dataHex }) => result(() => traceagentDecodeStream(Buffer.from(dataHex, "hex"))));
   }
 
   private registerHssCaptureTools(): void {
@@ -887,7 +839,6 @@ export class JLinkMcpServer {
       writePlanId: z.string().startsWith("op_"),
       dryRun: z.boolean().optional(),
       challengeId: z.string().uuid().optional(),
-      approvalToken: z.string().min(1).optional(),
     }, async (input) => result(() => this.variableWriteExecute(input as HssVariableWriteExecuteInput)));
   }
 
@@ -902,7 +853,7 @@ export class JLinkMcpServer {
 
   private async variableWriteExecute(input: HssVariableWriteExecuteInput) {
     if (!input.writePlanId || this.hssCapture.variableWriteRisk(input.writePlanId) === "R2") return this.hssCapture.variableWriteExecute(input);
-    const outcome = await executeR4Operation({ challengeId: input.challengeId ?? "", approvalToken: input.approvalToken, cwd: undefined }, {
+    const outcome = await executeR4Operation({ challengeId: input.challengeId ?? "", cwd: undefined }, {
       revalidate: () => this.hssCapture.variableWriteApprovalBinding(input.writePlanId!),
       execute: (approval) => this.hssCapture.executeR4VariableWrite(input.writePlanId!, approval),
     });
@@ -917,9 +868,9 @@ export class JLinkMcpServer {
     } catch (error) { return this.r4ErrorResponse(error); }
   }
 
-  private async r4ExecuteResponse(tool: R4ExecuteTool, args: Record<string, unknown>, challengeId: string, approvalToken: string, execute: () => Promise<unknown>) {
+  private async r4ExecuteResponse(tool: R4ExecuteTool, args: Record<string, unknown>, challengeId: string, execute: () => Promise<unknown>) {
     try {
-      const outcome = await executeR4Operation({ challengeId, approvalToken }, {
+      const outcome = await executeR4Operation({ challengeId }, {
         revalidate: () => this.r4PlanInput(tool, args),
         execute,
       });
@@ -965,7 +916,7 @@ export class JLinkMcpServer {
     this.server.resource("system-status", "probe://status",
       { description: "Overall system status", mimeType: "application/json" },
       async () => {
-        const status = { probe: this.probe.type, displayName: this.probe.displayName, gdbServer: this.probe.getGDBServerStatus(), rtt: this.rttClient.getStats(), telnetProxy: this.telnetProxy.getStatus(), runningProcesses: this.processManager.listRunning() };
+        const status = { probe: this.probe.type, displayName: this.probe.displayName, gdbServer: this.probe.getGDBServerStatus(), rtt: this.rttClient.getStats(), runningProcesses: this.processManager.listRunning() };
         return { contents: [{ uri: "probe://status", text: JSON.stringify(status, null, 2), mimeType: "application/json" }] };
       }
     );
@@ -1052,7 +1003,6 @@ Start by checking list_devices, then set_device, then start_debug_session.` }}],
     await this.hssCapture.dispose();
     this.gdb.disconnect();
     this.rttClient.disconnect();
-    this.telnetProxy.stop();
     this.probe.dispose();
     this.processManager.killAll();
   }

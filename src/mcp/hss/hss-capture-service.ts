@@ -26,7 +26,7 @@ import { buildHssCapturePlan, revalidateHssCapturePlan } from "./hss-plan";
 import { HSS_SAFETY_FALSE, type HssCaptureMetadata, type HssScalarType } from "./hss-contract";
 import { appendHssJcapEvent, hssQpcTick, parseHssQpcTimebase, type HssJcapEventJournal } from "./hss-events";
 import { hssFail, hssOk, type HssEnvelope } from "./hss-envelope";
-import { HSS_ERROR, HssError } from "./hss-errors";
+import { HSS_ERROR, HssError, type HssErrorCode } from "./hss-errors";
 import { HelperHssVariableMemoryIo, type HssVariableMemoryIo } from "./hss-memory-io";
 import { loadHssPolicy } from "./hss-policy";
 import { createHssVariableWritePlan, HssWritePlanStore, type HssVariableWritePlan, type HssVariableWritePlanInput, type HssWritePlanRevalidateContext } from "./hss-write-plan";
@@ -99,6 +99,7 @@ interface ActiveCapture {
   runtimeIdentity: HssRuntimeIdentity;
   journal: HssJcapEventJournal;
   stdoutRemainder: string;
+  qpcEpochSeen: boolean;
   helperResult?: Record<string, unknown>;
   helperResultCount: number;
   stdoutError?: Error;
@@ -523,6 +524,7 @@ export class HssCaptureService {
         runtimeIdentity: launchIdentity,
         journal,
         stdoutRemainder: "",
+        qpcEpochSeen: false,
         helperResultCount: 0,
         hssStarted: false,
         artifactGate,
@@ -573,7 +575,7 @@ export class HssCaptureService {
         risk: plan.resetBeforeCapture ? "R3" : "R1",
         };
       } catch (error) {
-        if (activeCapture && error instanceof HssError && error.code === HSS_ERROR.ARTIFACT_MATCH_UNVERIFIED) {
+        if (activeCapture && error instanceof HssError && error.code.startsWith("ARTIFACT_MATCH_")) {
           await activeCapture.done;
           throw error;
         }
@@ -1353,6 +1355,14 @@ export class HssCaptureService {
   private acceptHelperRecord(active: ActiveCapture, record: Record<string, unknown>): void {
     if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("helper NDJSON record must be an object");
     if (record.captureId !== active.captureId) throw new Error("helper NDJSON captureId mismatch");
+    if (record.record === "lifecycle" && record.phase === "qpc_epoch") {
+      if (active.qpcEpochSeen) throw new Error("helper emitted duplicate qpc_epoch");
+      const streamQpc = parseHssQpcTimebase(record);
+      if (streamQpc.qpcEpochCounter !== active.journal.qpcEpochCounter || streamQpc.qpcFrequency !== active.journal.qpcFrequency) throw new Error("helper lifecycle QPC timebase mismatch");
+      active.qpcEpochSeen = true;
+      return;
+    }
+    if (!active.qpcEpochSeen) throw new Error("helper emitted a record before qpc_epoch");
     if (record.record === "result") {
       const resultQpc = parseHssQpcTimebase(record);
       if (resultQpc.qpcEpochCounter !== active.journal.qpcEpochCounter || resultQpc.qpcFrequency !== active.journal.qpcFrequency) throw new Error("helper result QPC timebase mismatch");
@@ -1360,7 +1370,14 @@ export class HssCaptureService {
       if (active.helperResultCount !== 1) throw new Error("helper emitted more than one result record");
       active.helperResult = record;
       const resultStatus = artifactMatchStatus(record.targetArtifactMatch);
-      if (!active.artifactMatchStatus) throw new HssError(HSS_ERROR.ARTIFACT_MATCH_UNVERIFIED, "helper result arrived without one native artifact_match record");
+      if (!active.artifactMatchStatus) {
+        const errorCode = typeof record.errorCode === "string" ? record.errorCode : "";
+        if (record.status === "error" && /^ARTIFACT_MATCH_[A-Z0-9_]+$/.test(errorCode)) {
+          active.rejectArtifactGate(new HssError(errorCode as HssErrorCode, typeof record.reason === "string" && record.reason ? record.reason : "native Artifact match gate failed"));
+          return;
+        }
+        throw new HssError(HSS_ERROR.ARTIFACT_MATCH_UNVERIFIED, "helper result arrived without one native artifact_match record");
+      }
       if (resultStatus && resultStatus !== active.artifactMatchStatus) throw new Error("helper result Artifact match status disagrees with native artifact_match");
       return;
     }
@@ -1376,11 +1393,6 @@ export class HssCaptureService {
       return;
     }
     if (record.record !== "lifecycle") throw new Error("helper emitted an unknown NDJSON record kind");
-    if (record.phase === "qpc_epoch") {
-      const streamQpc = parseHssQpcTimebase(record);
-      if (streamQpc.qpcEpochCounter !== active.journal.qpcEpochCounter || streamQpc.qpcFrequency !== active.journal.qpcFrequency) throw new Error("helper lifecycle QPC timebase mismatch");
-      return;
-    }
     if (record.phase === "hss_start") {
       if (!Number.isSafeInteger(record.returnCode) || Number(record.returnCode) < 0 || record.crashed !== false) return;
       if (!active.artifactMatchStatus) throw new HssError(HSS_ERROR.ARTIFACT_MATCH_UNVERIFIED, "helper reported HSS Start before native artifact_match");

@@ -1,0 +1,8 @@
+{
+  "schema": "p5-hardware-status-v1",
+  "state": "completed",
+  "updatedAt": "2026-07-18T05:22:01.223Z",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-50-00-000+08-00-v16-r4-only",
+  "evidenceFile": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-50-00-000+08-00-v16-r4-only\\evidence.json",
+  "r4Only": true
+}

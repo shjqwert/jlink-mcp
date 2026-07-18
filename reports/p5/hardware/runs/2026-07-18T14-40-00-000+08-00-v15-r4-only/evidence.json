@@ -1,0 +1,320 @@
+{
+  "schema": "p5-hardware-r2-r4-v1",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-40-00-000+08-00-v15-r4-only",
+  "targetRoot": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+  "commands": [
+    {
+      "command": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink.exe -NoGui 1",
+      "stdin": [
+        "ShowEmuList USB",
+        "exit"
+      ],
+      "cwd": "D:\\AI_Project\\Trunk\\Jlink_mcp"
+    },
+    {
+      "command": "C:\\Program Files\\nodejs\\node.exe D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\standalone.js",
+      "cwd": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+      "env": {
+        "PROBE_TYPE": "jlink",
+        "JLINK_DEVICE": "Z20K146M",
+        "JLINK_INTERFACE": "SWD",
+        "JLINK_SPEED": "4000",
+        "JLINK_SERIAL": "69401227",
+        "JLINK_DLL_PATH": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+        "JLINK_INSTALL_DIR": "C:\\Program Files\\SEGGER\\JLink_V884",
+        "JLINK_MCP_HSS_HELPER_PATH": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+        "JLINK_MCP_STORAGE_ROOT": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-40-00-000+08-00-v15-r4-only\\storage",
+        "JLINK_MCP_EVIDENCE_ROOT": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-40-00-000+08-00-v15-r4-only\\evidence",
+        "JLINK_MCP_R4_SESSION_AUTHORIZATION": "<redacted>"
+      }
+    }
+  ],
+  "forbiddenActions": {
+    "flash": 0,
+    "erase": 0,
+    "reset": 0,
+    "halt": 0,
+    "resume": 0,
+    "r5": 0
+  },
+  "authorizedActions": {
+    "flash": 0
+  },
+  "calls": [
+    {
+      "at": "2026-07-18T05:21:04.238Z",
+      "name": "artifact_probe",
+      "arguments": {
+        "artifactFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+        "mapFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifact": {
+          "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+          "format": "elf",
+          "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+          "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "size": 3404434,
+          "supportedOperations": [
+            "symbols",
+            "flash",
+            "verify"
+          ],
+          "mapPath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+          "mapSha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf"
+        },
+        "candidates": [
+          {
+            "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+            "format": "elf",
+            "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+            "generation": "dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6",
+            "size": 3404434,
+            "supportedOperations": [
+              "symbols",
+              "flash",
+              "verify"
+            ]
+          }
+        ],
+        "mapCandidates": [
+          "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-18T05:21:04.260Z",
+      "name": "symbol_search",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "query": "g_hssDbgCounterFocIsr",
+        "limit": 8
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "refs": [
+          {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgCounterFocIsr",
+            "layoutHash": "16ab18bd82b6939ff47f48f44a7690a65b4f7900cf087d024249373899bf2e67"
+          }
+        ]
+      }
+    },
+    {
+      "at": "2026-07-18T05:21:04.282Z",
+      "name": "symbol_resolve",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "selector": "g_hssDbgCounterFocIsr",
+        "type": "uint32"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "symbol": {
+          "ref": {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgCounterFocIsr",
+            "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+          },
+          "rootAddress": 536898348,
+          "memberOffset": 0,
+          "address": 536898348,
+          "type": "uint32",
+          "size": 4,
+          "region": "ram",
+          "hssEligible": true,
+          "source": "iar-map",
+          "confidence": "map"
+        }
+      }
+    },
+    {
+      "at": "2026-07-18T05:21:04.295Z",
+      "name": "hot_variable_add",
+      "arguments": {
+        "ref": {
+          "qualifiedName": "g_hssDbgCounterFocIsr",
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+        }
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "ref": {
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "qualifiedName": "g_hssDbgCounterFocIsr",
+          "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+        },
+        "logicalIdentity": "g_hssDbgCounterFocIsr",
+        "validatedAt": "2026-07-18T05:21:04.294Z"
+      }
+    },
+    {
+      "at": "2026-07-18T05:21:04.306Z",
+      "name": "symbol_search",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "query": "g_hssDbgWriteProbe",
+        "limit": 8
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "refs": [
+          {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgWriteProbe",
+            "layoutHash": "2cc8c79393046db2650372060bc196d3e87151ca86658bfa0d0376343cf57748"
+          }
+        ]
+      }
+    },
+    {
+      "at": "2026-07-18T05:21:04.323Z",
+      "name": "symbol_resolve",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "selector": "g_hssDbgWriteProbe",
+        "type": "uint32"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "symbol": {
+          "ref": {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgWriteProbe",
+            "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+          },
+          "rootAddress": 536872964,
+          "memberOffset": 0,
+          "address": 536872964,
+          "type": "uint32",
+          "size": 4,
+          "region": "ram",
+          "hssEligible": true,
+          "source": "iar-map",
+          "confidence": "map"
+        }
+      }
+    },
+    {
+      "at": "2026-07-18T05:21:04.335Z",
+      "name": "hot_variable_add",
+      "arguments": {
+        "ref": {
+          "qualifiedName": "g_hssDbgWriteProbe",
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+        }
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "ref": {
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "qualifiedName": "g_hssDbgWriteProbe",
+          "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+        },
+        "logicalIdentity": "g_hssDbgWriteProbe",
+        "validatedAt": "2026-07-18T05:21:04.334Z"
+      }
+    },
+    {
+      "at": "2026-07-18T05:21:04.342Z",
+      "name": "probe_command_plan",
+      "arguments": {
+        "commands": [
+          "mem 0xE000EDF0, 4"
+        ]
+      },
+      "isError": false,
+      "payload": {
+        "risk": {
+          "level": "R4",
+          "requiresUserApproval": true
+        },
+        "ok": false,
+        "error": {
+          "code": "r5_forbidden",
+          "message": "probe command verb cannot be proven below R5: mem"
+        }
+      }
+    }
+  ],
+  "manifestBefore": {
+    "files": 1813,
+    "digest": "a366f917c6a2f46da86b5cc4e04d933ffdca4aaf69c4ced8e8817cfeeb911b93"
+  },
+  "probeEnumeration": {
+    "serials": [
+      "69401227"
+    ],
+    "stdoutSha256": "3e1622f5c84ec5582097f38cf2f20a4b10d97c9d846c6bc69192c6744c2f04a5",
+    "stdout": "SEGGER J-Link Commander V8.84 (Compiled Nov  5 2025 18:39:12)\r\nDLL version V8.84, compiled Nov  5 2025 18:38:15\r\n\r\nConnecting to J-Link via USB...O.K.\r\nFirmware: J-Link V9 compiled May  7 2021 16:26:12\r\nHardware version: V9.40\r\nJ-Link uptime (since boot): N/A (Not supported by this model)\r\nS/N: 69401227\r\nLicense(s): RDI, GDB, FlashDL, FlashBP, JFlash\r\nVTref=4.679V\r\n\r\n\r\nType \"connect\" to establish a target connection, '?' for help\r\nJ-Link>J-Link[0]: Connection: USB, Serial number: 69401227, ProductName: J-Link CE, Nickname: <not set>\r\nJ-Link>"
+  },
+  "artifact": {
+    "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+    "format": "elf",
+    "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+    "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+    "size": 3404434,
+    "supportedOperations": [
+      "symbols",
+      "flash",
+      "verify"
+    ],
+    "mapPath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+    "mapSha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf"
+  },
+  "variableRefs": [
+    {
+      "source": "hot_variable",
+      "ref": {
+        "qualifiedName": "g_hssDbgCounterFocIsr",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+      }
+    },
+    {
+      "source": "hot_variable",
+      "ref": {
+        "qualifiedName": "g_hssDbgWriteProbe",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+      }
+    }
+  ],
+  "trustRefresh": {
+    "authorizedChanges": [],
+    "alreadyCurrent": true,
+    "before": {
+      "path": "C:\\Users\\SHJ\\AppData\\Local\\jlink-mcp\\trust\\projects\\2b10ed8984a24df7f04ba9298f5c8e13c2d9256b2fff676a83b3cddd6fccd9c6\\trust-profile.json",
+      "fileSha256": "8b5b46f40fc137c5533c21e40860920f6a6293c954a3d13aad9d99155ed7d447",
+      "bytes": 1385,
+      "profileSha256": "74faaf6f298c18c12db6bdb2803f467f44de273641c3113066066531c48e9009",
+      "runtimeSha256": "ed7276e3c6c4de04b9bb5190f513b18d9daa608e555382fabcf4125d1962b6fa",
+      "helperSha256": "01749a6e158c604bb9842957bd3d011af3c67c8bf7efa57d61e082e87ac9c345"
+    },
+    "after": {
+      "path": "C:\\Users\\SHJ\\AppData\\Local\\jlink-mcp\\trust\\projects\\2b10ed8984a24df7f04ba9298f5c8e13c2d9256b2fff676a83b3cddd6fccd9c6\\trust-profile.json",
+      "fileSha256": "8b5b46f40fc137c5533c21e40860920f6a6293c954a3d13aad9d99155ed7d447",
+      "bytes": 1385,
+      "profileSha256": "74faaf6f298c18c12db6bdb2803f467f44de273641c3113066066531c48e9009",
+      "runtimeSha256": "ed7276e3c6c4de04b9bb5190f513b18d9daa608e555382fabcf4125d1962b6fa",
+      "helperSha256": "01749a6e158c604bb9842957bd3d011af3c67c8bf7efa57d61e082e87ac9c345"
+    }
+  },
+  "failure": {
+    "message": "probe_command_plan did not return an exact challenge",
+    "stack": "AssertionError [ERR_ASSERTION]: probe_command_plan did not return an exact challenge\n    at executeR4ProbeAcceptance (file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:422:10)\n    at async file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:216:5"
+  }
+}

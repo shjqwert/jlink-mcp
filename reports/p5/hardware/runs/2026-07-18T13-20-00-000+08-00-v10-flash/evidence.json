@@ -1,0 +1,451 @@
+{
+  "schema": "p5-hardware-r2-r4-v1",
+  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T13-20-00-000+08-00-v10-flash",
+  "targetRoot": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+  "commands": [
+    {
+      "command": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink.exe -NoGui 1",
+      "stdin": [
+        "ShowEmuList USB",
+        "exit"
+      ],
+      "cwd": "D:\\AI_Project\\Trunk\\Jlink_mcp"
+    },
+    {
+      "command": "C:\\Program Files\\nodejs\\node.exe D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\standalone.js",
+      "cwd": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+      "env": {
+        "PROBE_TYPE": "jlink",
+        "JLINK_DEVICE": "Z20K146M",
+        "JLINK_INTERFACE": "SWD",
+        "JLINK_SPEED": "4000",
+        "JLINK_SERIAL": "69401227",
+        "JLINK_DLL_PATH": "C:\\Program Files\\SEGGER\\JLink_V884\\JLink_x64.dll",
+        "JLINK_INSTALL_DIR": "C:\\Program Files\\SEGGER\\JLink_V884",
+        "JLINK_MCP_HSS_HELPER_PATH": "D:\\AI_Project\\Trunk\\Jlink_mcp\\native\\hss-helper\\bin\\hss_helper.exe",
+        "JLINK_MCP_STORAGE_ROOT": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T13-20-00-000+08-00-v10-flash\\storage",
+        "JLINK_MCP_EVIDENCE_ROOT": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T13-20-00-000+08-00-v10-flash\\evidence",
+        "JLINK_MCP_R4_SESSION_AUTHORIZATION": "<redacted>"
+      }
+    },
+    {
+      "command": "C:\\Program Files\\nodejs\\node.exe D:\\AI_Project\\Trunk\\Jlink_mcp\\out\\mcp\\standalone.js approve 4533647b-5c3c-4ae7-8b17-878df808326a --session-authorized",
+      "cwd": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config",
+      "authorization": "ephemeral-current-session"
+    }
+  ],
+  "forbiddenActions": {
+    "flash": 0,
+    "erase": 0,
+    "reset": 0,
+    "halt": 0,
+    "resume": 0,
+    "r5": 0
+  },
+  "authorizedActions": {
+    "flash": 1
+  },
+  "calls": [
+    {
+      "at": "2026-07-18T05:04:32.860Z",
+      "name": "artifact_probe",
+      "arguments": {
+        "artifactFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+        "mapFile": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifact": {
+          "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+          "format": "elf",
+          "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+          "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "size": 3404434,
+          "supportedOperations": [
+            "symbols",
+            "flash",
+            "verify"
+          ],
+          "mapPath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+          "mapSha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf"
+        },
+        "candidates": [
+          {
+            "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+            "format": "elf",
+            "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+            "generation": "dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6",
+            "size": 3404434,
+            "supportedOperations": [
+              "symbols",
+              "flash",
+              "verify"
+            ]
+          }
+        ],
+        "mapCandidates": [
+          "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map"
+        ]
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:32.888Z",
+      "name": "symbol_search",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "query": "g_hssDbgCounterFocIsr",
+        "limit": 8
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "refs": [
+          {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgCounterFocIsr",
+            "layoutHash": "16ab18bd82b6939ff47f48f44a7690a65b4f7900cf087d024249373899bf2e67"
+          }
+        ]
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:32.912Z",
+      "name": "symbol_resolve",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "selector": "g_hssDbgCounterFocIsr",
+        "type": "uint32"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "symbol": {
+          "ref": {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgCounterFocIsr",
+            "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+          },
+          "rootAddress": 536898348,
+          "memberOffset": 0,
+          "address": 536898348,
+          "type": "uint32",
+          "size": 4,
+          "region": "ram",
+          "hssEligible": true,
+          "source": "iar-map",
+          "confidence": "map"
+        }
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:32.931Z",
+      "name": "hot_variable_add",
+      "arguments": {
+        "ref": {
+          "qualifiedName": "g_hssDbgCounterFocIsr",
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+        }
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "ref": {
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "qualifiedName": "g_hssDbgCounterFocIsr",
+          "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+        },
+        "logicalIdentity": "g_hssDbgCounterFocIsr",
+        "validatedAt": "2026-07-18T05:04:32.931Z"
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:32.942Z",
+      "name": "symbol_search",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "query": "g_hssDbgWriteProbe",
+        "limit": 8
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "refs": [
+          {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgWriteProbe",
+            "layoutHash": "2cc8c79393046db2650372060bc196d3e87151ca86658bfa0d0376343cf57748"
+          }
+        ]
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:32.964Z",
+      "name": "symbol_resolve",
+      "arguments": {
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "selector": "g_hssDbgWriteProbe",
+        "type": "uint32"
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "symbol": {
+          "ref": {
+            "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+            "qualifiedName": "g_hssDbgWriteProbe",
+            "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+          },
+          "rootAddress": 536872964,
+          "memberOffset": 0,
+          "address": 536872964,
+          "type": "uint32",
+          "size": 4,
+          "region": "ram",
+          "hssEligible": true,
+          "source": "iar-map",
+          "confidence": "map"
+        }
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:32.976Z",
+      "name": "hot_variable_add",
+      "arguments": {
+        "ref": {
+          "qualifiedName": "g_hssDbgWriteProbe",
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+        }
+      },
+      "isError": false,
+      "payload": {
+        "status": "ok",
+        "ref": {
+          "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+          "qualifiedName": "g_hssDbgWriteProbe",
+          "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+        },
+        "logicalIdentity": "g_hssDbgWriteProbe",
+        "validatedAt": "2026-07-18T05:04:32.976Z"
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:32.990Z",
+      "name": "flash_plan",
+      "arguments": {
+        "filePath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out"
+      },
+      "isError": false,
+      "payload": {
+        "risk": {
+          "level": "R4",
+          "requiresUserApproval": true
+        },
+        "challenge": {
+          "artifact": {
+            "generation": "dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6",
+            "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6"
+          },
+          "canonicalArgs": {
+            "filePath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out"
+          },
+          "connectionGeneration": 1,
+          "layoutHash": "dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6",
+          "policy": {
+            "sha256": "03113048ce96bb3457e6b4c2a911e01c402a651e4f4f44bfdfa4205b4c70771d",
+            "unverifiedWriteException": false
+          },
+          "probe": {
+            "interface": "SWD",
+            "kind": "jlink",
+            "serial": "69401227",
+            "speedKhz": 4000
+          },
+          "session": {
+            "id": "80d97dda-50fc-4d70-a875-98108c89cbb5"
+          },
+          "target": {
+            "artifactMatch": "unverified",
+            "targetId": "Z20K146M"
+          },
+          "tool": "flash",
+          "challengeId": "4533647b-5c3c-4ae7-8b17-878df808326a",
+          "nonce": "0R2X17O7kzxopRy2ecRjcoNHapdtLX5mha3EF0AvQP4",
+          "operationDigest": "579fcdfeec7cdeba7f4b8b359e614bcfee8d2891f2f7d7cb62997521d5fbf0a6",
+          "issuedAt": "2026-07-18T05:04:32.990Z",
+          "expiresAt": "2026-07-18T05:09:32.990Z",
+          "summary": "flash {\"filePath\":\"D:\\\\FOC_Project\\\\Trunk\\\\ProJect\\\\HM_C095_SCM_App-e8f80a2-mcal-config\\\\Appl\\\\Debug\\\\Exe\\\\FOC_SCM.out\"}\ntarget=Z20K146M match=unverified probe=69401227 connectionGeneration=1\nartifact=dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6/0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6 layout=dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6 policy=03113048ce96bb3457e6b4c2a911e01c402a651e4f4f44bfdfa4205b4c70771d session=80d97dda-50fc-4d70-a875-98108c89cbb5"
+        }
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:33.013Z",
+      "name": "flash",
+      "arguments": {
+        "filePath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+        "challengeId": "4533647b-5c3c-4ae7-8b17-878df808326a"
+      },
+      "isError": false,
+      "payload": {
+        "risk": {
+          "level": "R4",
+          "requiresUserApproval": true
+        },
+        "ok": false,
+        "error": {
+          "code": "approval_required",
+          "message": "the exact challenge has not been approved in the protected local CLI"
+        },
+        "consumed": false
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:40.246Z",
+      "name": "flash",
+      "arguments": {
+        "filePath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+        "challengeId": "4533647b-5c3c-4ae7-8b17-878df808326a"
+      },
+      "isError": false,
+      "payload": {
+        "risk": {
+          "level": "R4",
+          "requiresUserApproval": true
+        },
+        "ok": true,
+        "data": {
+          "success": true,
+          "rawOutput": "SEGGER J-Link Commander V8.84 (Compiled Nov  5 2025 18:39:12)\r\nDLL version V8.84, compiled Nov  5 2025 18:38:15\r\n\r\nJ-Link Commander will now exit on Error\r\nConnecting to J-Link via USB...O.K.\r\nFirmware: J-Link V9 compiled May  7 2021 16:26:12\r\nHardware version: V9.40\r\nJ-Link uptime (since boot): N/A (Not supported by this model)\r\nS/N: 69401227\r\nLicense(s): RDI, GDB, FlashDL, FlashBP, JFlash\r\nVTref=4.690V\r\nDevice \"Z20K146M\" selected.\r\n\r\n\r\nConnecting to target via SWD\r\nInitTarget() start\r\n******************************************************\r\nJ-Link script: Z20K146M M4F core J-Link script\r\n******************************************************\r\nInitTarget() end - Took 104ms\r\nFound SW-DP with ID 0x2BA01477\r\nDPIDR: 0x2BA01477\r\nCoreSight SoC-400 or earlier\r\nScanning AP map to find all available APs\r\nAP[2]: Stopped AP scan as end of AP map has been reached\r\nAP[0]: AHB-AP (IDR: 0x24770011, ADDR: 0x00000000)\r\nAP[1]: JTAG-AP (IDR: 0x0C860000, ADDR: 0x01000000)\r\nIterating through AP map to find AHB-AP to use\r\nAP[0]: Core found\r\nAP[0]: AHB-AP ROM base: 0xE00FF000\r\nCPUID register: 0x410FC241. Implementer code: 0x41 (ARM)\r\nFound Cortex-M4 r0p1, Little endian.\r\nFPUnit: 6 code (BP) slots and 2 literal slots\r\nCoreSight components:\r\nROMTbl[0] @ E00FF000\r\n[0][0]: E000E000 CID B105E00D PID 000BB00C SCS-M7\r\n[0][1]: E0001000 CID B105E00D PID 003BB002 DWT\r\n[0][2]: E0002000 CID B105E00D PID 002BB003 FPB\r\n[0][3]: E0000000 CID B105E00D PID 003BB001 ITM\r\n[0][4]: E0040000 CID B105900D PID 000BB9A1 TPIU\r\n[0][5]: E0041000 CID B105900D PID 000BB925 ETM\r\nSetupTarget() start\r\nInit SRAM Begin\r\nInit SRAM End\r\nSetupTarget() end - Took 2.89s\r\nMemory zones:\r\n  Zone: \"Default\" Description: Default access mode\r\nCortex-M4 identified.\r\nJ-Link>E000EDF0 = 01 00 01 01                                       ....\r\nJ-Link>Reset delay: 0 ms\r\nReset type: NORMAL (https://kb.segger.com/J-Link_Reset_Strategies)\r\nReset: Halt core after reset via DEMCR.VC_CORERESET.\r\nReset: Reset device via AIRCR.SYSRESETREQ.\r\nJ-Link>PC = 00021790, CycleCnt = 00000000\r\nR0 = 00000000, R1 = 00000000, R2 = 00000000, R3 = 00000000\r\nR4 = 00000000, R5 = 00000000, R6 = 00000000, R7 = 00000000\r\nR8 = 00000000, R9 = 00000000, R10= 00000000, R11= 00000000\r\nR12= 00000000\r\nSP(R13)= 2001FB00, MSP= 2001FB00, PSP= 00000000, R14(LR) = FFFFFFFF\r\nXPSR = 01000000: APSR = nzcvq, EPSR = 01000000, IPSR = 000 (NoException)\r\nCFBP = 00000000, CONTROL = 00, FAULTMASK = 00, BASEPRI = 00, PRIMASK = 00\r\n\r\nFPS0 = 00000000, FPS1 = 00000000, FPS2 = 00000000, FPS3 = 00000000\r\nFPS4 = 00000000, FPS5 = 00000000, FPS6 = 00000000, FPS7 = 00000000\r\nFPS8 = 00000000, FPS9 = 00000000, FPS10= 00000000, FPS11= 00000000\r\nFPS12= 00000000, FPS13= 00000000, FPS14= 00000000, FPS15= 00000000\r\nFPS16= 00000000, FPS17= 00000000, FPS18= 00000000, FPS19= 00000000\r\nFPS20= 00000000, FPS21= 00000000, FPS22= 00000000, FPS23= 00000000\r\nFPS24= 00000000, FPS25= 00000000, FPS26= 00000000, FPS27= 00000000\r\nFPS28= 00000000, FPS29= 00000000, FPS30= 00000000, FPS31= 00000000\r\nFPSCR= 00000000\r\nJ-Link>'loadfile': Performing implicit reset & halt of MCU.\r\nReset type: NORMAL (https://kb.segger.com/J-Link_Reset_Strategies)\r\nReset: Halt core after reset via DEMCR.VC_CORERESET.\r\nReset: Reset device via AIRCR.SYSRESETREQ.\r\nDownloading file [D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out]...\r\nComparing flash   [000%]\b\b\b\b\b100%] Done.\r\nJ-Link: Flash download: Bank 0 @ 0x00000000: Skipped. Contents already match\r\nO.K.\r\nJ-Link>Reset delay: 0 ms\r\nReset type: NORMAL (https://kb.segger.com/J-Link_Reset_Strategies)\r\nReset: Halt core after reset via DEMCR.VC_CORERESET.\r\nReset: Reset device via AIRCR.SYSRESETREQ.\r\nJ-Link>Memory map 'after startup completion point' is active\r\nJ-Link>",
+          "output": "******************************************************\r\nJ-Link script: Z20K146M M4F core J-Link script\r\n******************************************************\r\nScanning AP map to find all available APs\r\nIterating through AP map to find AHB-AP to use\r\nSetupTarget() start\r\nInit SRAM Begin\r\nInit SRAM End\r\nSetupTarget() end - Took 2.89s\r\n  Zone: \"Default\" Description: Default access mode\r\nReset type: NORMAL (https://kb.segger.com/J-Link_Reset_Strategies)\r\nReset: Halt core after reset via DEMCR.VC_CORERESET.\r\nReset: Reset device via AIRCR.SYSRESETREQ.\r\nR0 = 00000000, R1 = 00000000, R2 = 00000000, R3 = 00000000\r\nR4 = 00000000, R5 = 00000000, R6 = 00000000, R7 = 00000000\r\nR8 = 00000000, R9 = 00000000, R10= 00000000, R11= 00000000\r\nR12= 00000000\r\nSP(R13)= 2001FB00, MSP= 2001FB00, PSP= 00000000, R14(LR) = FFFFFFFF\r\nXPSR = 01000000: APSR = nzcvq, EPSR = 01000000, IPSR = 000 (NoException)\r\nCFBP = 00000000, CONTROL = 00, FAULTMASK = 00, BASEPRI = 00, PRIMASK = 00\r\nFPS0 = 00000000, FPS1 = 00000000, FPS2 = 00000000, FPS3 = 00000000\r\nFPS4 = 00000000, FPS5 = 00000000, FPS6 = 00000000, FPS7 = 00000000\r\nFPS8 = 00000000, FPS9 = 00000000, FPS10= 00000000, FPS11= 00000000\r\nFPS12= 00000000, FPS13= 00000000, FPS14= 00000000, FPS15= 00000000\r\nFPS16= 00000000, FPS17= 00000000, FPS18= 00000000, FPS19= 00000000\r\nFPS20= 00000000, FPS21= 00000000, FPS22= 00000000, FPS23= 00000000\r\nFPS24= 00000000, FPS25= 00000000, FPS26= 00000000, FPS27= 00000000\r\nFPS28= 00000000, FPS29= 00000000, FPS30= 00000000, FPS31= 00000000\r\nFPSCR= 00000000\r\nReset type: NORMAL (https://kb.segger.com/J-Link_Reset_Strategies)\r\nReset: Halt core after reset via DEMCR.VC_CORERESET.\r\nReset: Reset device via AIRCR.SYSRESETREQ.\r\nDownloading file [D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out]...\r\nComparing flash   [000%]\b\b\b\b\b100%] Done.\r\nJ-Link: Flash download: Bank 0 @ 0x00000000: Skipped. Contents already match\r\nO.K.\r\nReset type: NORMAL (https://kb.segger.com/J-Link_Reset_Strategies)\r\nReset: Halt core after reset via DEMCR.VC_CORERESET.\r\nReset: Reset device via AIRCR.SYSRESETREQ."
+        },
+        "challengeId": "4533647b-5c3c-4ae7-8b17-878df808326a",
+        "operationDigest": "579fcdfeec7cdeba7f4b8b359e614bcfee8d2891f2f7d7cb62997521d5fbf0a6",
+        "consumed": true
+      }
+    },
+    {
+      "at": "2026-07-18T05:04:40.257Z",
+      "name": "flash",
+      "arguments": {
+        "filePath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+        "challengeId": "4533647b-5c3c-4ae7-8b17-878df808326a"
+      },
+      "isError": false,
+      "payload": {
+        "risk": {
+          "level": "R4",
+          "requiresUserApproval": true
+        },
+        "ok": false,
+        "error": {
+          "code": "operation_binding_changed",
+          "message": "operation context changed after approval planning"
+        },
+        "consumed": false
+      }
+    }
+  ],
+  "manifestBefore": {
+    "files": 1813,
+    "digest": "a366f917c6a2f46da86b5cc4e04d933ffdca4aaf69c4ced8e8817cfeeb911b93"
+  },
+  "probeEnumeration": {
+    "serials": [
+      "69401227"
+    ],
+    "stdoutSha256": "28711f10f13836e4dad871e9984e4cdef13d7ac4b3675c8c47afeeca5f21e382",
+    "stdout": "SEGGER J-Link Commander V8.84 (Compiled Nov  5 2025 18:39:12)\r\nDLL version V8.84, compiled Nov  5 2025 18:38:15\r\n\r\nConnecting to J-Link via USB...O.K.\r\nFirmware: J-Link V9 compiled May  7 2021 16:26:12\r\nHardware version: V9.40\r\nJ-Link uptime (since boot): N/A (Not supported by this model)\r\nS/N: 69401227\r\nLicense(s): RDI, GDB, FlashDL, FlashBP, JFlash\r\nVTref=4.687V\r\n\r\n\r\nType \"connect\" to establish a target connection, '?' for help\r\nJ-Link>J-Link[0]: Connection: USB, Serial number: 69401227, ProductName: J-Link CE, Nickname: <not set>\r\nJ-Link>"
+  },
+  "artifact": {
+    "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+    "format": "elf",
+    "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+    "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+    "size": 3404434,
+    "supportedOperations": [
+      "symbols",
+      "flash",
+      "verify"
+    ],
+    "mapPath": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\List\\FOC_SCM.map",
+    "mapSha256": "f95d59de4b2b3dcc3ce296069ad5c7d167007d54dea43e01a6284bfdddb2bdaf"
+  },
+  "variableRefs": [
+    {
+      "source": "hot_variable",
+      "ref": {
+        "qualifiedName": "g_hssDbgCounterFocIsr",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "layoutHash": "a38a25ab56af3d62f79b13cc910239619e919e21b9af183fbf4339ff65e5bbb4"
+      }
+    },
+    {
+      "source": "hot_variable",
+      "ref": {
+        "qualifiedName": "g_hssDbgWriteProbe",
+        "artifactGeneration": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066",
+        "layoutHash": "60cca1335162efc01347c620881a2649546515e98c87e35cc568bba8cbbc7328"
+      }
+    }
+  ],
+  "trustRefresh": {
+    "authorizedChanges": [],
+    "alreadyCurrent": true,
+    "before": {
+      "path": "C:\\Users\\SHJ\\AppData\\Local\\jlink-mcp\\trust\\projects\\2b10ed8984a24df7f04ba9298f5c8e13c2d9256b2fff676a83b3cddd6fccd9c6\\trust-profile.json",
+      "fileSha256": "82a571775ca5e2f4570903c1bf5a8e6b178380f5ebf44c593d41007766fcf033",
+      "bytes": 1385,
+      "profileSha256": "76c14cead6a4af14b170ba1bc5fbc0148c17bf0bac24ff8f07702df4e98e9651",
+      "runtimeSha256": "b416e597768c93b775a952bdbcf4c1d40a00fa751936320c95f5d24414904910",
+      "helperSha256": "55e96239836fa884d8534c586138e1ab7a10bd8d495afb532dab5684a4770dc3"
+    },
+    "after": {
+      "path": "C:\\Users\\SHJ\\AppData\\Local\\jlink-mcp\\trust\\projects\\2b10ed8984a24df7f04ba9298f5c8e13c2d9256b2fff676a83b3cddd6fccd9c6\\trust-profile.json",
+      "fileSha256": "82a571775ca5e2f4570903c1bf5a8e6b178380f5ebf44c593d41007766fcf033",
+      "bytes": 1385,
+      "profileSha256": "76c14cead6a4af14b170ba1bc5fbc0148c17bf0bac24ff8f07702df4e98e9651",
+      "runtimeSha256": "b416e597768c93b775a952bdbcf4c1d40a00fa751936320c95f5d24414904910",
+      "helperSha256": "55e96239836fa884d8534c586138e1ab7a10bd8d495afb532dab5684a4770dc3"
+    }
+  },
+  "flash": {
+    "challenge": {
+      "challengeId": "4533647b-5c3c-4ae7-8b17-878df808326a",
+      "operationDigest": "579fcdfeec7cdeba7f4b8b359e614bcfee8d2891f2f7d7cb62997521d5fbf0a6",
+      "summary": "flash {\"filePath\":\"D:\\\\FOC_Project\\\\Trunk\\\\ProJect\\\\HM_C095_SCM_App-e8f80a2-mcal-config\\\\Appl\\\\Debug\\\\Exe\\\\FOC_SCM.out\"}\ntarget=Z20K146M match=unverified probe=69401227 connectionGeneration=1\nartifact=dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6/0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6 layout=dab0aaec658efd553a55e7bc911bca989314ade44e3c72e2ec1c1539aca8e9e6 policy=03113048ce96bb3457e6b4c2a911e01c402a651e4f4f44bfdfa4205b4c70771d session=80d97dda-50fc-4d70-a875-98108c89cbb5",
+      "expiresAt": "2026-07-18T05:09:32.990Z"
+    },
+    "missingApproval": {
+      "risk": {
+        "level": "R4",
+        "requiresUserApproval": true
+      },
+      "ok": false,
+      "error": {
+        "code": "approval_required",
+        "message": "the exact challenge has not been approved in the protected local CLI"
+      },
+      "consumed": false
+    },
+    "artifact": {
+      "path": "D:\\FOC_Project\\Trunk\\ProJect\\HM_C095_SCM_App-e8f80a2-mcal-config\\Appl\\Debug\\Exe\\FOC_SCM.out",
+      "sha256": "0ab51e0520a7afc2ffe064ac75296670016879958f56842c0e7433270278d5d6",
+      "generation": "99b1212f878b34a13f0e0dd207ebf866b874ea763f5a8792bf6a08801b967066"
+    },
+    "approvalCli": {
+      "exitCode": 0,
+      "stdoutSha256": "12465b4e462e9ff5ea6ae454895287b83e70dfb154ef76d522eb9a5c5a2dc6dc",
+      "stderr": "",
+      "authorization": "ephemeral-current-session",
+      "tokenPersisted": false
+    }
+  },
+  "failure": {
+    "message": "same retained approval was not rejected on replay\n+ actual - expected\n\n+ 'operation_binding_changed'\n- 'approval_replayed'\n",
+    "stack": "AssertionError [ERR_ASSERTION]: same retained approval was not rejected on replay\n+ actual - expected\n\n+ 'operation_binding_changed'\n- 'approval_replayed'\n\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:205:12"
+  }
+}
