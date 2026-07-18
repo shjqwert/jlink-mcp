@@ -2,7 +2,6 @@ import { spawn } from "child_process";
 import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig } from "./backend";
 import { ProcessManager } from "../utils/process-manager";
 import { log, logError } from "../utils/logger";
-import { checkR4ExecutionPermit, classifyR4Operation, type RiskOperationErrorCode } from "../mcp/risk-operations";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -274,7 +273,7 @@ export class JLinkBackend extends ProbeBackend {
   }
   async readRegister(name: string): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
-      return this.approvalRejected("r5_forbidden", "unknown or non-core register is forbidden");
+      return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
     return this.withPreflight("readRegister", () => this.execRaw(["halt", `rreg ${name}`]));
   }
@@ -283,10 +282,10 @@ export class JLinkBackend extends ProbeBackend {
 
   async flash(filePath: string, baseAddress?: number): Promise<CommandResult> {
     const addr = baseAddress !== undefined ? ` 0x${baseAddress.toString(16)}` : "";
-    return this.executeApproved("flash", { filePath, ...(baseAddress !== undefined ? { baseAddress } : {}) }, ["r", "halt", `loadfile ${filePath}${addr}`, "r", "go"], 180000);
+    return this.executeDirect([`loadfile ${filePath}${addr}`], 180000);
   }
   async erase(): Promise<CommandResult> {
-    return this.executeApproved("erase", {}, ["erase"]);
+    return this.executeDirect(["erase"]);
   }
 
   async setBreakpoint(address: number): Promise<CommandResult> {
@@ -297,35 +296,18 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   async executeRaw(commands: string[]): Promise<CommandResult> {
-    return this.executeApproved("probe_command", { commands }, commands);
+    return this.executeDirect(commands);
   }
 
-  private async executeApproved(tool: "flash" | "erase" | "probe_command", canonicalArgs: Record<string, unknown>, commands: string[], timeoutMs = 30000): Promise<CommandResult> {
-    const forbidden = classifyR4Operation(tool, canonicalArgs);
-    if (forbidden) return this.approvalRejected(forbidden.code, forbidden.message);
+  private async executeDirect(commands: string[], timeoutMs = 30000): Promise<CommandResult> {
     if (!this.beginHardwareOperation()) {
       return { success: false, rawOutput: "", output: `Probe is exclusively owned by ${this.getExclusiveOwner()}`, error: "Capture owns the probe", errorCode: ProbeErrorCode.PROBE_BUSY };
     }
     try {
-      return await this.acquireLock(async () => {
-        const generation = this.connectionGeneration + 1;
-        const rejected = checkR4ExecutionPermit(tool, canonicalArgs, generation);
-        if (rejected) return this.approvalRejected(rejected.code, rejected.message);
-        return this.execRaw(["mem 0xE000EDF0, 4", ...commands], undefined, timeoutMs);
-      });
+      return await this.acquireLock(() => this.execRaw(commands, undefined, timeoutMs));
     } finally {
       this.endHardwareOperation();
     }
-  }
-
-  private approvalRejected(code: RiskOperationErrorCode, message: string): CommandResult {
-    return {
-      success: false,
-      rawOutput: "",
-      output: message,
-      error: message,
-      errorCode: code === "r5_forbidden" ? ProbeErrorCode.R5_FORBIDDEN : ProbeErrorCode.APPROVAL_REQUIRED,
-    };
   }
 
   // ── GDB Server ───────────────────────────────────────────────────

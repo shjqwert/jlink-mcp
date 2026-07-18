@@ -44,7 +44,7 @@ export function hssApiCandidateReport(officialSdkHeaderFound = false, officialSd
     officialSdkHeaderFound,
     officialSdkHeaderPath,
     publicPrototypeCandidate: true,
-    riskLevel: "experimental",
+    maturity: "experimental",
     productionReady: false,
   };
 }
@@ -58,6 +58,6 @@ export type HssApiCandidateReport = {
   officialSdkHeaderFound: boolean;
   officialSdkHeaderPath?: string;
   publicPrototypeCandidate: true;
-  riskLevel: "experimental";
+  maturity: "experimental";
   productionReady: false;
 };

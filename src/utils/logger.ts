@@ -1,8 +1,10 @@
-import * as vscode from "vscode";
+export interface LogSink {
+  appendLine(message: string): void;
+}
 
-let outputChannel: vscode.OutputChannel | undefined;
+let outputChannel: LogSink | undefined;
 
-export function initLogger(channel: vscode.OutputChannel): void {
+export function initLogger(channel: LogSink): void {
   outputChannel = channel;
 }
 

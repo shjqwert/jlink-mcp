@@ -1,11 +1,11 @@
 ## 1. Remove Legacy Control Planes and Establish Standalone MCP (Commit 2)
 
-- [ ] 1.1 Add characterization tests for the exact 57-tool contract, three retained Resources, zero Prompts, and standalone stdio startup.
-- [ ] 1.2 Remove `src/extension.ts`, VS Code contribution metadata, activation/configuration, VSIX packaging, extension-only dependencies, and extension documentation while leaving Offline UI source unchanged.
-- [ ] 1.3 Remove executable approval, trust, risk-level, challenge/nonce/token, consume/replay, approval CLI/IPC, and approval-only plan/execute code and tests.
-- [ ] 1.4 Remove deprecated tool aliases, `gdb_load`, MCP workflow Prompts, and the discovery-catalog Resource.
-- [ ] 1.5 Register the specified 57 direct tools and only `rtt://output`, `probe://gdb-server-log`, and `probe://status` from the standalone server.
-- [ ] 1.6 Clean package scripts, dependencies, configuration, tests, and current documentation, then pass build, lint, unit tests, tool-surface checks, and the scoped historical-control-plane scan.
+- [x] 1.1 Add characterization tests for the exact 57-tool contract, three retained Resources, zero Prompts, and standalone stdio startup.
+- [x] 1.2 Remove `src/extension.ts`, VS Code contribution metadata, activation/configuration, VSIX packaging, extension-only dependencies, and extension documentation while leaving Offline UI source unchanged.
+- [x] 1.3 Remove executable approval, trust, risk-level, challenge/nonce/token, consume/replay, approval CLI/IPC, and approval-only plan/execute code and tests.
+- [x] 1.4 Remove deprecated tool aliases, `gdb_load`, MCP workflow Prompts, and the discovery-catalog Resource.
+- [x] 1.5 Register the specified 57 direct tools and only `rtt://output`, `probe://gdb-server-log`, and `probe://status` from the standalone server.
+- [x] 1.6 Clean package scripts, dependencies, configuration, tests, and current documentation, then pass build, lint, unit tests, tool-surface checks, and the scoped historical-control-plane scan.
 
 ## 2. Unify Target Context and Physical Execution (Commit 3)
 

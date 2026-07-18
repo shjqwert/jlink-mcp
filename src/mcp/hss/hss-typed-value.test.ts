@@ -38,14 +38,14 @@ test("typed arrays encode and decode exact element counts", () => {
   const bytes = encodeHssValues("int16", [100, 120, 140, 160], "little");
   assert.equal(bytes.length, 8);
   assert.deepEqual(decodeHssValues("int16", bytes, "little"), [100, 120, 140, 160]);
-  assert.throws(() => encodeHssValues("int16", [], "little"), policyError(HSS_ERROR.POLICY_MAX_ELEMENTS_EXCEEDED));
-  assert.throws(() => decodeHssValues("int16", Buffer.from([1]), "little"), policyError(HSS_ERROR.POLICY_TYPE_MISMATCH));
+  assert.throws(() => encodeHssValues("int16", [], "little"), valueError(HSS_ERROR.ELEMENT_COUNT_INVALID));
+  assert.throws(() => decodeHssValues("int16", Buffer.from([1]), "little"), valueError(HSS_ERROR.TYPE_MISMATCH));
 });
 
 function assertValueError(fn: () => unknown): void {
-  assert.throws(fn, policyError(HSS_ERROR.POLICY_VALUE_OUT_OF_RANGE));
+  assert.throws(fn, valueError(HSS_ERROR.VALUE_OUT_OF_RANGE));
 }
 
-function policyError(code: string): (error: unknown) => boolean {
+function valueError(code: string): (error: unknown) => boolean {
   return (error: unknown) => error instanceof HssError && error.code === code;
 }

@@ -1,286 +1,64 @@
-<p align="center">
-  <img src="logo.png" alt="jlink-mcp logo" width="200">
-</p>
+# jlink-mcp
 
-<h1 align="center">jlink-mcp</h1>
+Standalone MCP server for Agent-driven MCU debugging through SEGGER J-Link.
 
-<p align="center">
-  <strong>Give AI hands to touch silicon.</strong><br>
-  An MCP server that lets LLMs debug embedded devices through SEGGER J-Link probes.
-</p>
+The Agent decides which operation to request. The server executes that exact operation, serializes physical Probe access, and reports observed state and side effects. There is no embedded approval broker, risk tier, challenge/token flow, workflow Prompt, or required plan/execute handshake.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/MCP-Server-blue?style=for-the-badge" alt="MCP Server">
-  <img src="https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
-  <img src="https://img.shields.io/badge/J--Link-SEGGER-00979D?style=for-the-badge" alt="J-Link">
-  <img src="https://img.shields.io/badge/ARM-Cortex--M-0091BD?style=for-the-badge" alt="ARM Cortex-M">
-</p>
+## Build and run
 
-<p align="center">
-  <a href="https://github.com/Klievan/jlink-mcp/stargazers"><img src="https://img.shields.io/github/stars/Klievan/jlink-mcp?style=flat-square" alt="GitHub Stars"></a>
-  <a href="https://github.com/Klievan/jlink-mcp/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Klievan/jlink-mcp?style=flat-square" alt="License"></a>
-  <a href="https://www.npmjs.com/package/jlink-mcp"><img src="https://img.shields.io/npm/v/jlink-mcp?style=flat-square&color=cb0000" alt="npm"></a>
-  <a href="https://www.npmjs.com/package/jlink-mcp"><img src="https://img.shields.io/npm/dt/jlink-mcp?style=flat-square&color=cb0000" alt="npm downloads"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=Klievan.jlink-mcp"><img src="https://img.shields.io/visual-studio-marketplace/v/Klievan.jlink-mcp?style=flat-square&label=VSCode" alt="VSCode Marketplace"></a>
-  <a href="https://smithery.ai/server/@Klievan/jlink-mcp"><img src="https://smithery.ai/badge/@Klievan/jlink-mcp" alt="Smithery"></a>
-  <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Compatible-green?style=flat-square" alt="MCP Compatible"></a>
-</p>
+Requirements: Node.js 18+, SEGGER J-Link Software, and a supported J-Link Probe.
 
----
-
-## What is this?
-
-**jlink-mcp** connects AI assistants (Claude, Copilot, etc.) to your embedded hardware via [SEGGER J-Link](https://www.segger.com/products/debug-probes/j-link/) debug probes using the [Model Context Protocol](https://modelcontextprotocol.io).
-
-Instead of manually typing J-Link commands, your AI assistant can:
-
-- **Read registers and memory** to understand device state
-- **Flash firmware** and reset devices
-- **Stream RTT logs** and search them by level/module/regex
-- **Diagnose crashes** by auto-decoding ARM Cortex-M fault registers
-- **Control execution** — halt, resume, reset
-- **Start GDB servers** for full debugging sessions
-
-## Quick Start
-
-### Claude Desktop
-
-Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "jlink": {
-      "command": "node",
-      "args": ["/path/to/jlink-mcp/out/mcp/standalone.js"],
-      "env": {
-        "JLINK_DEVICE": "nRF52840_XXAA"
-      }
-    }
-  }
-}
-```
-
-### Claude Code
-
-Add `.mcp.json` to your project root:
-
-```json
-{
-  "mcpServers": {
-    "jlink": {
-      "command": "node",
-      "args": ["out/mcp/standalone.js"],
-      "cwd": "/path/to/jlink-mcp",
-      "env": {
-        "JLINK_DEVICE": "nRF52840_XXAA"
-      }
-    }
-  }
-}
-```
-
-### VSCode Extension
-
-Install the extension (requires VSCode 1.99+). It auto-registers the MCP server via the native `vscode.lm` API. Configure the device in settings:
-
-```
-jlinkMcp.jlink.device = "nRF52840_XXAA"
-```
-
-Copilot Chat and Claude in VSCode will automatically discover the registered tools.
-
-### From Source
-
-```bash
-git clone https://github.com/Klievan/jlink-mcp.git
-cd jlink-mcp
+```powershell
 npm install
-npm run compile
-JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
+npm run build
+node out/mcp/standalone.js
 ```
 
-## Tools
+Configure a Target with `target_configure` before project operations. One canonical `projectRoot` owns one persistent Target configuration; another project must be configured independently.
 
-### Workflow Tools (start here)
+## MCP surface
 
-| Tool | Description |
-|------|-------------|
-| `start_debug_session` | **One-call setup.** Starts GDB server + connects RTT + returns boot log. |
-| `snapshot` | Captures full device state: registers, fault status, stack dump, RTT output. |
-| `diagnose_crash` | Auto-reads and decodes ARM Cortex-M fault registers (CFSR, HFSR, MMFAR, BFAR) with exception stack frame. |
+The standalone server exposes 57 direct tools covering Target configuration, Artifact and symbol resolution, typed variables, SVD peripheral registers, core registers, memory, CPU control, flash/erase, raw GDB/Probe commands, HSS capture, JCAP queries, GDB Server, GDB, RTT, and deterministic analysis.
 
-### Device Control
+Only these Resources are exposed:
 
-| Tool | Description |
-|------|-------------|
-| `device_info` | Probe type, target CPU, compact register summary |
-| `halt` | Halt CPU |
-| `resume` | Resume CPU |
-| `reset` | Reset device (optionally halt after reset) |
+- `rtt://output`
+- `probe://gdb-server-log`
+- `probe://status`
 
-### Memory & Registers
+No MCP Prompts are registered.
 
-| Tool | Description |
-|------|-------------|
-| `read_memory` | Read memory at address (clean hex dump output) |
-| `read_registers` | All CPU registers in compact format |
-| `read_register` | Read specific register (PC, SP, R0-R12, etc.) |
+## Correctness rules
 
-### Flash
+- Reads do not implicitly halt or reset the target.
+- Preflight failures do not reset or halt the target.
+- Writes default to no old-value capture, no readback, and no restore. The caller opts into confirmation.
+- All physical operations for one Probe are serialized.
+- SVD register operations require an explicitly configured, validated SVD. Raw memory tools are the fallback when no SVD can be supplied, but do not count as SVD coverage.
+- HSS is capped at 10 synchronized variables, 1 kHz, and 60 seconds for the current hardware capability.
 
-| Tool | Description |
-|------|-------------|
-| `flash_plan` → `flash` | Plan and execute an approved firmware flash |
-| `erase_plan` → `erase` | Plan and execute an approved flash erase |
+## Capture package
 
-R4 execution uses one protected local step: run `jlink-mcp approve <challengeId>` in a real TTY, verify the displayed digest and summary, and type the exact challenge ID once. The broker retains that approval in memory for one execution; no approval token is printed or passed through the Agent.
+JCAP v1 uses four durable files:
 
-### GDB Server
-
-| Tool | Description |
-|------|-------------|
-| `gdb_server_start` | Start probe's GDB server |
-| `gdb_server_stop` | Stop GDB server + disconnect RTT |
-| `gdb_server_status` | GDB server and RTT status |
-
-### RTT (Real-Time Transfer)
-
-| Tool | Description |
-|------|-------------|
-| `rtt_connect` | Connect to RTT telnet port |
-| `rtt_disconnect` | Disconnect from RTT |
-| `rtt_read` | Read recent log lines (ANSI stripped, Zephyr format parsed) |
-| `rtt_search` | **Filter logs** by level (`err`/`wrn`/`inf`/`dbg`), module, or regex |
-| `rtt_clear` | Clear RTT buffer |
-
-### Artifact, HSS, and JCAP
-
-| Tool | Description |
-|------|-------------|
-| `artifact_probe` | Discover content-identified target artifacts |
-| `symbol_search` / `symbol_resolve` | Resolve safe runtime variable layouts |
-| `hot_variable_add` / `hot_variable_refresh` | Cache and refresh validated layouts |
-| `hss_capture_plan` / `hss_capture_start` | Plan and start the validated J-Link HSS path |
-| `hss_capture_status` / `hss_capture_stop` | Inspect and finalize HSS captures |
-| `capture_summary` / `capture_series` / `capture_event_window` | Query bounded Indexed JCAP evidence |
-| `analysis_profiles` / `analysis_run` | Run deterministic analysis-v0 profiles |
-
-### Advanced
-
-| Tool | Description |
-|------|-------------|
-| `probe_command_plan` → `probe_command` | Plan and execute an approved raw probe command |
-| `get_config` | Current probe and server configuration |
-
-## Probe Backend
-
-jlink-mcp uses the SEGGER J-Link backend in production:
-
-```bash
-PROBE_TYPE=jlink JLINK_DEVICE=nRF52840_XXAA node out/mcp/standalone.js
+```text
+<captureId>.jcap/
+  capture.json
+  raw/samples.bin
+  raw/events.bin
+  capture.db
 ```
 
-## Architecture
+AI and local analysis consumers query `capture.db`. If it is damaged, it is rebuilt from `capture.json` and the append-only Raw files. CSV exists only when explicitly exported and is written outside the JCAP package.
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    MCP Client                        │
-│          (Claude, Copilot, any MCP client)           │
-└──────────────────────┬──────────────────────────────┘
-                       │ JSON-RPC over stdio
-┌──────────────────────▼──────────────────────────────┐
-│                  jlink-mcp                           │
-│                                                      │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │   Tools  │  │ Resources │  │      Prompts      │  │
-│  └────┬─────┘  └────┬─────┘  └───────┬───────────┘  │
-│       │              │                │              │
-│  ┌────▼──────────────▼────────────────▼───────────┐  │
-│  │              ProbeBackend                       │  │
-│  │                   J-Link                      │  │
-│  └────────────────────┬──────────────────────────┘  │
-│                       │                             │
-│  ┌────────────────────▼─────┐ ┌──────────────────┐  │
-│  │        RTTClient         │ │  ProcessManager  │  │
-│  └──────────────────────────┘ └──────────────────┘  │
-└─────────────────────────────────────────────────────┘
-                       │
-          ┌────────────▼────────────┐
-          │    Debug Probe (USB)    │
-          │  → Target MCU (SWD/JTAG)│
-          └─────────────────────────┘
-```
+## Offline UI
 
-### Source Layout
+The existing local Offline UI source is retained for compatibility. It is intentionally outside the scope of the current Agent-first refactor: this change does not modify, extend, or accept it.
 
-```
-src/
-├── probe/
-│   ├── backend.ts      # ProbeBackend abstract class + shared utilities
-│   ├── jlink.ts        # SEGGER J-Link implementation
-│   └── factory.ts      # Probe creation from config
-├── mcp/
-│   ├── server.ts       # MCP server
-│   └── standalone.ts   # Standalone entry (stdio transport)
-├── rtt/
-│   └── rtt-client.ts   # RTT client with ANSI stripping + Zephyr log parsing
-├── utils/
-│   ├── config.ts       # VSCode settings / env var config
-│   ├── logger.ts       # Logging
-│   └── process-manager.ts # Child process lifecycle
-└── extension.ts        # VSCode extension + MCP provider registration
-```
+## Local evidence
 
-## Design Decisions (LLM-Optimized)
-
-This server was built by having an AI use it against real hardware, then fixing every friction point:
-
-- **Output parsing** strips 40+ lines of J-Link connection banners. Only data comes back.
-- **Registers** are compact: `Core: PC=0xBF54 SP=0x20062880 ...` instead of 65 raw lines.
-- **FP registers** only shown if non-zero (they're usually all zeros).
-- **RTT output** has ANSI escape codes stripped and Zephyr log format parsed into structured fields.
-- **Composite tools** (`start_debug_session`, `snapshot`, `diagnose_crash`) replace multi-step workflows with single calls.
-- **Fault decoding** is automatic — reads CFSR/HFSR/MMFAR/BFAR and explains each bit.
-- **`rtt_search`** lets you find errors without reading the entire log.
-
-## Continuous variable capture
-
-Windows x64 builds can capture ELF-resolved RAM scalars through validated HSS sessions and store them as JCAP packages.
-
-Saved JCAP packages can be queried and analyzed offline with the production analysis tools.
-
-### HSS MVP-B Scalar baseline
-
-MVP-B Scalar is the current release baseline for HM_C095 HSS capture-time writes: 1kHz read-only capture and 1kHz scalar active write/readback have passing evidence in [docs/hss-hm-c095-1khz-fix-verification.md](docs/hss-hm-c095-1khz-fix-verification.md). Production array writes are intentionally deferred to the next phase; keep generated `.tmp/` and `.jlink-mcp/captures|exports` artifacts out of git.
-
-## Environment Variables
-
-### J-Link
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PROBE_TYPE` | `jlink` | Production probe backend; other values are rejected |
-| `JLINK_DEVICE` | `Unspecified` | Target device (e.g., `nRF52840_XXAA`, `STM32F407VG`) |
-| `JLINK_INSTALL_DIR` | Auto-detect | Path to SEGGER J-Link installation |
-| `JLINK_INTERFACE` | `SWD` | Debug interface: `SWD` or `JTAG` |
-| `JLINK_SPEED` | `4000` | Connection speed in kHz |
-| `JLINK_SERIAL` | | J-Link serial number (multi-probe) |
-| `JLINK_GDB_PORT` | `2331` | GDB server port |
-| `JLINK_RTT_PORT` | `19021` | RTT telnet port |
-
-## Prerequisites
-
-- **[SEGGER J-Link Software](https://www.segger.com/downloads/jlink/)** installed (JLinkExe, JLinkGDBServer)
-- A J-Link debug probe connected to an ARM Cortex-M target
-- Node.js 18+
+Generated captures, exports, acceptance evidence, environment details, local project paths, Probe serial numbers, and Artifact hashes belong under ignored `test-output/` storage and must not be committed or pushed.
 
 ## License
 
-MIT - see [LICENSE](LICENSE)
-
----
-
-<p align="center">
-  Built by <a href="https://github.com/thesprkfactory">The Sprk Factory</a>
-</p>
+MIT. See [LICENSE](LICENSE).

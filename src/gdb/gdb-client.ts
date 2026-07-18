@@ -1,6 +1,5 @@
 import { ChildProcess, spawn } from "child_process";
 import { log, logError } from "../utils/logger";
-import { checkR4ExecutionPermit, classifyR4Operation, type RiskOperationErrorCode } from "../mcp/risk-operations";
 
 export interface GDBResponse {
   success: boolean;
@@ -8,7 +7,7 @@ export interface GDBResponse {
   /** If the target stopped, why (breakpoint, signal, exit, etc.) */
   stopReason?: string;
   error?: string;
-  code?: RiskOperationErrorCode;
+  code?: string;
 }
 
 /**
@@ -127,20 +126,8 @@ export class GDBClient {
    * If the target doesn't stop in time, returns with a "target running" message.
    */
   async command(cmd: string, timeout: number = 15000): Promise<GDBResponse> {
-    const trimmed = cmd.trim();
-    const isLoad = /^load(?:\s|$)/i.test(trimmed);
-    const tool = isLoad ? "flash" : "gdb_command";
-    const canonicalArgs = isLoad
-      ? { filePath: this.loadedSymbolFile ?? "" }
-      : { command: cmd, timeout };
-    if (!isLoad) {
-      const forbidden = classifyR4Operation("gdb_command", canonicalArgs);
-      if (forbidden) return { success: false, output: "", error: forbidden.message, code: forbidden.code };
-    }
-    const rejected = checkR4ExecutionPermit(tool, canonicalArgs, this.connectionGeneration);
-    if (rejected) return { success: false, output: "", error: rejected.message, code: rejected.code };
     if (!this.proc || !this.connected) {
-      return { success: false, output: "", error: "raw GDB execution requires the same connected generation used by its R4 challenge", code: "approval_mismatch" };
+      return { success: false, output: "", error: "GDB is not connected", code: "GDB_NOT_CONNECTED" };
     }
     return this.commandInternal(cmd, timeout, false);
   }
@@ -251,7 +238,7 @@ export class GDBClient {
 
   /** Load an ELF file for symbol-aware debugging */
   async loadSymbols(elfPath: string): Promise<GDBResponse> {
-    if (!elfPath || /[\r\n\0]/.test(elfPath)) return { success: false, output: "", error: "symbol path contains forbidden control characters", code: "r5_forbidden" };
+    if (!elfPath || /[\r\n\0]/.test(elfPath)) return { success: false, output: "", error: "symbol path contains forbidden control characters", code: "INVALID_ARGUMENT" };
     const quoted = `"${elfPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
     const result = await this.commandInternal(`file ${quoted}`, 15_000, true);
     if (result.success) this.loadedSymbolFile = elfPath;
@@ -271,7 +258,7 @@ export class GDBClient {
   /** Read a C variable by name (requires debug symbols) */
   async readVariable(name: string): Promise<GDBResponse> {
     if (!/^[A-Za-z_]\w*(?:(?:\.[A-Za-z_]\w*)|(?:\[\d+\]))*$/.test(name)) {
-      return { success: false, output: "", error: "variable selector cannot be proven below R5", code: "r5_forbidden" };
+      return { success: false, output: "", error: "variable selector is not supported", code: "INVALID_ARGUMENT" };
     }
     return this.commandInternal(`print ${name}`, 15_000, true);
   }

@@ -1,6 +1,7 @@
 out/
 node_modules/
 .tmp/
+test-output/
 .jlink-mcp/captures/
 .jlink-mcp/exports/
 *.log

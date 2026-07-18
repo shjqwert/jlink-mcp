@@ -12,15 +12,7 @@ const common = {
   minify: false,
 };
 
-// 1. VSCode extension entry point — exclude vscode (provided by host)
-const extensionBuild = esbuild.build({
-  ...common,
-  entryPoints: ["src/extension.ts"],
-  outfile: "out/extension.js",
-  external: ["vscode", "sqlite3"],
-});
-
-// 2. Standalone MCP server — bundle JS dependencies; ship sqlite3's native binding separately
+// Standalone MCP server — bundle JS dependencies; ship sqlite3's native binding separately
 const standaloneBuild = esbuild.build({
   ...common,
   entryPoints: ["src/mcp/standalone.ts"],
@@ -28,7 +20,7 @@ const standaloneBuild = esbuild.build({
   external: ["sqlite3"],
 });
 
-// 3. Local loopback JCAP offline UI
+// Local loopback JCAP offline UI
 const uiBuild = esbuild.build({
   ...common,
   entryPoints: ["src/mcp/ui.ts"],
@@ -36,5 +28,5 @@ const uiBuild = esbuild.build({
   external: ["sqlite3"],
 });
 
-await Promise.all([extensionBuild, standaloneBuild, uiBuild]);
+await Promise.all([standaloneBuild, uiBuild]);
 console.log("Build complete");

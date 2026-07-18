@@ -1,6 +1,5 @@
 {
   "name": "jlink-mcp",
-  "displayName": "jlink-mcp",
   "description": "MCP server for SEGGER J-Link debug probes — LLM-driven embedded debugging with RTT, GDB, HSS, and JCAP",
   "repository": {
     "type": "git",
@@ -11,17 +10,10 @@
     "url": "https://github.com/Klievan/jlink-mcp/issues"
   },
   "version": "0.3.2",
-  "publisher": "Klievan",
-  "icon": "logo.png",
   "license": "MIT",
   "engines": {
-    "node": ">=18",
-    "vscode": "^1.110.0"
+    "node": ">=18"
   },
-  "categories": [
-    "Debuggers",
-    "Other"
-  ],
   "keywords": [
     "j-link",
     "segger",
@@ -38,128 +30,32 @@
   "bin": {
     "jlink-mcp": "./out/mcp/standalone.js"
   },
-  "activationEvents": [
-    "onStartupFinished"
+  "files": [
+    "out/**/*.js",
+    "out/**/*.d.ts",
+    "native/hss-helper/bin/hss_helper.exe",
+    "README.md",
+    "LICENSE"
   ],
-  "main": "./out/extension.js",
-  "contributes": {
-    "commands": [
-      {
-        "command": "jlinkMcp.showStatus",
-        "title": "J-Link MCP: Show Status",
-        "category": "J-Link"
-      },
-      {
-        "command": "jlinkMcp.startGdbServer",
-        "title": "J-Link MCP: Start GDB Server",
-        "category": "J-Link"
-      },
-      {
-        "command": "jlinkMcp.stopGdbServer",
-        "title": "J-Link MCP: Stop GDB Server",
-        "category": "J-Link"
-      },
-      {
-        "command": "jlinkMcp.connectRtt",
-        "title": "J-Link MCP: Connect RTT",
-        "category": "J-Link"
-      },
-      {
-        "command": "jlinkMcp.disconnectRtt",
-        "title": "J-Link MCP: Disconnect RTT",
-        "category": "J-Link"
-      },
-      {
-        "command": "jlinkMcp.flashFirmware",
-        "title": "J-Link MCP: Flash Firmware",
-        "category": "J-Link"
-      },
-      {
-        "command": "jlinkMcp.showOutput",
-        "title": "J-Link MCP: Show Output Log",
-        "category": "J-Link"
-      },
-      {
-        "command": "jlinkMcp.showRttOutput",
-        "title": "J-Link MCP: Show RTT Output",
-        "category": "J-Link"
-      }
-    ],
-    "configuration": {
-      "title": "J-Link MCP",
-      "properties": {
-        "jlinkMcp.jlink.installDir": {
-          "type": "string",
-          "default": "",
-          "description": "Path to SEGGER J-Link installation directory (auto-detected if empty)"
-        },
-        "jlinkMcp.jlink.device": {
-          "type": "string",
-          "default": "Unspecified",
-          "description": "Target device name (e.g., NRF52840_XXAA, STM32F407VG)"
-        },
-        "jlinkMcp.jlink.interface": {
-          "type": "string",
-          "enum": ["SWD", "JTAG"],
-          "default": "SWD",
-          "description": "Debug interface"
-        },
-        "jlinkMcp.jlink.speed": {
-          "type": "number",
-          "default": 4000,
-          "description": "Connection speed in kHz"
-        },
-        "jlinkMcp.jlink.serialNumber": {
-          "type": "string",
-          "default": "",
-          "description": "J-Link serial number (for multi-probe setups)"
-        },
-        "jlinkMcp.jlink.gdbPort": {
-          "type": "number",
-          "default": 2331,
-          "description": "GDB server port"
-        },
-        "jlinkMcp.jlink.rttTelnetPort": {
-          "type": "number",
-          "default": 19021,
-          "description": "RTT telnet port"
-        },
-        "jlinkMcp.jlink.swoTelnetPort": {
-          "type": "number",
-          "default": 2332,
-          "description": "SWO telnet port"
-        }
-      }
-    },
-    "mcpServerDefinitionProviders": [
-      {
-        "id": "jlinkMcp.mcpServer",
-        "label": "J-Link Debug Probe"
-      }
-    ]
-  },
   "scripts": {
+    "clean": "node scripts/clean.mjs",
     "compile": "tsc -p ./",
     "bundle": "node esbuild.mjs",
     "ui": "node out/mcp/ui.js",
     "build:hss": "node scripts/build-hss-helper.mjs",
     "watch": "tsc -watch -p ./",
-    "build": "npm run compile && npm run bundle",
+    "build": "npm run clean && npm run compile && npm run bundle",
     "prepublishOnly": "npm run build",
-    "vscode:prepublish": "npm run build",
-    "package": "npm run build && vsce package",
     "lint": "tsc --noEmit",
-    "test": "npm run compile && node --test out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js out/mcp/rtt-channel/rtt-channel.test.js out/mcp/preflight/temp-preflight.test.js",
+    "test": "npm run clean && npm run compile && npm run test:unit && npm run test:surface && npm run test:legacy-scan",
+    "test:unit": "node scripts/run-tests.mjs out/probe/backend.test.js out/mcp/artifact/artifact-catalog.test.js out/mcp/artifact/hot-variables.test.js out/mcp/artifact/symbol-catalog.test.js out/mcp/hss/hss-typed-value.test.js out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/jcap/analysis-v0.test.js out/mcp/jcap/jcap-v0.test.js out/mcp/preflight/temp-preflight.test.js out/mcp/rtt-channel/rtt-channel.test.js out/mcp/sqlite-runtime.test.js",
+    "test:surface": "node scripts/run-tests.mjs out/mcp/standalone-surface.test.js",
+    "test:legacy-scan": "node scripts/scan-legacy-control-plane.mjs",
     "test:elf": "npm run compile && node scripts/test-elf.mjs",
     "test:rtt-channel": "npm run compile && node --test out/mcp/rtt-channel/rtt-channel.test.js",
-    "test:hss-backend": "npm run compile && node --test out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js",
-    "test:hss-dll": "npm run compile && node --test out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/hss-dll/hss-dll-adapter.test.js",
-    "test:trust-cli": "npm run compile && node --test out/mcp/trust/trust-cli.test.js out/mcp/trust/trust-profile.test.js out/mcp/server-hss-tool-surface.test.js",
-    "test:jcap": "npm run build && node --test out/mcp/sqlite-runtime.test.js out/mcp/jcap/jcap-v0.test.js",
-    "test:hss-mvp-a": "npm run compile && node --test out/mcp/hss/hss-mvp-a.test.js",
-    "hss:hm-c095": "node scripts/hss-hm-c095-mvp-a.mjs",
-    "test:hss-mvp-b": "npm run compile && node --test out/mcp/hss/hss-policy.test.js out/mcp/hss/hss-write-layout.test.js out/mcp/hss/hss-typed-value.test.js out/mcp/hss/hss-write-plan.test.js out/mcp/hss/hss-write-plan-store.test.js out/mcp/hss/hss-write-queue.test.js out/mcp/hss/hss-write-execute.test.js out/mcp/hss/hss-events.test.js out/mcp/hss/hss-flag-overlay.test.js out/mcp/hss/hss-query-event-window.test.js out/mcp/hss/hss-export-event-aware.test.js out/mcp/hss/hss-audit.test.js out/mcp/hss/hss-mvp-b-integration.test.js && node scripts/hss-hm-c095-mvp-b-active-write.mjs --fake",
-    "validate:hss-mvp-b-capture": "node scripts/hss-validate-mvp-b-capture.mjs"
+    "test:hss-contract": "npm run compile && node scripts/run-tests.mjs out/mcp/hss-dll/hss-api-candidate.test.js",
+    "test:hss-helper": "npm run build:hss && native\\hss-helper\\bin\\hss_helper.exe self-test",
+    "test:jcap": "npm run build && node --test out/mcp/sqlite-runtime.test.js out/mcp/jcap/jcap-v0.test.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -168,8 +64,6 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
-    "@types/vscode": "^1.110.0",
-    "@vscode/vsce": "^3.7.1",
     "esbuild": "^0.28.0",
     "typescript": "^6.0.2"
   }

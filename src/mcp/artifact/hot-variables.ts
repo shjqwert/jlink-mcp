@@ -3,8 +3,7 @@ import { symbolLogicalIdentity, type ResolvedSymbol, type SymbolRef } from "./sy
 export interface HotVariableContext {
   artifactGeneration: string;
   mapSha256?: string;
-  policyGeneration: string;
-  sessionGeneration: string;
+  targetGeneration: string;
 }
 
 export interface HotVariable {
@@ -13,8 +12,7 @@ export interface HotVariable {
   resolved: ResolvedSymbol;
   artifactGeneration: string;
   mapSha256?: string;
-  policyGeneration: string;
-  sessionGeneration: string;
+  targetGeneration: string;
   validatedAt: string;
 }
 
@@ -33,7 +31,7 @@ export class HotVariables {
   add(resolved: ResolvedSymbol, context: HotVariableContext, validatedAt = new Date().toISOString()): HotVariable {
     if (resolved.ref.artifactGeneration !== context.artifactGeneration) throw new Error("cannot cache a resolved symbol from a different artifact generation");
     const logicalIdentity = symbolLogicalIdentity(resolved.ref);
-    const value: HotVariable = { logicalIdentity, layoutHash: resolved.ref.layoutHash, resolved, artifactGeneration: context.artifactGeneration, ...(context.mapSha256 ? { mapSha256: context.mapSha256 } : {}), policyGeneration: context.policyGeneration, sessionGeneration: context.sessionGeneration, validatedAt };
+    const value: HotVariable = { logicalIdentity, layoutHash: resolved.ref.layoutHash, resolved, artifactGeneration: context.artifactGeneration, ...(context.mapSha256 ? { mapSha256: context.mapSha256 } : {}), targetGeneration: context.targetGeneration, validatedAt };
     this.variables.set(logicalIdentity, value);
     return value;
   }
@@ -64,8 +62,7 @@ export class HotVariables {
 function sameContext(value: HotVariable, context: HotVariableContext, layoutHash?: string): boolean {
   return value.artifactGeneration === context.artifactGeneration
     && value.mapSha256 === context.mapSha256
-    && value.policyGeneration === context.policyGeneration
-    && value.sessionGeneration === context.sessionGeneration
+    && value.targetGeneration === context.targetGeneration
     && value.resolved.ref.artifactGeneration === context.artifactGeneration
     && (layoutHash === undefined || value.layoutHash === layoutHash);
 }

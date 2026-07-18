@@ -35,7 +35,7 @@ export function encodeHssValue(type: HssScalarType, value: number, endian: HssTa
 
 export function decodeHssValue(type: HssScalarType, bytes: Buffer, endian: HssTargetEndian): number {
   validateEndian(endian);
-  if (bytes.length !== TYPE_BYTES[type]) throw new HssError(HSS_ERROR.POLICY_TYPE_MISMATCH, "value byte length does not match scalar type", { type, byteLength: bytes.length });
+  if (bytes.length !== TYPE_BYTES[type]) throw new HssError(HSS_ERROR.TYPE_MISMATCH, "value byte length does not match scalar type", { type, byteLength: bytes.length });
   switch (type) {
     case "int8": return bytes.readInt8(0);
     case "uint8": return bytes.readUInt8(0);
@@ -48,14 +48,14 @@ export function decodeHssValue(type: HssScalarType, bytes: Buffer, endian: HssTa
 }
 
 export function encodeHssValues(type: HssScalarType, values: number[], endian: HssTargetEndian): Buffer {
-  if (values.length === 0) throw new HssError(HSS_ERROR.POLICY_MAX_ELEMENTS_EXCEEDED, "values must not be empty");
+  if (values.length === 0) throw new HssError(HSS_ERROR.ELEMENT_COUNT_INVALID, "values must not be empty");
   return Buffer.concat(values.map((value) => encodeHssValue(type, value, endian)));
 }
 
 export function decodeHssValues(type: HssScalarType, bytes: Buffer, endian: HssTargetEndian): number[] {
   validateEndian(endian);
   const byteSize = TYPE_BYTES[type];
-  if (bytes.length === 0 || bytes.length % byteSize !== 0) throw new HssError(HSS_ERROR.POLICY_TYPE_MISMATCH, "byte length must equal elementSize * elementCount", { type, byteLength: bytes.length });
+  if (bytes.length === 0 || bytes.length % byteSize !== 0) throw new HssError(HSS_ERROR.TYPE_MISMATCH, "byte length must equal elementSize * elementCount", { type, byteLength: bytes.length });
   const values: number[] = [];
   for (let offset = 0; offset < bytes.length; offset += byteSize) values.push(decodeHssValue(type, bytes.subarray(offset, offset + byteSize), endian));
   return values;
@@ -66,14 +66,14 @@ export function hssBytesEqual(left: Buffer, right: Buffer): boolean {
 }
 
 function validateValue(type: HssScalarType, value: number): void {
-  if (!Number.isFinite(value)) throw new HssError(HSS_ERROR.POLICY_VALUE_OUT_OF_RANGE, "value must be finite", { type, value });
+  if (!Number.isFinite(value)) throw new HssError(HSS_ERROR.VALUE_OUT_OF_RANGE, "value must be finite", { type, value });
   if (type === "float32") return;
   const range = INT_RANGE[type];
   if (!range || !Number.isInteger(value) || value < range.min || value > range.max) {
-    throw new HssError(HSS_ERROR.POLICY_VALUE_OUT_OF_RANGE, `value does not fit ${type}`, { type, value });
+    throw new HssError(HSS_ERROR.VALUE_OUT_OF_RANGE, `value does not fit ${type}`, { type, value });
   }
 }
 
 function validateEndian(endian: HssTargetEndian): void {
-  if (endian !== "little" && endian !== "big") throw new HssError(HSS_ERROR.POLICY_TYPE_MISMATCH, "target endian must be little or big", { endian });
+  if (endian !== "little" && endian !== "big") throw new HssError(HSS_ERROR.TYPE_MISMATCH, "target endian must be little or big", { endian });
 }

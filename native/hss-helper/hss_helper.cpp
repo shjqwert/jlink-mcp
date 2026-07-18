@@ -852,223 +852,6 @@ static bool uuid_v4(const std::string& value) {
 static std::string hex_u32(U32 value);
 static std::wstring lower_path(std::wstring path);
 
-struct R4CommandBindings {
-  std::string planPath;
-  std::string expectedSummarySha256;
-  std::string device;
-  std::string iface;
-  std::string serial;
-  int speedKhz = 0;
-  std::string captureId;
-  std::string runtimeIdentitySha256;
-  std::string artifactGeneration;
-  std::string artifactSha256;
-  std::string address;
-  int length = 0;
-  int accessSize = 0;
-  std::string bytesHex;
-  bool enforcePlanPath = true;
-};
-
-struct R4NativeException {
-  std::string summarySha256;
-  std::string writePlanId;
-  std::string canonicalTarget;
-  std::string bytesHex;
-  U32 address = 0;
-  int byteLength = 0;
-  int accessSize = 0;
-};
-
-static bool r4_compute_approval_digest(const StrictJson& envelope, std::string* digest, std::string* reason) {
-  const StrictJson* operation = json_member(envelope, "operation");
-  const StrictJson* approval = json_member(envelope, "approval");
-  const StrictJson* binding = json_member(envelope, "binding");
-  const StrictJson* target = binding ? json_member(*binding, "target") : nullptr;
-  const StrictJson* probe = binding ? json_member(*binding, "probe") : nullptr;
-  const StrictJson* artifact = binding ? json_member(*binding, "artifact") : nullptr;
-  const StrictJson* policy = binding ? json_member(*binding, "policy") : nullptr;
-  const StrictJson* session = binding ? json_member(*binding, "session") : nullptr;
-  std::string write_plan_id, target_id, artifact_match, probe_kind, serial, iface, generation, artifact_sha, layout, policy_sha, session_id, capture_id;
-  uint64_t speed = 0, connection = 0;
-  if (!operation || !approval || !binding || !target || !probe || !artifact || !policy || !session
-      || !json_text(json_member(*operation, "writePlanId"), &write_plan_id)
-      || !json_text(json_member(*target, "targetId"), &target_id) || !json_text(json_member(*target, "artifactMatch"), &artifact_match)
-      || !json_text(json_member(*probe, "kind"), &probe_kind) || !json_text(json_member(*probe, "serial"), &serial)
-      || !json_text(json_member(*probe, "interface"), &iface) || !json_u64(json_member(*probe, "speedKhz"), &speed)
-      || !json_text(json_member(*artifact, "generation"), &generation) || !json_text(json_member(*artifact, "sha256"), &artifact_sha)
-      || !json_text(json_member(*binding, "layoutSha256"), &layout) || !json_text(json_member(*policy, "sha256"), &policy_sha)
-      || !json_text(json_member(*session, "id"), &session_id) || !json_text(json_member(*session, "captureId"), &capture_id)
-      || !json_u64(json_member(*binding, "physicalConnectionGeneration"), &connection)) {
-    *reason = "R4 approval binding is incomplete";
-    return false;
-  }
-  const std::string canonical =
-    "{\"artifact\":{\"generation\":" + canonical_json_string(generation) + ",\"sha256\":" + canonical_json_string(artifact_sha)
-    + "},\"canonicalArgs\":{\"writePlanId\":" + canonical_json_string(write_plan_id)
-    + "},\"connectionGeneration\":" + std::to_string(connection)
-    + ",\"layoutHash\":" + canonical_json_string(layout)
-    + ",\"policy\":{\"sha256\":" + canonical_json_string(policy_sha) + ",\"unverifiedWriteException\":true}"
-    + ",\"probe\":{\"interface\":" + canonical_json_string(iface) + ",\"kind\":" + canonical_json_string(probe_kind)
-    + ",\"serial\":" + canonical_json_string(serial) + ",\"speedKhz\":" + std::to_string(speed) + "}"
-    + ",\"session\":{\"captureId\":" + canonical_json_string(capture_id) + ",\"id\":" + canonical_json_string(session_id) + "}"
-    + ",\"target\":{\"artifactMatch\":" + canonical_json_string(artifact_match) + ",\"targetId\":" + canonical_json_string(target_id) + "}"
-    + ",\"tool\":\"variable_write_execute\"}";
-  if (!sha256_bytes(canonical, digest)) {
-    *reason = "R4 approval operation digest could not be computed";
-    return false;
-  }
-  return true;
-}
-
-static bool validate_r4_native_exception(const std::string& bytes, const R4CommandBindings& expected, R4NativeException* out, std::string* reason) {
-  StrictJson root;
-  if (!valid_utf8(bytes) || !StrictJsonParser(bytes).parse(&root, reason)) return false;
-  if (!json_exact_keys(root, {"schema", "version", "kind", "canonicalization", "summaryAlgorithm", "operation", "approval", "binding", "write", "summarySha256"})) { *reason = "R4 envelope contains missing or unknown root fields"; return false; }
-  const StrictJson* operation = json_member(root, "operation");
-  const StrictJson* approval = json_member(root, "approval");
-  const StrictJson* binding = json_member(root, "binding");
-  const StrictJson* write = json_member(root, "write");
-  if (!operation || !approval || !binding || !write
-      || !json_exact_keys(*operation, {"tool", "writePlanId", "planDigest", "planIssuedAt", "planExpiresAt", "canonicalArgs"})
-      || !json_exact_keys(*approval, {"state", "challengeId", "operationDigest", "nonceSha256", "consumedAt", "expiresAt"})
-      || !json_exact_keys(*binding, {"target", "probe", "runtime", "artifact", "layoutSha256", "policy", "session", "physicalConnectionGeneration"})
-      || !json_exact_keys(*write, {"canonicalTarget", "address", "accessSize", "byteLength", "bytesHex", "readbackRequired"})) {
-    *reason = "R4 envelope contains missing or unknown nested fields";
-    return false;
-  }
-  const StrictJson* target = json_member(*binding, "target");
-  const StrictJson* probe = json_member(*binding, "probe");
-  const StrictJson* runtime = json_member(*binding, "runtime");
-  const StrictJson* artifact = json_member(*binding, "artifact");
-  const StrictJson* policy = json_member(*binding, "policy");
-  const StrictJson* session = json_member(*binding, "session");
-  const StrictJson* canonical_args = json_member(*operation, "canonicalArgs");
-  if (!target || !probe || !runtime || !artifact || !policy || !session || !canonical_args
-      || !json_exact_keys(*target, {"targetId", "artifactMatch"})
-      || !json_exact_keys(*probe, {"kind", "serial", "interface", "speedKhz"})
-      || !json_exact_keys(*runtime, {"identitySha256", "scriptApprovalSha256"})
-      || !json_exact_keys(*artifact, {"generation", "sha256", "evidenceGeneration"})
-      || !json_exact_keys(*policy, {"sha256", "rule", "unverifiedWriteException", "maxWrites", "remainingWrites", "maxElements", "remainingElements"})
-      || !json_exact_keys(*session, {"id", "captureId", "captureGeneration"})
-      || !json_exact_keys(*canonical_args, {"targetRef", "canonicalTarget", "values"})) {
-    *reason = "R4 envelope binding contains missing or unknown fields";
-    return false;
-  }
-  std::string schema, kind, canonicalization, summary_algorithm, summary, tool, write_plan_id, plan_digest, plan_issued, plan_expires;
-  std::string approval_state, challenge_id, approval_digest, nonce_sha, consumed_at, approval_expires;
-  std::string target_id, artifact_match, probe_kind, serial, iface, runtime_sha, script_approval_sha, artifact_generation, artifact_sha, evidence_generation;
-  std::string layout_sha, policy_sha, policy_rule, session_id, capture_id, canonical_target, bytes_hex, args_target;
-  uint64_t version = 0, speed = 0, connection = 0, max_writes = 0, remaining_writes = 0, max_elements = 0, remaining_elements = 0, capture_generation = 0;
-  uint64_t address = 0, access_size = 0, byte_length = 0;
-  if (!json_text(json_member(root, "schema"), &schema) || !json_u64(json_member(root, "version"), &version)
-      || !json_text(json_member(root, "kind"), &kind) || !json_text(json_member(root, "canonicalization"), &canonicalization)
-      || !json_text(json_member(root, "summaryAlgorithm"), &summary_algorithm) || !json_text(json_member(root, "summarySha256"), &summary)
-      || schema != "jlink-mcp-r4-native-exception" || version != 1U || kind != "unverified_variable_write"
-      || canonicalization != "utf8-sorted-json-v1" || summary_algorithm != "sha256") { *reason = "R4 envelope discriminator is invalid"; return false; }
-  if (!json_text(json_member(*operation, "tool"), &tool) || tool != "variable_write_execute"
-      || !json_text(json_member(*operation, "writePlanId"), &write_plan_id) || !std::regex_match(write_plan_id, std::regex("op_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"))
-      || !json_text(json_member(*operation, "planDigest"), &plan_digest) || !lower_sha256(plan_digest)
-      || !json_text(json_member(*operation, "planIssuedAt"), &plan_issued) || !json_text(json_member(*operation, "planExpiresAt"), &plan_expires)
-      || !iso_utc_milliseconds(plan_issued) || !iso_utc_milliseconds(plan_expires) || plan_issued > plan_expires) { *reason = "R4 operation identity or lifetime is invalid"; return false; }
-  if (!json_text(json_member(*approval, "state"), &approval_state) || approval_state != "consumed"
-      || !json_text(json_member(*approval, "challengeId"), &challenge_id) || !uuid_v4(challenge_id)
-      || !json_text(json_member(*approval, "operationDigest"), &approval_digest) || !lower_sha256(approval_digest)
-      || !json_text(json_member(*approval, "nonceSha256"), &nonce_sha) || !lower_sha256(nonce_sha)
-      || !json_text(json_member(*approval, "consumedAt"), &consumed_at) || !json_text(json_member(*approval, "expiresAt"), &approval_expires)
-      || !iso_utc_milliseconds(consumed_at) || !iso_utc_milliseconds(approval_expires) || consumed_at > approval_expires) { *reason = "R4 approval consumption evidence is invalid"; return false; }
-  if (!json_text(json_member(*target, "targetId"), &target_id) || !bounded_text(target_id)
-      || !json_text(json_member(*target, "artifactMatch"), &artifact_match) || artifact_match != "unverified"
-      || !json_text(json_member(*probe, "kind"), &probe_kind) || probe_kind != "jlink"
-      || !json_text(json_member(*probe, "serial"), &serial) || !bounded_text(serial)
-      || !json_text(json_member(*probe, "interface"), &iface) || (iface != "SWD" && iface != "JTAG")
-      || !json_u64(json_member(*probe, "speedKhz"), &speed) || speed == 0U || speed > (std::numeric_limits<int>::max)()
-      || !json_u64(json_member(*binding, "physicalConnectionGeneration"), &connection) || connection == 0U) { *reason = "R4 target or probe binding is invalid"; return false; }
-  if (!json_text(json_member(*runtime, "identitySha256"), &runtime_sha) || !lower_sha256(runtime_sha)
-      || !json_text(json_member(*runtime, "scriptApprovalSha256"), &script_approval_sha) || !lower_sha256(script_approval_sha)
-      || !json_text(json_member(*artifact, "generation"), &artifact_generation) || !lower_sha256(artifact_generation)
-      || !json_text(json_member(*artifact, "sha256"), &artifact_sha) || !lower_sha256(artifact_sha)
-      || !json_text(json_member(*artifact, "evidenceGeneration"), &evidence_generation) || !lower_sha256(evidence_generation)
-      || !json_text(json_member(*binding, "layoutSha256"), &layout_sha) || !lower_sha256(layout_sha)) { *reason = "R4 runtime, Artifact, or layout binding is invalid"; return false; }
-  if (!json_text(json_member(*policy, "sha256"), &policy_sha) || !lower_sha256(policy_sha)
-      || !json_text(json_member(*policy, "rule"), &policy_rule) || !bounded_text(policy_rule)
-      || !json_true(json_member(*policy, "unverifiedWriteException"))
-      || !json_u64(json_member(*policy, "maxWrites"), &max_writes) || max_writes == 0U
-      || !json_u64(json_member(*policy, "remainingWrites"), &remaining_writes) || remaining_writes > max_writes
-      || !json_u64(json_member(*policy, "maxElements"), &max_elements) || max_elements == 0U
-      || !json_u64(json_member(*policy, "remainingElements"), &remaining_elements) || remaining_elements > max_elements
-      || !json_text(json_member(*session, "id"), &session_id) || !bounded_text(session_id)
-      || !json_text(json_member(*session, "captureId"), &capture_id) || !bounded_text(capture_id)
-      || !json_u64(json_member(*session, "captureGeneration"), &capture_generation)) { *reason = "R4 policy or session binding is invalid"; return false; }
-  if (!json_text(json_member(*write, "canonicalTarget"), &canonical_target) || !bounded_text(canonical_target)
-      || !json_u64(json_member(*write, "address"), &address) || address > (std::numeric_limits<U32>::max)()
-      || !json_u64(json_member(*write, "accessSize"), &access_size) || (access_size != 1U && access_size != 2U && access_size != 4U)
-      || !json_u64(json_member(*write, "byteLength"), &byte_length) || byte_length == 0U || byte_length > 4096U || byte_length % access_size != 0U
-      || !json_text(json_member(*write, "bytesHex"), &bytes_hex) || bytes_hex.size() != byte_length * 2U
-      || !std::all_of(bytes_hex.begin(), bytes_hex.end(), [](unsigned char ch) { return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'); })
-      || !json_true(json_member(*write, "readbackRequired")) || address < 0x20000000ULL || address + byte_length > 0x40000000ULL) { *reason = "R4 write binding is invalid or outside the bounded RAM window"; return false; }
-  const StrictJson* target_ref = json_member(*canonical_args, "targetRef");
-  const StrictJson* values = json_member(*canonical_args, "values");
-  std::string ref_kind, ref_path;
-  if (!target_ref || !values || values->type != StrictJson::Type::array || values->arrayValue.empty() || values->arrayValue.size() != byte_length / access_size
-      || values->arrayValue.size() > 4096U || !json_text(json_member(*canonical_args, "canonicalTarget"), &args_target) || args_target != canonical_target
-      || !json_text(json_member(*target_ref, "kind"), &ref_kind) || !json_text(json_member(*target_ref, "path"), &ref_path)
-      || !std::regex_match(ref_path, std::regex("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*"))
-      || std::any_of(values->arrayValue.begin(), values->arrayValue.end(), [](const StrictJson& value) { return value.type != StrictJson::Type::number; })) { *reason = "R4 canonical write arguments are invalid"; return false; }
-  std::string derived_target;
-  if (ref_kind == "scalar") {
-    if (!json_exact_keys(*target_ref, {"kind", "path"}) || values->arrayValue.size() != 1U) { *reason = "R4 scalar targetRef is invalid"; return false; }
-    derived_target = ref_path;
-  } else if (ref_kind == "array_element") {
-    uint64_t index = 0;
-    if (!json_exact_keys(*target_ref, {"kind", "path", "index"}) || !json_u64(json_member(*target_ref, "index"), &index) || values->arrayValue.size() != 1U) { *reason = "R4 array element targetRef is invalid"; return false; }
-    derived_target = ref_path + "[" + std::to_string(index) + "]";
-  } else if (ref_kind == "array_slice") {
-    uint64_t start = 0;
-    if (!json_exact_keys(*target_ref, {"kind", "path", "startIndex"}) || !json_u64(json_member(*target_ref, "startIndex"), &start)
-        || start + values->arrayValue.size() - 1U > 9007199254740991ULL) { *reason = "R4 array slice targetRef is invalid"; return false; }
-    derived_target = ref_path + "[" + std::to_string(start) + ".." + std::to_string(start + values->arrayValue.size() - 1U) + "]";
-  } else { *reason = "R4 targetRef kind is invalid"; return false; }
-  if (derived_target != canonical_target || policy_rule != ref_path) { *reason = "R4 write target does not match its policy binding"; return false; }
-  if (expected.device != target_id || expected.iface != iface || expected.serial != serial || expected.speedKhz != static_cast<int>(speed)
-      || expected.captureId != capture_id || expected.runtimeIdentitySha256 != runtime_sha
-      || expected.artifactGeneration != artifact_generation || expected.artifactSha256 != artifact_sha
-      || evidence_generation != artifact_generation || expected.address != hex_u32(static_cast<U32>(address))
-      || expected.length != static_cast<int>(byte_length) || expected.accessSize != static_cast<int>(access_size) || expected.bytesHex != bytes_hex) {
-    *reason = "R4 envelope does not match the helper arguments";
-    return false;
-  }
-  if (!lower_sha256(summary) || !lower_sha256(expected.expectedSummarySha256)) { *reason = "R4 summary SHA-256 is not canonical"; return false; }
-  std::string computed_approval_digest;
-  if (!r4_compute_approval_digest(root, &computed_approval_digest, reason) || computed_approval_digest != approval_digest) {
-    *reason = "R4 approval operation digest is inconsistent";
-    return false;
-  }
-  StrictJson summary_body = root;
-  summary_body.objectValue.erase("summarySha256");
-  std::string computed_summary;
-  if (!sha256_bytes(canonical_json(summary_body), &computed_summary) || computed_summary != summary || computed_summary != expected.expectedSummarySha256) {
-    *reason = "R4 envelope summary SHA-256 is inconsistent";
-    return false;
-  }
-  if (expected.enforcePlanPath) {
-    std::error_code error;
-    const auto plan = std::filesystem::weakly_canonical(std::filesystem::path(expected.planPath), error);
-    if (error || lower_path(plan.filename().native()) != L"r4-native-exception.json" || narrow(plan.parent_path().filename().native()) != write_plan_id) {
-      *reason = "R4 envelope path does not match its write plan identity";
-      return false;
-    }
-  }
-  out->summarySha256 = summary;
-  out->writePlanId = write_plan_id;
-  out->canonicalTarget = canonical_target;
-  out->bytesHex = bytes_hex;
-  out->address = static_cast<U32>(address);
-  out->byteLength = static_cast<int>(byte_length);
-  out->accessSize = static_cast<int>(access_size);
-  return true;
-}
-
 struct PlanSymbol {
   std::string name;
   U32 address;
@@ -1576,7 +1359,7 @@ static bool path_contains_reparse_point(const std::wstring& path) {
 static bool prepare_jlink_script(
     const std::string& mode,
     const std::wstring& path,
-    const std::string& approved_sha256,
+    const std::string& expected_sha256,
     JlinkScriptSelection* selection,
     std::string* error_code,
     std::string* reason) {
@@ -1586,7 +1369,7 @@ static bool prepare_jlink_script(
     return false;
   }
   if (mode == "none") {
-    if (!path.empty() || !approved_sha256.empty()) {
+    if (!path.empty() || !expected_sha256.empty()) {
       *error_code = "HSS_JLINK_SCRIPT_ARGUMENTS_INVALID";
       *reason = "J-Link script path and SHA-256 are forbidden when script mode is none";
       return false;
@@ -1594,9 +1377,9 @@ static bool prepare_jlink_script(
     selection->mode = mode;
     return true;
   }
-  if (path.empty() || !valid_sha256_hex(approved_sha256)) {
+  if (path.empty() || !valid_sha256_hex(expected_sha256)) {
     *error_code = "HSS_JLINK_SCRIPT_IDENTITY_UNVALIDATED";
-    *reason = "J-Link script selection requires an absolute path and approved SHA-256";
+    *reason = "J-Link script selection requires an absolute path and expected SHA-256";
     return false;
   }
   if (!is_absolute_windows_path(path) || path.find(L'\r') != std::wstring::npos || path.find(L'\n') != std::wstring::npos) {
@@ -1613,7 +1396,7 @@ static bool prepare_jlink_script(
   const DWORD attributes = GetFileAttributesW(canonical.c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
     *error_code = "HSS_JLINK_SCRIPT_MISSING";
-    *reason = "approved J-Link script file does not exist";
+    *reason = "expected J-Link script file does not exist";
     return false;
   }
   HANDLE handle = CreateFileW(canonical.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -1630,15 +1413,15 @@ static bool prepare_jlink_script(
   if (!sha256_handle(handle, &actual_sha256)) {
     CloseHandle(handle);
     *error_code = "HSS_JLINK_SCRIPT_HASH_FAILED";
-    *reason = "approved J-Link script file could not be hashed";
+    *reason = "expected J-Link script file could not be hashed";
     return false;
   }
-  std::string normalized_approved_sha256 = approved_sha256;
-  std::transform(normalized_approved_sha256.begin(), normalized_approved_sha256.end(), normalized_approved_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-  if (actual_sha256 != normalized_approved_sha256) {
+  std::string normalized_expected_sha256 = expected_sha256;
+  std::transform(normalized_expected_sha256.begin(), normalized_expected_sha256.end(), normalized_expected_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (actual_sha256 != normalized_expected_sha256) {
     CloseHandle(handle);
     *error_code = "HSS_JLINK_SCRIPT_IDENTITY_CHANGED";
-    *reason = "J-Link script SHA-256 does not match the approved identity";
+    *reason = "J-Link script SHA-256 does not match the expected identity";
     return false;
   }
   selection->mode = mode;
@@ -1691,7 +1474,7 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   if (!prepare_jlink_script(
       option_utf8(options, L"--jlink-script-mode", ""),
       script_path,
-      option_utf8(options, L"--approved-jlink-script-sha256", ""),
+      option_utf8(options, L"--jlink-script-sha256", ""),
       &script_selection,
       &script_error_code,
       &script_error_reason)) {
@@ -1764,7 +1547,7 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   if (!apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "approved J-Link script selection failed or changed before target connect", dll_utf8);
+    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "expected J-Link script selection failed or changed before target connect", dll_utf8);
     return 0;
   }
   (void)call_int1(arm_tif, tif, &crashed);
@@ -1932,10 +1715,8 @@ class ArtifactMatchConnectionState {
     return verified_;
   }
 
-  bool consumeVerified(uint64_t connect_ordinal) {
-    if (!verified_ || connect_ordinal != connectOrdinal_) return false;
-    verified_ = false;
-    return true;
+  bool isVerified(uint64_t connect_ordinal) const {
+    return verified_ && connect_ordinal == connectOrdinal_;
   }
 
   uint64_t connectOrdinal() const { return connectOrdinal_; }
@@ -2608,100 +2389,6 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
   return 0;
 }
 
-struct R4MemoryTransactionResult {
-  bool ok = false;
-  bool writeIssued = false;
-  std::string errorCode;
-  std::vector<unsigned char> oldBytes;
-  std::vector<unsigned char> readbackBytes;
-};
-
-using R4MemoryRead = std::function<bool(U32, int, std::vector<unsigned char>*)>;
-using R4MemoryWrite = std::function<bool(U32, const std::vector<unsigned char>&)>;
-
-static R4MemoryTransactionResult execute_r4_memory_transaction(
-    ArtifactMatchStatus artifact_status,
-    U32 address,
-    const std::vector<unsigned char>& requested,
-    const R4MemoryRead& read,
-    const R4MemoryWrite& write) {
-  R4MemoryTransactionResult result;
-  if (artifact_status != ArtifactMatchStatus::unverified) {
-    result.errorCode = artifact_status == ArtifactMatchStatus::mismatch ? "ARTIFACT_MATCH_MISMATCH" : "HSS_R4_ARTIFACT_STATE_INVALID";
-    return result;
-  }
-  if (!read(address, static_cast<int>(requested.size()), &result.oldBytes)) { result.errorCode = "JLINK_READMEM_FAILED"; return result; }
-  result.writeIssued = true;
-  if (!write(address, requested)) { result.errorCode = "JLINK_WRITEMEM_FAILED"; return result; }
-  if (!read(address, static_cast<int>(requested.size()), &result.readbackBytes)) { result.errorCode = "READBACK_FAILED"; return result; }
-  if (result.readbackBytes != requested) { result.errorCode = "READBACK_MISMATCH"; return result; }
-  result.ok = true;
-  return result;
-}
-
-static StrictJson strict_json_string(const std::string& text) {
-  StrictJson value;
-  value.type = StrictJson::Type::string;
-  value.text = text;
-  return value;
-}
-
-static bool resummarize_r4_fixture(StrictJson* root) {
-  StrictJson* approval = &root->objectValue["approval"];
-  std::string approval_digest;
-  std::string reason;
-  if (!r4_compute_approval_digest(*root, &approval_digest, &reason)) return false;
-  approval->objectValue["operationDigest"] = strict_json_string(approval_digest);
-  root->objectValue.erase("summarySha256");
-  std::string summary;
-  if (!sha256_bytes(canonical_json(*root), &summary)) return false;
-  root->objectValue["summarySha256"] = strict_json_string(summary);
-  return true;
-}
-
-static std::string r4_fixture_envelope(const std::string& artifact_match = "unverified", bool policy_exception = true) {
-  const std::string body =
-    "{\"schema\":\"jlink-mcp-r4-native-exception\",\"version\":1,\"kind\":\"unverified_variable_write\","
-    "\"canonicalization\":\"utf8-sorted-json-v1\",\"summaryAlgorithm\":\"sha256\","
-    "\"operation\":{\"tool\":\"variable_write_execute\",\"writePlanId\":\"op_22222222-2222-4222-8222-222222222222\","
-    "\"planDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
-    "\"planIssuedAt\":\"2026-07-17T00:00:00.000Z\",\"planExpiresAt\":\"2026-07-17T00:01:00.000Z\","
-    "\"canonicalArgs\":{\"targetRef\":{\"kind\":\"scalar\",\"path\":\"Debug_R4\"},\"canonicalTarget\":\"Debug_R4\",\"values\":[42]}},"
-    "\"approval\":{\"state\":\"consumed\",\"challengeId\":\"11111111-1111-4111-8111-111111111111\","
-    "\"operationDigest\":\"0000000000000000000000000000000000000000000000000000000000000000\","
-    "\"nonceSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
-    "\"consumedAt\":\"2026-07-17T00:00:01.000Z\",\"expiresAt\":\"2026-07-17T00:01:00.000Z\"},"
-    "\"binding\":{\"target\":{\"targetId\":\"MCU\",\"artifactMatch\":" + canonical_json_string(artifact_match) + "},"
-    "\"probe\":{\"kind\":\"jlink\",\"serial\":\"123\",\"interface\":\"SWD\",\"speedKhz\":4000},"
-    "\"runtime\":{\"identitySha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\","
-    "\"scriptApprovalSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},"
-    "\"artifact\":{\"generation\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\","
-    "\"sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\","
-    "\"evidenceGeneration\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"},"
-    "\"layoutSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\","
-    "\"policy\":{\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"rule\":\"Debug_R4\","
-    "\"unverifiedWriteException\":" + std::string(policy_exception ? "true" : "false") + ",\"maxWrites\":1,\"remainingWrites\":1,\"maxElements\":1,\"remainingElements\":1},"
-    "\"session\":{\"id\":\"session\",\"captureId\":\"outside-capture\",\"captureGeneration\":0},\"physicalConnectionGeneration\":7},"
-    "\"write\":{\"canonicalTarget\":\"Debug_R4\",\"address\":536870912,\"accessSize\":4,\"byteLength\":4,\"bytesHex\":\"2a000000\",\"readbackRequired\":true}}";
-  StrictJson root;
-  std::string reason;
-  if (!StrictJsonParser(body).parse(&root, &reason) || !resummarize_r4_fixture(&root)) return "";
-  return canonical_json(root);
-}
-
-static R4CommandBindings r4_fixture_bindings(const std::string& envelope) {
-  StrictJson root;
-  std::string reason;
-  std::string summary;
-  (void)StrictJsonParser(envelope).parse(&root, &reason);
-  (void)json_text(json_member(root, "summarySha256"), &summary);
-  return {
-    "", summary, "MCU", "SWD", "123", 4000, "outside-capture",
-    std::string(64U, 'c'), std::string(64U, 'e'), std::string(64U, 'f'),
-    "0x20000000", 4, 4, "2a000000", false,
-  };
-}
-
 static int self_test() {
   U32 parsed_u32 = 0;
   int parsed_int = 0;
@@ -2745,79 +2432,6 @@ static int self_test() {
       || !qpc_delta_ns(2250, 2000, 1000, &second_epoch_tick) || second_epoch_tick != first_epoch_tick
       || qpc_delta_ns(999, 1000, 1000, &first_epoch_tick) || qpc_delta_ns(1000, 1000, 0, &first_epoch_tick)) {
     error_json("HSS_SELF_TEST_QPC_TIMEBASE_FAILED", "QPC validation or cross-epoch nanosecond conversion failed");
-    return 0;
-  }
-  const std::string r4_envelope = r4_fixture_envelope();
-  const R4CommandBindings r4_bindings = r4_fixture_bindings(r4_envelope);
-  R4NativeException parsed_r4;
-  std::string r4_reason;
-  StrictJson missing_r4;
-  StrictJson extra_r4;
-  if (r4_envelope.empty() || !validate_r4_native_exception(r4_envelope, r4_bindings, &parsed_r4, &r4_reason)
-      || !StrictJsonParser(r4_envelope).parse(&missing_r4, &r4_reason)
-      || !StrictJsonParser(r4_envelope).parse(&extra_r4, &r4_reason)) {
-    error_json("HSS_SELF_TEST_R4_ENVELOPE_FAILED", r4_reason.empty() ? "valid R4 envelope was rejected" : r4_reason);
-    return 0;
-  }
-  missing_r4.objectValue.erase("approval");
-  StrictJson extra_value;
-  extra_value.type = StrictJson::Type::boolean;
-  extra_value.booleanValue = true;
-  extra_r4.objectValue["callerAuthorization"] = extra_value;
-  std::string tampered_r4 = r4_envelope;
-  const size_t tampered_bytes = tampered_r4.find("2a000000");
-  if (tampered_bytes == std::string::npos) {
-    error_json("HSS_SELF_TEST_R4_ENVELOPE_FAILED", "R4 fixture bytes are missing");
-    return 0;
-  }
-  tampered_r4.replace(tampered_bytes, 8U, "00000000");
-  std::string noncanonical_r4 = r4_envelope;
-  const size_t version = noncanonical_r4.find("\"version\":1");
-  if (version == std::string::npos) {
-    error_json("HSS_SELF_TEST_R4_ENVELOPE_FAILED", "R4 fixture version is missing");
-    return 0;
-  }
-  noncanonical_r4.replace(version, sizeof("\"version\":1") - 1U, "\"version\":1.0");
-  R4CommandBindings wrong_r4_binding = r4_bindings;
-  wrong_r4_binding.device = "OTHER";
-  R4NativeException rejected_r4;
-  if (validate_r4_native_exception(canonical_json(missing_r4), r4_bindings, &rejected_r4, &r4_reason)
-      || validate_r4_native_exception(canonical_json(extra_r4), r4_bindings, &rejected_r4, &r4_reason)
-      || validate_r4_native_exception(tampered_r4, r4_bindings, &rejected_r4, &r4_reason)
-      || validate_r4_native_exception(noncanonical_r4, r4_bindings, &rejected_r4, &r4_reason)
-      || validate_r4_native_exception(r4_envelope, wrong_r4_binding, &rejected_r4, &r4_reason)
-      || validate_r4_native_exception(r4_fixture_envelope("verified"), r4_fixture_bindings(r4_fixture_envelope("verified")), &rejected_r4, &r4_reason)
-      || validate_r4_native_exception(r4_fixture_envelope("mismatch"), r4_fixture_bindings(r4_fixture_envelope("mismatch")), &rejected_r4, &r4_reason)
-      || validate_r4_native_exception(r4_fixture_envelope("unverified", false), r4_fixture_bindings(r4_fixture_envelope("unverified", false)), &rejected_r4, &r4_reason)) {
-    error_json("HSS_SELF_TEST_R4_REJECTION_FAILED", "invalid R4 envelope or binding did not fail closed");
-    return 0;
-  }
-  int r4_reads = 0;
-  int r4_writes = 0;
-  std::vector<unsigned char> r4_memory{0U, 0U, 0U, 0U};
-  const auto r4_read = [&](U32 address, int length, std::vector<unsigned char>* bytes) {
-    ++r4_reads;
-    if (address != 0x20000000U || length != 4) return false;
-    *bytes = r4_memory;
-    return true;
-  };
-  const auto r4_write = [&](U32 address, const std::vector<unsigned char>& bytes) {
-    ++r4_writes;
-    if (address != 0x20000000U || bytes.size() != 4U) return false;
-    r4_memory = bytes;
-    return true;
-  };
-  const auto verified_rejection = execute_r4_memory_transaction(ArtifactMatchStatus::verified, 0x20000000U, {0x2AU, 0U, 0U, 0U}, r4_read, r4_write);
-  const auto mismatch_rejection = execute_r4_memory_transaction(ArtifactMatchStatus::mismatch, 0x20000000U, {0x2AU, 0U, 0U, 0U}, r4_read, r4_write);
-  if (verified_rejection.writeIssued || mismatch_rejection.writeIssued || r4_reads != 0 || r4_writes != 0) {
-    error_json("HSS_SELF_TEST_R4_ZERO_SIDE_EFFECT_FAILED", "verified or mismatch R4 rejection reached memory access");
-    return 0;
-  }
-  const auto r4_transaction = execute_r4_memory_transaction(ArtifactMatchStatus::unverified, 0x20000000U, {0x2AU, 0U, 0U, 0U}, r4_read, r4_write);
-  if (!r4_transaction.ok || !r4_transaction.writeIssued || r4_reads != 2 || r4_writes != 1
-      || r4_transaction.oldBytes != std::vector<unsigned char>({0U, 0U, 0U, 0U})
-      || r4_transaction.readbackBytes != std::vector<unsigned char>({0x2AU, 0U, 0U, 0U})) {
-    error_json("HSS_SELF_TEST_R4_READBACK_FAILED", "R4 same-connection transaction did not read old value, write once, and read back");
     return 0;
   }
   if (hss_buffer_overwritten({0xA5, 0xA5}, 0xA5) || !hss_buffer_overwritten({0xA5, 0x00}, 0xA5)) {
@@ -3015,8 +2629,7 @@ static int self_test() {
   unsupported_reader.reason = "JLINKARM_ReadMemU8 export is unavailable; read-only capture continued";
   ArtifactMatchConnectionState match_connection;
   const uint64_t first_connect = match_connection.connected();
-  const bool first_consumed = match_connection.recordVerified(first_connect) && match_connection.consumeVerified(first_connect);
-  const bool replay_rejected = !match_connection.consumeVerified(first_connect);
+  const bool first_verified = match_connection.recordVerified(first_connect) && match_connection.isVerified(first_connect);
   const uint64_t second_connect = match_connection.connected();
   if (complete_match.status != ArtifactMatchStatus::verified || complete_match.bytesCompared != 4U
       || !artifact_match_capture_allowed(complete_match) || !artifact_match_write_allowed(complete_match)
@@ -3028,8 +2641,8 @@ static int self_test() {
       || partial_read.gateErrorCode != "ARTIFACT_MATCH_READ_INCOMPLETE" || artifact_match_capture_allowed(partial_read)
       || unsupported_reader.status != ArtifactMatchStatus::unverified || !artifact_match_capture_allowed(unsupported_reader)
       || artifact_match_write_allowed(unsupported_reader)
-      || !first_consumed || !replay_rejected || second_connect != 2U || match_connection.consumeVerified(second_connect)) {
-    error_json("HSS_SELF_TEST_ARTIFACT_MATCH_FAILED", "artifact match completeness or connection consumption failed");
+      || !first_verified || second_connect != 2U || match_connection.isVerified(second_connect)) {
+    error_json("HSS_SELF_TEST_ARTIFACT_MATCH_FAILED", "artifact match completeness or connection binding failed");
     return 0;
   }
   uint64_t sample_budget = 0;
@@ -3107,7 +2720,7 @@ static int self_test() {
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v0-exact-utf8-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"failureCloseValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true,\"r4NativeEnvelopeValidated\":true"
+    << ",\"budgetStopValidated\":true,\"failureCloseValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
@@ -3320,15 +2933,15 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
   const std::wstring dll_path = dll_it == options.end() ? L"" : dll_it->second;
   const std::wstring script_path = script_it == options.end() ? L"" : script_it->second;
   const std::string dll_utf8 = narrow(dll_path);
-  const std::string approved_dll_sha256 = option_utf8(options, L"--approved-dll-sha256", "");
-  const std::string approved_script_sha256 = option_utf8(options, L"--approved-jlink-script-sha256", "");
+  const std::string expected_dll_sha256 = option_utf8(options, L"--dll-sha256", "");
+  const std::string expected_script_sha256 = option_utf8(options, L"--jlink-script-sha256", "");
   const std::string operation = state_only ? "target-state" : option_utf8(options, L"--operation", "");
   const bool halt_after_reset = option_utf8(options, L"--halt", "false") == "true";
   const std::string device = option_utf8(options, L"--device", "");
   const std::string iface = option_utf8(options, L"--interface", "SWD");
   const std::string serial_text = option_utf8(options, L"--serial", "");
   int speed = 4000;
-  if (dll_path.empty() || device.empty() || !valid_sha256_hex(approved_dll_sha256)
+  if (dll_path.empty() || device.empty() || !valid_sha256_hex(expected_dll_sha256)
       || !parse_int_text(option_utf8(options, L"--speed", "4000"), &speed) || speed < 1
       || (!state_only && operation != "halt" && operation != "resume" && operation != "reset")) {
     error_json("HSS_CPU_CONTROL_PLAN_INVALID", "CPU control requires validated DLL, target, speed, and fixed operation", dll_utf8);
@@ -3343,7 +2956,7 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
   JlinkScriptSelection script_selection;
   std::string script_error_code;
   std::string script_error_reason;
-  if (!prepare_jlink_script(option_utf8(options, L"--jlink-script-mode", ""), script_path, approved_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
+  if (!prepare_jlink_script(option_utf8(options, L"--jlink-script-mode", ""), script_path, expected_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
     error_json(script_error_code, script_error_reason, dll_utf8);
     return 0;
   }
@@ -3355,13 +2968,13 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
   std::vector<wchar_t> loaded_path(32768);
   const DWORD loaded_path_bytes = GetModuleFileNameW(dll, loaded_path.data(), static_cast<DWORD>(loaded_path.size()));
   std::string loaded_dll_sha256;
-  std::string normalized_approved_sha256 = approved_dll_sha256;
-  std::transform(normalized_approved_sha256.begin(), normalized_approved_sha256.end(), normalized_approved_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  std::string normalized_expected_sha256 = expected_dll_sha256;
+  std::transform(normalized_expected_sha256.begin(), normalized_expected_sha256.end(), normalized_expected_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
   if (loaded_path_bytes == 0 || loaded_path_bytes >= loaded_path.size()
       || !sha256_file(std::wstring(loaded_path.data(), loaded_path_bytes), &loaded_dll_sha256)
-      || loaded_dll_sha256 != normalized_approved_sha256) {
+      || loaded_dll_sha256 != normalized_expected_sha256) {
     FreeLibrary(dll);
-    error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the approved CPU-control identity", dll_utf8);
+    error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the expected CPU-control identity", dll_utf8);
     return 0;
   }
   auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
@@ -3510,8 +3123,8 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   const std::wstring script_path = options.count(L"--jlink-script-file") ? options.at(L"--jlink-script-file") : L"";
   const std::wstring manifest_path = options.count(L"--artifact-match-manifest") ? options.at(L"--artifact-match-manifest") : L"";
   const std::wstring plan_path = options.count(L"--plan") ? options.at(L"--plan") : L"";
-  const std::string approved_dll_sha256 = option_utf8(options, L"--approved-dll-sha256", "");
-  const std::string approved_script_sha256 = option_utf8(options, L"--approved-jlink-script-sha256", "");
+  const std::string expected_dll_sha256 = option_utf8(options, L"--dll-sha256", "");
+  const std::string expected_script_sha256 = option_utf8(options, L"--jlink-script-sha256", "");
   const std::string manifest_sha256 = option_utf8(options, L"--artifact-match-manifest-sha256", "");
   const std::string runtime_sha256 = option_utf8(options, L"--artifact-match-runtime-identity-sha256", "");
   const std::string artifact_generation = option_utf8(options, L"--artifact-generation", "");
@@ -3528,7 +3141,7 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   U32 address = 0;
   std::vector<unsigned char> requested;
   if (dll_path.empty() || manifest_path.empty() || plan_path.empty() || capture_id.empty() || device.empty() || serial_text.empty()
-      || !valid_sha256_hex(approved_dll_sha256) || !valid_sha256_hex(manifest_sha256) || !valid_sha256_hex(runtime_sha256)
+      || !valid_sha256_hex(expected_dll_sha256) || !valid_sha256_hex(manifest_sha256) || !valid_sha256_hex(runtime_sha256)
       || !valid_sha256_hex(artifact_generation) || !valid_sha256_hex(artifact_sha256)
       || !parse_int_text(option_utf8(options, L"--speed", ""), &speed) || speed < 1
       || !parse_int_text(option_utf8(options, L"--length", ""), &length) || length < 1 || length > 4096
@@ -3541,7 +3154,7 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   JlinkScriptSelection script_selection;
   std::string script_error_code;
   std::string script_error_reason;
-  if (!prepare_jlink_script(option_utf8(options, L"--jlink-script-mode", ""), script_path, approved_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
+  if (!prepare_jlink_script(option_utf8(options, L"--jlink-script-mode", ""), script_path, expected_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
     error_json(script_error_code, script_error_reason, narrow(dll_path));
     return 0;
   }
@@ -3557,10 +3170,10 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   std::vector<wchar_t> loaded_path(32768);
   const DWORD loaded_path_bytes = GetModuleFileNameW(dll, loaded_path.data(), static_cast<DWORD>(loaded_path.size()));
   std::string loaded_dll_sha256;
-  std::string normalized_approved = approved_dll_sha256;
-  std::transform(normalized_approved.begin(), normalized_approved.end(), normalized_approved.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-  if (loaded_path_bytes == 0 || loaded_path_bytes >= loaded_path.size() || !sha256_file(std::wstring(loaded_path.data(), loaded_path_bytes), &loaded_dll_sha256) || loaded_dll_sha256 != normalized_approved) {
-    FreeLibrary(dll); error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the approved write identity", narrow(dll_path)); return 0;
+  std::string normalized_expected = expected_dll_sha256;
+  std::transform(normalized_expected.begin(), normalized_expected.end(), normalized_expected.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  if (loaded_path_bytes == 0 || loaded_path_bytes >= loaded_path.size() || !sha256_file(std::wstring(loaded_path.data(), loaded_path_bytes), &loaded_dll_sha256) || loaded_dll_sha256 != normalized_expected) {
+    FreeLibrary(dll); error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the expected write identity", narrow(dll_path)); return 0;
   }
   auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
   auto arm_close = reinterpret_cast<JLINKARM_Close_Fn>(required(dll, "JLINKARM_Close"));
@@ -3611,7 +3224,7 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
     return true;
   });
   if (match.status == ArtifactMatchStatus::verified) connection.recordVerified(connect_ordinal);
-  if (match.status != ArtifactMatchStatus::verified || !connection.consumeVerified(connect_ordinal)) {
+  if (match.status != ArtifactMatchStatus::verified || !connection.isVerified(connect_ordinal)) {
     call_void0(arm_close, &crashed); FreeLibrary(dll);
     const std::string code = match.gateErrorCode.empty() ? "ARTIFACT_MATCH_UNVERIFIED_WRITE_FORBIDDEN" : match.gateErrorCode;
     artifact_match_gate_error(code, match.reason, capture_id, manifest_sha256, &manifest, &match);
@@ -3647,249 +3260,6 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   return 0;
 }
 
-static bool exact_r4_option_set(int argc, wchar_t** argv, const std::map<std::wstring, std::wstring>& options, std::string* reason) {
-  if (argc < 2 || (argc - 2) % 2 != 0 || options.size() != static_cast<size_t>((argc - 2) / 2)) {
-    *reason = "variable-write-r4 arguments must be unique name/value pairs";
-    return false;
-  }
-  std::set<std::wstring> expected{
-    L"--dll", L"--approved-dll-sha256", L"--device", L"--interface", L"--speed", L"--serial",
-    L"--jlink-script-mode", L"--capture-id", L"--plan", L"--r4-exception-summary-sha256",
-    L"--artifact-match-manifest", L"--artifact-match-manifest-sha256", L"--artifact-match-runtime-identity-sha256",
-    L"--artifact-generation", L"--artifact-sha256", L"--address", L"--length", L"--access-size", L"--bytes-hex",
-  };
-  const std::string mode = option_utf8(options, L"--jlink-script-mode", "");
-  if (mode == "file") {
-    expected.insert(L"--jlink-script-file");
-    expected.insert(L"--approved-jlink-script-sha256");
-  } else if (mode != "none") {
-    *reason = "variable-write-r4 requires script mode none or file";
-    return false;
-  }
-  std::set<std::wstring> actual;
-  for (const auto& [key, unused] : options) { (void)unused; actual.insert(key); }
-  if (actual != expected) {
-    *reason = "variable-write-r4 contains missing or unknown helper arguments";
-    return false;
-  }
-  return true;
-}
-
-static void r4_write_error(
-    const std::string& code,
-    const std::string& reason,
-    const std::string& summary,
-    bool exception_consumed,
-    bool write_issued,
-    const ArtifactMatchManifest* manifest = nullptr,
-    const std::string& manifest_sha256 = "",
-    const ArtifactMatchResult* match = nullptr,
-    const std::vector<unsigned char>* old_bytes = nullptr,
-    const std::vector<unsigned char>* readback_bytes = nullptr,
-    int64_t before_qpc = -1,
-    int64_t after_qpc = -1) {
-  std::cout << "{\"status\":\"error\",\"command\":\"variable-write-r4\",\"errorCode\":" << canonical_json_string(code)
-            << ",\"reason\":" << canonical_json_string(reason)
-            << ",\"r4ExceptionConsumed\":" << (exception_consumed ? "true" : "false")
-            << ",\"r4ExceptionSummarySha256\":" << canonical_json_string(summary)
-            << ",\"writeIssued\":" << (write_issued ? "true" : "false");
-  if (old_bytes) std::cout << ",\"oldBytesHex\":\"" << bytes_hex(*old_bytes) << "\"";
-  if (readback_bytes) std::cout << ",\"readbackBytesHex\":\"" << bytes_hex(*readback_bytes) << "\"";
-  if (before_qpc >= 0) std::cout << ",\"operationBeforeQpcCounter\":\"" << before_qpc << "\"";
-  if (after_qpc >= 0) std::cout << ",\"operationAfterQpcCounter\":\"" << after_qpc << "\"";
-  if (manifest && match) write_artifact_match_evidence(*manifest, manifest_sha256, *match);
-  std::cout << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
-            << ",\"targetWritten\":" << (write_issued ? "true" : "false")
-            << ",\"targetReset\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
-}
-
-static int variable_write_r4(int argc, wchar_t** argv, const std::map<std::wstring, std::wstring>& options) {
-  std::string reason;
-  if (!exact_r4_option_set(argc, argv, options, &reason)) {
-    r4_write_error("HSS_R4_NATIVE_EXCEPTION_INVALID", reason, option_utf8(options, L"--r4-exception-summary-sha256", ""), false, false);
-    return 0;
-  }
-  const std::wstring dll_path = options.at(L"--dll");
-  const std::wstring plan_path = options.at(L"--plan");
-  const std::wstring manifest_path = options.at(L"--artifact-match-manifest");
-  const std::wstring script_path = options.count(L"--jlink-script-file") ? options.at(L"--jlink-script-file") : L"";
-  const std::string approved_dll_sha256 = option_utf8(options, L"--approved-dll-sha256", "");
-  const std::string approved_script_sha256 = option_utf8(options, L"--approved-jlink-script-sha256", "");
-  const std::string manifest_sha256 = option_utf8(options, L"--artifact-match-manifest-sha256", "");
-  const std::string runtime_sha256 = option_utf8(options, L"--artifact-match-runtime-identity-sha256", "");
-  const std::string artifact_generation = option_utf8(options, L"--artifact-generation", "");
-  const std::string artifact_sha256 = option_utf8(options, L"--artifact-sha256", "");
-  const std::string summary_sha256 = option_utf8(options, L"--r4-exception-summary-sha256", "");
-  const std::string capture_id = option_utf8(options, L"--capture-id", "");
-  const std::string device = option_utf8(options, L"--device", "");
-  const std::string iface = option_utf8(options, L"--interface", "");
-  const std::string serial_text = option_utf8(options, L"--serial", "");
-  const std::string address_text = option_utf8(options, L"--address", "");
-  const std::string bytes_hex_text = option_utf8(options, L"--bytes-hex", "");
-  int speed = 0;
-  int length = 0;
-  int access_size = 0;
-  U32 serial = 0;
-  if (dll_path.empty() || plan_path.empty() || manifest_path.empty() || capture_id.empty() || device.empty() || serial_text.empty()
-      || !lower_sha256(approved_dll_sha256) || !lower_sha256(manifest_sha256) || !lower_sha256(runtime_sha256)
-      || !lower_sha256(artifact_generation) || !lower_sha256(artifact_sha256) || !lower_sha256(summary_sha256)
-      || (option_utf8(options, L"--jlink-script-mode", "") == "file" && !lower_sha256(approved_script_sha256))
-      || !parse_int_text(option_utf8(options, L"--speed", ""), &speed) || speed < 1
-      || !parse_int_text(option_utf8(options, L"--length", ""), &length) || length < 1 || length > 4096
-      || !parse_int_text(option_utf8(options, L"--access-size", ""), &access_size) || (access_size != 1 && access_size != 2 && access_size != 4)
-      || !parse_u32_text(serial_text, &serial)) {
-    r4_write_error("HSS_R4_NATIVE_EXCEPTION_INVALID", "variable-write-r4 requires exact canonical helper bindings", summary_sha256, false, false);
-    return 0;
-  }
-  std::string envelope_bytes;
-  if (!read_bounded_text_file(plan_path, 64U * 1024U, &envelope_bytes)) {
-    r4_write_error("HSS_R4_NATIVE_EXCEPTION_READ_FAILED", "R4 exception envelope is missing, empty, or exceeds its byte bound", summary_sha256, false, false);
-    return 0;
-  }
-  const R4CommandBindings expected{
-    narrow(plan_path), summary_sha256, device, iface, serial_text, speed, capture_id, runtime_sha256,
-    artifact_generation, artifact_sha256, address_text, length, access_size, bytes_hex_text, true,
-  };
-  R4NativeException exception;
-  if (!validate_r4_native_exception(envelope_bytes, expected, &exception, &reason)) {
-    r4_write_error("HSS_R4_NATIVE_EXCEPTION_INVALID", reason, summary_sha256, false, false);
-    return 0;
-  }
-  std::vector<unsigned char> requested;
-  if (!parse_hex_bytes(bytes_hex_text, &requested) || requested.size() != static_cast<size_t>(length)) {
-    r4_write_error("HSS_R4_NATIVE_EXCEPTION_INVALID", "R4 write bytes do not match the validated envelope", summary_sha256, false, false);
-    return 0;
-  }
-  JlinkScriptSelection script_selection;
-  std::string script_error_code;
-  std::string script_error_reason;
-  if (!prepare_jlink_script(option_utf8(options, L"--jlink-script-mode", ""), script_path, approved_script_sha256, &script_selection, &script_error_code, &script_error_reason)) {
-    r4_write_error(script_error_code, script_error_reason, summary_sha256, true, false);
-    return 0;
-  }
-  ArtifactMatchManifest manifest;
-  std::string manifest_error_code;
-  if (!load_artifact_match_manifest(manifest_path, plan_path, manifest_sha256, capture_id, device, serial_text, runtime_sha256, artifact_generation, artifact_sha256, &manifest, &manifest_error_code, &reason)) {
-    r4_write_error(manifest_error_code, reason, summary_sha256, true, false);
-    return 0;
-  }
-  HMODULE dll = LoadLibraryW(dll_path.c_str());
-  if (!dll) { r4_write_error("HSS_DLL_LOAD_FAILED", "LoadLibraryW failed", summary_sha256, true, false); return 0; }
-  std::vector<wchar_t> loaded_path(32768);
-  const DWORD loaded_path_bytes = GetModuleFileNameW(dll, loaded_path.data(), static_cast<DWORD>(loaded_path.size()));
-  std::string loaded_dll_sha256;
-  if (loaded_path_bytes == 0 || loaded_path_bytes >= loaded_path.size()
-      || !sha256_file(std::wstring(loaded_path.data(), loaded_path_bytes), &loaded_dll_sha256) || loaded_dll_sha256 != approved_dll_sha256) {
-    FreeLibrary(dll); r4_write_error("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the R4 runtime binding", summary_sha256, true, false); return 0;
-  }
-  auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
-  auto arm_close = reinterpret_cast<JLINKARM_Close_Fn>(required(dll, "JLINKARM_Close"));
-  auto arm_exec = reinterpret_cast<JLINKARM_ExecCommand_Fn>(required(dll, "JLINKARM_ExecCommand"));
-  auto arm_tif = reinterpret_cast<JLINKARM_TIF_Select_Fn>(required(dll, "JLINKARM_TIF_Select"));
-  auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
-  auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
-  auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
-  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
-  auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
-  auto arm_read_u8 = reinterpret_cast<JLINKARM_ReadMemU8_Fn>(required(dll, "JLINKARM_ReadMemU8"));
-  auto arm_write_mem = reinterpret_cast<JLINKARM_WriteMem_Fn>(required(dll, "JLINKARM_WriteMem"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_version || !arm_read_u8 || !arm_write_mem) {
-    FreeLibrary(dll); r4_write_error("HSS_WRITE_EXPORT_MISSING", "required same-connection R4 write export is missing", summary_sha256, true, false); return 0;
-  }
-  bool crashed = false;
-  const int dll_version = call_int0(arm_version, &crashed);
-  const int select_rc = call_select_sn(arm_select_sn, serial, &crashed);
-  const int open_rc = crashed ? -1 : call_int0(arm_open, &crashed);
-  if (crashed || dll_version <= 0 || select_rc < 0 || open_rc < 0 || !suppress_jlink_gui(arm_exec, &crashed)) {
-    if (open_rc >= 0) call_void0(arm_close, &crashed);
-    FreeLibrary(dll); r4_write_error("JLINK_OPEN_FAILED", "J-Link R4 variable-write open failed", summary_sha256, true, false); return 0;
-  }
-  char exec_out[512] = {};
-  const std::string device_cmd = "device = " + device;
-  const int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
-  char script_out[512] = {};
-  int script_rc = -1;
-  if (crashed || device_rc < 0 || !apply_jlink_script(arm_exec, script_selection, &script_rc, script_out, sizeof(script_out), &crashed)) {
-    call_void0(arm_close, &crashed); FreeLibrary(dll); r4_write_error("JLINK_SCRIPT_SELECT_FAILED", "trusted ScriptFile selection failed before R4 variable write", summary_sha256, true, false); return 0;
-  }
-  const int tif_rc = call_int1(arm_tif, iface == "JTAG" ? 0 : 1, &crashed);
-  call_void1(arm_speed, speed, &crashed);
-  ArtifactMatchConnectionState connection;
-  const int connect_rc = crashed ? -1 : call_int0(arm_connect, &crashed);
-  const uint64_t connect_ordinal = connection.connected();
-  const U32 connected_serial = crashed ? 0U : call_u320(arm_get_sn, &crashed);
-  if (crashed || tif_rc < 0 || connect_rc < 0 || connected_serial != serial || connect_ordinal != manifest.connectOrdinal) {
-    call_void0(arm_close, &crashed); FreeLibrary(dll); r4_write_error("ARTIFACT_MATCH_BINDING_MISMATCH", "R4 physical connection does not match the envelope", summary_sha256, true, false); return 0;
-  }
-  bool artifact_read_crashed = false;
-  ArtifactMatchResult match = compare_artifact_ranges(manifest, [&](U32 read_address, U32 count, U8* data, std::string* read_reason) {
-    std::vector<U8> status(count, 0xFFU);
-    bool read_crashed = false;
-    const int rc = call_read_mem_u8(arm_read_u8, read_address, count, data, status.data(), &read_crashed);
-    artifact_read_crashed = artifact_read_crashed || read_crashed;
-    if (read_crashed || rc < 0 || std::any_of(status.begin(), status.end(), [](U8 value) { return value != 0U; })) {
-      *read_reason = "JLINKARM_ReadMemU8 returned a failed or partial nonvolatile read";
-      return false;
-    }
-    return true;
-  });
-  if (artifact_read_crashed || match.status != ArtifactMatchStatus::unverified) {
-    call_void0(arm_close, &crashed);
-    FreeLibrary(dll);
-    const std::string code = match.status == ArtifactMatchStatus::mismatch ? "ARTIFACT_MATCH_MISMATCH"
-      : match.status == ArtifactMatchStatus::verified ? "HSS_R4_ARTIFACT_STATE_INVALID" : "ARTIFACT_MATCH_READ_INCOMPLETE";
-    const std::string state_reason = match.status == ArtifactMatchStatus::verified
-      ? "verified targets must use the approval-free R2 variable-write path"
-      : match.status == ArtifactMatchStatus::mismatch ? "target Artifact mismatch is never writable"
-        : "Artifact comparison raised an exception; the connection is not safe for an R4 write";
-    r4_write_error(code, state_reason, summary_sha256, true, false, &manifest, manifest_sha256, &match);
-    return 0;
-  }
-  const auto exact_read = [&](U32 read_address, int read_length, std::vector<unsigned char>* bytes) {
-    bytes->assign(static_cast<size_t>(read_length), 0U);
-    std::vector<U8> status(static_cast<size_t>(read_length), 0xFFU);
-    bool read_crashed = false;
-    const int rc = call_read_mem_u8(arm_read_u8, read_address, static_cast<U32>(read_length), bytes->data(), status.data(), &read_crashed);
-    return !read_crashed && rc >= 0 && std::all_of(status.begin(), status.end(), [](U8 value) { return value == 0U; });
-  };
-  const auto write_once = [&](U32 write_address, const std::vector<unsigned char>& bytes) {
-    bool write_crashed = false;
-    const int rc = call_write_mem(arm_write_mem, write_address, static_cast<U32>(bytes.size()), bytes.data(), &write_crashed);
-    return !write_crashed && rc >= 0;
-  };
-  const int64_t before_qpc = qpc_counter();
-  if (before_qpc < 0) {
-    call_void0(arm_close, &crashed); FreeLibrary(dll); r4_write_error("HSS_QPC_UNAVAILABLE", "could not timestamp R4 variable write", summary_sha256, true, false, &manifest, manifest_sha256, &match); return 0;
-  }
-  R4MemoryTransactionResult transaction = execute_r4_memory_transaction(match.status, exception.address, requested, exact_read, write_once);
-  const int64_t after_qpc = qpc_counter();
-  call_void0(arm_close, &crashed);
-  FreeLibrary(dll);
-  if (!transaction.ok || after_qpc < before_qpc) {
-    const std::string code = transaction.ok ? "HSS_QPC_UNAVAILABLE" : transaction.errorCode;
-    const std::string failure = transaction.ok ? "could not timestamp R4 variable write completion"
-      : transaction.errorCode == "JLINK_READMEM_FAILED" ? "old-value read failed before R4 variable write"
-      : transaction.errorCode == "JLINK_WRITEMEM_FAILED" ? "R4 variable write failed; target state is unknown"
-      : transaction.errorCode == "READBACK_FAILED" ? "R4 readback failed after write; target state is unknown"
-      : transaction.errorCode == "READBACK_MISMATCH" ? "R4 readback does not match the requested bytes"
-      : "R4 variable-write transaction failed";
-    r4_write_error(code, failure, summary_sha256, true, transaction.writeIssued, &manifest, manifest_sha256, &match,
-      transaction.oldBytes.empty() ? nullptr : &transaction.oldBytes,
-      transaction.readbackBytes.empty() ? nullptr : &transaction.readbackBytes, before_qpc, after_qpc);
-    return 0;
-  }
-  std::cout << "{\"status\":\"ok\",\"command\":\"variable-write-r4\",\"dllVersion\":" << dll_version
-            << ",\"helperVersion\":\"" << HSS_HELPER_VERSION << "\",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
-            << ",\"jlinkScriptMode\":\"" << script_selection.mode << "\",\"jlinkScriptFile\":\"" << escape(script_selection.pathUtf8)
-            << "\",\"jlinkScriptSha256\":\"" << script_selection.sha256 << "\",\"jlinkScriptReturnCode\":" << script_rc
-            << ",\"r4ExceptionConsumed\":true,\"r4ExceptionSummarySha256\":\"" << summary_sha256
-            << "\",\"oldBytesHex\":\"" << bytes_hex(transaction.oldBytes) << "\",\"readbackBytesHex\":\"" << bytes_hex(transaction.readbackBytes)
-            << "\",\"operationBeforeQpcCounter\":\"" << before_qpc << "\",\"operationAfterQpcCounter\":\"" << after_qpc << "\",\"writeIssued\":true";
-  write_artifact_match_evidence(manifest, manifest_sha256, match);
-  std::cout << ",\"targetWritten\":true,\"targetReset\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
-  return 0;
-}
-
 static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const auto plan_it = options.find(L"--plan");
   if (plan_it == options.end()) {
@@ -3902,9 +3272,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
   const std::string dll_utf8 = json_string(plan, "dllPath");
-  const std::string approved_dll_sha256 = json_string(plan, "approvedDllSha256");
+  const std::string expected_dll_sha256 = json_string(plan, "dllSha256");
   const std::string jlink_script_utf8 = json_string(plan, "jlinkScriptFile");
-  const std::string approved_jlink_script_sha256 = json_string(plan, "approvedJlinkScriptSha256");
+  const std::string expected_jlink_script_sha256 = json_string(plan, "jlinkScriptSha256");
   const std::string artifact_match_manifest_utf8 = json_string(plan, "artifactMatchManifestPath");
   const std::string artifact_match_manifest_sha256 = json_string(plan, "artifactMatchManifestSha256");
   const std::string artifact_match_runtime_identity_sha256 = json_string(plan, "artifactMatchRuntimeIdentitySha256");
@@ -3976,7 +3346,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("HSS_PLAN_INVALID", "post-connect uint32 counter stability policy is missing or invalid");
     return 0;
   }
-  if (!runtime_identity_validated || !valid_sha256_hex(approved_dll_sha256)) {
+  if (!runtime_identity_validated || !valid_sha256_hex(expected_dll_sha256)) {
     error_json("HSS_RUNTIME_IDENTITY_UNVALIDATED", "capture plan requires a validated DLL SHA-256 identity", dll_utf8);
     return 0;
   }
@@ -3997,7 +3367,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (!prepare_jlink_script(
       jlink_script_mode,
       jlink_script_path,
-      approved_jlink_script_sha256,
+      expected_jlink_script_sha256,
       &script_selection,
       &script_error_code,
       &script_error_reason)) {
@@ -4056,13 +3426,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   std::vector<wchar_t> loaded_path(32768);
   const DWORD loaded_path_bytes = GetModuleFileNameW(dll, loaded_path.data(), static_cast<DWORD>(loaded_path.size()));
   std::string loaded_dll_sha256;
-  std::string normalized_approved_sha256 = approved_dll_sha256;
-  std::transform(normalized_approved_sha256.begin(), normalized_approved_sha256.end(), normalized_approved_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  std::string normalized_expected_sha256 = expected_dll_sha256;
+  std::transform(normalized_expected_sha256.begin(), normalized_expected_sha256.end(), normalized_expected_sha256.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
   if (loaded_path_bytes == 0 || loaded_path_bytes >= loaded_path.size()
       || !sha256_file(std::wstring(loaded_path.data(), loaded_path_bytes), &loaded_dll_sha256)
-      || loaded_dll_sha256 != normalized_approved_sha256) {
+      || loaded_dll_sha256 != normalized_expected_sha256) {
     FreeLibrary(dll);
-    error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the approved capture identity", dll_utf8);
+    error_json("HSS_RUNTIME_IDENTITY_CHANGED", "loaded DLL SHA-256 does not match the expected capture identity", dll_utf8);
     return 0;
   }
   auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
@@ -4133,7 +3503,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (!apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "approved J-Link script selection failed or changed before target connect", dll_utf8);
+    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "expected J-Link script selection failed or changed before target connect", dll_utf8);
     return 0;
   }
   const int tif = iface == "JTAG" ? 0 : 1;
@@ -4237,9 +3607,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     artifact_match_result.reason = "artifact match verification does not bind the current J-Link connection";
     artifact_match_result.gateErrorCode = "ARTIFACT_MATCH_BINDING_MISMATCH";
   }
-  if (artifact_match_result.status == ArtifactMatchStatus::verified && !artifact_match_connection.consumeVerified(connect_ordinal)) {
+  if (artifact_match_result.status == ArtifactMatchStatus::verified && !artifact_match_connection.isVerified(connect_ordinal)) {
     artifact_match_result.status = ArtifactMatchStatus::unverified;
-    artifact_match_result.reason = "verified artifact match was stale or already consumed";
+    artifact_match_result.reason = "verified artifact match no longer binds the active connection";
     artifact_match_result.gateErrorCode = "ARTIFACT_MATCH_VERIFICATION_STALE";
   }
   stream_artifact_match(capture_id, qpc_counter(), artifact_match_manifest, artifact_match_manifest_sha256, artifact_match_result);
@@ -4591,7 +3961,6 @@ int wmain(int argc, wchar_t** argv) {
   if (command == L"cpu-control") return cpu_control(options, false);
   if (command == L"target-state") return cpu_control(options, true);
   if (command == L"variable-write") return variable_write(options);
-  if (command == L"variable-write-r4") return variable_write_r4(argc, argv, options);
   if (command == L"hss-capture") return hss_capture(options);
   if (command == L"hss-smoke" || command == L"hss-benchmark") {
     error_json("HSS_START_READ_STOP_NOT_AUTHORIZED_YET", "connect-preflight must pass before enabling HSS Start/Read/Stop candidate calls", narrow(dll_path));

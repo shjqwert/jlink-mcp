@@ -1,4 +1,3 @@
-import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -21,7 +20,7 @@ export interface JLinkConfig {
   swoTelnetPort: number;
 }
 
-export interface ExtensionConfig {
+export interface AppConfig {
   jlink: JLinkConfig;
 }
 
@@ -52,21 +51,25 @@ function findJLinkInstallDir(): string {
   return "";
 }
 
-export function getConfig(): ExtensionConfig {
-  const cfg = vscode.workspace.getConfiguration("jlinkMcp");
-
+export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const configuredInterface = env.JLINK_INTERFACE?.toUpperCase();
   return {
     jlink: {
-      installDir: cfg.get<string>("jlink.installDir") || findJLinkInstallDir(),
-      device: cfg.get<string>("jlink.device") || "Unspecified",
-      interface: cfg.get<"SWD" | "JTAG">("jlink.interface") || "SWD",
-      speed: cfg.get<number>("jlink.speed") || 4000,
-      serialNumber: cfg.get<string>("jlink.serialNumber") || undefined,
-      gdbPort: cfg.get<number>("jlink.gdbPort") || 2331,
-      rttTelnetPort: cfg.get<number>("jlink.rttTelnetPort") || 19021,
-      swoTelnetPort: cfg.get<number>("jlink.swoTelnetPort") || 2332,
+      installDir: env.JLINK_INSTALL_DIR || findJLinkInstallDir(),
+      device: env.JLINK_DEVICE || "Unspecified",
+      interface: configuredInterface === "JTAG" ? "JTAG" : "SWD",
+      speed: positiveInteger(env.JLINK_SPEED, 4000),
+      serialNumber: env.JLINK_SERIAL || undefined,
+      gdbPort: positiveInteger(env.JLINK_GDB_PORT, 2331),
+      rttTelnetPort: positiveInteger(env.JLINK_RTT_PORT, 19021),
+      swoTelnetPort: positiveInteger(env.JLINK_SWO_PORT, 2332),
     },
   };
+}
+
+function positiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 export function getJLinkExePath(config: JLinkConfig): string {
