@@ -1,12 +1,16 @@
-import { spawn } from "child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
 import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig } from "./backend";
-import { ProcessManager } from "../utils/process-manager";
+import { ProcessManager, terminateChildProcess } from "../utils/process-manager";
 import { log, logError } from "../utils/logger";
 import * as path from "path";
 import * as fs from "fs";
 
 export interface JLinkConfig {
   installDir: string;
+  jlinkExePath?: string;
+  gdbServerExePath?: string;
+  /** Test/package override; defaults to the bundled native helper. */
+  memoryHelperPath?: string;
   device: string;
   interface: "SWD" | "JTAG";
   speed: number;
@@ -17,6 +21,7 @@ export interface JLinkConfig {
 }
 
 const GDB_SERVER_PROCESS = "jlink-gdb-server";
+export type JLinkSpawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
 
 // Lines that are JLink connection boilerplate
 const BOILERPLATE_PATTERNS = [
@@ -69,12 +74,17 @@ export class JLinkBackend extends ProbeBackend {
   private processManager: ProcessManager;
   private gdbOutputBuffer: string[] = [];
   private connectionGeneration = 0;
+  private readonly spawnProcess: JLinkSpawn;
 
-  constructor(config: Partial<JLinkConfig>, processManager: ProcessManager) {
+  constructor(config: Partial<JLinkConfig>, processManager: ProcessManager, spawnProcess: JLinkSpawn = spawn) {
     super();
     this.processManager = processManager;
+    this.spawnProcess = spawnProcess;
     this.config = {
       installDir: config.installDir || findJLinkInstallDir(),
+      jlinkExePath: config.jlinkExePath,
+      gdbServerExePath: config.gdbServerExePath,
+      memoryHelperPath: config.memoryHelperPath,
       device: config.device || "Unspecified",
       interface: config.interface || "SWD",
       speed: config.speed || 4000,
@@ -86,26 +96,27 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   private get jlinkExe(): string {
+    if (this.config.jlinkExePath) return this.config.jlinkExePath;
     const exe = process.platform === "win32" ? "JLink.exe" : "JLinkExe";
     return this.config.installDir ? path.join(this.config.installDir, exe) : exe;
   }
 
   private get gdbServerExe(): string {
+    if (this.config.gdbServerExePath) return this.config.gdbServerExePath;
     const exe = process.platform === "win32" ? "JLinkGDBServerCL.exe" : "JLinkGDBServerCLExe";
     return this.config.installDir ? path.join(this.config.installDir, exe) : exe;
   }
 
   /**
    * Raw JLinkExe execution. Does NOT include preflight/locking.
-   * Use the public methods (which call withPreflight) instead.
+   * Public methods add only in-process exclusion and the requested command.
    */
-  private async execRaw(commands: string[], speedOverride?: number, timeoutMs = 30000): Promise<CommandResult> {
+  private async execRaw(commands: string[], timeoutMs = 30000): Promise<CommandResult> {
     this.connectionGeneration += 1;
-    const speed = speedOverride ?? this.config.speed;
     const args = [
       "-device", this.config.device,
       "-if", this.config.interface,
-      "-speed", String(speed),
+      "-speed", String(this.config.speed),
       "-autoconnect", "1",
       "-ExitOnError", "1",
       "-NoGui", "1",
@@ -114,34 +125,43 @@ export class JLinkBackend extends ProbeBackend {
       args.push("-SelectEmuBySN", this.config.serialNumber);
     }
 
-    log(`[J-Link] ${commands.join("; ")}${speedOverride ? ` (speed=${speed})` : ""}`);
+    log(`[J-Link] ${commands.join("; ")}`);
 
     return new Promise<CommandResult>((resolve) => {
-      const proc = spawn(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
+      const proc = this.spawnProcess(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "", stderr = "";
       let settled = false;
-      let timeout: NodeJS.Timeout;
+      let timedOut = false;
+      let processError: Error | undefined;
+      let timeout: NodeJS.Timeout | undefined;
       const finish = (result: CommandResult) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
+        if (timeout) clearTimeout(timeout);
         resolve(result);
       };
 
       proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
       proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
 
-      proc.stdin?.write(commands.concat(["exit"]).join("\n") + "\n");
+      // J-Link Commander otherwise resumes the target when it closes. Keep the
+      // target state under the explicit command/envelope contract.
+      proc.stdin?.write(["exec SetRestartOnClose = 0", ...commands, "exit"].join("\n") + "\n");
       proc.stdin?.end();
 
       proc.on("error", (err) => {
         logError("J-Link spawn error", err);
         this.setState(ProbeState.DISCONNECTED);
-        finish({ success: false, rawOutput: stdout, output: stdout, error: `Failed to spawn JLinkExe: ${err.message}`, errorCode: ProbeErrorCode.PROBE_NOT_FOUND });
+        processError = err;
       });
-      proc.on("exit", (code) => {
+      proc.on("close", (code, signal) => {
+        if (timedOut) {
+          finish({ success: false, rawOutput: stdout, output: stripBoilerplate(stdout), stderr, error: `J-Link timed out after ${timeoutMs}ms; process close was observed before the Probe queue was released`, errorCode: ProbeErrorCode.TIMEOUT, exitCode: code, exitSignal: signal });
+          return;
+        }
         if (code !== 0) logError(`J-Link exited with code ${code}`);
-        const result: CommandResult = { success: code === 0, rawOutput: stdout, output: stripBoilerplate(stdout), error: stderr || undefined };
+        const result: CommandResult = { success: code === 0 && !processError, rawOutput: stdout, output: stripBoilerplate(stdout), stderr, error: processError ? `Failed to spawn JLinkExe: ${processError.message}` : stderr || undefined, exitCode: code, exitSignal: signal };
+        if (processError) result.errorCode = ProbeErrorCode.PROBE_NOT_FOUND;
         // Classify errors from output
         if (!result.success) {
           const raw = stdout.toLowerCase();
@@ -158,52 +178,150 @@ export class JLinkBackend extends ProbeBackend {
       });
 
       timeout = setTimeout(() => {
-        proc.kill("SIGTERM");
-        finish({ success: false, rawOutput: stdout, output: stripBoilerplate(stdout), error: `J-Link timed out after ${timeoutMs}ms`, errorCode: ProbeErrorCode.TIMEOUT });
+        timedOut = true;
+        void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
       }, timeoutMs);
     });
   }
 
-  /**
-   * Deterministic recovery sequence:
-   * 1. Stop GDB server if running
-   * 2. Try connect under reset
-   * 3. If that fails, reduce speed (4000 → 1000 → 400) and retry
-   */
-  async recover(): Promise<boolean> {
-    log("[J-Link] Starting recovery sequence");
-
-    // Stop GDB server to release the probe
-    if (this.isGDBServerRunning()) {
-      log("[J-Link] Recovery: stopping GDB server");
-      this.stopGDBServer();
-      await sleep(1000);
+  private async accessMemoryNonIntrusive(address: number, length: number, accessSize: 1 | 2 | 4, writeBytes?: Buffer): Promise<CommandResult> {
+    if (!Number.isSafeInteger(address) || address < 0 || address > 0xffff_ffff
+      || !Number.isSafeInteger(length) || length < 1 || length > 4096
+      || address + length > 0x1_0000_0000
+      || (writeBytes !== undefined && writeBytes.length !== length)) {
+      return { success: false, rawOutput: "", output: "", error: "memory range is invalid", errorCode: ProbeErrorCode.INVALID_ARGUMENT, writeIssued: writeBytes ? false : undefined, stateUnknown: false };
     }
-
-    // Try connect under reset at various speeds
-    const speeds = [this.config.speed, 1000, 400];
-    for (const speed of speeds) {
-      log(`[J-Link] Recovery: trying connect under reset at ${speed} kHz`);
-      const result = await this.execRaw(["r", "halt", "sleep 200", "regs"], speed);
-      if (result.success) {
-        log(`[J-Link] Recovery succeeded at ${speed} kHz`);
-        if (speed !== this.config.speed) {
-          log(`[J-Link] Keeping reduced speed: ${speed} kHz (was ${this.config.speed})`);
-          this.config.speed = speed;
+    const helper = this.config.memoryHelperPath ?? path.resolve(__dirname, "..", "..", "native", "hss-helper", "bin", "hss_helper.exe");
+    const dll = ["JLink_x64.dll", "JLinkARM.dll"].map((name) => path.join(this.config.installDir, name)).find((candidate) => fs.existsSync(candidate));
+    if (process.platform !== "win32" || !fs.existsSync(helper) || !dll || !/^\d+$/.test(this.config.serialNumber ?? "")) {
+      return {
+        success: false,
+        rawOutput: "",
+        output: "",
+        error: "non-intrusive memory access requires the bundled helper, an explicit numeric Probe serial, and a configured J-Link DLL directory",
+        errorCode: ProbeErrorCode.NON_INTRUSIVE_READ_UNAVAILABLE,
+        suggestedAction: "Configure target_configure with an explicit J-Link executable path from the installed SEGGER directory.",
+        writeIssued: writeBytes ? false : undefined,
+        stateUnknown: false,
+      };
+    }
+    const args = [
+      writeBytes ? "write-ram-probe" : "read-ram-probe",
+      "--dll", dll,
+      "--device", this.config.device,
+      "--interface", this.config.interface,
+      "--serial", this.config.serialNumber!,
+      "--speed", String(this.config.speed),
+      "--address", `0x${address.toString(16)}`,
+      "--size", String(length),
+      "--access-size", String(accessSize),
+    ];
+    if (writeBytes) args.push("--bytes-hex", writeBytes.toString("hex"));
+    else args.push("--samples", "1", "--interval-ms", "0");
+    return new Promise<CommandResult>((resolveResult) => {
+      const proc = this.spawnProcess(helper, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      let stdout = "";
+      let stderr = "";
+      let processError: Error | undefined;
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
+      }, 30_000);
+      timeout.unref();
+      proc.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
+      proc.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
+      proc.on("error", (error) => { processError = error; });
+      proc.on("close", (code, signal) => {
+        clearTimeout(timeout);
+        if (timedOut) {
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: "non-intrusive J-Link memory helper timed out", errorCode: ProbeErrorCode.TIMEOUT, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? true : undefined, stateUnknown: true });
+          return;
         }
-        this.setState(ProbeState.TARGET_ATTACHED);
-        return true;
-      }
-    }
-
-    log("[J-Link] Recovery failed at all speeds");
-    this.setState(ProbeState.PROBE_CONNECTED);
-    return false;
+        if (processError || code !== 0) {
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: processError?.message ?? `memory helper exited ${String(code)}`, errorCode: ProbeErrorCode.NON_INTRUSIVE_READ_UNAVAILABLE, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? !processError : undefined, stateUnknown: !processError });
+          return;
+        }
+        let response: {
+          status?: string;
+          errorCode?: string;
+          reason?: string;
+          readFailed?: boolean;
+          probeSerial?: number;
+          targetWasHaltedRaw?: number;
+          targetWasHaltedAfterOperationRaw?: number;
+          targetWasHaltedAfterReadRaw?: number;
+          targetWritten?: boolean;
+          writeFailed?: boolean;
+          writeReturnCode?: number;
+          writeIssued?: boolean;
+          closeFailed?: boolean;
+          stateUnknown?: boolean;
+          samples?: Array<{ valid?: boolean; bytes?: string }>;
+        };
+        try {
+          response = JSON.parse(stdout.trim()) as typeof response;
+        } catch (error) {
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: `memory helper returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`, errorCode: ProbeErrorCode.STATE_DESYNC, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? true : undefined, stateUnknown: true });
+          return;
+        }
+        const operationFailed = writeBytes
+          ? response.status !== "ok" || response.writeFailed || response.closeFailed || response.targetWritten !== true
+          : response.status !== "ok" || response.readFailed || !response.samples?.[0]?.valid;
+        if (operationFailed) {
+          const identityFailure = response.errorCode === "JLINK_PROBE_IDENTITY_MISMATCH" || response.errorCode === "JLINK_SELECT_SN_FAILED";
+          const fallback = writeBytes ? "JLINKARM_WriteMem failed" : "JLINKARM_ReadMem failed";
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: response.reason ?? response.errorCode ?? fallback, errorCode: identityFailure ? ProbeErrorCode.PROBE_IDENTITY_MISMATCH : ProbeErrorCode.TARGET_UNREACHABLE, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? response.writeIssued === true : false, stateUnknown: response.stateUnknown ?? true });
+          return;
+        }
+        if (response.probeSerial !== Number(this.config.serialNumber)) {
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: "memory helper connected to a different J-Link serial", errorCode: ProbeErrorCode.PROBE_IDENTITY_MISMATCH, exitCode: code, exitSignal: signal, writeIssued: false, stateUnknown: true });
+          return;
+        }
+        const before = response.targetWasHaltedRaw;
+        const after = response.targetWasHaltedAfterOperationRaw ?? response.targetWasHaltedAfterReadRaw;
+        if ((before !== 0 && before !== 1) || (after !== 0 && after !== 1)) {
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: "target run state could not be proven around non-intrusive memory access", errorCode: ProbeErrorCode.STATE_DESYNC, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? response.writeIssued === true : false, stateUnknown: true });
+          return;
+        }
+        if (before !== after) {
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: `memory access changed target run state (${before === 1 ? "halted" : "running"} -> ${after === 1 ? "halted" : "running"})`, errorCode: ProbeErrorCode.HIDDEN_STATE_CHANGE, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? response.writeIssued === true : false, stateUnknown: false });
+          return;
+        }
+        if (writeBytes) {
+          resolveResult({
+            success: true,
+            rawOutput: stdout,
+            output: `wrote ${writeBytes.length} bytes at 0x${address.toString(16)}`,
+            stderr,
+            exitCode: code,
+            exitSignal: signal,
+            writeIssued: true,
+            stateUnknown: false,
+          });
+          return;
+        }
+        const bytesHex = response.samples![0].bytes ?? "";
+        if (!new RegExp(`^[0-9a-fA-F]{${length * 2}}$`).test(bytesHex)) {
+          resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: "memory helper returned an invalid byte count", errorCode: ProbeErrorCode.STATE_DESYNC, exitCode: code, exitSignal: signal, stateUnknown: true });
+          return;
+        }
+        const bytes = bytesHex.match(/../g) ?? [];
+        resolveResult({
+          success: true,
+          rawOutput: stdout,
+          output: `${address.toString(16).padStart(8, "0")} = ${bytes.join(" ")}`,
+          stderr,
+          exitCode: code,
+          exitSignal: signal,
+        });
+      });
+    });
   }
 
   /**
-   * Override preflight to use execRaw directly (avoids deadlock since
-   * preflight is called inside acquireLock from withPreflight).
+   * Read-only reachability check. It never resets, halts, changes speed,
+   * stops a session, or retries under reset.
    */
   async preflight(): Promise<CommandResult | null> {
     const result = await this.execRaw([`mem 0xE000EDF0, 4`]);
@@ -223,34 +341,39 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   // ── ProbeBackend implementation ──────────────────────────────────
-  // All target-touching methods go through withPreflight for
-  // automatic validation, locking, and recovery.
+  // Public methods execute only the requested command. The MCP execution
+  // layer owns validation, serialization, and read-only observations.
 
   async getDeviceInfo(): Promise<CommandResult> {
-    return this.withPreflight("getDeviceInfo", () => this.execRaw(["halt", "regs"]));
+    return this.executeDirect(["regs"]);
   }
   async halt(): Promise<CommandResult> {
-    return this.withPreflight("halt", () => this.execRaw(["halt"]));
+    return this.executeDirect(["halt"]);
   }
   async resume(): Promise<CommandResult> {
-    return this.withPreflight("resume", () => this.execRaw(["go"]));
+    return this.executeDirect(["go"]);
   }
   async reset(halt = false): Promise<CommandResult> {
-    // Reset doesn't need preflight — it IS the recovery action
-    return this.acquireLock(() => this.execRaw(halt ? ["r", "halt"] : ["r", "go"]));
+    return this.executeDirect(halt ? ["r", "halt"] : ["r", "go"]);
   }
   async step(): Promise<CommandResult> {
-    return this.withPreflight("step", () => this.execRaw(["halt", "s"]));
+    return this.executeDirect(["s"]);
   }
 
-  async readMemory(address: number, length: number): Promise<CommandResult> {
-    // Skip preflight when reading DHCSR (that IS the preflight)
-    const isDHCSR = address === 0xE000EDF0;
-    if (isDHCSR) return this.acquireLock(() => this.execRaw([`mem 0x${address.toString(16)}, ${length}`]));
-    return this.withPreflight("readMemory", () => this.execRaw([`mem 0x${address.toString(16)}, ${length}`]));
+  async readMemory(address: number, length: number, accessSize: 1 | 2 | 4 = 1): Promise<CommandResult> {
+    if (length % accessSize !== 0) return { success: false, rawOutput: "", output: "", error: "memory read length is unaligned", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+    return this.accessMemoryNonIntrusive(address, length, accessSize);
   }
   async writeMemory(address: number, value: number): Promise<CommandResult> {
-    return this.withPreflight("writeMemory", () => this.execRaw([`w4 0x${address.toString(16)}, 0x${value.toString(16)}`]));
+    const bytes = Buffer.allocUnsafe(4);
+    bytes.writeUInt32LE(value >>> 0);
+    return this.accessMemoryNonIntrusive(address, bytes.length, 4, bytes);
+  }
+  async writeMemoryBytes(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<CommandResult> {
+    if (bytes.length === 0 || bytes.length % accessSize !== 0 || address % accessSize !== 0) {
+      return { success: false, rawOutput: "", output: "", error: "memory write is empty or unaligned", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+    }
+    return this.accessMemoryNonIntrusive(address, bytes.length, accessSize, bytes);
   }
   async readMemoryForExclusiveOwner(owner: string, address: number, length: number): Promise<CommandResult> {
     if (this.getExclusiveOwner() !== owner) return this.ownerMemoryRejected(owner);
@@ -269,30 +392,38 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   async readAllRegisters(): Promise<CommandResult> {
-    return this.withPreflight("readAllRegisters", () => this.execRaw(["halt", "regs"]));
+    return this.executeDirect(["regs"]);
   }
   async readRegister(name: string): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
       return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
-    return this.withPreflight("readRegister", () => this.execRaw(["halt", `rreg ${name}`]));
+    return this.executeDirect([`rreg ${name}`]);
+  }
+  async writeCoreRegister(name: string, value: number): Promise<CommandResult> {
+    if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
+      return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+    }
+    return this.executeDirect([`wreg ${name}, 0x${value.toString(16)}`]);
   }
 
   override getConnectionGeneration(): number { return this.connectionGeneration; }
 
   async flash(filePath: string, baseAddress?: number): Promise<CommandResult> {
-    const addr = baseAddress !== undefined ? ` 0x${baseAddress.toString(16)}` : "";
-    return this.executeDirect([`loadfile ${filePath}${addr}`], 180000);
+    if (!filePath || /[\0\r\n\"]/.test(filePath)) return { success: false, rawOutput: "", output: "", error: "invalid flash path", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+    const address = path.extname(filePath).toLowerCase() === ".bin" ? baseAddress : 0;
+    if (address === undefined) return { success: false, rawOutput: "", output: "", error: "raw BIN flash requires a base address", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+    return this.executeDirect([`loadfile "${filePath}" 0x${address.toString(16)} noreset`], 180000);
   }
   async erase(): Promise<CommandResult> {
-    return this.executeDirect(["erase"]);
+    return this.executeDirect(["erase 0 0 noreset"]);
   }
 
   async setBreakpoint(address: number): Promise<CommandResult> {
-    return this.withPreflight("setBreakpoint", () => this.execRaw([`SetBP 0x${address.toString(16)}`]));
+    return this.executeDirect([`SetBP 0x${address.toString(16)}`]);
   }
   async clearBreakpoints(): Promise<CommandResult> {
-    return this.withPreflight("clearBreakpoints", () => this.execRaw(["ClrBP"]));
+    return this.executeDirect(["ClrBP"]);
   }
 
   async executeRaw(commands: string[]): Promise<CommandResult> {
@@ -304,13 +435,27 @@ export class JLinkBackend extends ProbeBackend {
       return { success: false, rawOutput: "", output: `Probe is exclusively owned by ${this.getExclusiveOwner()}`, error: "Capture owns the probe", errorCode: ProbeErrorCode.PROBE_BUSY };
     }
     try {
-      return await this.acquireLock(() => this.execRaw(commands, undefined, timeoutMs));
+      return await this.acquireLock(() => this.execRaw(commands, timeoutMs));
     } finally {
       this.endHardwareOperation();
     }
   }
 
   // ── GDB Server ───────────────────────────────────────────────────
+
+  private gdbServerArgs(): string[] {
+    const args = [
+      "-device", this.config.device,
+      "-if", this.config.interface,
+      "-speed", String(this.config.speed),
+      "-port", String(this.config.gdbPort),
+      "-RTTTelnetPort", String(this.config.rttTelnetPort),
+      "-SWOPort", String(this.config.swoTelnetPort),
+      "-vd", "-noreset", "-nohalt", "-noir", "-LocalhostOnly", "1", "-nosinglerun", "-NoGui", "1",
+    ];
+    if (this.config.serialNumber) args.push("-select", `USB=${this.config.serialNumber}`);
+    return args;
+  }
 
   async startGDBServer(): Promise<{ success: boolean; message: string }> {
     if (!this.beginHardwareOperation()) return { success: false, message: `Probe is exclusively owned by ${this.getExclusiveOwner()}` };
@@ -319,16 +464,7 @@ export class JLinkBackend extends ProbeBackend {
         return { success: true, message: "GDB Server is already running" };
       }
 
-      const args = [
-        "-device", this.config.device,
-        "-if", this.config.interface,
-        "-speed", String(this.config.speed),
-        "-port", String(this.config.gdbPort),
-        "-RTTTelnetPort", String(this.config.rttTelnetPort),
-        "-SWOPort", String(this.config.swoTelnetPort),
-        "-vd", "-nohalt", "-noir", "-LocalhostOnly", "1", "-singlerun", "-NoGui", "1",
-      ];
-      if (this.config.serialNumber) args.push("-select", `USB=${this.config.serialNumber}`);
+      const args = this.gdbServerArgs();
 
       try {
         this.connectionGeneration += 1;
@@ -346,6 +482,12 @@ export class JLinkBackend extends ProbeBackend {
             this.gdbOutputBuffer.push(`[ERR] ${line}`);
           }
         });
+        const readiness = await waitForGdbServerReady(managed.process, 15_000);
+        if (!readiness.ready || !this.processManager.get(GDB_SERVER_PROCESS)) {
+          await this.processManager.killAndWait(GDB_SERVER_PROCESS);
+          this.setState(ProbeState.PROBE_CONNECTED);
+          return { success: false, message: `GDB Server did not become ready: ${readiness.message}` };
+        }
         this.setState(ProbeState.GDB_RUNNING);
         return { success: true, message: `GDB Server started on port ${this.config.gdbPort}, RTT telnet on port ${this.config.rttTelnetPort}` };
       } catch (err) {
@@ -357,19 +499,27 @@ export class JLinkBackend extends ProbeBackend {
     }
   }
 
-  stopGDBServer(): { success: boolean; message: string } {
+  async stopGDBServer(): Promise<{ success: boolean; message: string }> {
     if (this.getExclusiveOwner()) return { success: false, message: `Probe is exclusively owned by ${this.getExclusiveOwner()}` };
-    const killed = this.processManager.kill(GDB_SERVER_PROCESS);
+    const stopped = await this.processManager.killAndWait(GDB_SERVER_PROCESS);
+    if (!stopped.exited) return { success: false, message: "GDB Server did not exit after termination was requested" };
     this.gdbOutputBuffer = [];
     this.rttConnected = false;
-    if (killed) this.setState(ProbeState.PROBE_CONNECTED);
-    return { success: true, message: killed ? "GDB Server stopped" : "GDB Server was not running" };
+    if (stopped.found) this.setState(ProbeState.PROBE_CONNECTED);
+    return { success: true, message: stopped.found ? "GDB Server stopped" : "GDB Server was not running" };
   }
 
   isGDBServerRunning(): boolean { return !!this.processManager.get(GDB_SERVER_PROCESS); }
 
   getGDBServerStatus(): GDBServerInfo {
-    return { running: this.isGDBServerRunning(), gdbPort: this.config.gdbPort, rttTelnetPort: this.config.rttTelnetPort };
+    const managed = this.processManager.get(GDB_SERVER_PROCESS);
+    const processId = managed?.process.pid;
+    return {
+      running: Boolean(managed),
+      processId: Number.isSafeInteger(processId) && Number(processId) > 0 ? processId : undefined,
+      gdbPort: this.config.gdbPort,
+      rttTelnetPort: this.config.rttTelnetPort,
+    };
   }
 
   getGDBServerOutput(lines = 50): string[] { return this.gdbOutputBuffer.slice(-lines); }
@@ -394,19 +544,34 @@ export class JLinkBackend extends ProbeBackend {
     // Run ShowEmuList without specifying a device to see connected probes
     const args = ["-NoGui", "1"];
     return new Promise<CommandResult>((resolve) => {
-      const proc = spawn(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
+      const proc = this.spawnProcess(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "", stderr = "";
+      let settled = false;
+      let timedOut = false;
+      let processError: Error | undefined;
+      let timeout: NodeJS.Timeout | undefined;
+      const finish = (result: CommandResult) => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        resolve(result);
+      };
       proc.stdout?.on("data", (d: Buffer) => { stdout += d.toString(); });
       proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
       proc.stdin?.write("ShowEmuList\nexit\n");
       proc.stdin?.end();
       proc.on("error", (err) => {
-        resolve({ success: false, rawOutput: stdout, output: stdout, error: `Failed to run JLinkExe: ${err.message}` });
+        processError = err;
       });
-      proc.on("exit", (code) => {
-        resolve({ success: code === 0, rawOutput: stdout, output: stripBoilerplate(stdout), error: stderr || undefined });
+      proc.on("close", (code, signal) => {
+        finish(timedOut
+          ? { success: false, rawOutput: stdout, output: stripBoilerplate(stdout), stderr, error: "J-Link discovery timed out; process close was observed", errorCode: ProbeErrorCode.TIMEOUT, exitCode: code, exitSignal: signal }
+          : { success: code === 0 && !processError, rawOutput: stdout, output: stripBoilerplate(stdout), stderr, error: processError ? `Failed to run JLinkExe: ${processError.message}` : stderr || undefined, errorCode: processError ? ProbeErrorCode.PROBE_NOT_FOUND : undefined, exitCode: code, exitSignal: signal });
       });
-      setTimeout(() => { proc.kill("SIGTERM"); resolve({ success: false, rawOutput: stdout, output: stdout, error: "Timed out" }); }, 10000);
+      timeout = setTimeout(() => {
+        timedOut = true;
+        void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
+      }, 10_000);
     }).finally(() => this.endHardwareOperation());
   }
 
@@ -435,6 +600,27 @@ export class JLinkBackend extends ProbeBackend {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function waitForGdbServerReady(processHandle: ChildProcess, timeoutMs: number): Promise<{ ready: boolean; message: string }> {
+  return new Promise((resolveReady) => {
+    let settled = false;
+    const finish = (ready: boolean, message: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      processHandle.stdout?.off("data", onData);
+      processHandle.off("exit", onExit);
+      processHandle.off("error", onError);
+      resolveReady({ ready, message });
+    };
+    const onData = (chunk: Buffer) => {
+      const text = chunk.toString();
+      if (/Waiting for (?:GDB )?connection|Listening on TCP\/IP port|Waiting for connection from GDB/i.test(text)) finish(true, "ready output observed");
+    };
+    const onExit = (code: number | null) => finish(false, `process exited with code ${code}`);
+    const onError = (error: Error) => finish(false, error.message);
+    processHandle.stdout?.on("data", onData);
+    processHandle.once("exit", onExit);
+    processHandle.once("error", onError);
+    const timeout = setTimeout(() => finish(false, `no readiness output within ${timeoutMs}ms`), timeoutMs);
+  });
 }

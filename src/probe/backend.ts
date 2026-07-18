@@ -27,6 +27,9 @@ export enum ProbeErrorCode {
   TIMEOUT = "TIMEOUT",
   PROBE_BUSY = "PROBE_BUSY",
   INVALID_ARGUMENT = "INVALID_ARGUMENT",
+  NON_INTRUSIVE_READ_UNAVAILABLE = "NON_INTRUSIVE_READ_UNAVAILABLE",
+  HIDDEN_STATE_CHANGE = "HIDDEN_STATE_CHANGE",
+  PROBE_IDENTITY_MISMATCH = "PROBE_IDENTITY_MISMATCH",
 }
 
 export interface CommandResult {
@@ -35,6 +38,8 @@ export interface CommandResult {
   rawOutput: string;
   /** Cleaned output (boilerplate stripped) */
   output: string;
+  /** Exact stderr from the probe process, when a process transport is used. */
+  stderr?: string;
   error?: string;
   /** Structured error code for programmatic handling */
   errorCode?: ProbeErrorCode;
@@ -42,6 +47,12 @@ export interface CommandResult {
   lastSuccessfulStage?: string;
   /** Suggested recovery action */
   suggestedAction?: string;
+  exitCode?: number | null;
+  exitSignal?: NodeJS.Signals | null;
+  /** Explicit transport evidence that a mutating hardware call was dispatched. */
+  writeIssued?: boolean;
+  /** Explicit evidence that final Probe/Target state is not trustworthy. */
+  stateUnknown?: boolean;
 }
 
 export interface MemoryDumpLine {
@@ -52,6 +63,8 @@ export interface MemoryDumpLine {
 
 export interface GDBServerInfo {
   running: boolean;
+  /** OS PID of the process that physically owns the Probe while running. */
+  processId?: number;
   gdbPort: number;
   /** Port for RTT telnet access (J-Link specific, -1 if not supported) */
   rttTelnetPort: number;
@@ -74,6 +87,12 @@ export interface CaptureProbeConfig {
   speed: number;
   serialNumber?: string;
   gdbPort: number;
+}
+
+export interface TargetStateObservation {
+  state: "running" | "halted" | "unknown";
+  source: "dhcsr" | "unavailable";
+  result: CommandResult;
 }
 
 export type ProbeType = "jlink";
@@ -194,10 +213,7 @@ export abstract class ProbeBackend {
     return null;
   }
 
-  /**
-   * Run a command with preflight validation and auto-recovery.
-   * Wraps the command in a lock to prevent concurrent access.
-   */
+  /** Run a command with a read-only preflight and no automatic recovery. */
   async withPreflight(
     operation: string,
     fn: () => Promise<CommandResult>,
@@ -216,17 +232,7 @@ export abstract class ProbeBackend {
       return await this.acquireLock(async () => {
         if (!skipPreflight && this.isDeviceConfigured()) {
           const check = await this.preflight();
-          if (check) {
-            // Try recovery once
-            const recovered = await this.recover();
-            if (!recovered) {
-              return {
-                ...check,
-                lastSuccessfulStage: "recovery_attempted",
-                suggestedAction: `Recovery failed. Try: 1) reset with halt, 2) power cycle the target, 3) check SWD wiring. Operation was: ${operation}`,
-              };
-            }
-          }
+          if (check) return { ...check, suggestedAction: `${check.suggestedAction ?? "Check the target connection."} Requested operation was not issued: ${operation}` };
         }
 
         const result = await fn();
@@ -257,15 +263,6 @@ export abstract class ProbeBackend {
     }
   }
 
-  /**
-   * Recovery sequence. Subclasses should override to implement
-   * probe-specific recovery (restart server, reconnect under reset, etc.)
-   * Returns true if recovery succeeded.
-   */
-  async recover(): Promise<boolean> {
-    return false;
-  }
-
   // ── Device control ───────────────────────────────────────────────
 
   abstract getDeviceInfo(): Promise<CommandResult>;
@@ -276,8 +273,23 @@ export abstract class ProbeBackend {
 
   // ── Memory ───────────────────────────────────────────────────────
 
-  abstract readMemory(address: number, length: number): Promise<CommandResult>;
+  abstract readMemory(address: number, length: number, accessSize?: 1 | 2 | 4): Promise<CommandResult>;
   abstract writeMemory(address: number, value: number): Promise<CommandResult>;
+
+  async writeMemoryBytes(_address: number, _bytes: Buffer, _accessSize: 1 | 2 | 4): Promise<CommandResult> {
+    return { success: false, rawOutput: "", output: "", error: "structured memory writes are not supported by this backend", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+  }
+
+  async observeTargetState(): Promise<TargetStateObservation> {
+    const result = await this.readMemory(0xE000EDF0, 4, 4);
+    if (!result.success) return { state: "unknown", source: "unavailable", result };
+    const rawDump = this.parseMemoryDump(result.rawOutput);
+    const dump = rawDump.length > 0 ? rawDump : this.parseMemoryDump(result.output);
+    const bytes = dump.flatMap((line) => line.hex.split(/\s+/).filter((value) => /^[0-9a-fA-F]{2}$/.test(value)));
+    if (bytes.length < 4) return { state: "unknown", source: "unavailable", result };
+    const dhcsr = parseLittleEndian32(bytes, 0);
+    return { state: (dhcsr & (1 << 17)) !== 0 ? "halted" : "running", source: "dhcsr", result };
+  }
 
   async readMemoryForExclusiveOwner(owner: string, address: number, length: number): Promise<CommandResult> {
     void address;
@@ -297,10 +309,16 @@ export abstract class ProbeBackend {
   abstract readAllRegisters(): Promise<CommandResult>;
   abstract readRegister(name: string): Promise<CommandResult>;
 
+  async writeCoreRegister(_name: string, _value: number): Promise<CommandResult> {
+    return { success: false, rawOutput: "", output: "", error: "core-register writes are not supported by this backend", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+  }
+
   // ── Flash ────────────────────────────────────────────────────────
 
   abstract flash(filePath: string, baseAddress?: number): Promise<CommandResult>;
   abstract erase(): Promise<CommandResult>;
+
+  supportsBlankVerification(): boolean { return false; }
 
   // ── Breakpoints ──────────────────────────────────────────────────
 
@@ -310,7 +328,7 @@ export abstract class ProbeBackend {
   // ── GDB Server ───────────────────────────────────────────────────
 
   abstract startGDBServer(): Promise<{ success: boolean; message: string }>;
-  abstract stopGDBServer(): { success: boolean; message: string };
+  abstract stopGDBServer(): Promise<{ success: boolean; message: string }>;
   abstract isGDBServerRunning(): boolean;
   abstract getGDBServerStatus(): GDBServerInfo;
   abstract getGDBServerOutput(lines?: number): string[];
@@ -418,10 +436,11 @@ export abstract class ProbeBackend {
     const results: MemoryDumpLine[] = [];
     for (const rawLine of raw.split("\n")) {
       const line = rawLine.trimEnd();
-      // J-Link format: "E000ED28 = 00 00 00 00 ..."
-      const jlinkMatch = line.match(/^(?:J-Link>\s*)?([0-9A-Fa-f]{8})\s*=\s*(.+?)\s{2,}(.*)$/);
+      // J-Link mem8/mem16/mem32, with or without the optional ASCII column.
+      const jlinkMatch = line.match(/^(?:J-Link>\s*)?([0-9A-Fa-f]{8})\s*=\s*(.*)$/);
       if (jlinkMatch) {
-        results.push({ address: `0x${jlinkMatch[1]}`, hex: jlinkMatch[2].trim(), ascii: jlinkMatch[3].trim() });
+        const payload = splitMemoryPayload(jlinkMatch[2]);
+        if (payload.hex) results.push({ address: `0x${jlinkMatch[1]}`, ...payload });
         continue;
       }
       // GDB memory format: "0xe000ed28: 00 00 00 00 ..."
@@ -439,14 +458,15 @@ export abstract class ProbeBackend {
     decoded: string;
     raw: { cfsr: number; hfsr: number; mmfar: number; bfar: number };
   }> {
-    const result = await this.readMemory(0xE000ED28, 20);
-    const dump = this.parseMemoryDump(result.rawOutput);
+    const result = await this.readMemory(0xE000ED28, 20, 4);
+    const rawDump = this.parseMemoryDump(result.rawOutput);
+    const dump = rawDump.length > 0 ? rawDump : this.parseMemoryDump(result.output);
 
     let cfsr = 0, hfsr = 0, mmfar = 0, bfar = 0;
     if (dump.length > 0) {
       const allHex = dump.map((d) => d.hex).join(" ");
       const bytes = allHex.split(/\s+/).filter(Boolean);
-      if (bytes.length >= 16) {
+      if (bytes.length >= 20) {
         cfsr = parseLittleEndian32(bytes, 0);
         hfsr = parseLittleEndian32(bytes, 4);
         mmfar = parseLittleEndian32(bytes, 12);
@@ -456,6 +476,12 @@ export abstract class ProbeBackend {
 
     return { result, decoded: decodeFaultRegisters(cfsr, hfsr, mmfar, bfar), raw: { cfsr, hfsr, mmfar, bfar } };
   }
+}
+
+function splitMemoryPayload(payload: string): { hex: string; ascii: string } {
+  const match = payload.match(/^\s*((?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{2})(?:[ \t]+(?:[0-9A-Fa-f]{8}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{2}))*)/);
+  if (!match) return { hex: "", ascii: payload.trim() };
+  return { hex: match[1].trim(), ascii: payload.slice(match[0].length).trim() };
 }
 
 // ══════════════════════════════════════════════════════════════════════

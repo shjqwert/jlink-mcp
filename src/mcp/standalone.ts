@@ -9,7 +9,7 @@
  *   J-Link:
  *     JLINK_DEVICE, JLINK_INSTALL_DIR, JLINK_INTERFACE, JLINK_SPEED,
  *     JLINK_SERIAL, JLINK_GDB_PORT, JLINK_RTT_PORT, JLINK_SWO_PORT
- *   Local roots: JLINK_MCP_STORAGE_ROOT, JLINK_MCP_EVIDENCE_ROOT
+ *   Local roots: JLINK_MCP_STORAGE_ROOT, JLINK_MCP_EVIDENCE_ROOT, JLINK_MCP_QUEUE_ROOT
  */
 
 import { JLinkMcpServer } from "./server";
@@ -54,6 +54,7 @@ async function main() {
     {
       storageRoot: env("JLINK_MCP_STORAGE_ROOT"),
       evidenceRoot: env("JLINK_MCP_EVIDENCE_ROOT"),
+      queueRoot: env("JLINK_MCP_QUEUE_ROOT"),
     }
   );
 

@@ -9,14 +9,14 @@
 
 ## 2. Unify Target Context and Physical Execution (Commit 3)
 
-- [ ] 2.1 Implement canonical mandatory `projectRoot` handling and persistent `.jlink-mcp/targets.json` configuration with required Target fields.
-- [ ] 2.2 Implement Target generations, content hashes, explicit external-input validation, Artifact/flash/SVD bindings, and persistent live match state.
-- [ ] 2.3 Implement machine-wide cross-process FIFO/lease serialization keyed by unambiguous Probe serial, with independent execution for different Probes.
-- [ ] 2.4 Implement explicit HSS and GDB Server long-lived ownership, compatible-operation allowlists, and `CAPTURE_ACTIVE`/`GDB_SESSION_ACTIVE` failures without auto-stop or auto-recovery.
-- [ ] 2.5 Implement the common operation envelope, stable error codes, before/after observations, side-effect reporting, warnings, and output references.
-- [ ] 2.6 Implement direct `halt`, `resume`, `reset`, `reset_halt`, memory, and CPU-core-register operations without hidden target-state changes or default readback.
-- [ ] 2.7 Implement direct flash, erase, Probe-command, GDB-command, GDB Server, GDB, and RTT behavior with strict format/session rules and truthful Artifact-match invalidation.
-- [ ] 2.8 Add unit and simulated concurrent-process tests for Target persistence, queue order, owner exclusion, failure continuation, no-hidden-side-effect behavior, and direct MCU operations.
+- [x] 2.1 Implement canonical mandatory `projectRoot` handling and persistent `.jlink-mcp/targets.json` configuration with required Target fields.
+- [x] 2.2 Implement Target generations, content hashes, explicit external-input validation, Artifact/flash/SVD bindings, and persistent live match state.
+- [x] 2.3 Implement machine-wide cross-process FIFO/lease serialization keyed by unambiguous Probe serial, with independent execution for different Probes.
+- [x] 2.4 Implement explicit HSS and GDB Server long-lived ownership, compatible-operation allowlists, and `CAPTURE_ACTIVE`/`GDB_SESSION_ACTIVE` failures without auto-stop or auto-recovery.
+- [x] 2.5 Implement the common operation envelope, stable error codes, before/after observations, side-effect reporting, warnings, and output references.
+- [x] 2.6 Implement direct `halt`, `resume`, `reset`, `reset_halt`, memory, and CPU-core-register operations without hidden target-state changes or default readback.
+- [x] 2.7 Implement direct flash, erase, Probe-command, GDB-command, GDB Server, GDB, and RTT behavior with strict format/session rules and truthful Artifact-match invalidation.
+- [x] 2.8 Add unit and simulated concurrent-process tests for Target persistence, queue order, owner exclusion, failure continuation, no-hidden-side-effect behavior, and direct MCU operations.
 
 ## 3. Implement Typed Artifact, Variable, and SVD Access (Commit 4)
 

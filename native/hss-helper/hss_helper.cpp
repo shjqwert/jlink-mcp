@@ -123,13 +123,15 @@ static std::map<std::wstring, std::wstring> parse_options(int argc, wchar_t** ar
   return options;
 }
 
-static void error_json(const std::string& code, const std::string& reason, const std::string& dll = "") {
+static void error_json(const std::string& code, const std::string& reason, const std::string& dll = "", bool state_unknown = false, bool write_issued = false) {
   std::cout
     << "{\"status\":\"error\",\"errorCode\":\"" << escape(code)
     << "\",\"reason\":\"" << escape(reason)
     << "\",\"dll\":\"" << escape(dll)
     << "\",\"helperVersion\":\"" << HSS_HELPER_VERSION
     << "\",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
+    << ",\"writeIssued\":" << (write_issued ? "true" : "false")
+    << ",\"stateUnknown\":" << (state_unknown ? "true" : "false")
     << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
 }
 
@@ -1524,7 +1526,7 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   int open_rc = call_int0(arm_open, &crashed);
   if (crashed || open_rc < 0) {
     FreeLibrary(dll);
-    error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
+    error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8, true);
     return 0;
   }
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
@@ -2101,20 +2103,30 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     return 0;
   }
 
+  char close_policy_out[512] = {};
+  int close_policy_rc = call_exec(arm_exec, "SetRestartOnClose = 0", close_policy_out, sizeof(close_policy_out), &crashed);
+  if (crashed || close_policy_rc < 0) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
+    return 0;
+  }
+
   char exec_out[512] = {};
   std::string device_cmd = "device = " + device;
   int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
   if (crashed) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
+    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8, true);
     return 0;
   }
   int tif_rc = call_int1(arm_tif, tif, &crashed);
   if (crashed) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_TIF_SELECT_EXCEPTION", "JLINKARM_TIF_Select raised a structured exception", dll_utf8);
+    error_json("JLINK_TIF_SELECT_EXCEPTION", "JLINKARM_TIF_Select raised a structured exception", dll_utf8, true);
     return 0;
   }
 
@@ -2122,7 +2134,7 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   if (crashed) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", dll_utf8);
+    error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", dll_utf8, true);
     return 0;
   }
 
@@ -2173,10 +2185,12 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     << ",\"probeSerial\":" << sn
     << ",\"returnCodes\":{\"selectSerial\":" << select_sn_rc
     << ",\"open\":" << open_rc
+    << ",\"setRestartOnClose\":" << close_policy_rc
     << ",\"device\":" << device_rc
     << ",\"tifSelect\":" << tif_rc
     << ",\"connect\":" << connect_rc
-    << "},\"execOutput\":\"" << escape(exec_out)
+    << "},\"closePolicyOutput\":\"" << escape(close_policy_out)
+    << "\",\"execOutput\":\"" << escape(exec_out)
     << "\",\"targetWasHalted\":" << (halted > 0 ? "true" : "false")
     << ",\"targetWasHaltedRaw\":" << halted
     << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
@@ -2184,7 +2198,17 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   return 0;
 }
 
-static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
+static bool read_count_complete(int read_rc, size_t expected_items, bool crashed) {
+  return !crashed && read_rc >= 0 && static_cast<size_t>(read_rc) == expected_items;
+}
+
+static bool width_read_complete(int read_rc, size_t expected_items, const std::vector<U8>& status, bool crashed) {
+  return read_count_complete(read_rc, expected_items, crashed)
+    && status.size() == expected_items
+    && std::all_of(status.begin(), status.end(), [](U8 value) { return value == 0U; });
+}
+
+static int ram_probe_access(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options, bool write_mode) {
   const std::string dll_utf8 = narrow(dll_path);
   if (dll_path.empty()) {
     error_json("HSS_DLL_PATH_MISSING", "--dll is required");
@@ -2197,18 +2221,32 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     return 0;
   }
   int size = 4;
-  int samples = 2;
+  int samples = write_mode ? 0 : 2;
   int interval_ms = 100;
-  if (!parse_int_text(option_utf8(options, L"--size", "4"), &size) || size < 1 || size > 256) {
-    error_json("HSS_READ_RAM_SIZE_INVALID", "--size must be 1..256 bytes");
+  int access_size = 1;
+  std::vector<unsigned char> requested;
+  if (!parse_int_text(option_utf8(options, L"--size", "4"), &size) || size < 1 || size > 4096) {
+    error_json("HSS_READ_RAM_SIZE_INVALID", "--size must be 1..4096 bytes");
     return 0;
   }
-  if (!parse_int_text(option_utf8(options, L"--samples", "2"), &samples) || samples < 1 || samples > 1000) {
-    error_json("HSS_READ_RAM_SAMPLES_INVALID", "--samples must be 1..1000");
+  if (!parse_int_text(option_utf8(options, L"--access-size", "1"), &access_size)
+      || (access_size != 1 && access_size != 2 && access_size != 4)
+      || size % access_size != 0 || address % static_cast<U32>(access_size) != 0) {
+    error_json("JLINK_MEMORY_ACCESS_SIZE_INVALID", "--access-size must be 1, 2, or 4 and the range must be aligned");
+    return 0;
+  }
+  if (!parse_int_text(option_utf8(options, L"--samples", write_mode ? "0" : "2"), &samples)
+      || (write_mode ? samples != 0 : (samples < 1 || samples > 1000))) {
+    error_json("HSS_READ_RAM_SAMPLES_INVALID", write_mode ? "write-ram-probe does not accept samples" : "--samples must be 1..1000");
     return 0;
   }
   if (!parse_int_text(option_utf8(options, L"--interval-ms", "100"), &interval_ms) || interval_ms < 0 || interval_ms > 60000) {
     error_json("HSS_READ_RAM_INTERVAL_INVALID", "--interval-ms must be 0..60000");
+    return 0;
+  }
+  if (write_mode && (!parse_hex_bytes(option_utf8(options, L"--bytes-hex", ""), &requested)
+      || requested.size() != static_cast<size_t>(size))) {
+    error_json("JLINK_WRITE_RAM_BYTES_INVALID", "--bytes-hex must contain exactly --size bytes");
     return 0;
   }
 
@@ -2225,12 +2263,22 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
   auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
-  auto arm_read_mem = reinterpret_cast<JLINKARM_ReadMem_Fn>(required(dll, "JLINKARM_ReadMem"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_read_mem) {
+  auto arm_read_u8 = !write_mode && access_size == 1 ? reinterpret_cast<JLINKARM_ReadMemU8_Fn>(required(dll, "JLINKARM_ReadMemU8")) : nullptr;
+  auto arm_read_u16 = !write_mode && access_size == 2 ? reinterpret_cast<JLINKARM_ReadMemU16_Fn>(required(dll, "JLINKARM_ReadMemU16")) : nullptr;
+  auto arm_read_u32 = !write_mode && access_size == 4 ? reinterpret_cast<JLINKARM_ReadMemU32_Fn>(required(dll, "JLINKARM_ReadMemU32")) : nullptr;
+  auto arm_write_u8 = write_mode && access_size == 1 ? reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8")) : nullptr;
+  auto arm_write_u16 = write_mode && access_size == 2 ? reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16")) : nullptr;
+  auto arm_write_u32 = write_mode && access_size == 4 ? reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32")) : nullptr;
+  const bool access_export_available = write_mode
+    ? (access_size == 1 ? arm_write_u8 != nullptr : access_size == 2 ? arm_write_u16 != nullptr : arm_write_u32 != nullptr)
+    : (access_size == 1 ? arm_read_u8 != nullptr : access_size == 2 ? arm_read_u16 != nullptr : arm_read_u32 != nullptr);
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted
+      || !access_export_available) {
     FreeLibrary(dll);
-    error_json("JLINK_BASE_EXPORT_MISSING", "required JLINKARM read-memory exports missing", dll_utf8);
+    error_json("JLINK_BASE_EXPORT_MISSING", "required width-specific JLINKARM memory export is missing", dll_utf8);
     return 0;
   }
 
@@ -2246,14 +2294,17 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
   }
 
   bool crashed = false;
-  int select_sn_rc = 0;
-  if (!serial_text.empty() && arm_select_sn) {
-    select_sn_rc = call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
-    if (crashed) {
-      FreeLibrary(dll);
-      error_json("JLINK_SELECT_SN_EXCEPTION", "JLINKARM_EMU_SelectByUSBSN raised a structured exception", dll_utf8);
-      return 0;
-    }
+  U32 expected_serial = 0;
+  if (!parse_u32_text(serial_text, &expected_serial) || expected_serial == 0) {
+    FreeLibrary(dll);
+    error_json("JLINK_SERIAL_INVALID", "--serial must identify one non-zero J-Link serial number", dll_utf8);
+    return 0;
+  }
+  int select_sn_rc = call_select_sn(arm_select_sn, expected_serial, &crashed);
+  if (crashed || select_sn_rc < 0) {
+    FreeLibrary(dll);
+    error_json("JLINK_SELECT_SN_FAILED", "JLINKARM_EMU_SelectByUSBSN failed", dll_utf8);
+    return 0;
   }
 
   int open_rc = call_int0(arm_open, &crashed);
@@ -2263,35 +2314,54 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     return 0;
   }
 
+  char close_policy_out[512] = {};
+  int close_policy_rc = call_exec(arm_exec, "SetRestartOnClose = 0", close_policy_out, sizeof(close_policy_out), &crashed);
+  if (crashed || close_policy_rc < 0) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
+    return 0;
+  }
+
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
   int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
-  if (crashed) {
+  if (crashed || device_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
+    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8, true);
     return 0;
   }
   const int tif = iface == "JTAG" ? 0 : 1;
   int tif_rc = call_int1(arm_tif, tif, &crashed);
-  if (crashed) {
+  if (crashed || tif_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_TIF_SELECT_EXCEPTION", "JLINKARM_TIF_Select raised a structured exception", dll_utf8);
+    error_json("JLINK_TIF_SELECT_EXCEPTION", "JLINKARM_TIF_Select raised a structured exception", dll_utf8, true);
     return 0;
   }
   call_void1(arm_speed, speed, &crashed);
   if (crashed) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", dll_utf8);
+    error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", dll_utf8, true);
     return 0;
   }
   int connect_rc = call_int0(arm_connect, &crashed);
   if (crashed || connect_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", dll_utf8);
+    error_json("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", dll_utf8, true);
+    return 0;
+  }
+
+  U32 actual_serial = call_u320(arm_get_sn, &crashed);
+  if (crashed || actual_serial != expected_serial) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_PROBE_IDENTITY_MISMATCH", "connected J-Link serial does not match --serial", dll_utf8, true);
     return 0;
   }
 
@@ -2300,6 +2370,13 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     halted = call_int0(arm_halted, &crashed);
     if (crashed) halted = -2;
   }
+  if (halted != 0 && halted != 1) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_STATE_OBSERVATION_FAILED", "target state could not be observed before memory access", dll_utf8, true);
+    return 0;
+  }
 
   bool resume_issued = false;
   int halted_after_resume = -1;
@@ -2307,14 +2384,14 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     if (!arm_go) {
       call_void0(arm_close, &crashed);
       FreeLibrary(dll);
-      error_json("JLINK_GO_EXPORT_MISSING", "JLINKARM_Go export missing", dll_utf8);
+      error_json("JLINK_GO_EXPORT_MISSING", "JLINKARM_Go export missing", dll_utf8, true);
       return 0;
     }
     call_void0(arm_go, &crashed);
     if (crashed) {
       call_void0(arm_close, &crashed);
       FreeLibrary(dll);
-      error_json("JLINK_GO_EXCEPTION", "JLINKARM_Go raised a structured exception", dll_utf8);
+      error_json("JLINK_GO_EXCEPTION", "JLINKARM_Go raised a structured exception", dll_utf8, true);
       return 0;
     }
     resume_issued = true;
@@ -2325,37 +2402,91 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     }
   }
 
+  int write_rc = 0;
+  bool write_crashed = false;
+  bool write_failed = false;
+  if (write_mode) {
+    for (size_t offset = 0; offset < requested.size() && !write_crashed; offset += static_cast<size_t>(access_size)) {
+      const U32 element_address = address + static_cast<U32>(offset);
+      if (access_size == 1) {
+        call_write_u8(arm_write_u8, element_address, requested[offset], &write_crashed);
+      } else if (access_size == 2) {
+        const U16 value = static_cast<U16>(requested[offset]) | (static_cast<U16>(requested[offset + 1]) << 8U);
+        call_write_u16(arm_write_u16, element_address, value, &write_crashed);
+      } else {
+        const U32 value = static_cast<U32>(requested[offset])
+          | (static_cast<U32>(requested[offset + 1]) << 8U)
+          | (static_cast<U32>(requested[offset + 2]) << 16U)
+          | (static_cast<U32>(requested[offset + 3]) << 24U);
+        call_write_u32(arm_write_u32, element_address, value, &write_crashed);
+      }
+    }
+    write_rc = write_crashed ? -1 : 0;
+    write_failed = write_crashed;
+  }
+
   std::vector<unsigned char> first_value;
   bool changed = false;
   bool all_zero = true;
   bool read_failed = false;
-  std::cout
-    << "{\"status\":\"ok\",\"command\":\"read-ram-probe\",\"api\":\"JLINKARM_ReadMem\""
+  std::ostringstream output;
+  output
+    << "\"command\":\"" << (write_mode ? "write-ram-probe" : "read-ram-probe")
+    << "\",\"api\":\"" << (write_mode ? "JLINKARM_WriteMem" : "JLINKARM_ReadMem") << "\""
     << ",\"dll\":\"" << escape(dll_utf8)
     << "\",\"device\":\"" << escape(device)
     << "\",\"interface\":\"" << escape(iface)
     << "\",\"speedKhz\":" << speed
+    << ",\"probeSerial\":" << actual_serial
     << ",\"address\":\"" << hex_u32(address)
     << "\",\"size\":" << size
+    << ",\"accessSize\":" << access_size
     << ",\"sampleCount\":" << samples
     << ",\"intervalMs\":" << interval_ms
     << ",\"returnCodes\":{\"selectSerial\":" << select_sn_rc
     << ",\"open\":" << open_rc
+    << ",\"setRestartOnClose\":" << close_policy_rc
     << ",\"device\":" << device_rc
     << ",\"tifSelect\":" << tif_rc
     << ",\"connect\":" << connect_rc
-    << "},\"execOutput\":\"" << escape(exec_out)
+    << "},\"closePolicyOutput\":\"" << escape(close_policy_out)
+    << "\",\"execOutput\":\"" << escape(exec_out)
     << "\",\"targetWasHalted\":" << (halted > 0 ? "true" : "false")
     << ",\"targetWasHaltedRaw\":" << halted
     << ",\"resumeBeforeRead\":" << (resume_before_read ? "true" : "false")
     << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
     << ",\"targetWasHaltedAfterResume\":" << (halted_after_resume > 0 ? "true" : "false")
     << ",\"targetWasHaltedAfterResumeRaw\":" << halted_after_resume
+    << ",\"writeReturnCode\":" << write_rc
+    << ",\"writeIssued\":" << (write_mode ? "true" : "false")
+    << ",\"writeFailed\":" << (write_failed ? "true" : "false")
+    << ",\"requestedBytes\":\"" << (write_mode ? bytes_hex(requested) : "") << "\""
     << ",\"samples\":[";
   for (int sample = 0; sample < samples; ++sample) {
     std::vector<unsigned char> buffer(static_cast<size_t>(size), 0);
-    const int read_rc = call_read_mem(arm_read_mem, address, static_cast<U32>(size), buffer.data(), &crashed);
-    const bool valid = !crashed && read_rc >= 0;
+    std::vector<U8> status(static_cast<size_t>(size / access_size), 0);
+    int read_rc = -1;
+    if (access_size == 1) {
+      read_rc = call_read_mem_u8(arm_read_u8, address, static_cast<U32>(size), buffer.data(), status.data(), &crashed);
+    } else if (access_size == 2) {
+      std::vector<U16> values(static_cast<size_t>(size / 2), 0);
+      read_rc = call_read_mem_u16(arm_read_u16, address, static_cast<U32>(values.size()), values.data(), status.data(), &crashed);
+      for (size_t index = 0; index < values.size(); ++index) {
+        buffer[index * 2] = static_cast<unsigned char>(values[index] & 0xFFU);
+        buffer[index * 2 + 1] = static_cast<unsigned char>((values[index] >> 8U) & 0xFFU);
+      }
+    } else {
+      std::vector<U32> values(static_cast<size_t>(size / 4), 0);
+      read_rc = call_read_mem_u32(arm_read_u32, address, static_cast<U32>(values.size()), values.data(), status.data(), &crashed);
+      for (size_t index = 0; index < values.size(); ++index) {
+        buffer[index * 4] = static_cast<unsigned char>(values[index] & 0xFFU);
+        buffer[index * 4 + 1] = static_cast<unsigned char>((values[index] >> 8U) & 0xFFU);
+        buffer[index * 4 + 2] = static_cast<unsigned char>((values[index] >> 16U) & 0xFFU);
+        buffer[index * 4 + 3] = static_cast<unsigned char>((values[index] >> 24U) & 0xFFU);
+      }
+    }
+    const int expected_items = size / access_size;
+    const bool valid = width_read_complete(read_rc, static_cast<size_t>(expected_items), status, crashed);
     if (!valid) read_failed = true;
     if (valid) {
       if (first_value.empty()) first_value = buffer;
@@ -2367,8 +2498,8 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     U32 scalar = 0;
     const int scalar_bytes = (std::min)(size, 4);
     for (int byte = 0; byte < scalar_bytes; ++byte) scalar |= static_cast<U32>(buffer[static_cast<size_t>(byte)]) << (byte * 8);
-    if (sample > 0) std::cout << ",";
-    std::cout
+    if (sample > 0) output << ",";
+    output
       << "{\"index\":" << sample
       << ",\"readReturnCode\":" << read_rc
       << ",\"valid\":" << (valid ? "true" : "false")
@@ -2379,13 +2510,36 @@ static int read_ram_probe(const std::wstring& dll_path, const std::map<std::wstr
     if (crashed) break;
     if (sample + 1 < samples && interval_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
   }
-  call_void0(arm_close, &crashed);
+  int halted_after_operation = call_int0(arm_halted, &crashed);
+  if (crashed) halted_after_operation = -2;
+  bool close_crashed = false;
+  call_void0(arm_close, &close_crashed);
   FreeLibrary(dll);
-  std::cout
+  const bool final_state_unknown = halted_after_operation != 0 && halted_after_operation != 1;
+  const bool operation_failed = write_failed || read_failed || close_crashed || final_state_unknown;
+  const bool state_unknown = write_failed || close_crashed || final_state_unknown;
+  const char* operation_error_code = close_crashed ? "JLINK_CLOSE_FAILED"
+    : final_state_unknown ? "JLINK_STATE_OBSERVATION_FAILED"
+    : write_failed ? "JLINK_WRITEMEM_FAILED"
+    : read_failed ? "JLINK_READMEM_FAILED" : "";
+  const char* operation_error_reason = close_crashed ? "JLINKARM_Close raised a structured exception"
+    : final_state_unknown ? "target state could not be observed after memory access"
+    : write_failed ? "width-specific J-Link write failed"
+    : read_failed ? "width-specific J-Link read was incomplete" : "";
+  output
     << "],\"changed\":" << (changed ? "true" : "false")
     << ",\"allZero\":" << (all_zero ? "true" : "false")
     << ",\"readFailed\":" << (read_failed ? "true" : "false")
-    << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+    << ",\"targetWasHaltedAfterOperation\":" << (halted_after_operation > 0 ? "true" : "false")
+    << ",\"targetWasHaltedAfterOperationRaw\":" << halted_after_operation
+    << ",\"targetWasHaltedAfterRead\":" << (halted_after_operation > 0 ? "true" : "false")
+    << ",\"targetWasHaltedAfterReadRaw\":" << halted_after_operation
+    << ",\"closeFailed\":" << (close_crashed ? "true" : "false")
+    << ",\"stateUnknown\":" << (state_unknown ? "true" : "false")
+    << (operation_failed ? std::string(",\"errorCode\":\"") + operation_error_code + "\",\"reason\":\"" + operation_error_reason + "\"" : "")
+    << ",\"targetReset\":false,\"targetWritten\":" << (write_mode && !write_failed ? "true" : "false")
+    << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+  std::cout << "{\"status\":\"" << (operation_failed ? "error" : "ok") << "\"," << output.str();
   return 0;
 }
 
@@ -2399,6 +2553,17 @@ static int self_test() {
   char script_output[1] = {1};
   int script_return_code = -1;
   bool script_crashed = true;
+  if (!read_count_complete(4, 4U, false)
+      || read_count_complete(0, 4U, false)
+      || read_count_complete(3, 4U, false)
+      || read_count_complete(4, 4U, true)
+      || !width_read_complete(2, 2U, {0U, 0U}, false)
+      || width_read_complete(1, 2U, {0U, 0U}, false)
+      || width_read_complete(2, 2U, {0U, 1U}, false)
+      || width_read_complete(2, 2U, {0U}, false)) {
+    error_json("HSS_SELF_TEST_READ_COUNT_FAILED", "J-Link read completion classification failed");
+    return 0;
+  }
   if (!prepare_jlink_script("none", L"", "", &no_script, &script_error_code, &script_error_reason)
       || !apply_jlink_script(nullptr, no_script, &script_return_code, script_output, sizeof(script_output), &script_crashed)
       || script_return_code != 0 || script_crashed || script_output[0] != '\0'
@@ -2767,14 +2932,14 @@ static bool read_scalar_memory(const HssMemoryIpc& ipc, U32 address, int length,
   if (length == 1 && ipc.readU8) {
     U8 value = 0;
     const int rc = call_read_mem_u8(ipc.readU8, address, 1U, &value, &status, &crashed);
-    if (!crashed && rc >= 0 && status == 0U) {
+    if (!crashed && rc == 1 && status == 0U) {
       (*bytes)[0] = value;
       return true;
     }
   } else if (length == 2 && ipc.readU16) {
     U16 value = 0;
     const int rc = call_read_mem_u16(ipc.readU16, address, 1U, &value, &status, &crashed);
-    if (!crashed && rc >= 0 && status == 0U) {
+    if (!crashed && rc == 1 && status == 0U) {
       (*bytes)[0] = static_cast<unsigned char>(value & 0xFFU);
       (*bytes)[1] = static_cast<unsigned char>((value >> 8U) & 0xFFU);
       return true;
@@ -2782,7 +2947,7 @@ static bool read_scalar_memory(const HssMemoryIpc& ipc, U32 address, int length,
   } else if (length == 4 && ipc.readU32) {
     U32 value = 0;
     const int rc = call_read_mem_u32(ipc.readU32, address, 1U, &value, &status, &crashed);
-    if (!crashed && rc >= 0 && status == 0U) {
+    if (!crashed && rc == 1 && status == 0U) {
       (*bytes)[0] = static_cast<unsigned char>(value & 0xFFU);
       (*bytes)[1] = static_cast<unsigned char>((value >> 8U) & 0xFFU);
       (*bytes)[2] = static_cast<unsigned char>((value >> 16U) & 0xFFU);
@@ -2792,7 +2957,7 @@ static bool read_scalar_memory(const HssMemoryIpc& ipc, U32 address, int length,
   }
   if (!ipc.readMem) return false;
   const int rc = call_read_mem(ipc.readMem, address, static_cast<U32>(length), bytes->data(), &crashed);
-  return !crashed && rc >= 0;
+  return read_count_complete(rc, static_cast<size_t>(length), crashed);
 }
 
 static bool write_scalar_memory(const HssMemoryIpc& ipc, U32 address, const std::vector<unsigned char>& bytes) {
@@ -3956,7 +4121,8 @@ int wmain(int argc, wchar_t** argv) {
   if (command == L"preflight") return preflight(dll_path);
   if (command == L"getcaps") return getcaps(dll_path, options);
   if (command == L"connect-preflight") return connect_preflight(dll_path, options);
-  if (command == L"read-ram-probe") return read_ram_probe(dll_path, options);
+  if (command == L"read-ram-probe") return ram_probe_access(dll_path, options, false);
+  if (command == L"write-ram-probe") return ram_probe_access(dll_path, options, true);
   if (command == L"self-test") return self_test();
   if (command == L"cpu-control") return cpu_control(options, false);
   if (command == L"target-state") return cpu_control(options, true);

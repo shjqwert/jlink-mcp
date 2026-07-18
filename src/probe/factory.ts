@@ -21,5 +21,5 @@ export function createProbeBackend(
   return new JLinkBackend(config.jlink || {}, processManager);
 }
 
-export { ProbeBackend, ProbeType, ProbeState, ProbeErrorCode, ProbeStatus, CommandResult, GDBServerInfo, MemoryDumpLine, CaptureProbeConfig } from "./backend";
+export { ProbeBackend, ProbeType, ProbeState, ProbeErrorCode, ProbeStatus, CommandResult, GDBServerInfo, MemoryDumpLine, CaptureProbeConfig, TargetStateObservation } from "./backend";
 export { JLinkBackend, JLinkConfig } from "./jlink";

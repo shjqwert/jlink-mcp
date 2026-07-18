@@ -48,7 +48,7 @@
     "prepublishOnly": "npm run build",
     "lint": "tsc --noEmit",
     "test": "npm run clean && npm run compile && npm run test:unit && npm run test:surface && npm run test:legacy-scan",
-    "test:unit": "node scripts/run-tests.mjs out/probe/backend.test.js out/mcp/artifact/artifact-catalog.test.js out/mcp/artifact/hot-variables.test.js out/mcp/artifact/symbol-catalog.test.js out/mcp/hss/hss-typed-value.test.js out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/jcap/analysis-v0.test.js out/mcp/jcap/jcap-v0.test.js out/mcp/preflight/temp-preflight.test.js out/mcp/rtt-channel/rtt-channel.test.js out/mcp/sqlite-runtime.test.js",
+    "test:unit": "node scripts/run-tests.mjs out/probe/backend.test.js out/probe/jlink.test.js out/gdb/gdb-client.test.js out/mcp/artifact/artifact-catalog.test.js out/mcp/artifact/hot-variables.test.js out/mcp/artifact/symbol-catalog.test.js out/mcp/hss/hss-typed-value.test.js out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/jcap/analysis-v0.test.js out/mcp/jcap/jcap-v0.test.js out/mcp/preflight/temp-preflight.test.js out/mcp/rtt-channel/rtt-channel.test.js out/mcp/runtime/target-store.test.js out/mcp/runtime/probe-queue.test.js out/mcp/runtime/direct-operations.test.js out/mcp/runtime/session-operations.test.js out/mcp/sqlite-runtime.test.js",
     "test:surface": "node scripts/run-tests.mjs out/mcp/standalone-surface.test.js",
     "test:legacy-scan": "node scripts/scan-legacy-control-plane.mjs",
     "test:elf": "npm run compile && node scripts/test-elf.mjs",

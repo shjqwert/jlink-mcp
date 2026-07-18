@@ -51,8 +51,11 @@ function rows(databaseFile: string, sql: string): Promise<Array<Record<string, u
     const database = new sqlite3.Database(databaseFile, sqlite3.OPEN_READONLY, (openError) => {
       if (openError) return reject(openError);
       database.all(sql, (error, result: Array<Record<string, unknown>>) => {
-        database.close();
-        if (error) reject(error); else resolve(result);
+        database.close((closeError) => {
+          if (error) reject(error);
+          else if (closeError) reject(closeError);
+          else resolve(result);
+        });
       });
     });
   });
