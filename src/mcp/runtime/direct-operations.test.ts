@@ -644,6 +644,166 @@ test("target_configure is rejected while a long-lived Probe owner is active", as
   queue.releaseOwner(before.probeSerial, owner.token);
 });
 
+test("structured writes default to no old read and no readback", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-default");
+  const result = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "ram",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.verification.status, "executed_unverified");
+  assert.deepEqual(probe.actions, ["write:20000000:4:4"]);
+});
+
+test("structured restore is forced, verified, and retains a failed main comparison", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-restore");
+  const old = Buffer.from("01000000", "hex");
+  probe.memory.set(0x20000000, old);
+  probe.memoryReads.push(old, Buffer.from("03000000", "hex"), old);
+  const result = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "02000000",
+    knownRegion: "ram",
+    verify: true,
+    restore: true,
+    comparator: { mode: "exact", type: "uint32", endian: "little" },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "READBACK_MISMATCH");
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal((result.data as { restore: { status: string } }).restore.status, "verified");
+  assert.equal(probe.memory.get(0x20000000)?.toString("hex"), old.toString("hex"));
+});
+
+test("structured restore uncertainty is explicit after an issued write", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-restore-failed");
+  probe.memory.set(0x20000000, Buffer.from("01000000", "hex"));
+  probe.writeMemoryResults.push(ok(), { success: false, rawOutput: "restore failed", output: "", error: "restore failed", writeIssued: true });
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "02000000",
+    knownRegion: "ram",
+    restore: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "PROBE_COMMAND_FAILED");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal((result.data as { restore: { status: string } }).restore.status, "uncertain");
+});
+
+test("structured comparator validation rejects unsafe requests before write", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-comparator-invalid");
+  const base = { projectRoot, address: 0x20000000, width: 32 as const, byteCount: 4, dataHex: "02000000", knownRegion: "ram" as const, verify: true };
+  const mismatch = await service.structuredWrite({ ...base, comparator: { mode: "tolerance", expected: 3, absTolerance: 0, relTolerance: 0, type: "uint32", endian: "little" } });
+  const zeroMask = await service.structuredWrite({ ...base, comparator: { mode: "masked", maskHex: "00000000" } });
+  const wrongType = await service.structuredWrite({ ...base, comparator: { mode: "exact", type: "uint16", endian: "little" } });
+  assert.deepEqual([mismatch.error?.code, zeroMask.error?.code, wrongType.error?.code], ["COMPARATOR_EXPECTED_MISMATCH", "COMPARATOR_INVALID", "COMPARATOR_INVALID"]);
+  assert.deepEqual(probe.actions, []);
+});
+
+test("bounded observe uses typed values, monotonic bounds, and match evidence", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-observe");
+  probe.memoryReads.push(Buffer.from("01000000", "hex"), Buffer.from("02000000", "hex"), Buffer.from("03000000", "hex"));
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "03000000",
+    knownRegion: "ram",
+    verify: true,
+    comparator: { mode: "observe", durationMs: 50, maxPolls: 3, intervalMs: 1, comparator: { mode: "exact", type: "uint32", endian: "little" } },
+  });
+  assert.equal(result.ok, true);
+  const details = (result.data as { verificationDetails: Record<string, unknown> }).verificationDetails;
+  assert.equal(details.observationCount, 3);
+  assert.equal(details.min, 1);
+  assert.equal(details.max, 3);
+  assert.ok(details.matchedEvidence);
+});
+
+test("structured old-value read failure retains command and final-state evidence without writing", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-old-read-failed");
+  probe.readResult = { success: false, rawOutput: "read failed", output: "", error: "read failed", errorCode: ProbeErrorCode.TARGET_UNREACHABLE };
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "02000000",
+    knownRegion: "ram",
+    captureOld: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, ProbeErrorCode.TARGET_UNREACHABLE);
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.after?.targetState, "running");
+  assert.equal((result.data as { oldReadCommand: { success: boolean } }).oldReadCommand.success, false);
+  assert.deepEqual(probe.actions, ["read:20000000:4"]);
+});
+
+test("structured restore is not attempted when the main write is explicitly unissued", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-write-unissued");
+  probe.memory.set(0x20000000, Buffer.from("01000000", "hex"));
+  probe.writeMemoryResults.push({
+    success: false,
+    rawOutput: "probe missing",
+    output: "",
+    error: "probe missing",
+    errorCode: ProbeErrorCode.PROBE_NOT_FOUND,
+    writeIssued: false,
+  });
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "02000000",
+    knownRegion: "ram",
+    restore: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal((result.data as { restore: { status: string } }).restore.status, "not_needed");
+  assert.deepEqual(probe.actions, ["read:20000000:4", "write:20000000:4:4"]);
+});
+
+test("structured hidden target drift preserves restore uncertainty", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-drift-restore-uncertain");
+  probe.memory.set(0x20000000, Buffer.from("01000000", "hex"));
+  probe.writeMemoryResults.push(ok(), { success: false, rawOutput: "restore failed", output: "", error: "restore failed", writeIssued: true });
+  probe.observations.push(
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+  );
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "02000000",
+    knownRegion: "ram",
+    restore: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal((result.data as { restore: { status: string } }).restore.status, "uncertain");
+});
+
 async function fixture(context: TestContext, name: string): Promise<{ service: DirectMcuService; probe: FakeProbe; targets: TargetStore; queue: ProbeQueue; projectRoot: string }> {
   const root = testDirectory(context, name);
   const projectRoot = join(root, "project");
@@ -663,6 +823,7 @@ class FakeProbe extends ProbeBackend {
   actions: string[] = [];
   rawCommands: string[] = [];
   memory = new Map<number, Buffer>();
+  memoryReads: Buffer[] = [];
   registerReadFailsWhileRunning = false;
   registerReadResult?: CommandResult;
   registerReadReject?: Error;
@@ -670,6 +831,7 @@ class FakeProbe extends ProbeBackend {
   registersReadReject?: Error;
   writeMemoryReject?: Error;
   writeMemoryResult?: CommandResult;
+  writeMemoryResults: CommandResult[] = [];
   writeRegisterReject?: Error;
   rawResult: CommandResult = ok();
   readResult?: CommandResult;
@@ -696,7 +858,7 @@ class FakeProbe extends ProbeBackend {
     this.readAccessSizes.push(accessSize);
     if (this.readMemoryReject) throw this.readMemoryReject;
     if (this.readResult) return this.readResult;
-    const bytes = this.memory.get(address)?.subarray(0, length) ?? Buffer.alloc(length);
+    const bytes = this.memoryReads.shift()?.subarray(0, length) ?? this.memory.get(address)?.subarray(0, length) ?? Buffer.alloc(length);
     const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0")).join(" ");
     const rawOutput = `${address.toString(16).padStart(8, "0")} = ${hex}  ....`;
     return { success: true, rawOutput, output: rawOutput };
@@ -705,6 +867,11 @@ class FakeProbe extends ProbeBackend {
   override async writeMemoryBytes(address: number, bytes: Buffer, accessSize: 1 | 2 | 4): Promise<CommandResult> {
     this.actions.push(`write:${address.toString(16)}:${bytes.length}:${accessSize}`);
     if (this.writeMemoryReject) throw this.writeMemoryReject;
+    const queued = this.writeMemoryResults.shift();
+    if (queued) {
+      if (queued.success) this.memory.set(address, Buffer.from(bytes));
+      return queued;
+    }
     if (this.writeMemoryResult) return this.writeMemoryResult;
     this.memory.set(address, Buffer.from(bytes));
     return ok();

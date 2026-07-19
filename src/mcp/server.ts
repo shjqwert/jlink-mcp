@@ -6,6 +6,8 @@ import { createProbeBackend, type ProbeFactoryConfig } from "../probe/factory";
 import { log } from "../utils/logger";
 import { ProcessManager } from "../utils/process-manager";
 import { DirectMcuService, type CoreRegisterWriteInput, type FlashInput, type MemoryReadInput, type MemoryWriteInput } from "./runtime/direct-operations";
+import { ArtifactVariableService, type VariableRefInput, type VariableWriteInput } from "./runtime/artifact-operations";
+import { SvdRegisterService, type RegisterWriteInput } from "./runtime/svd-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./runtime/operation-envelope";
 import { ProbeQueue } from "./runtime/probe-queue";
 import { SessionOperations } from "./runtime/session-operations";
@@ -95,6 +97,28 @@ const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
 const projectRootInput = { projectRoot: z.string().min(1).describe("Existing absolute project root configured by target_configure") };
 const uint32 = z.number().int().min(0).max(0xffff_ffff);
 const accessWidth = z.union([z.literal(8), z.literal(16), z.literal(32)]);
+const scalarType = z.enum(["int8", "uint8", "int16", "uint16", "int32", "uint32", "float32"]);
+const variableRef = z.object({
+  artifactGeneration: z.string().regex(/^[0-9a-f]{64}$/i),
+  qualifiedName: z.string().min(1).max(1024),
+  memberPath: z.string().min(1).max(1024).optional(),
+  layoutHash: z.string().regex(/^[0-9a-f]{64}$/i),
+});
+const variableNonObserveComparator = z.union([
+  z.object({ mode: z.literal("exact") }),
+  z.object({ mode: z.literal("tolerance"), absTolerance: z.number().nonnegative(), relTolerance: z.number().nonnegative() }),
+  z.object({ mode: z.literal("masked"), maskHex: z.string().regex(/^(?:[0-9a-fA-F]{2})+$/) }),
+]);
+const variableComparator = z.union([
+  variableNonObserveComparator,
+  z.object({
+    mode: z.literal("observe"),
+    durationMs: z.number().int().min(1).max(60_000),
+    maxPolls: z.number().int().min(1).max(1_000),
+    intervalMs: z.number().int().min(1).max(10_000),
+    comparator: variableNonObserveComparator,
+  }),
+]);
 const channel = z.object({
   index: z.number().int().min(0),
   name: z.string().optional(),
@@ -115,6 +139,8 @@ export class JLinkMcpServer {
   private readonly queue: ProbeQueue;
   private readonly runtimes = new TargetRuntimeRegistry();
   private readonly direct: DirectMcuService;
+  private readonly artifacts: ArtifactVariableService;
+  private readonly registers: SvdRegisterService;
   private readonly sessions: SessionOperations;
   private readonly implemented = new Set<AgentToolName>();
 
@@ -124,6 +150,8 @@ export class JLinkMcpServer {
     this.targets = new TargetStore(stateRoot);
     this.queue = new ProbeQueue(options.queueRoot);
     this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target));
+    this.artifacts = new ArtifactVariableService(this.targets, this.direct, stateRoot);
+    this.registers = new SvdRegisterService(this.targets, this.direct);
     this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target));
     this.server = new McpServer({ name: "jlink-mcp", version: "0.3.2" });
     this.registerTools();
@@ -156,6 +184,48 @@ export class JLinkMcpServer {
       return result;
     });
     this.registerEnvelopeTool("target_status", projectRootInput, (input) => this.direct.status(String(input.projectRoot)));
+
+    this.registerEnvelopeTool("artifact_probe", {
+      ...projectRootInput,
+      explicitArtifact: z.string().min(1).optional(),
+      explicitMap: z.string().min(1).optional(),
+      maxFiles: z.number().int().min(1).max(100_000).optional(),
+      maxDepth: z.number().int().min(0).max(64).optional(),
+      maxCandidates: z.number().int().min(1).max(4096).optional(),
+    }, (input) => this.artifacts.artifactProbe(input as never));
+    this.registerEnvelopeTool("symbol_search", { ...projectRootInput, query: z.string().min(1).max(256), limit: z.number().int().min(1).max(128).default(64) },
+      (input) => this.artifacts.symbolSearch(String(input.projectRoot), String(input.query), Number(input.limit)));
+    this.registerEnvelopeTool("symbol_resolve", { ...projectRootInput, selector: z.string().min(1).max(1024) },
+      (input) => this.artifacts.symbolResolve(String(input.projectRoot), String(input.selector)));
+    this.registerEnvelopeTool("hot_variable_add", { ...projectRootInput, ref: variableRef, requestedType: scalarType.optional() },
+      (input) => this.artifacts.hotAdd(String(input.projectRoot), input.ref as VariableRefInput, input.requestedType as never));
+    this.registerEnvelopeTool("hot_variable_list", projectRootInput, (input) => this.artifacts.hotList(String(input.projectRoot)));
+    this.registerEnvelopeTool("hot_variable_refresh", { ...projectRootInput, selectors: z.array(z.string().min(1).max(1024)).min(1).max(128) },
+      (input) => this.artifacts.hotRefresh(String(input.projectRoot), input.selectors as string[]));
+    this.registerEnvelopeTool("read_variable", { ...projectRootInput, ref: variableRef },
+      (input) => this.artifacts.readVariable(String(input.projectRoot), input.ref as VariableRefInput));
+    this.registerEnvelopeTool("write_variable", {
+      ...projectRootInput,
+      ref: variableRef,
+      value: z.number(),
+      captureOld: z.boolean().default(false),
+      verify: z.boolean().default(false),
+      restore: z.boolean().default(false),
+      comparator: variableComparator.default({ mode: "exact" }),
+    }, (input) => this.artifacts.writeVariable(input as unknown as VariableWriteInput));
+    this.registerEnvelopeTool("read_register", { ...projectRootInput, selector: z.string().min(3).max(512) },
+      (input) => this.registers.readRegister(String(input.projectRoot), String(input.selector)));
+    this.registerEnvelopeTool("read_registers", { ...projectRootInput, selectors: z.array(z.string().min(3).max(512)).min(1).max(32) },
+      (input) => this.registers.readRegisters(String(input.projectRoot), input.selectors as string[]));
+    this.registerEnvelopeTool("write_register", {
+      ...projectRootInput,
+      selector: z.string().min(3).max(512),
+      value: uint32,
+      captureOld: z.boolean().default(false),
+      verify: z.boolean().default(false),
+      restore: z.boolean().default(false),
+      comparator: variableComparator.default({ mode: "exact" }),
+    }, (input) => this.registers.writeRegister(input as unknown as RegisterWriteInput));
 
     for (const tool of ["halt", "resume", "reset", "reset_halt"] as const) {
       this.registerEnvelopeTool(tool, projectRootInput, (input) => this.direct.control(tool, String(input.projectRoot)));
@@ -231,8 +301,6 @@ export class JLinkMcpServer {
     });
 
     const targetPhaseStubs = [
-      "artifact_probe", "symbol_search", "symbol_resolve", "hot_variable_add", "hot_variable_list", "hot_variable_refresh",
-      "read_variable", "write_variable", "read_register", "read_registers", "write_register",
       "hss_capability", "hss_plan", "hss_start", "hss_status", "hss_stop", "hss_recover",
     ] as const;
     for (const name of targetPhaseStubs) this.registerStub(name, projectRootInput);

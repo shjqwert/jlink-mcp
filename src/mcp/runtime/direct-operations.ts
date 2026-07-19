@@ -14,6 +14,8 @@ import {
   type OperationEnvelope,
 } from "./operation-envelope";
 import {
+  assertArtifactBindingsCurrent,
+  assertSvdBindingCurrent,
   inspectFlashFile,
   locateMemoryRegion,
   overlappingMemoryRegions,
@@ -23,6 +25,8 @@ import {
   type StoredTarget,
   type TargetConfigureInput,
 } from "./target-store";
+import { decodeHssValue, encodeHssValue, hssTypedByteSize, type HssTargetEndian } from "../hss/hss-typed-value";
+import type { HssScalarType } from "../hss/hss-contract";
 
 export interface DirectTargetRuntime {
   probe: ProbeBackend;
@@ -35,12 +39,47 @@ export interface MemoryReadInput {
   address: number;
   width: 8 | 16 | 32;
   byteCount: number;
+  operationTool?: string;
+  expectedTargetGeneration?: string;
+  expectedArtifactGeneration?: string;
+  expectedSvdSha256?: string;
+  allowedArtifactMatch?: Array<"verified" | "unverified" | "mismatch">;
 }
 
 export interface MemoryWriteInput extends MemoryReadInput {
   dataHex: string;
   captureOld?: boolean;
   verify?: boolean;
+}
+
+export type NonObserveComparator =
+  | { mode: "exact"; type?: HssScalarType; endian?: HssTargetEndian }
+  | { mode: "tolerance"; expected: number; absTolerance: number; relTolerance: number; type: HssScalarType; endian: HssTargetEndian }
+  | { mode: "masked"; maskHex: string; type?: HssScalarType; endian?: HssTargetEndian };
+
+export type ScalarComparator = NonObserveComparator
+  | { mode: "observe"; durationMs: number; maxPolls: number; intervalMs: number; comparator: NonObserveComparator };
+
+export interface StructuredMemoryWriteInput extends MemoryReadInput {
+  dataHex: string;
+  captureOld?: boolean;
+  verify?: boolean;
+  restore?: boolean;
+  comparator?: ScalarComparator;
+  knownRegion: "ram" | "peripheral";
+  rmw?: { mask: number; value: number; endian: HssTargetEndian };
+  semanticData?: Record<string, unknown>;
+}
+
+export interface StructuredMemoryReadRequest {
+  address: number;
+  width: 8 | 16 | 32;
+  byteCount: number;
+  semanticData?: Record<string, unknown>;
+}
+
+export interface StructuredMemoryReadBatchInput extends Pick<MemoryReadInput, "projectRoot" | "operationTool" | "expectedTargetGeneration" | "expectedArtifactGeneration" | "expectedSvdSha256" | "allowedArtifactMatch"> {
+  requests: StructuredMemoryReadRequest[];
 }
 
 export interface CoreRegisterWriteInput {
@@ -149,8 +188,10 @@ export class DirectMcuService {
   }
 
   readMemory(input: MemoryReadInput): Promise<OperationEnvelope> {
-    try { validateMemoryRequest(input); } catch (error) { return Promise.resolve(this.failure(createOperationEnvelope("read_memory"), error, "validation")); }
-    return this.queued("read_memory", input.projectRoot, [], async (envelope, _target, runtime) => {
+    const tool = input.operationTool ?? "read_memory";
+    try { validateMemoryRequest(input); } catch (error) { return Promise.resolve(this.failure(createOperationEnvelope(tool), error, "validation")); }
+    return this.queued(tool, input.projectRoot, [], async (envelope, target, runtime) => {
+      validateExpectedTarget(input, target);
       const before = await observe(runtime.probe);
       envelope.before = observationData(before);
       if (before.state === "unknown") {
@@ -162,7 +203,7 @@ export class DirectMcuService {
       try {
         result = await runtime.probe.readMemory(input.address, input.byteCount, input.width / 8 as 1 | 2 | 4);
         if (!result.success) {
-          readFailure = commandError(result, "read", false);
+          readFailure = memoryReadCommandError(result, "read");
         } else {
           try {
             bytes = memoryBytes(runtime.probe, result, input.address, input.byteCount, input.width / 8 as 1 | 2 | 4);
@@ -199,15 +240,68 @@ export class DirectMcuService {
     });
   }
 
+  structuredReadBatch(input: StructuredMemoryReadBatchInput): Promise<OperationEnvelope> {
+    const tool = input.operationTool ?? "read_registers";
+    try {
+      if (!Array.isArray(input.requests) || input.requests.length < 1 || input.requests.length > 32) throw executionError("READ_BATCH_INVALID", "validation", "structured read batch accepts 1 to 32 requests");
+      for (const request of input.requests) validateMemoryRequest({ projectRoot: input.projectRoot, ...request });
+    } catch (error) {
+      return Promise.resolve(this.failure(createOperationEnvelope(tool), error, "validation"));
+    }
+    return this.queued(tool, input.projectRoot, [], async (envelope, target, runtime) => {
+      validateExpectedTarget({ ...input, address: input.requests[0].address, width: input.requests[0].width, byteCount: input.requests[0].byteCount }, target);
+      const before = await observe(runtime.probe);
+      envelope.before = observationData(before);
+      if (before.state === "unknown") throw executionError("TARGET_STATE_UNKNOWN", "precondition", "target state is unknown before structured reads; no read was issued", { stateUnknown: true });
+      const results: Array<Record<string, unknown>> = [];
+      let readFailure: OperationExecutionError | undefined;
+      for (const request of input.requests) {
+        let command: CommandResult | undefined;
+        let bytes: Buffer | undefined;
+        try {
+          command = await runtime.probe.readMemory(request.address, request.byteCount, request.width / 8 as 1 | 2 | 4);
+          if (!command.success) readFailure = memoryReadCommandError(command, "read");
+          else {
+            const decoded = memoryBytes(runtime.probe, command, request.address, request.byteCount, request.width / 8 as 1 | 2 | 4);
+            if (decoded.length < request.byteCount) readFailure = executionError("READ_LENGTH_MISMATCH", "decode", `requested ${request.byteCount} bytes but decoded ${decoded.length}`);
+            else bytes = decoded.subarray(0, request.byteCount);
+          }
+        } catch (error) {
+          readFailure = unexpectedReadError(error, "structured read backend rejected");
+        }
+        results.push({
+          ...(request.semanticData ?? {}),
+          address: request.address,
+          width: request.width,
+          byteCount: request.byteCount,
+          dataHex: bytes?.toString("hex"),
+          command: command ? commandData(command) : null,
+        });
+        envelope.data = { results };
+        if (readFailure) break;
+      }
+      let after: TargetStateObservation;
+      try { after = await observe(runtime.probe); }
+      catch { throw readFailure ? readErrorWithUnknownState(readFailure) : executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured reads", { stateUnknown: true }); }
+      envelope.after = observationData(after);
+      if (after.state === "unknown") throw readFailure ? readErrorWithUnknownState(readFailure) : executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured reads", { stateUnknown: true });
+      if (after.state !== before.state) throw executionError("HIDDEN_STATE_CHANGE", "final_observation", "structured reads changed target run state", { stateUnknown: false });
+      if (readFailure) throw readFailure;
+      envelope.verification = { status: "observed", method: "probe_read_batch" };
+    });
+  }
+
   writeMemory(input: MemoryWriteInput): Promise<OperationEnvelope> {
+    const tool = input.operationTool ?? "write_memory";
     let bytes: Buffer;
     try {
       validateMemoryRequest(input);
       bytes = parseWriteBytes(input.dataHex, input.byteCount, input.width);
     } catch (error) {
-      return Promise.resolve(this.failure(createOperationEnvelope("write_memory"), error, "validation"));
+      return Promise.resolve(this.failure(createOperationEnvelope(tool), error, "validation"));
     }
-    return this.queued("write_memory", input.projectRoot, ["memory_write"], async (envelope, target, runtime) => {
+    return this.queued(tool, input.projectRoot, ["memory_write"], async (envelope, target, runtime) => {
+      validateExpectedTarget(input, target);
       const region = locateMemoryRegion(target, input.address, input.byteCount);
       const overlaps = overlappingMemoryRegions(target, input.address, input.byteCount);
       if (!region && overlaps.length > 0) throw executionError("MEMORY_RANGE_CROSSES_REGION", "validation", "write range crosses a configured memory-region boundary");
@@ -324,6 +418,174 @@ export class DirectMcuService {
       if (before.state !== after.state) {
         throw executionError("HIDDEN_STATE_CHANGE", "final_observation", `memory write changed target state from ${before.state} to ${after.state}`, { writeIssued: true, stateUnknown: false });
       }
+    });
+  }
+
+  structuredWrite(input: StructuredMemoryWriteInput): Promise<OperationEnvelope> {
+    const tool = input.operationTool ?? "write_variable";
+    let requested: Buffer;
+    try {
+      validateMemoryRequest(input);
+      requested = parseWriteBytes(input.dataHex, input.byteCount, input.width);
+      validateStructuredComparator(input.comparator ?? { mode: "exact" }, input.byteCount, requested);
+      if (input.restore && !input.captureOld) input = { ...input, captureOld: true };
+      if (input.rmw && input.byteCount !== input.width / 8) throw executionError("RMW_WIDTH_INVALID", "validation", "read-modify-write requires exactly one declared-width register");
+    } catch (error) {
+      return Promise.resolve(this.failure(createOperationEnvelope(tool), error, "validation"));
+    }
+    return this.queued(tool, input.projectRoot, ["structured_memory_write"], async (envelope, target, runtime) => {
+      validateExpectedTarget(input, target);
+      const configured = locateMemoryRegion(target, input.address, input.byteCount);
+      const overlaps = overlappingMemoryRegions(target, input.address, input.byteCount);
+      if (!configured && overlaps.length > 0) throw executionError("MEMORY_RANGE_CROSSES_REGION", "validation", "structured write crosses a configured memory-region boundary");
+      if (configured && (!configured.writable || configured.kind === "flash" || configured.kind === "rom")) {
+        throw executionError("MEMORY_REGION_NOT_WRITABLE", "validation", `configured ${configured.kind} region is not writable`);
+      }
+      if (configured && input.knownRegion === "ram" && configured.kind !== "ram") {
+        throw executionError("SYMBOL_REGION_CONFLICT", "validation", `DWARF reports RAM but Target configuration reports ${configured.kind}`);
+      }
+      if (configured && input.knownRegion === "peripheral" && configured.kind !== "peripheral") {
+        throw executionError("SVD_REGION_CONFLICT", "validation", `SVD reports peripheral space but Target configuration reports ${configured.kind}`);
+      }
+
+      const before = await observe(runtime.probe);
+      envelope.before = observationData(before);
+      if (before.state === "unknown") throw executionError("TARGET_STATE_UNKNOWN", "precondition", "target state is unknown before structured write; no write was issued", { stateUnknown: true });
+      const accessSize = input.width / 8 as 1 | 2 | 4;
+      const oldRequired = Boolean(input.captureOld || input.restore || input.rmw);
+      let old: Buffer | undefined;
+      let oldReadCommand: Record<string, unknown> | undefined;
+      envelope.data = {
+        ...(input.semanticData ?? {}),
+        address: input.address,
+        width: input.width,
+        byteCount: input.byteCount,
+        requestedHex: requested.toString("hex"),
+        oldReadCommand: undefined,
+      };
+      if (oldRequired) {
+        let oldError: OperationExecutionError | undefined;
+        try {
+          old = await readExact(runtime.probe, input.address, input.byteCount, accessSize, "old_value_read", (result) => {
+            oldReadCommand = commandData(result);
+            envelope.data = { ...(envelope.data as Record<string, unknown>), oldReadCommand };
+          });
+        } catch (error) {
+          oldError = unexpectedReadError(error, "old-value read backend rejected");
+        }
+        if (oldError) {
+          let after: TargetStateObservation;
+          try { after = await observe(runtime.probe); }
+          catch { throw readErrorWithUnknownState(oldError); }
+          envelope.after = observationData(after);
+          if (after.state === "unknown") throw readErrorWithUnknownState(oldError);
+          if (after.state !== before.state) throw executionError("HIDDEN_STATE_CHANGE", "final_observation", "old-value read changed target run state", { stateUnknown: false });
+          throw oldError;
+        }
+      }
+      if (input.rmw) {
+        if (!old) throw executionError("OLD_VALUE_REQUIRED", "old_value_read", "read-modify-write requires a successful old-value read");
+        requested = applyReadModifyWrite(old, input.rmw);
+      }
+
+      let command: Record<string, unknown> | undefined;
+      let writeIssued = false;
+      let mainError: OperationExecutionError | undefined;
+      try {
+        const result = await runtime.probe.writeMemoryBytes(input.address, requested, accessSize);
+        command = commandData(result);
+        if (!result.success) {
+          writeIssued = result.writeIssued ?? result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
+          mainError = commandError(result, "write", writeIssued, writeIssued);
+        } else {
+          writeIssued = true;
+          envelope.observedEffects.push("structured_memory_write_issued");
+        }
+      } catch (error) {
+        writeIssued = true;
+        mainError = unexpectedPostWriteError(error, "write", "structured memory write backend rejected after command dispatch");
+      }
+
+      let readback: Buffer | undefined;
+      let verificationDetails: Record<string, unknown> | undefined;
+      let verificationError: OperationExecutionError | undefined;
+      if (!mainError && input.verify) {
+        try {
+          const result = await verifyStructuredValue(runtime.probe, input.address, input.byteCount, accessSize, requested, input.comparator ?? { mode: "exact" });
+          readback = result.readback;
+          verificationDetails = result.details;
+          if (!result.pass) verificationError = executionError("READBACK_MISMATCH", "verification", "structured readback did not satisfy the requested comparator", { writeIssued: true });
+        } catch (error) {
+          verificationError = normalizePostWriteError(error, "READBACK_FAILED", "readback", "structured readback failed after the write", true);
+        }
+      }
+
+      let restoreCommand: Record<string, unknown> | undefined;
+      let restoreReadCommand: Record<string, unknown> | undefined;
+      let restoreReadback: Buffer | undefined;
+      let restoreError: OperationExecutionError | undefined;
+      if (input.restore && writeIssued) {
+        if (!old) throw executionError("OLD_VALUE_REQUIRED", "restore", "restore requires a captured old value", { writeIssued: true, stateUnknown: true });
+        try {
+          const restored = await runtime.probe.writeMemoryBytes(input.address, old, accessSize);
+          restoreCommand = commandData(restored);
+          if (!restored.success) throw commandError(restored, "restore_write", true, true);
+          envelope.observedEffects.push("structured_restore_write_issued");
+          restoreReadback = await readExact(runtime.probe, input.address, input.byteCount, accessSize, "restore_readback", (result) => {
+            restoreReadCommand = commandData(result);
+          });
+          if (!restoreReadback.equals(old)) throw executionError("RESTORE_MISMATCH", "restore_readback", "restore readback does not match the captured old value", { writeIssued: true, stateUnknown: true });
+        } catch (error) {
+          restoreError = normalizePostWriteError(error, "RESTORE_FAILED", "restore", "restore or restore readback failed", true);
+        }
+      }
+
+      envelope.data = {
+        ...(input.semanticData ?? {}),
+        address: input.address,
+        width: input.width,
+        byteCount: input.byteCount,
+        oldHex: old?.toString("hex"),
+        requestedHex: requested.toString("hex"),
+        readbackHex: readback?.toString("hex"),
+        oldReadCommand,
+        command,
+        comparator: input.verify ? input.comparator ?? { mode: "exact" } : undefined,
+        verificationDetails,
+        restore: input.restore ? {
+          requestedHex: old?.toString("hex"),
+          readbackHex: restoreReadback?.toString("hex"),
+          command: restoreCommand,
+          readbackCommand: restoreReadCommand,
+          status: !writeIssued ? "not_needed" : restoreError ? "uncertain" : "verified",
+        } : { status: "not_requested" },
+      };
+      envelope.verification = input.verify
+        ? verificationError
+          ? { status: "failed", method: comparatorMethod(input.comparator ?? { mode: "exact" }), details: verificationDetails }
+          : mainError
+            ? { status: "failed", method: "write_command" }
+            : { status: "verified", method: comparatorMethod(input.comparator ?? { mode: "exact" }), details: verificationDetails }
+        : { status: mainError ? "failed" : "executed_unverified" };
+
+      let after: TargetStateObservation;
+      try {
+        after = await observe(runtime.probe);
+      } catch (error) {
+        throw normalizePostWriteError(error, "POST_OPERATION_STATE_UNKNOWN", "final_observation", "target-state observation failed after structured write", writeIssued);
+      }
+      envelope.after = observationData(after);
+      if (before.state !== after.state && after.state !== "unknown") {
+        envelope.observedEffects.push(`target_state_changed_during_write:${before.state}->${after.state}`);
+        throw executionError("HIDDEN_STATE_CHANGE", "final_observation", `structured write changed target state from ${before.state} to ${after.state}`, {
+          writeIssued,
+          stateUnknown: Boolean(restoreError?.detail.stateUnknown || mainError?.detail.stateUnknown),
+        });
+      }
+      if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured write", { writeIssued, stateUnknown: writeIssued });
+      if (restoreError) throw restoreError;
+      if (mainError) throw mainError;
+      if (verificationError) throw verificationError;
     });
   }
 
@@ -663,10 +925,13 @@ export class DirectMcuService {
         applyQueueMetadata(envelope, metadata);
         const current = this.targets.requireCurrent(target);
         activeTarget = current;
+        refreshArtifact(envelope, current);
         await operation(envelope, current, await this.runtimeFor(current));
+        const completed = this.targets.requireCurrent(current);
+        refreshArtifact(envelope, completed);
         if (observationInvalidatesConnectionEvidence(envelope)) {
           const hardwareEffectIssued = requestedEffects.length > 0 && envelope.observedEffects.length > 0;
-          const updated = await this.transitionArtifact(current, "unverified", "probe_connection_identity_lost", hardwareEffectIssued);
+          const updated = await this.transitionArtifact(completed, "unverified", "probe_connection_identity_lost", hardwareEffectIssued);
           refreshArtifact(envelope, updated);
           envelope.warnings.push("Live Artifact verification was invalidated because a state observation lost Probe/Target identity.");
         }
@@ -754,6 +1019,13 @@ function commandError(result: CommandResult, stage: string, writeIssued: boolean
     writeIssued,
     stateUnknown: result.stateUnknown ?? stateUnknown,
   });
+}
+
+function memoryReadCommandError(result: CommandResult, stage: string): OperationExecutionError {
+  if (result.errorCode === ProbeErrorCode.NON_INTRUSIVE_READ_UNAVAILABLE) {
+    return executionError("HALT_REQUIRED", stage, "the requested memory read is unavailable while the target runs; call halt explicitly if appropriate");
+  }
+  return commandError(result, stage, false);
 }
 
 function normalizePostWriteError(
@@ -848,7 +1120,7 @@ async function readExact(
 ): Promise<Buffer> {
   const result = await probe.readMemory(address, byteCount, accessSize);
   record?.(result);
-  if (!result.success) throw commandError(result, stage, stage !== "old_value_read", stage !== "old_value_read");
+  if (!result.success) throw memoryReadCommandError(result, stage);
   const bytes = memoryBytes(probe, result, address, byteCount, accessSize);
   if (bytes.length < byteCount) {
     const afterWrite = stage !== "old_value_read";
@@ -864,6 +1136,167 @@ function validateMemoryRequest(input: MemoryReadInput): void {
   const accessSize = input.width / 8;
   if (input.address % accessSize !== 0 || input.byteCount % accessSize !== 0) throw executionError("UNALIGNED_ACCESS", "validation", "address and byteCount must align to width");
   if (input.address + input.byteCount > 0x1_0000_0000) throw executionError("ADDRESS_RANGE_OVERFLOW", "validation", "memory range exceeds the 32-bit address space");
+}
+
+function validateStructuredComparator(comparator: ScalarComparator, byteCount: number, requested: Buffer): void {
+  if (comparator.mode !== "observe" && (comparator.type !== undefined || comparator.endian !== undefined)) {
+    if (!comparator.type || !comparator.endian || hssTypedByteSize(comparator.type) !== byteCount) {
+      throw executionError("COMPARATOR_INVALID", "validation", "typed comparator metadata must match the requested byte width");
+    }
+  }
+  if (comparator.mode === "tolerance") {
+    if (!Number.isFinite(comparator.expected) || !Number.isFinite(comparator.absTolerance) || !Number.isFinite(comparator.relTolerance)
+      || comparator.absTolerance < 0 || comparator.relTolerance < 0) {
+      throw executionError("COMPARATOR_INVALID", "validation", "tolerance values must be finite and non-negative");
+    }
+    if (!encodeHssValue(comparator.type, comparator.expected, comparator.endian).equals(requested)) {
+      throw executionError("COMPARATOR_EXPECTED_MISMATCH", "validation", "tolerance expected value does not encode to the requested write bytes");
+    }
+  }
+  if (comparator.mode === "masked") {
+    if (!/^(?:[0-9a-fA-F]{2})+$/.test(comparator.maskHex) || comparator.maskHex.length !== byteCount * 2) {
+      throw executionError("COMPARATOR_INVALID", "validation", "masked comparator requires one mask byte per requested byte");
+    }
+    if (Buffer.from(comparator.maskHex, "hex").every((value) => value === 0)) throw executionError("COMPARATOR_INVALID", "validation", "masked comparator must select at least one bit");
+  }
+  if (comparator.mode === "observe") {
+    if (!Number.isSafeInteger(comparator.durationMs) || comparator.durationMs < 1 || comparator.durationMs > 60_000
+      || !Number.isSafeInteger(comparator.maxPolls) || comparator.maxPolls < 1 || comparator.maxPolls > 1_000
+      || !Number.isSafeInteger(comparator.intervalMs) || comparator.intervalMs < 1 || comparator.intervalMs > 10_000) {
+      throw executionError("COMPARATOR_INVALID", "validation", "observe bounds are invalid");
+    }
+    validateStructuredComparator(comparator.comparator, byteCount, requested);
+  }
+}
+
+function applyReadModifyWrite(old: Buffer, rmw: NonNullable<StructuredMemoryWriteInput["rmw"]>): Buffer {
+  if (![1, 2, 4].includes(old.length)) throw executionError("RMW_WIDTH_INVALID", "validation", "read-modify-write supports 8, 16, or 32 bits");
+  const bits = old.length * 8;
+  const limit = bits === 32 ? 0xffff_ffff : 2 ** bits - 1;
+  if (!Number.isSafeInteger(rmw.mask) || !Number.isSafeInteger(rmw.value) || rmw.mask < 0 || rmw.mask > limit || rmw.value < 0 || rmw.value > limit) {
+    throw executionError("RMW_VALUE_INVALID", "validation", "read-modify-write mask and value must fit the declared width");
+  }
+  const current = readUnsigned(old, rmw.endian);
+  const next = ((current & (~rmw.mask >>> 0)) | (rmw.value & rmw.mask)) >>> 0;
+  return writeUnsigned(next, old.length, rmw.endian);
+}
+
+async function verifyStructuredValue(
+  probe: ProbeBackend,
+  address: number,
+  byteCount: number,
+  accessSize: 1 | 2 | 4,
+  expected: Buffer,
+  comparator: ScalarComparator,
+): Promise<{ pass: boolean; readback: Buffer; details: Record<string, unknown> }> {
+  if (comparator.mode !== "observe") {
+    let command: Record<string, unknown> | undefined;
+    const readback = await readExact(probe, address, byteCount, accessSize, "readback", (result) => { command = commandData(result); });
+    const comparison = compareStructured(readback, expected, comparator);
+    return { pass: comparison.pass, readback, details: { ...comparison.details, observationCount: 1, command } };
+  }
+  const startedAt = new Date().toISOString();
+  const started = process.hrtime.bigint();
+  const observations: Array<{ at: string; hex: string; numeric?: number }> = [];
+  let readback: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  let matchedAt: string | undefined;
+  let matchedEvidence: Record<string, unknown> | undefined;
+  let lastCommand: Record<string, unknown> | undefined;
+  for (let index = 0; index < comparator.maxPolls; index += 1) {
+    readback = await readExact(probe, address, byteCount, accessSize, "observe_readback", (result) => { lastCommand = commandData(result); });
+    const at = new Date().toISOString();
+    const numeric = observedNumeric(readback, comparator.comparator);
+    observations.push({ at, hex: readback.toString("hex"), ...(numeric === undefined ? {} : { numeric }) });
+    const comparison = compareStructured(readback, expected, comparator.comparator);
+    if (comparison.pass) {
+      matchedAt = at;
+      matchedEvidence = comparison.details;
+      break;
+    }
+    const elapsed = elapsedMilliseconds(started);
+    if (elapsed >= comparator.durationMs) break;
+    await wait(Math.min(comparator.intervalMs, Math.max(1, comparator.durationMs - elapsed)));
+  }
+  const values = observations.flatMap((item) => item.numeric === undefined ? [] : [item.numeric]);
+  return {
+    pass: Boolean(matchedAt),
+    readback,
+    details: {
+      observationCount: observations.length,
+      startedAt,
+      endedAt: new Date().toISOString(),
+      matchedAt,
+      matchedEvidence,
+      first: observations[0] ?? null,
+      last: observations.at(-1) ?? null,
+      min: values.length ? Math.min(...values) : null,
+      max: values.length ? Math.max(...values) : null,
+      numericSummary: values.length ? "typed" : "not_available",
+      command: lastCommand,
+    },
+  };
+}
+
+function compareStructured(actual: Buffer, expected: Buffer, comparator: NonObserveComparator): { pass: boolean; details: Record<string, unknown> } {
+  if (comparator.mode === "exact") {
+    return { pass: actual.equals(expected), details: { mode: "exact", expectedHex: expected.toString("hex"), actualHex: actual.toString("hex") } };
+  }
+  if (comparator.mode === "masked") {
+    const mask = Buffer.from(comparator.maskHex, "hex");
+    const pass = actual.length === expected.length && actual.every((value, index) => (value & mask[index]) === (expected[index] & mask[index]));
+    return { pass, details: { mode: "masked", maskHex: mask.toString("hex"), expectedHex: expected.toString("hex"), actualHex: actual.toString("hex") } };
+  }
+  const actualValue = decodeHssValue(comparator.type, actual, comparator.endian);
+  const limit = comparator.absTolerance + comparator.relTolerance * Math.abs(comparator.expected);
+  const difference = Math.abs(actualValue - comparator.expected);
+  return { pass: difference <= limit, details: { mode: "tolerance", expected: comparator.expected, actual: actualValue, difference, limit, absTolerance: comparator.absTolerance, relTolerance: comparator.relTolerance } };
+}
+
+function comparatorMethod(comparator: ScalarComparator): string {
+  return comparator.mode === "observe" ? `observe:${comparator.comparator.mode}` : comparator.mode;
+}
+
+function observedNumeric(bytes: Buffer, comparator: NonObserveComparator): number | undefined {
+  if (comparator.type && comparator.endian) return decodeHssValue(comparator.type, bytes, comparator.endian);
+  return undefined;
+}
+
+function elapsedMilliseconds(started: bigint): number {
+  return Number(process.hrtime.bigint() - started) / 1_000_000;
+}
+
+function readUnsigned(bytes: Buffer, endian: HssTargetEndian): number {
+  if (![1, 2, 4].includes(bytes.length)) throw executionError("VALUE_WIDTH_INVALID", "decode", "numeric value width must be 8, 16, or 32 bits");
+  return endian === "little" ? bytes.readUIntLE(0, bytes.length) : bytes.readUIntBE(0, bytes.length);
+}
+
+function writeUnsigned(value: number, byteCount: number, endian: HssTargetEndian): Buffer {
+  const bytes = Buffer.alloc(byteCount);
+  if (endian === "little") bytes.writeUIntLE(value, 0, byteCount);
+  else bytes.writeUIntBE(value, 0, byteCount);
+  return bytes;
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
+function validateExpectedTarget(input: MemoryReadInput, target: StoredTarget): void {
+  if (input.expectedTargetGeneration && target.generation !== input.expectedTargetGeneration) {
+    throw executionError("STALE_TARGET_REFERENCE", "precondition", "resolved access belongs to a stale Target generation");
+  }
+  if (input.expectedArtifactGeneration && target.artifact?.generation !== input.expectedArtifactGeneration) {
+    throw executionError("STALE_ARTIFACT_REFERENCE", "precondition", "resolved access belongs to a stale Artifact generation");
+  }
+  if (input.expectedArtifactGeneration) assertArtifactBindingsCurrent(target);
+  if (input.expectedSvdSha256) {
+    const svd = assertSvdBindingCurrent(target);
+    if (svd.sha256 !== input.expectedSvdSha256) throw executionError("STALE_SVD_REFERENCE", "precondition", "register access belongs to a stale SVD generation");
+  }
+  if (input.allowedArtifactMatch && !input.allowedArtifactMatch.includes(target.liveArtifactMatch.status)) {
+    const code = target.liveArtifactMatch.status === "mismatch" ? "ARTIFACT_MISMATCH" : "ARTIFACT_NOT_VERIFIED";
+    throw executionError(code, "precondition", `Artifact match is ${target.liveArtifactMatch.status}; structured access was not issued`);
+  }
 }
 
 function parseWriteBytes(dataHex: string, byteCount: number, width: number): Buffer {

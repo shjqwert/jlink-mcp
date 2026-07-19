@@ -44,6 +44,30 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       const removedFields = ["challenge" + "Id", "nonce", "approval" + "Token", "plan" + "Id"];
       for (const removed of removedFields) assert.equal(schema.properties?.[removed], undefined, `${name} must not expose ${removed}`);
     }
+    for (const name of ["write_variable", "write_register"] as const) {
+      const properties = tools.find((tool) => tool.name === name)?.inputSchema.properties as Record<string, { default?: unknown }>;
+      assert.equal(properties.captureOld?.default, false);
+      assert.equal(properties.verify?.default, false);
+      assert.equal(properties.restore?.default, false);
+    }
+    const ref = { artifactGeneration: "a".repeat(64), qualifiedName: "counter", layoutHash: "b".repeat(64) };
+    const phaseThreeCalls = [
+      ["artifact_probe", { projectRoot: root }],
+      ["symbol_search", { projectRoot: root, query: "counter" }],
+      ["symbol_resolve", { projectRoot: root, selector: "counter" }],
+      ["hot_variable_add", { projectRoot: root, ref }],
+      ["hot_variable_list", { projectRoot: root }],
+      ["hot_variable_refresh", { projectRoot: root, selectors: ["counter"] }],
+      ["read_variable", { projectRoot: root, ref }],
+      ["write_variable", { projectRoot: root, ref, value: 1 }],
+      ["read_register", { projectRoot: root, selector: "GPIO.CTRL" }],
+      ["read_registers", { projectRoot: root, selectors: ["GPIO.CTRL"] }],
+      ["write_register", { projectRoot: root, selector: "GPIO.CTRL", value: 1 }],
+    ] as const;
+    for (const [name, argumentsValue] of phaseThreeCalls) {
+      const envelope = parseEnvelope(await client.callTool({ name, arguments: argumentsValue }));
+      assert.notEqual((envelope.error as { code?: string } | undefined)?.code, "NOT_IMPLEMENTED", `${name} must be implemented in Phase 3`);
+    }
     assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri).sort(), [
       "probe://gdb-server-log",
       "probe://status",

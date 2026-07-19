@@ -28,7 +28,7 @@ export interface HssRequestedSymbol {
 const projectControlSelectorSchema = z.string()
   .min(1)
   .max(512)
-  .regex(/^(?:[A-Za-z0-9_./\\\\ -]+::)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/, "selector must be a scalar or fixed member path")
+  .regex(/^(?:(?:[A-Za-z]:)?[A-Za-z0-9_./\\\\ -]+::)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/, "selector must be a scalar or fixed member path")
   .refine((value) => !value.includes("->") && !value.includes("[") && !value.includes("]"), "pointer and array traversal are forbidden");
 const projectControlScalarTypeSchema = z.enum(HSS_SCALAR_TYPES);
 const projectControlConditionSchema = z.object({

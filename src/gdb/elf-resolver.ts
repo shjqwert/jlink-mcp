@@ -11,7 +11,7 @@ import {
 } from "../mcp/hss/hss-contract";
 
 const execFileAsync = promisify(execFile);
-const selectorPattern = /^(?:[A-Za-z0-9_./\\ -]+::)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
+const selectorPattern = /^(?:(?:[A-Za-z]:)?[A-Za-z0-9_./\\ -]+::)?[A-Za-z_]\w*(?:\[\d+\])?(?:\.[A-Za-z_]\w*(?:\[\d+\])?)*$/;
 const gdbTimeoutMs = 30000;
 
 export interface RequestedCaptureSymbol {
@@ -41,9 +41,13 @@ export interface ElfResolution {
 }
 
 export interface ElfResolvedSymbol extends RequestedCaptureSymbol {
+  rootAddress: number;
+  rootSize: number;
+  memberOffset: number;
   address: number;
   size: number;
   type: HssScalarType;
+  region: "ram" | "flash";
 }
 
 export interface LoadedProjectConfig {
@@ -52,8 +56,9 @@ export interface LoadedProjectConfig {
 }
 
 export function validateSelector(selector: string): void {
-  if (!selectorPattern.test(selector) || selector.includes("->") || selector.includes("[") || selector.includes("]")) {
-    throw new Error(`Unsafe selector "${selector}": only fixed global/static scalar member paths are allowed`);
+  const arrayElements = selector.match(/\[\d+\]/g) ?? [];
+  if (!selectorPattern.test(selector) || selector.includes("->") || arrayElements.length > 1) {
+    throw new Error(`Unsafe selector "${selector}": only fixed global/static scalars, nested members, and one fixed array element are allowed`);
   }
 }
 
@@ -95,27 +100,40 @@ export function parseGdbSymbolOutput(output: string, requested: RequestedCapture
     const layoutBlock = output.match(new RegExp(`__JL_LAYOUT_BEGIN_${index}__([\\s\\S]*?)__JL_LAYOUT_END_${index}__`))?.[1] ?? "";
     const addressText = block.match(new RegExp(`__JL_ADDR_${index}__=(0x[0-9a-f]+)`, "i"))?.[1];
     const sizeText = block.match(new RegExp(`__JL_SIZE_${index}__=(\\d+)`))?.[1];
+    const rootAddressText = rootBlock.match(new RegExp(`__JL_ROOT_ADDR_${index}__=(0x[0-9a-f]+)`, "i"))?.[1];
+    const rootSizeText = rootBlock.match(new RegExp(`__JL_ROOT_SIZE_${index}__=(\\d+)`))?.[1];
     const typeText = block.match(/type\s*=\s*([^\r\n]+)/i)?.[0];
     const selectorErrors = block.split(/\r?\n/).filter((line) => /No symbol|optimized out|ambiguous|not defined|Attempt to take address|There is no member/i.test(line));
     const duplicateStaticRoots = (rootBlock.match(/^File\s+/gm) ?? []).length > 1;
-    const finalMember = requested[index].name.split(".").at(-1)!;
-    const bitfield = new RegExp(`\\b${finalMember}\\s*:\\s*\\d+\\s*;`).test(layoutBlock);
-    if (!addressText || !sizeText || !typeText || selectorErrors.length > 0 || duplicateStaticRoots || bitfield) {
+    const finalMember = requested[index].name.replace(/\[\d+\]/g, "").split(".").at(-1)!;
+    const bitfield = new RegExp(`\\b${escapeRegex(finalMember)}\\s*:\\s*\\d+\\s*;`).test(layoutBlock);
+    const unionLayout = /\btype\s*=\s*union\b|\bunion(?:\s+\w+)?\s*\{/i.test(rootBlock + "\n" + layoutBlock);
+    const arrayBounds = layoutBlock.match(new RegExp(`__JL_BOUND_${index}__=(\\d+)`))?.[1];
+    const pointerArray = /__JL_ARRAY_TYPE_BEGIN_[^\n]*[\s\S]*?type\s*=\s*[^\r\n]*\*[\s\S]*?__JL_ARRAY_TYPE_END_/i.test(layoutBlock);
+    if (!addressText || !sizeText || !rootAddressText || !rootSizeText || !typeText || selectorErrors.length > 0 || duplicateStaticRoots || bitfield || unionLayout || arrayBounds === "0" || pointerArray) {
       if (duplicateStaticRoots) selectorErrors.push("ambiguous static root; use source-file::symbol");
       if (bitfield) selectorErrors.push("bitfields are forbidden");
+      if (unionLayout) selectorErrors.push("union layouts are forbidden");
+      if (arrayBounds === "0") selectorErrors.push("array index is out of bounds");
+      if (pointerArray) selectorErrors.push("pointer indexing is forbidden");
       errors.push(`${requested[index].name}: ${selectorErrors.join("; ") || "could not resolve address, size, and type"}`);
       continue;
     }
     const address = Number.parseInt(addressText, 16);
     const size = Number.parseInt(sizeText, 10);
+    const rootAddress = Number.parseInt(rootAddressText, 16);
+    const rootSize = Number.parseInt(rootSizeText, 10);
+    const memberOffset = address - rootAddress;
     const type = scalarType(typeText, size);
     const section = sections.find((candidate) => address >= candidate.start && address + size <= candidate.end);
     const writableRam = !!section && section.flags.includes("ALLOC") && !section.flags.includes("READONLY") && !section.flags.includes("CODE");
+    const readableFlash = !!section && section.flags.includes("ALLOC") && (section.flags.includes("READONLY") || section.flags.includes("CODE"));
     if (!type) errors.push(`${requested[index].name}: unsupported final scalar type ${typeText.replace(/^type\s*=\s*/i, "")}`);
     else if (![1, 2, 4].includes(size) || address % size !== 0) errors.push(`${requested[index].name}: address 0x${address.toString(16)} is not naturally aligned`);
+    else if (!Number.isSafeInteger(rootAddress) || !Number.isSafeInteger(rootSize) || rootSize < size || memberOffset < 0 || memberOffset + size > rootSize) errors.push(`${requested[index].name}: final address is outside its fixed root layout`);
     else if (address < 0 || address + size > 0x1_0000_0000 || address >= 0x4000_0000 && address < 0x6000_0000 || address >= 0xe000_0000) errors.push(`${requested[index].name}: address is in a forbidden peripheral/debug range`);
-    else if (!writableRam) errors.push(`${requested[index].name}: address is not in an ELF writable RAM section`);
-    else symbols.push({ ...requested[index], address, size, type });
+    else if (!writableRam && !readableFlash) errors.push(`${requested[index].name}: address is not in an ELF allocated RAM or Flash section`);
+    else symbols.push({ ...requested[index], rootAddress, rootSize, memberOffset, address, size, type, region: writableRam ? "ram" : "flash" });
   }
   if (errors.length > 0) throw new Error(`ELF selector validation failed:\n${errors.join("\n")}`);
   return symbols;
@@ -136,12 +154,59 @@ async function runGdb(gdbPath: string, elfPath: string, commands: string[]): Pro
   }
 }
 
+export async function searchElfVariableNames(gdbPath: string, elfFile: string, query: string, limit = 64): Promise<string[]> {
+  if (!query.trim() || query.length > 256) throw new Error("symbol query must contain 1 to 256 characters");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new Error("symbol search limit must be from 1 to 128");
+  const elfPath = await realpath(elfFile);
+  const output = await runGdb(gdbPath, elfPath, ["set pagination off", `info variables ${escapeRegex(query)}`]);
+  const names: string[] = [];
+  let sourceFile: string | undefined;
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const file = line.match(/^File\s+(.+):$/)?.[1];
+    if (file) {
+      sourceFile = file.replace(/\\/g, "/");
+      continue;
+    }
+    if (!line || line.startsWith("All variables") || line.startsWith("Non-debugging symbols")) continue;
+    const match = line.match(/\b([A-Za-z_]\w*)\s*(?:\[[^\]]+\])?;$/);
+    if (!match || !match[1].includes(query)) continue;
+    names.push(sourceFile ? `${sourceFile}::${match[1]}` : match[1]);
+    if (names.length >= limit) break;
+  }
+  return [...new Set(names)].slice(0, limit);
+}
+
 function gdbExpression(selector: string): string {
   validateSelector(selector);
   const separator = selector.indexOf("::");
   if (separator < 0) return selector;
   const source = selector.slice(0, separator).replace(/\\/g, "/");
   return `'${source}'::${selector.slice(separator + 2)}`;
+}
+
+function selectorRoot(selector: string): string {
+  const separator = selector.indexOf("::");
+  const prefix = separator < 0 ? "" : `${selector.slice(0, separator)}::`;
+  const body = separator < 0 ? selector : selector.slice(separator + 2);
+  return prefix + body.split(".", 1)[0].replace(/\[\d+\]$/, "");
+}
+
+function selectorRootName(selector: string): string {
+  const body = selector.includes("::") ? selector.slice(selector.indexOf("::") + 2) : selector;
+  return body.split(".", 1)[0].replace(/\[\d+\]$/, "");
+}
+
+function selectorArray(selector: string): { prefix: string; index: number } | undefined {
+  const match = selector.match(/^(.*)\[(\d+)\](?:\.|$)/);
+  if (!match) return undefined;
+  const index = Number.parseInt(match[2], 10);
+  if (!Number.isSafeInteger(index)) throw new Error("array index exceeds the safe integer range");
+  return { prefix: match[1], index };
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function mergeRanges(sections: ElfSection[]): Array<{ start: number; end: number }> {
@@ -207,30 +272,40 @@ export async function resolveElfSymbols(gdbPath: string, elfFile: string, reques
   const commands = ["set pagination off", "show endian", "maintenance info sections"];
   for (let index = 0; index < requested.length; index += 1) {
     const expression = gdbExpression(requested[index].name);
+    const rootSelector = selectorRoot(requested[index].name);
+    const rootExpression = gdbExpression(rootSelector);
     commands.push(
       `echo __JL_BEGIN_${index}__\\n`,
       `printf \"__JL_ADDR_${index}__=0x%llx\\n\", (unsigned long long)&(${expression})`,
       `printf \"__JL_SIZE_${index}__=%llu\\n\", (unsigned long long)sizeof(${expression})`,
       `ptype ${expression}`,
       `echo __JL_END_${index}__\\n`,
+      `echo __JL_ROOT_BEGIN_${index}__\\n`,
+      `printf \"__JL_ROOT_ADDR_${index}__=0x%llx\\n\", (unsigned long long)&(${rootExpression})`,
+      `printf \"__JL_ROOT_SIZE_${index}__=%llu\\n\", (unsigned long long)sizeof(${rootExpression})`,
+      `ptype ${rootExpression}`,
     );
     if (!requested[index].name.includes("::")) {
-      const root = requested[index].name.split(".", 1)[0];
-      commands.push(
-        `echo __JL_ROOT_BEGIN_${index}__\\n`,
-        `info variables ^${root}$`,
-        `echo __JL_ROOT_END_${index}__\\n`,
-      );
+      commands.push(`info variables ^${selectorRootName(requested[index].name)}$`);
     }
+    commands.push(`echo __JL_ROOT_END_${index}__\\n`);
     const memberSelector = requested[index].name.includes("::") ? requested[index].name.split("::", 2)[1] : requested[index].name;
-    if (memberSelector.includes(".")) {
-      const prefix = requested[index].name.includes("::") ? `${requested[index].name.split("::", 2)[0]}::` : "";
-      const rootExpression = gdbExpression(prefix + memberSelector.split(".", 1)[0]);
+    if (memberSelector.includes(".") || memberSelector.includes("[")) {
       commands.push(
         `echo __JL_LAYOUT_BEGIN_${index}__\\n`,
         `ptype ${rootExpression}`,
-        `echo __JL_LAYOUT_END_${index}__\\n`,
       );
+      const array = selectorArray(requested[index].name);
+      if (array) {
+        const arrayExpression = gdbExpression(array.prefix);
+        commands.push(
+          `echo __JL_ARRAY_TYPE_BEGIN_${index}__\\n`,
+          `ptype ${arrayExpression}`,
+          `echo __JL_ARRAY_TYPE_END_${index}__\\n`,
+          `printf \"__JL_BOUND_${index}__=%u\\n\", (unsigned int)(${array.index} < (sizeof(${arrayExpression}) / sizeof((${arrayExpression})[0])))`,
+        );
+      }
+      commands.push(`echo __JL_LAYOUT_END_${index}__\\n`);
     }
   }
   const output = await runGdb(gdbPath, elfPath, commands);

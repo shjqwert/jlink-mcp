@@ -20,14 +20,14 @@
 
 ## 3. Implement Typed Artifact, Variable, and SVD Access (Commit 4)
 
-- [ ] 3.1 Implement bounded content-driven Artifact discovery and classification for typed ELF/DWARF, MAP-only symbols, and HEX/BIN/SREC flash images without silent candidate selection.
-- [ ] 3.2 Implement supported scalar, fixed-array-element, and nested fixed-layout symbol resolution with address-conflict and unsupported-layout rejection.
-- [ ] 3.3 Implement persistent logical Hot Variables, Artifact-generation staleness, targeted refresh, and verified/unverified/mismatch gates.
-- [ ] 3.4 Implement `read_variable` so reads preserve the running state and report when an explicit halt is required.
-- [ ] 3.5 Implement the shared structured-write pipeline with defaults `captureOld=false`, `verify=false`, `restore=false` and status `executed_unverified` when no confirmation is requested.
-- [ ] 3.6 Implement exact, tolerance, masked, and bounded-observe comparators plus forced old-value capture, main readback, restore attempt, restore readback, and `stateUnknown` reporting when restoration is uncertain.
-- [ ] 3.7 Implement explicit SVD loading/validation and conservative register/field reads and writes that honor width, access, read-action, W1C, reserved-bit, and read-modify-write safety semantics.
-- [ ] 3.8 Add unit and simulated integration tests for Artifact discovery, typed selectors, stale refresh, read-state preservation, all write options/failures, Artifact-match transitions, and SVD-unavailable behavior.
+- [x] 3.1 Implement bounded content-driven Artifact discovery and classification for typed ELF/DWARF, MAP-only symbols, and HEX/BIN/SREC flash images without silent candidate selection.
+- [x] 3.2 Implement supported scalar, fixed-array-element, and nested fixed-layout symbol resolution with address-conflict and unsupported-layout rejection.
+- [x] 3.3 Implement persistent logical Hot Variables, Artifact-generation staleness, targeted refresh, and verified/unverified/mismatch gates.
+- [x] 3.4 Implement `read_variable` so reads preserve the running state and report when an explicit halt is required.
+- [x] 3.5 Implement the shared structured-write pipeline with defaults `captureOld=false`, `verify=false`, `restore=false` and status `executed_unverified` when no confirmation is requested.
+- [x] 3.6 Implement exact, tolerance, masked, and bounded-observe comparators plus forced old-value capture, main readback, restore attempt, restore readback, and `stateUnknown` reporting when restoration is uncertain.
+- [x] 3.7 Implement explicit SVD loading/validation and conservative register/field reads and writes that honor width, access, read-action, W1C, reserved-bit, and read-modify-write safety semantics.
+- [x] 3.8 Add unit and simulated integration tests for Artifact discovery, typed selectors, stale refresh, read-state preservation, all write options/failures, Artifact-match transitions, and SVD-unavailable behavior.
 
 ## 4. Implement Direct HSS and JCAP v1 Data Path (Commit 5)
 

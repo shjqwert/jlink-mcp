@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { TargetStore, TargetStoreError } from "./target-store";
+import { resolveArtifactGeneration } from "../artifact/artifact-catalog";
+import { assertArtifactBindingsCurrent, assertSvdBindingCurrent, TargetStore, TargetStoreError } from "./target-store";
 
 test("TargetStore persists canonical project configuration and advances generation", async (context) => {
   const root = testDirectory(context, "target-store-generation");
@@ -41,8 +42,10 @@ test("TargetStore validates and hashes explicit external SVD and Artifact files"
   mkdirSync(projectRoot, { recursive: true });
   mkdirSync(externalRoot, { recursive: true });
   const artifactPath = join(projectRoot, "firmware.elf");
+  const mapPath = join(projectRoot, "firmware.map");
   const svdPath = join(externalRoot, "device.svd");
   writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 2, 3]));
+  writeFileSync(mapPath, "counter 0x20000000 0x4 Data Gb\n", "utf8");
   writeFileSync(svdPath, "<?xml version=\"1.0\"?><device><name>T</name></device>");
   const target = await new TargetStore(join(root, "state")).configure({
     projectRoot,
@@ -51,12 +54,16 @@ test("TargetStore validates and hashes explicit external SVD and Artifact files"
     interface: "JTAG",
     speed: 2000,
     artifactPath,
+    mapPath,
     svdPath,
   });
+  const discovered = await resolveArtifactGeneration({ projectRoot, explicitArtifact: artifactPath, explicitMap: mapPath });
 
   assert.equal(target.artifact?.external, false);
   assert.equal(target.svd?.external, true);
-  assert.equal(target.artifact?.generation, target.artifact?.sha256);
+  assert.match(target.artifact?.generation ?? "", /^[0-9a-f]{64}$/);
+  assert.notEqual(target.artifact?.generation, target.artifact?.sha256);
+  assert.equal(target.artifact?.generation, discovered.generation);
   assert.match(target.svd?.sha256 ?? "", /^[0-9a-f]{64}$/);
 });
 
@@ -78,6 +85,25 @@ test("TargetStore requires an address for raw BIN flash bindings", async (contex
     }),
     (error) => error instanceof TargetStoreError && error.code === "BASE_ADDRESS_REQUIRED",
   );
+});
+
+test("configured Artifact, MAP, and SVD bindings fail closed when same-path content changes", async (context) => {
+  const root = testDirectory(context, "target-store-current-bindings");
+  const projectRoot = join(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const mapPath = join(projectRoot, "firmware.map");
+  const svdPath = join(projectRoot, "device.svd");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1]));
+  writeFileSync(mapPath, "first map", "utf8");
+  writeFileSync(svdPath, "<device><name>T</name></device>", "utf8");
+  const target = await new TargetStore(join(root, "state")).configure({ projectRoot, device: "T", probeSerial: "3", interface: "SWD", speed: 1000, artifactPath, mapPath, svdPath });
+  assert.doesNotThrow(() => assertArtifactBindingsCurrent(target));
+  assert.doesNotThrow(() => assertSvdBindingCurrent(target));
+  writeFileSync(mapPath, "changed map", "utf8");
+  assert.throws(() => assertArtifactBindingsCurrent(target), (error: unknown) => error instanceof TargetStoreError && error.code === "MAP_GENERATION_STALE");
+  writeFileSync(svdPath, "<device><name>Changed</name></device>", "utf8");
+  assert.throws(() => assertSvdBindingCurrent(target), (error: unknown) => error instanceof TargetStoreError && error.code === "SVD_GENERATION_STALE");
 });
 
 test("TargetStore refuses stale Artifact-match evidence after reconfiguration", async (context) => {

@@ -8,6 +8,7 @@ test("search is bounded and unqualified duplicate statics remain ambiguous", () 
   const catalog = new SymbolCatalog(artifact, [
     candidate("one.c::counter", "static"),
     candidate("two.c::counter", "static"),
+    candidate("C:\\src\\drive.c::driveCounter", "static"),
     candidate("globalCounter", "global"),
   ]);
   assert.equal(catalog.search("counter", 1).length, 1);
@@ -18,10 +19,11 @@ test("search is bounded and unqualified duplicate statics remain ambiguous", () 
     assert.equal(result.error.candidates?.length, 2);
   }
   assert.equal(catalog.resolve("one.c::counter").ok, true);
+  assert.equal(catalog.resolve("C:\\src\\drive.c::driveCounter").ok, true);
 });
 
 test("fixed DWARF member has stable layout identity and final address", () => {
-  const catalog = new SymbolCatalog(artifact, [{ ...candidate("motor", "fixed-member"), memberPath: "speed", rootAddress: 0x20000000, memberOffset: 4, source: "elf-dwarf", confidence: "dwarf" }]);
+  const catalog = new SymbolCatalog(artifact, [{ ...candidate("motor", "fixed-member"), memberPath: "speed", rootAddress: 0x20000000, rootSize: 8, memberOffset: 4, source: "elf-dwarf", confidence: "dwarf" }]);
   const first = catalog.resolve("motor.speed");
   const second = catalog.resolve("motor.speed");
   assert.equal(first.ok, true);
@@ -42,7 +44,7 @@ test("unsafe and MAP-unknown layouts are structured rejections", () => {
   assert.equal(pointer.ok, false);
   assert.equal(map.ok, false);
   if (!pointer.ok) assert.equal(pointer.error.code, "unsupported_symbol");
-  if (!map.ok) assert.equal(map.error.code, "hss_ineligible");
+  if (!map.ok) assert.equal(map.error.code, "unknown_layout");
   assert.equal(catalog.resolve("pointer->value").ok, false);
 });
 

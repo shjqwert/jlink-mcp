@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { computeArtifactGeneration } from "../artifact/artifact-catalog";
 import { canonicalProbeSerial, ProbeIdentityError } from "./probe-identity";
 
 export type TargetInterface = "SWD" | "JTAG";
@@ -176,8 +177,12 @@ export class TargetStore {
   async configure(input: TargetConfigureInput, expectedGeneration?: string | null): Promise<StoredTarget> {
     validateConfigureInput(input);
     const projectRoot = this.canonicalProjectRoot(input.projectRoot);
-    const artifact = input.artifactPath ? inspectArtifactFile(projectRoot, input.artifactPath) : undefined;
+    const inspectedArtifact = input.artifactPath ? inspectArtifactFile(projectRoot, input.artifactPath) : undefined;
     const map = input.mapPath ? resolveBoundFile(projectRoot, input.mapPath, validateMap) : undefined;
+    const artifact = inspectedArtifact ? {
+      ...inspectedArtifact,
+      generation: computeArtifactGeneration(inspectedArtifact.sha256, map?.sha256),
+    } : undefined;
     const svd = input.svdPath ? resolveBoundFile(projectRoot, input.svdPath, validateSvd) : undefined;
     const jlinkPath = input.jlinkPath ? resolveBoundFile(projectRoot, input.jlinkPath, validateExecutableFile) : undefined;
     const gdbServerPath = input.gdbServerPath ? resolveBoundFile(projectRoot, input.gdbServerPath, validateExecutableFile) : undefined;
@@ -405,6 +410,35 @@ export function inspectFlashFile(projectRoot: string, filePath: string, baseAddr
 export function inspectArtifactFile(projectRoot: string, filePath: string): ArtifactBinding {
   const binding = resolveBoundFile(projectRoot, filePath, validateElf);
   return { ...binding, generation: binding.sha256 };
+}
+
+export function assertArtifactBindingsCurrent(target: StoredTarget): void {
+  if (!target.artifact) throw new TargetStoreError("ARTIFACT_NOT_CONFIGURED", "target_configure must bind an ELF Artifact before symbol access");
+  assertFileBindingCurrent(target.artifact, "ARTIFACT_GENERATION_STALE", "Artifact");
+  if (target.map) assertFileBindingCurrent(target.map, "MAP_GENERATION_STALE", "MAP");
+  const generation = computeArtifactGeneration(target.artifact.sha256, target.map?.sha256);
+  if (generation !== target.artifact.generation) {
+    throw new TargetStoreError("ARTIFACT_GENERATION_STALE", "Artifact generation does not match its configured Artifact/MAP content; call target_configure again");
+  }
+}
+
+export function assertSvdBindingCurrent(target: StoredTarget): TargetFileBinding {
+  if (!target.svd) throw new TargetStoreError("SVD_NOT_CONFIGURED", "target_configure must bind an explicit SVD before peripheral register access");
+  assertFileBindingCurrent(target.svd, "SVD_GENERATION_STALE", "SVD");
+  return target.svd;
+}
+
+function assertFileBindingCurrent(binding: TargetFileBinding, code: string, label: string): void {
+  let canonical: string;
+  try {
+    canonical = normalize(realpathSync.native(binding.path));
+  } catch {
+    throw new TargetStoreError(code, `${label} no longer exists at its configured path; call target_configure again`);
+  }
+  const current = statSync(canonical);
+  if (!current.isFile() || canonical !== normalize(binding.path) || current.size !== binding.size || sha256File(canonical) !== binding.sha256) {
+    throw new TargetStoreError(code, `${label} content or identity changed after target_configure; call target_configure again`);
+  }
 }
 
 export function locateMemoryRegion(target: StoredTarget, address: number, byteCount: number): MemoryRegion | undefined {

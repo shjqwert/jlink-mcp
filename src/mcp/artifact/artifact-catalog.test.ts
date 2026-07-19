@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ArtifactCatalogError,
+  computeArtifactGeneration,
   discoverArtifacts,
   historicalDiagnosticMatchEvidence,
   resolveArtifactGeneration,
@@ -16,7 +17,7 @@ test("artifact discovery is content-driven, bounded, excluded, and explicit-firs
   const chosen = join(root, "firmware.out");
   const other = join(root, "other.axf");
   const map = join(root, "firmware.map");
-  await writeFile(chosen, elfFixture());
+  await writeFile(chosen, elfWithDwarfFixture());
   await writeFile(other, elfFixture(0x08001000));
   await writeFile(map, "map evidence", "utf8");
   await writeFile(join(root, "firmware.bin"), Buffer.from([1, 2, 3]));
@@ -26,6 +27,10 @@ test("artifact discovery is content-driven, bounded, excluded, and explicit-firs
   const discovered = await discoverArtifacts({ projectRoot: root });
   assert.deepEqual(discovered.candidates.map((candidate) => candidate.format).sort(), ["elf", "elf", "raw-bin"]);
   assert.equal(discovered.candidates.some((candidate) => candidate.path.includes("hidden.out")), false);
+  assert.equal(discovered.candidates.find((candidate) => candidate.path === chosen)?.classification, "typed-debug-artifact");
+  assert.equal(discovered.candidates.find((candidate) => candidate.path === other)?.classification, "untyped-elf");
+  assert.equal(discovered.candidates.find((candidate) => candidate.format === "raw-bin")?.classification, "flash-image");
+  assert.deepEqual(discovered.candidates.find((candidate) => candidate.path === chosen)?.pairedMapCandidates, [map]);
 
   const selected = await resolveArtifactGeneration({ projectRoot: root, explicitArtifact: chosen, explicitMap: map });
   assert.equal(selected.path, chosen);
@@ -41,6 +46,37 @@ test("implicit artifact ambiguity is a structured rejection", async () => {
     resolveArtifactGeneration({ projectRoot: root }),
     (error: unknown) => error instanceof ArtifactCatalogError && error.code === "ARTIFACT_SELECTION_REQUIRED",
   );
+});
+
+test("explicit external inputs are accepted but malformed HEX, SREC, and MAP are rejected", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "jlink-artifact-external-project-"));
+  const externalRoot = await mkdtemp(join(tmpdir(), "jlink-artifact-external-pack-"));
+  const elf = join(externalRoot, "firmware.out");
+  const map = join(externalRoot, "firmware.map");
+  await writeFile(elf, elfWithDwarfFixture());
+  await writeFile(map, "symbol map text", "utf8");
+  const selected = await resolveArtifactGeneration({ projectRoot, explicitArtifact: elf, explicitMap: map });
+  assert.equal(selected.path, elf);
+  assert.equal(selected.mapPath, map);
+  assert.equal(selected.generation, computeArtifactGeneration(selected.sha256, selected.mapSha256));
+  const localElf = join(projectRoot, "local.out");
+  await writeFile(localElf, elfWithDwarfFixture());
+  const selectedWithExternalMap = await resolveArtifactGeneration({ projectRoot, explicitMap: map });
+  assert.equal(selectedWithExternalMap.path, localElf);
+  assert.equal(selectedWithExternalMap.mapPath, map);
+
+  const badHex = join(projectRoot, "bad.hex");
+  const badMetadataHex = join(projectRoot, "bad-metadata.hex");
+  const badSrec = join(projectRoot, "bad.s19");
+  const badMap = join(projectRoot, "bad.map");
+  await writeFile(badHex, ":00000001FE\n", "ascii");
+  await writeFile(badMetadataHex, ":0100000100FE\n", "ascii");
+  await writeFile(badSrec, "S104000001FB\nS9030000FC\n", "ascii");
+  await writeFile(badMap, Buffer.from([0, 1, 2]));
+  await assert.rejects(() => discoverArtifacts({ projectRoot, explicitArtifact: badHex }), (error: unknown) => error instanceof ArtifactCatalogError && error.code === "FLASH_CHECKSUM_INVALID");
+  await assert.rejects(() => discoverArtifacts({ projectRoot, explicitArtifact: badMetadataHex }), (error: unknown) => error instanceof ArtifactCatalogError && error.code === "FLASH_FORMAT_INVALID");
+  await assert.rejects(() => discoverArtifacts({ projectRoot, explicitArtifact: badSrec }), (error: unknown) => error instanceof ArtifactCatalogError && error.code === "FLASH_CHECKSUM_INVALID");
+  await assert.rejects(() => discoverArtifacts({ projectRoot, explicitArtifact: elf, explicitMap: badMap }), (error: unknown) => error instanceof ArtifactCatalogError && error.code === "ARTIFACT_MAP_INVALID");
 });
 
 test("artifact-match-v0 contains only explicit nonvolatile file-backed bytes", async () => {
@@ -118,6 +154,33 @@ function elfFixture(codeAddress = 0x08000000): Buffer {
   data.set(Buffer.from([0x11, 0x22, 0x33, 0x44]), 0x100);
   data.set(Buffer.from([0xaa, 0xbb, 0xcc, 0xdd]), 0x104);
   return data.subarray(0, Math.max(headerBytes, 0x108));
+}
+
+function elfWithDwarfFixture(): Buffer {
+  const base = elfFixture();
+  const sectionOffset = 0x120;
+  const sectionEntrySize = 40;
+  const sectionCount = 4;
+  const strings = Buffer.from("\0.shstrtab\0.debug_info\0.debug_abbrev\0", "utf8");
+  const stringsOffset = sectionOffset + sectionEntrySize * sectionCount;
+  const data = Buffer.alloc(stringsOffset + strings.length + 2);
+  base.copy(data);
+  data.writeUInt32LE(sectionOffset, 32);
+  data.writeUInt16LE(sectionEntrySize, 46);
+  data.writeUInt16LE(sectionCount, 48);
+  data.writeUInt16LE(1, 50);
+  writeSectionHeader(data, sectionOffset + sectionEntrySize, 1, 3, stringsOffset, strings.length);
+  writeSectionHeader(data, sectionOffset + sectionEntrySize * 2, 11, 1, stringsOffset + strings.length, 1);
+  writeSectionHeader(data, sectionOffset + sectionEntrySize * 3, 23, 1, stringsOffset + strings.length + 1, 1);
+  strings.copy(data, stringsOffset);
+  return data;
+}
+
+function writeSectionHeader(buffer: Buffer, offset: number, nameOffset: number, type: number, fileOffset: number, size: number): void {
+  buffer.writeUInt32LE(nameOffset, offset);
+  buffer.writeUInt32LE(type, offset + 4);
+  buffer.writeUInt32LE(fileOffset, offset + 16);
+  buffer.writeUInt32LE(size, offset + 20);
 }
 
 function writeProgramHeader(buffer: Buffer, offset: number, fileOffset: number, virtualAddress: number, physicalAddress: number, fileSize: number, memorySize: number, flags: number): void {

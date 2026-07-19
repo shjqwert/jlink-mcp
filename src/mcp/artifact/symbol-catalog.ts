@@ -4,7 +4,7 @@ import { parseIarMap, type IarMapSymbol } from "../hss/iar-map-parser";
 import type { HssScalarType } from "../hss/hss-contract";
 
 const MAX_SEARCH_RESULTS = 128;
-const selectorPattern = /^(?:[A-Za-z0-9_./\\ -]+::)?[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
+const selectorPattern = /^(?:(?:[A-Za-z]:)?[A-Za-z0-9_./\\ -]+::)?[A-Za-z_]\w*(?:\[\d+\])?(?:\.[A-Za-z_]\w*(?:\[\d+\])?)*$/;
 
 export type SymbolRegion = "ram" | "flash" | "unknown";
 export type SymbolSource = "elf-dwarf" | "iar-map";
@@ -22,6 +22,7 @@ export interface SymbolCandidate {
   qualifiedName: string;
   memberPath?: string;
   rootAddress: number;
+  rootSize?: number;
   memberOffset?: number;
   type?: HssScalarType;
   size?: number;
@@ -29,19 +30,22 @@ export interface SymbolCandidate {
   source: SymbolSource;
   confidence: "dwarf" | "map";
   kind?: SymbolKind;
+  endian?: "little" | "big";
 }
 
 export interface ResolvedSymbol {
   ref: SymbolRef;
   rootAddress: number;
+  rootSize: number;
   memberOffset: number;
   address: number;
   type: HssScalarType;
   size: number;
   region: SymbolRegion;
-  hssEligible: true;
+  hssEligible: boolean;
   source: SymbolSource;
   confidence: "dwarf" | "map";
+  endian: "little" | "big";
 }
 
 export type SymbolResolveResult =
@@ -69,10 +73,10 @@ export class SymbolCatalog {
   }
 
   resolve(selector: string): SymbolResolveResult {
-    if (!selectorPattern.test(selector) || /->|\[|\]|\*|&/.test(selector)) {
-      return reject("unsupported_symbol", "only fixed global/static scalar member paths are supported");
+    if (!selectorPattern.test(selector) || /->|\*|&/.test(selector) || (selector.match(/\[\d+\]/g) ?? []).length > 1) {
+      return reject("unsupported_symbol", "only fixed global/static scalars, nested members, and one fixed array element are supported");
     }
-    const requested = splitSelector(selector);
+    const requested = parseSymbolSelector(selector);
     const matches = this.candidates.filter((candidate) => (requested.qualifiedName.includes("::")
       ? candidate.qualifiedName === requested.qualifiedName
       : candidate.qualifiedName === requested.qualifiedName || candidate.qualifiedName.split("::").at(-1) === requested.qualifiedName)
@@ -106,24 +110,26 @@ export function catalogFromIarMap(artifact: Pick<ArtifactGeneration, "generation
   return new SymbolCatalog(artifact, [...parseIarMap(mapFile).values()].flat().map(mapCandidate));
 }
 
-export function catalogCandidateFromIarMap(symbol: IarMapSymbol, type?: HssScalarType): SymbolCandidate {
-  return { qualifiedName: symbol.name, rootAddress: symbol.address, type, size: symbol.size, region: isRam(symbol.address) ? "ram" : "unknown", source: "iar-map", confidence: "map", kind: "global" };
+export function catalogCandidateFromIarMap(symbol: IarMapSymbol): SymbolCandidate {
+  return { qualifiedName: symbol.name, rootAddress: symbol.address, size: symbol.size, region: isRam(symbol.address) ? "ram" : "unknown", source: "iar-map", confidence: "map", kind: "global" };
 }
 
 export function symbolLogicalIdentity(ref: Pick<SymbolRef, "qualifiedName" | "memberPath">): string {
-  return `${ref.qualifiedName}${ref.memberPath ? `.${ref.memberPath}` : ""}`;
+  return `${ref.qualifiedName}${ref.memberPath ? `${ref.memberPath.startsWith("[") ? "" : "."}${ref.memberPath}` : ""}`;
 }
 
 function mapCandidate(symbol: IarMapSymbol): SymbolCandidate {
   return catalogCandidateFromIarMap(symbol);
 }
 
-function splitSelector(selector: string): Pick<SymbolCandidate, "qualifiedName" | "memberPath"> {
+export function parseSymbolSelector(selector: string): Pick<SymbolCandidate, "qualifiedName" | "memberPath"> {
   const separator = selector.indexOf("::");
   const prefix = separator < 0 ? "" : selector.slice(0, separator + 2);
   const body = separator < 0 ? selector : selector.slice(separator + 2);
-  const [root, ...members] = body.split(".");
-  return { qualifiedName: `${prefix}${root}`, ...(members.length ? { memberPath: members.join(".") } : {}) };
+  const root = body.match(/^([A-Za-z_]\w*)/)?.[1];
+  if (!root) return { qualifiedName: `${prefix}${body}` };
+  const suffix = body.slice(root.length).replace(/^\./, "");
+  return { qualifiedName: `${prefix}${root}`, ...(suffix ? { memberPath: suffix } : {}) };
 }
 
 function logicalName(candidate: SymbolCandidate): string {
@@ -134,19 +140,22 @@ function resolveCandidate(artifactGeneration: string, candidate: SymbolCandidate
   if (candidate.kind && !["global", "static", "fixed-member"].includes(candidate.kind)) {
     return reject("unsupported_symbol", `unsupported symbol kind: ${candidate.kind}`);
   }
-  if (!Number.isSafeInteger(candidate.rootAddress) || !Number.isSafeInteger(candidate.memberOffset ?? 0)) {
+  if (!Number.isSafeInteger(candidate.rootAddress) || candidate.rootAddress < 0 || candidate.rootAddress > 0xffff_ffff || !Number.isSafeInteger(candidate.memberOffset ?? 0)) {
     return reject("unknown_layout", "root address or member offset is unknown");
   }
-  if (!candidate.type || !candidate.size) return reject("hss_ineligible", "HSS requires a known scalar type and size");
-  const expectedSize = scalarSize(candidate.type);
-  if (candidate.size !== expectedSize || candidate.region !== "ram") {
-    return reject("hss_ineligible", candidate.region !== "ram" ? "HSS requires a RAM symbol" : "HSS type and size are incompatible");
+  if (candidate.source !== "elf-dwarf" || candidate.confidence !== "dwarf" || !candidate.type || !candidate.size) {
+    return reject("unknown_layout", "typed resolution requires ELF/DWARF type and size evidence");
   }
+  const expectedSize = scalarSize(candidate.type);
+  if (candidate.size !== expectedSize) return reject("unknown_layout", "DWARF type and size are incompatible");
   const memberOffset = candidate.memberOffset ?? 0;
   const address = candidate.rootAddress + memberOffset;
-  if (!Number.isSafeInteger(address) || address % candidate.size !== 0) return reject("unknown_layout", "final symbol address is invalid or unaligned");
+  if (!Number.isSafeInteger(address) || address < 0 || address + candidate.size > 0x1_0000_0000 || address % candidate.size !== 0) return reject("unknown_layout", "final symbol address is invalid or unaligned");
   const ref = refFor(artifactGeneration, candidate);
-  return { ok: true, value: { ref, rootAddress: candidate.rootAddress, memberOffset, address, type: candidate.type, size: candidate.size, region: candidate.region, hssEligible: true, source: candidate.source, confidence: candidate.confidence } };
+  const rootSize = candidate.rootSize ?? candidate.size;
+  if (!Number.isSafeInteger(rootSize) || rootSize < candidate.size || memberOffset + candidate.size > rootSize) return reject("unknown_layout", "terminal selector lies outside the fixed root layout");
+  const endian = candidate.endian ?? "little";
+  return { ok: true, value: { ref, rootAddress: candidate.rootAddress, rootSize, memberOffset, address, type: candidate.type, size: candidate.size, region: candidate.region, hssEligible: candidate.region === "ram", source: candidate.source, confidence: candidate.confidence, endian } };
 }
 
 function refFor(artifactGeneration: string, candidate: SymbolCandidate): SymbolRef {
@@ -154,11 +163,13 @@ function refFor(artifactGeneration: string, candidate: SymbolCandidate): SymbolR
     qualifiedName: candidate.qualifiedName,
     memberPath: candidate.memberPath,
     rootAddress: candidate.rootAddress,
+    rootSize: candidate.rootSize ?? candidate.size,
     memberOffset: candidate.memberOffset ?? 0,
     type: candidate.type,
     size: candidate.size,
     region: candidate.region,
     source: candidate.source,
+    endian: candidate.endian ?? "little",
   };
   return { artifactGeneration, qualifiedName: candidate.qualifiedName, ...(candidate.memberPath ? { memberPath: candidate.memberPath } : {}), layoutHash: createHash("sha256").update(stableStringify(layout)).digest("hex") };
 }

@@ -13,6 +13,8 @@ const MAX_MATCH_RANGES = 4096;
 const EXCLUDED_NAMES = new Set([".git", "node_modules", ".jlink-mcp"]);
 
 export type ArtifactFormat = "elf" | "intel-hex" | "srec" | "raw-bin";
+export type ArtifactClassification = "typed-debug-artifact" | "untyped-elf" | "flash-image";
+export type DwarfCapability = "present" | "absent" | "unknown";
 
 export interface ArtifactCandidate {
   path: string;
@@ -20,6 +22,13 @@ export interface ArtifactCandidate {
   sha256: string;
   generation: string;
   size: number;
+  classification: ArtifactClassification;
+  debugCapabilities: {
+    dwarf: DwarfCapability;
+    elfClass?: 32 | 64;
+    endian?: "little" | "big";
+  };
+  pairedMapCandidates: string[];
   supportedOperations: Array<"symbols" | "flash" | "verify">;
 }
 
@@ -94,9 +103,14 @@ export async function discoverArtifacts(input: {
   if (explicitMap && extname(explicitMap).toLowerCase() !== ".map") {
     throw new ArtifactCatalogError("ARTIFACT_MAP_INVALID", "explicitMap must select a .map file", { explicitMap });
   }
+  if (explicitMap) {
+    const mapBytes = await readFile(explicitMap);
+    if (mapBytes.includes(0)) throw new ArtifactCatalogError("ARTIFACT_MAP_INVALID", "explicitMap must contain text linker-map evidence", { explicitMap });
+  }
 
   if (explicitArtifact) {
-    const candidate = await probeCandidate(explicitArtifact, limits.maxArtifactBytes);
+    const probed = await probeCandidate(explicitArtifact, limits.maxArtifactBytes, true);
+    const candidate = probed ? pairMapCandidates(probed, explicitMap ? [explicitMap] : []) : undefined;
     if (!candidate) throw new ArtifactCatalogError("ARTIFACT_UNSUPPORTED", "explicit artifact content is unsupported", { path: explicitArtifact });
     return {
       projectRoot,
@@ -109,7 +123,7 @@ export async function discoverArtifacts(input: {
 
   const configured = (input.configuredCacheDirs ?? []).map((path) => normalized(resolve(projectRoot, path)));
   const candidates: ArtifactCandidate[] = [];
-  const mapCandidates: string[] = [];
+  const mapCandidates: string[] = explicitMap ? [explicitMap] : [];
   let scannedFiles = 0;
   let hashedBytes = 0;
 
@@ -127,7 +141,10 @@ export async function discoverArtifacts(input: {
       if (!entry.isFile()) continue;
       scannedFiles += 1;
       if (scannedFiles > limits.maxFiles) throw new ArtifactCatalogError("ARTIFACT_SCAN_LIMIT", "artifact scan exceeded maxFiles", { maxFiles: limits.maxFiles });
-      if (extname(entry.name).toLowerCase() === ".map") mapCandidates.push(await realpath(path));
+      if (extname(entry.name).toLowerCase() === ".map") {
+        const mapPath = await realpath(path);
+        if (!mapCandidates.includes(mapPath)) mapCandidates.push(mapPath);
+      }
       const candidate = await probeCandidate(path, limits.maxArtifactBytes);
       if (!candidate) continue;
       hashedBytes += candidate.size;
@@ -137,7 +154,14 @@ export async function discoverArtifacts(input: {
     }
   };
   await walk(projectRoot, 0);
-  return { projectRoot, explicit: false, candidates: candidates.sort(byPath), mapCandidates: mapCandidates.sort(), scannedFiles };
+  mapCandidates.sort();
+  return {
+    projectRoot,
+    explicit: false,
+    candidates: candidates.sort(byPath).map((candidate) => pairMapCandidates(candidate, mapCandidates)),
+    mapCandidates,
+    scannedFiles,
+  };
 }
 
 export async function resolveArtifactGeneration(input: Parameters<typeof discoverArtifacts>[0]): Promise<ArtifactGeneration> {
@@ -152,13 +176,13 @@ export async function resolveArtifactGeneration(input: Parameters<typeof discove
   const artifact = discovery.candidates[0];
   const explicitMap = input.explicitMap ? discovery.mapCandidates[0] : undefined;
   const stem = basename(artifact.path, extname(artifact.path)).toLowerCase();
-  const pairedMaps = explicitMap ? [explicitMap] : discovery.mapCandidates.filter((path) => basename(path, extname(path)).toLowerCase() === stem);
+  const pairedMaps = explicitMap ? [explicitMap] : artifact.pairedMapCandidates.filter((path) => basename(path, extname(path)).toLowerCase() === stem);
   if (pairedMaps.length > 1) {
     throw new ArtifactCatalogError("ARTIFACT_MAP_SELECTION_REQUIRED", "multiple MAP candidates match the selected artifact", { maps: pairedMaps });
   }
   const mapPath = pairedMaps[0];
   const mapSha256 = mapPath ? await sha256Bounded(mapPath, DEFAULT_MAX_ARTIFACT_BYTES) : undefined;
-  const generation = generationHash({ path: artifact.path, format: artifact.format, sha256: artifact.sha256, mapPath, mapSha256 });
+  const generation = computeArtifactGeneration(artifact.sha256, mapSha256);
   return { ...artifact, generation, ...(mapPath && mapSha256 ? { mapPath, mapSha256 } : {}) };
 }
 
@@ -233,7 +257,7 @@ export function historicalDiagnosticMatchEvidence(input: {
   return { targetArtifactMatch: "unverified", historyOnly: true, ...input };
 }
 
-async function probeCandidate(path: string, maxBytes: number): Promise<ArtifactCandidate | undefined> {
+async function probeCandidate(path: string, maxBytes: number, strict = false): Promise<ArtifactCandidate | undefined> {
   const info = await stat(path);
   if (!info.isFile() || info.size < 1 || info.size > maxBytes) return undefined;
   const handle = await open(path, "r");
@@ -252,9 +276,126 @@ async function probeCandidate(path: string, maxBytes: number): Promise<ArtifactC
   else if (extension === ".bin") format = "raw-bin";
   if (!format) return undefined;
   const canonical = await realpath(path);
-  const digest = await sha256Bounded(canonical, maxBytes);
-  const supportedOperations: ArtifactCandidate["supportedOperations"] = format === "elf" ? ["symbols", "flash", "verify"] : ["flash", "verify"];
-  return { path: canonical, format, sha256: digest, generation: generationHash({ path: canonical, format, sha256: digest }), size: info.size, supportedOperations };
+  const data = await readFile(canonical);
+  try {
+    if (format === "intel-hex") validateIntelHexBytes(data, canonical);
+    if (format === "srec") validateSrecBytes(data, canonical);
+  } catch (error) {
+    if (strict) throw error;
+    return undefined;
+  }
+  const digest = sha256(data);
+  const debugCapabilities = format === "elf" ? inspectElfDebugCapabilities(data) : { dwarf: "absent" as const };
+  const classification: ArtifactClassification = format !== "elf"
+    ? "flash-image"
+    : debugCapabilities.dwarf === "present"
+      ? "typed-debug-artifact"
+      : "untyped-elf";
+  const supportedOperations: ArtifactCandidate["supportedOperations"] = format === "elf"
+    ? [...(debugCapabilities.dwarf === "present" ? ["symbols" as const] : []), "verify"]
+    : ["flash", "verify"];
+  return {
+    path: canonical,
+    format,
+    sha256: digest,
+    generation: computeArtifactGeneration(digest),
+    size: info.size,
+    classification,
+    debugCapabilities,
+    pairedMapCandidates: [],
+    supportedOperations,
+  };
+}
+
+function pairMapCandidates(candidate: ArtifactCandidate, maps: readonly string[]): ArtifactCandidate {
+  if (candidate.format !== "elf") return candidate;
+  const stem = basename(candidate.path, extname(candidate.path)).toLowerCase();
+  return {
+    ...candidate,
+    pairedMapCandidates: maps.filter((path) => basename(path, extname(path)).toLowerCase() === stem),
+  };
+}
+
+function inspectElfDebugCapabilities(data: Buffer): ArtifactCandidate["debugCapabilities"] {
+  if (data.length < 16 || !data.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) return { dwarf: "absent" };
+  const elfClass = data[4] === 1 ? 32 : data[4] === 2 ? 64 : undefined;
+  const endian = data[5] === 1 ? "little" : data[5] === 2 ? "big" : undefined;
+  if (!elfClass || !endian) return { dwarf: "unknown" };
+  const read16 = endian === "little" ? Buffer.prototype.readUInt16LE : Buffer.prototype.readUInt16BE;
+  const read32 = endian === "little" ? Buffer.prototype.readUInt32LE : Buffer.prototype.readUInt32BE;
+  try {
+    const sectionOffset = elfClass === 32 ? read32.call(data, 32) : safeUInt64(data, 40, endian);
+    const sectionEntrySize = read16.call(data, elfClass === 32 ? 46 : 58);
+    const sectionCount = read16.call(data, elfClass === 32 ? 48 : 60);
+    const stringTableIndex = read16.call(data, elfClass === 32 ? 50 : 62);
+    if (sectionOffset === 0 || sectionCount === 0) return { dwarf: "unknown", elfClass, endian };
+    if (sectionEntrySize < (elfClass === 32 ? 40 : 64) || stringTableIndex >= sectionCount || sectionOffset + sectionEntrySize * sectionCount > data.length) {
+      return { dwarf: "unknown", elfClass, endian };
+    }
+    const stringHeader = sectionOffset + sectionEntrySize * stringTableIndex;
+    const stringOffset = elfClass === 32 ? read32.call(data, stringHeader + 16) : safeUInt64(data, stringHeader + 24, endian);
+    const stringSize = elfClass === 32 ? read32.call(data, stringHeader + 20) : safeUInt64(data, stringHeader + 32, endian);
+    if (stringOffset + stringSize > data.length) return { dwarf: "unknown", elfClass, endian };
+    let hasInfo = false;
+    let hasAbbrev = false;
+    for (let index = 0; index < sectionCount; index += 1) {
+      const header = sectionOffset + sectionEntrySize * index;
+      const nameOffset = read32.call(data, header);
+      if (nameOffset >= stringSize) continue;
+      const end = data.indexOf(0, stringOffset + nameOffset);
+      if (end < 0 || end > stringOffset + stringSize) continue;
+      const name = data.toString("utf8", stringOffset + nameOffset, end);
+      hasInfo ||= name === ".debug_info" || name === ".zdebug_info";
+      hasAbbrev ||= name === ".debug_abbrev" || name === ".zdebug_abbrev";
+    }
+    return { dwarf: hasInfo && hasAbbrev ? "present" : "absent", elfClass, endian };
+  } catch {
+    return { dwarf: "unknown", elfClass, endian };
+  }
+}
+
+function safeUInt64(data: Buffer, offset: number, endian: "little" | "big"): number {
+  const value = endian === "little" ? data.readBigUInt64LE(offset) : data.readBigUInt64BE(offset);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("ELF offset exceeds the safe integer range");
+  return Number(value);
+}
+
+function validateIntelHexBytes(data: Buffer, path: string): void {
+  const lines = data.toString("utf8").replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let eofSeen = false;
+  for (const line of lines) {
+    if (eofSeen || !/^:[0-9A-Fa-f]+$/.test(line) || (line.length - 1) % 2 !== 0) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "Intel HEX contains an invalid record", { path });
+    const bytes = Buffer.from(line.slice(1), "hex");
+    if (bytes.length < 5 || bytes.length !== bytes[0] + 5 || ![0, 1, 2, 3, 4, 5].includes(bytes[3])) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "Intel HEX record length or type is invalid", { path });
+    const expectedLengths: Record<number, number | undefined> = { 1: 0, 2: 2, 3: 4, 4: 2, 5: 4 };
+    const expectedLength = expectedLengths[bytes[3]];
+    if (expectedLength !== undefined && (bytes[0] !== expectedLength || bytes[1] !== 0 || bytes[2] !== 0)) {
+      throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "Intel HEX metadata record has an invalid address or length", { path });
+    }
+    if (bytes.reduce((sum, value) => (sum + value) & 0xff, 0) !== 0) throw new ArtifactCatalogError("FLASH_CHECKSUM_INVALID", "Intel HEX checksum validation failed", { path });
+    if (bytes[3] === 1) eofSeen = true;
+  }
+  if (!eofSeen) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "Intel HEX EOF record is missing", { path });
+}
+
+function validateSrecBytes(data: Buffer, path: string): void {
+  const lines = data.toString("utf8").replace(/^\uFEFF/, "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let dataSeen = false;
+  let terminationSeen = false;
+  for (const line of lines) {
+    if (terminationSeen) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "SREC contains records after its termination record", { path });
+    const match = line.match(/^S([0-9])([0-9A-Fa-f]+)$/);
+    if (!match || match[2].length % 2 !== 0) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "SREC contains an invalid record", { path });
+    const type = Number(match[1]);
+    if (type === 4) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "SREC type S4 is reserved", { path });
+    const bytes = Buffer.from(match[2], "hex");
+    const addressBytes = [0, 1, 5, 9].includes(type) ? 2 : [2, 6, 8].includes(type) ? 3 : 4;
+    if (bytes.length < addressBytes + 2 || bytes[0] !== bytes.length - 1) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "SREC record length is invalid", { path });
+    if ((bytes.reduce((sum, value) => sum + value, 0) & 0xff) !== 0xff) throw new ArtifactCatalogError("FLASH_CHECKSUM_INVALID", "SREC checksum validation failed", { path });
+    if ([1, 2, 3].includes(type)) dataSeen = true;
+    if ([7, 8, 9].includes(type)) terminationSeen = true;
+  }
+  if (!dataSeen || !terminationSeen) throw new ArtifactCatalogError("FLASH_FORMAT_INVALID", "SREC data or termination record is missing", { path });
 }
 
 function nonvolatileElfRanges(data: Buffer, nonvolatile: AddressRange[], ram: AddressRange[]): ArtifactMatchManifest["ranges"] {
@@ -305,7 +446,7 @@ function insideAny(address: number, length: number, ranges: AddressRange[]): boo
 
 async function existingProjectFile(input: string, projectRoot: string, maxBytes: number): Promise<string> {
   const path = await realpath(isAbsolute(input) ? input : resolve(projectRoot, input));
-  if (!insidePath(path, projectRoot)) throw new ArtifactCatalogError("ARTIFACT_PATH_INVALID", "artifact input escapes projectRoot", { path, projectRoot });
+  if (!isAbsolute(input) && !insidePath(path, projectRoot)) throw new ArtifactCatalogError("ARTIFACT_PATH_INVALID", "relative artifact input escapes projectRoot", { path, projectRoot });
   const info = await stat(path);
   if (!info.isFile() || info.size > maxBytes) throw new ArtifactCatalogError("ARTIFACT_PATH_INVALID", "artifact input is not a bounded regular file", { path, size: info.size, maxBytes });
   return path;
@@ -317,8 +458,8 @@ async function sha256Bounded(path: string, maxBytes: number): Promise<string> {
   return sha256(await readFile(path));
 }
 
-function generationHash(input: { path: string; format: ArtifactFormat; sha256: string; mapPath?: string; mapSha256?: string }): string {
-  return sha256(Buffer.from(JSON.stringify(input), "utf8"));
+export function computeArtifactGeneration(artifactSha256: string, mapSha256?: string): string {
+  return sha256(Buffer.from(JSON.stringify({ artifactSha256: artifactSha256.toLowerCase(), mapSha256: mapSha256?.toLowerCase() ?? null }), "utf8"));
 }
 
 function sha256(data: Buffer): string {
