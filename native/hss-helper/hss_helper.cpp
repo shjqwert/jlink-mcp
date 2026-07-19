@@ -1011,13 +1011,16 @@ static bool hss_capture_failed(bool crashed, uint64_t emitted_samples) {
   return crashed || emitted_samples == 0;
 }
 
+static uint64_t hss_timeline_tolerance_slots(uint64_t requested_samples) {
+  return requested_samples / 1000U;
+}
+
 static bool should_attempt_memory_restore(bool write_mode, bool restore_requested, bool old_read_failed, size_t old_size, size_t write_elements_issued) {
   return write_mode && restore_requested && !old_read_failed && old_size > 0 && write_elements_issued > 0;
 }
 
 enum class HssSampleDecision {
   emit,
-  duplicate,
   invalid,
 };
 
@@ -1029,6 +1032,8 @@ struct HssRecordSequence {
   uint32_t lastSampleIndex = 0;
   uint64_t emittedSamples = 0;
   uint64_t duplicateSamples = 0;
+  uint64_t timestampGapEvents = 0;
+  uint64_t timestampGapSlots = 0;
   uint64_t droppedSamples = 0;
 };
 
@@ -1043,34 +1048,46 @@ static HssSampleDecision observe_hss_sample(HssRecordSequence* sequence, uint32_
     sequence->invalid = true;
     return HssSampleDecision::invalid;
   }
-  *sample_index = static_cast<uint32_t>(normalized);
+  if (sequence->emittedSamples > (std::numeric_limits<uint32_t>::max)()) {
+    sequence->invalid = true;
+    return HssSampleDecision::invalid;
+  }
+  *sample_index = static_cast<uint32_t>(sequence->emittedSamples);
   if (sequence->hasSample) {
     if (timestamp_ms < sequence->lastTimestampMs) {
       sequence->invalid = true;
       return HssSampleDecision::invalid;
     }
-    if (*sample_index == sequence->lastSampleIndex) {
-      sequence->lastTimestampMs = timestamp_ms;
+    if (normalized == sequence->lastSampleIndex) {
       ++sequence->duplicateSamples;
-      return HssSampleDecision::duplicate;
-    }
-    if (*sample_index < sequence->lastSampleIndex) {
+    } else if (normalized < sequence->lastSampleIndex) {
       sequence->invalid = true;
       return HssSampleDecision::invalid;
-    }
-    const uint64_t missing = static_cast<uint64_t>(*sample_index) - static_cast<uint64_t>(sequence->lastSampleIndex) - 1U;
-    if (missing > 0) {
-      sequence->droppedSamples += missing;
+    } else if (normalized > static_cast<uint64_t>(sequence->lastSampleIndex) + 1U) {
+      ++sequence->timestampGapEvents;
+      sequence->timestampGapSlots += normalized - static_cast<uint64_t>(sequence->lastSampleIndex) - 1U;
       *status_flags |= 1U << 4;
     }
   } else {
     sequence->hasSample = true;
-    sequence->firstSampleIndex = *sample_index;
+    sequence->firstSampleIndex = static_cast<uint32_t>(normalized);
   }
   sequence->lastTimestampMs = timestamp_ms;
-  sequence->lastSampleIndex = *sample_index;
+  sequence->lastSampleIndex = static_cast<uint32_t>(normalized);
   ++sequence->emittedSamples;
+  const uint64_t observed_slots = static_cast<uint64_t>(sequence->lastSampleIndex) - static_cast<uint64_t>(sequence->firstSampleIndex) + 1U;
+  sequence->droppedSamples = observed_slots > sequence->emittedSamples ? observed_slots - sequence->emittedSamples : 0;
   return HssSampleDecision::emit;
+}
+
+static bool hss_timeline_quality_reportable(
+    bool duration_validated,
+    bool sample_threshold_met,
+    uint64_t missing_samples,
+    const HssRecordSequence& sequence) {
+  return duration_validated && sample_threshold_met && missing_samples == 0
+    && sequence.droppedSamples == 0 && sequence.duplicateSamples == 0
+    && sequence.timestampGapEvents == 0 && !sequence.invalid;
 }
 
 static bool hss_capture_sample_evidence_validated(bool stop_requested, uint64_t read_attempts, uint64_t decoded_samples) {
@@ -1080,7 +1097,7 @@ static bool hss_capture_sample_evidence_validated(bool stop_requested, uint64_t 
 static bool hss_terminal_sequence_validated(bool stop_requested, const HssRecordSequence& sequence, uint64_t decoded_samples) {
   if (sequence.invalid) return false;
   if (sequence.emittedSamples == 0) return stop_requested && decoded_samples == 0 && sequence.duplicateSamples == 0;
-  return decoded_samples == sequence.emittedSamples + sequence.duplicateSamples;
+  return decoded_samples == sequence.emittedSamples;
 }
 
 enum class PostConnectDecision {
@@ -2962,6 +2979,12 @@ static int self_test() {
     error_json("HSS_SELF_TEST_WRITE_RETRY_FAILED", "a crashed typed write was retried through JLINKARM_WriteMem");
     return 0;
   }
+  if (hss_timeline_tolerance_slots(60000) != 60
+      || hss_timeline_tolerance_slots(1999) != 1
+      || hss_timeline_tolerance_slots(999) != 0) {
+    error_json("HSS_SELF_TEST_TIMELINE_TOLERANCE_FAILED", "HSS millisecond timeline drift tolerance did not preserve its strict 0.1 percent bound");
+    return 0;
+  }
   if (!should_attempt_memory_restore(true, true, false, 8, 2)
       || should_attempt_memory_restore(true, true, false, 8, 0)
       || should_attempt_memory_restore(true, false, false, 8, 2)
@@ -3027,10 +3050,13 @@ static int self_test() {
   HssRecordSequence normal_sequence;
   uint32_t normal_flags = 0;
   uint32_t normalized_index = 0;
-  if (observe_hss_sample(&normal_sequence, 84U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 84U
-      || observe_hss_sample(&normal_sequence, 85U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 85U
-      || observe_hss_sample(&normal_sequence, 86U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 86U
-      || normal_sequence.emittedSamples != 3 || normal_sequence.duplicateSamples != 0 || normal_sequence.droppedSamples != 0 || normal_sequence.invalid) {
+  if (observe_hss_sample(&normal_sequence, 84U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 0U
+      || observe_hss_sample(&normal_sequence, 85U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 1U
+      || observe_hss_sample(&normal_sequence, 86U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 2U
+      || normal_sequence.emittedSamples != 3 || normal_sequence.duplicateSamples != 0
+      || normal_sequence.timestampGapEvents != 0 || normal_sequence.timestampGapSlots != 0
+      || normal_sequence.droppedSamples != 0 || normal_sequence.invalid
+      || !hss_timeline_quality_reportable(true, true, 0, normal_sequence)) {
     error_json("HSS_SELF_TEST_RECORD_SEQUENCE_FAILED", "normal HSS record sequence classification failed");
     return 0;
   }
@@ -3045,7 +3071,7 @@ static int self_test() {
   }
   HssRecordSequence lower_rate_decreasing_sequence;
   uint32_t lower_rate_decreasing_flags = 0;
-  if (observe_hss_sample(&lower_rate_decreasing_sequence, 10U, 100, &lower_rate_decreasing_flags, &normalized_index) != HssSampleDecision::emit || normalized_index != 1U
+  if (observe_hss_sample(&lower_rate_decreasing_sequence, 10U, 100, &lower_rate_decreasing_flags, &normalized_index) != HssSampleDecision::emit || normalized_index != 0U
       || observe_hss_sample(&lower_rate_decreasing_sequence, 9U, 100, &lower_rate_decreasing_flags, &normalized_index) != HssSampleDecision::invalid
       || !lower_rate_decreasing_sequence.invalid || lower_rate_decreasing_sequence.duplicateSamples != 0) {
     error_json("HSS_SELF_TEST_RECORD_RAW_TIME_DECREASING_FAILED", "decreasing raw HSS millisecond headers were hidden by sample-index normalization");
@@ -3053,11 +3079,24 @@ static int self_test() {
   }
   HssRecordSequence gap_sequence;
   uint32_t gap_flags = 0;
-  if (observe_hss_sample(&gap_sequence, 86U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::emit || gap_flags != 1U
-      || observe_hss_sample(&gap_sequence, 88U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::emit || gap_flags != (1U | (1U << 4))
-      || observe_hss_sample(&gap_sequence, 88U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::duplicate
-      || gap_sequence.emittedSamples != 2 || gap_sequence.duplicateSamples != 1 || gap_sequence.droppedSamples != 1 || gap_sequence.invalid) {
-    error_json("HSS_SELF_TEST_RECORD_GAP_FAILED", "HSS gap and duplicate classification failed");
+  if (observe_hss_sample(&gap_sequence, 86U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::emit || gap_flags != 1U || normalized_index != 0U
+      || observe_hss_sample(&gap_sequence, 88U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::emit || gap_flags != (1U | (1U << 4)) || normalized_index != 1U
+      || observe_hss_sample(&gap_sequence, 88U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::emit || gap_flags != 1U || normalized_index != 2U
+      || gap_sequence.emittedSamples != 3 || gap_sequence.duplicateSamples != 1
+      || gap_sequence.timestampGapEvents != 1 || gap_sequence.timestampGapSlots != 1
+      || gap_sequence.droppedSamples != 0 || gap_sequence.invalid
+      || hss_timeline_quality_reportable(true, true, 0, gap_sequence)) {
+    error_json("HSS_SELF_TEST_RECORD_GAP_FAILED", "HSS quantized timestamp collision did not preserve every returned frame or reconcile net timeline loss");
+    return 0;
+  }
+  HssRecordSequence unresolved_gap_sequence;
+  uint32_t unresolved_gap_flags = 0;
+  if (observe_hss_sample(&unresolved_gap_sequence, 86U, 1000, &unresolved_gap_flags, &normalized_index) != HssSampleDecision::emit
+      || observe_hss_sample(&unresolved_gap_sequence, 88U, 1000, &unresolved_gap_flags, &normalized_index) != HssSampleDecision::emit
+      || unresolved_gap_sequence.timestampGapEvents != 1 || unresolved_gap_sequence.timestampGapSlots != 1
+      || unresolved_gap_sequence.droppedSamples != 1
+      || hss_timeline_quality_reportable(true, true, 0, unresolved_gap_sequence)) {
+    error_json("HSS_SELF_TEST_RECORD_UNRESOLVED_GAP_FAILED", "HSS timestamp gaps were incorrectly promoted to complete loss evidence");
     return 0;
   }
   HssRecordSequence decreasing_sequence;
@@ -4670,11 +4709,6 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       HssRecordSequence candidate_sequence = record_sequence;
       uint32_t normalized_sample_index = 0;
       const HssSampleDecision decision = observe_hss_sample(&candidate_sequence, hss_sample_index, requested_rate, &status_flags, &normalized_sample_index);
-      if (decision == HssSampleDecision::duplicate) {
-        record_sequence = candidate_sequence;
-        ++decoded_samples;
-        continue;
-      }
       if (decision == HssSampleDecision::invalid) {
         record_sequence = candidate_sequence;
         ++decoded_samples;
@@ -4732,6 +4766,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const double payload_changed_ratio = read_attempts > 0 ? static_cast<double>(payload_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const bool read_failed = !stop_requested && hss_capture_failed(read_crashed, record_sequence.emittedSamples);
   const uint64_t missing_samples = record_sequence.emittedSamples < requested_samples ? requested_samples - record_sequence.emittedSamples : 0;
+  const uint64_t timeline_slot_deficit = record_sequence.droppedSamples;
+  const uint64_t timeline_tolerance_slots = hss_timeline_tolerance_slots(requested_samples);
   const bool duration_validated = elapsed_ns >= planned_duration_ns;
   const bool sample_threshold_met = record_sequence.emittedSamples * 100ULL >= requested_samples * 95ULL;
   const bool lifecycle_validated = start_rc >= 0 && stop_rc >= 0
@@ -4740,8 +4776,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const bool decoder_semantics_validated = hss_terminal_sequence_validated(stop_requested, record_sequence, decoded_samples)
     && (stop_requested || budget_exhausted || (duration_validated && sample_threshold_met))
     && read_errors == 0 && !raw_write_failed;
-  const bool complete_contiguous_sequence = duration_validated && sample_threshold_met && missing_samples == 0
-    && record_sequence.droppedSamples == 0 && !record_sequence.invalid;
+  const bool timeline_quality_reported = hss_timeline_quality_reportable(
+    duration_validated,
+    sample_threshold_met,
+    missing_samples,
+    record_sequence);
   const bool validation_failed = read_failed || raw_write_failed || ipc_response_write_failed || ready_journal_write_failed || !lifecycle_validated || !decoder_semantics_validated;
   std::cout
     << "{\"record\":\"result\",\"status\":\"" << (validation_failed ? "error" : stop_requested || budget_exhausted ? "stopped" : "ok") << "\"";
@@ -4780,10 +4819,12 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
      << ",\"samplesSha256\":\"" << samples_sha256 << "\""
      << ",\"hssStartIssued\":true,\"rawOpened\":true"
      << ",\"rawClosed\":" << (raw_closed ? "true" : "false")
-     << ",\"validSamples\":" << valid_samples
-     << ",\"emittedSamples\":" << record_sequence.emittedSamples
-     << ",\"duplicateSamples\":" << record_sequence.duplicateSamples
-     << ",\"readErrors\":" << read_errors
+      << ",\"validSamples\":" << valid_samples
+      << ",\"emittedSamples\":" << record_sequence.emittedSamples
+      << ",\"duplicateSamples\":" << record_sequence.duplicateSamples
+      << ",\"timestampGapEvents\":" << record_sequence.timestampGapEvents
+      << ",\"timestampGapSlots\":" << record_sequence.timestampGapSlots
+      << ",\"readErrors\":" << read_errors
     << ",\"hssBlockCount\":" << blocks.size()
     << ",\"hssSampleHeaderBytes\":" << hss_sample_header_bytes
     << ",\"hssSampleStrideBytes\":" << hss_sample_stride_bytes
@@ -4827,11 +4868,21 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadChangedRatio\":" << payload_changed_ratio
     << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
-     << ",\"qualityStatus\":\"" << (complete_contiguous_sequence ? "reported" : "partial")
-     << "\",\"timeouts\":0,\"overflows\":" << (complete_contiguous_sequence ? "0" : "null") << ",\"droppedSamples\":" << record_sequence.droppedSamples
-     << ",\"qualityEvidence\":{\"missingSamples\":\"derived_from_planned_minus_emitted\",\"droppedSamples\":\"derived_from_normalized_HSS_millisecond_header_gaps\",\"overflows\":\""
-     << (complete_contiguous_sequence ? "derived_zero_from_complete_contiguous_sequence" : "not_distinguishable_from_incomplete_sequence")
-     << "\",\"readErrors\":\"measured_from_read_results\",\"timeouts\":\"bounded_capture_loop_reported_no_timeout\"}"
+      << ",\"qualityStatus\":\"" << (timeline_quality_reported ? "reported" : "partial")
+      << "\",\"timeouts\":0,\"overflows\":" << (timeline_quality_reported ? "0" : "null")
+      << ",\"droppedSamples\":" << (timeline_quality_reported ? "0" : "null")
+      << ",\"timelineSlotDeficit\":" << timeline_slot_deficit
+      << ",\"timelineToleranceSlots\":" << timeline_tolerance_slots
+      << ",\"qualityEvidence\":{\"missingSamples\":\"derived_from_planned_minus_emitted\",\"droppedSamples\":\""
+      << (timeline_quality_reported ? "zero_from_complete_contiguous_timeline" : "not_reported_without_unambiguous_timeline_and_overflow_evidence")
+      << "\",\"timelineSlotDeficit\":" << timeline_slot_deficit
+      << ",\"timelineToleranceSlots\":" << timeline_tolerance_slots
+      << ",\"timestampCollisionEvents\":" << record_sequence.duplicateSamples
+      << ",\"timestampGapEvents\":" << record_sequence.timestampGapEvents
+      << ",\"timestampGapSlots\":" << record_sequence.timestampGapSlots
+      << ",\"overflowEvidenceSource\":\"candidate_api_exposes_no_overflow_counter\",\"overflows\":\""
+      << (timeline_quality_reported ? "zero_from_complete_contiguous_timeline" : "not_reported_without_independent_overflow_evidence")
+      << "\",\"readErrors\":\"measured_from_read_results\",\"timeouts\":\"bounded_capture_loop_reported_no_timeout\"}"
      << ",\"durationValidated\":" << (duration_validated ? "true" : "false")
      << ",\"sampleThresholdMet\":" << (sample_threshold_met ? "true" : "false");
   write_post_connect_evidence(post_connect_evidence);
@@ -4840,7 +4891,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"targetReset\":false,\"targetWritten\":" << (target_written ? "true" : "false")
     << ",\"stateUnknown\":" << (target_write_unknown || (ipc_response_write_failed && target_written) ? "true" : "false")
     << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
-     << ",\"segment\":{\"file\":\"samples.bin\",\"sampleStart\":" << (record_sequence.hasSample ? record_sequence.firstSampleIndex : 0)
+     << ",\"segment\":{\"file\":\"samples.bin\",\"sampleStart\":0"
      << ",\"sampleCount\":" << sample_count
     << ",\"sha256\":\"" << samples_sha256 << "\"},\"stopReturnCode\":" << stop_rc << "}";
   return 0;

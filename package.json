@@ -56,7 +56,7 @@
     "test:elf": "npm run compile && node scripts/test-elf.mjs",
     "test:rtt-channel": "npm run compile && node --test out/mcp/rtt-channel/rtt-channel.test.js",
     "test:hss-contract": "npm run compile && node scripts/run-tests.mjs out/mcp/hss-dll/hss-api-candidate.test.js",
-    "test:hss-helper": "npm run build:hss && native\\hss-helper\\bin\\hss_helper.exe self-test",
+    "test:hss-helper": "npm run build:hss && node scripts/test-hss-helper.mjs",
     "test:jcap": "npm run build && node --test out/mcp/sqlite-runtime.test.js out/mcp/jcap/jcap-v0.test.js out/mcp/jcap/jcap-v1.test.js"
   },
   "dependencies": {

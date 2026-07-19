@@ -53,10 +53,10 @@
 
 - [x] 6.1 Revalidate the frozen board, Probe, project, Artifact manifest, flash image association, recovery method, and explicit erase permission without mutating the target.
 - [x] 6.2 Execute T12 flash plus verify first to establish a verified live Artifact generation, recording all vendor side effects and final target state.
-- [ ] 6.3 Execute applicable T03-T11 hardware cases in dependency order and record honest PASS, FAIL, BLOCKED, SKIPPED_WITH_REASON, or NOT_TESTED results.
-- [ ] 6.4 Execute T14 Smoke at four variables, 100 Hz, 10 seconds and T14 Full at ten variables, 1 kHz, 60 seconds with at least 57,000 frames and explicit loss/overflow counts.
-- [ ] 6.5 Execute T15 for 60 seconds, writing `0x13579BDF` near 20 seconds and restoring the captured old value near 40 seconds with verified interval events.
-- [ ] 6.6 Execute T16-T20 recovery, integrity, rebuild, query, and end-to-end cases against local ignored evidence.
+- [x] 6.3 Execute applicable T03-T11 hardware cases in dependency order and record honest PASS, FAIL, BLOCKED, SKIPPED_WITH_REASON, or NOT_TESTED results.
+- [x] 6.4 Execute T14 Smoke at four variables, 100 Hz, 10 seconds and T14 Full at ten variables, 1 kHz, 60 seconds with at least 57,000 frames and explicit loss/overflow counts.
+- [x] 6.5 Execute T15 for 60 seconds, writing `0x13579BDF` near 20 seconds and restoring the captured old value near 40 seconds with verified interval events.
+- [x] 6.6 Execute T16-T20 recovery, integrity, rebuild, query, and end-to-end cases against local ignored evidence.
 - [x] 6.7 Execute T13 only with `allowErase=true`, immediately flash/verify the associated S19, and explicitly restore execution; otherwise record SKIPPED_WITH_REASON.
-- [ ] 6.8 Keep exact-Z20K146M SVD cases BLOCKED until a validated SVD is configured, and never count raw memory access as SVD coverage.
-- [ ] 6.9 Produce the local Acceptance Index and Issue Ledger and recommend merge only when every applicable T01-T20 case passes and no P0 remains open.
+- [x] 6.8 Keep exact-Z20K146M SVD cases BLOCKED until a validated SVD is configured, and never count raw memory access as SVD coverage.
+- [x] 6.9 Produce the local Acceptance Index and Issue Ledger and recommend merge only when every applicable T01-T20 case passes and no P0 remains open.
