@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
@@ -9,7 +9,8 @@ import {
   type GDBServerInfo,
   type TargetStateObservation,
 } from "../../probe/backend";
-import { DirectMcuService } from "./direct-operations";
+import { repoTempRoot } from "../preflight/temp-preflight";
+import { DirectMcuService, removeFlashSnapshotDirectory, type FlashSnapshotCleanup } from "./direct-operations";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore } from "./target-store";
 
@@ -401,6 +402,61 @@ test("flash rejects raw BIN without baseAddress before hardware issue", async (c
   assert.equal(result.error?.code, "BASE_ADDRESS_REQUIRED");
   assert.equal(result.error?.writeIssued, false);
   assert.deepEqual(probe.actions, []);
+});
+
+test("flash snapshots its immutable execution input under the repo-local temp root", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "flash-repo-temp");
+  const imagePath = join(projectRoot, "image.bin");
+  writeFileSync(imagePath, Buffer.from([1, 2, 3, 4]));
+
+  const result = await service.flash({ projectRoot, path: imagePath, baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, true);
+  assert.equal(probe.flashPaths.length, 1);
+  assert.ok(probe.flashPaths[0].startsWith(join(repoTempRoot(), "flash-")));
+  assert.notEqual(probe.flashPaths[0], imagePath);
+});
+
+test("flash snapshot cleanup retries transient sharing violations and returns persistent failures", async () => {
+  let attempts = 0;
+  const transient = await removeFlashSnapshotDirectory("ignored", {
+    retryDelaysMs: [0, 0],
+    remove: () => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error("sharing violation"), { code: "EPERM" });
+    },
+  });
+  assert.equal(transient, undefined);
+  assert.equal(attempts, 3);
+
+  attempts = 0;
+  const persistent = await removeFlashSnapshotDirectory("ignored", {
+    retryDelaysMs: [0, 0],
+    remove: () => {
+      attempts += 1;
+      throw Object.assign(new Error("still shared"), { code: "EPERM" });
+    },
+  });
+  assert.equal((persistent as NodeJS.ErrnoException).code, "EPERM");
+  assert.equal(attempts, 3);
+});
+
+test("flash cleanup failure cannot replace a verified hardware result", async (context) => {
+  const cleanup: FlashSnapshotCleanup = async (snapshotRoot) => {
+    rmSync(snapshotRoot, { recursive: true, force: true });
+    throw Object.assign(new Error("simulated cleanup sharing violation"), { code: "EPERM" });
+  };
+  const { service, probe, projectRoot } = await fixture(context, "flash-cleanup-warning", cleanup);
+  const imagePath = join(projectRoot, "image.bin");
+  writeFileSync(imagePath, Buffer.from([1, 2, 3, 4]));
+
+  const result = await service.flash({ projectRoot, path: imagePath, baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.verification.status, "verified");
+  assert.deepEqual(result.observedEffects, ["flash_program_issued", "vendor_verification_succeeded"]);
+  assert.match(result.warnings.join("\n"), /cleanup failed.*hardware result remains authoritative/i);
+  assert.equal(probe.flashPaths.length, 1);
 });
 
 test("flash reports unknown and known vendor target-state changes without auto-recovery", async (context) => {
@@ -804,7 +860,7 @@ test("structured hidden target drift preserves restore uncertainty", async (cont
   assert.equal((result.data as { restore: { status: string } }).restore.status, "uncertain");
 });
 
-async function fixture(context: TestContext, name: string): Promise<{ service: DirectMcuService; probe: FakeProbe; targets: TargetStore; queue: ProbeQueue; projectRoot: string }> {
+async function fixture(context: TestContext, name: string, cleanupFlashSnapshot?: FlashSnapshotCleanup): Promise<{ service: DirectMcuService; probe: FakeProbe; targets: TargetStore; queue: ProbeQueue; projectRoot: string }> {
   const root = testDirectory(context, name);
   const projectRoot = join(root, "project");
   mkdirSync(projectRoot, { recursive: true });
@@ -812,7 +868,7 @@ async function fixture(context: TestContext, name: string): Promise<{ service: D
   await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
   const probe = new FakeProbe();
   const queue = new ProbeQueue(join(root, "queue"));
-  const service = new DirectMcuService(targets, queue, async () => ({ probe }));
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), cleanupFlashSnapshot);
   return { service, probe, targets, queue, projectRoot };
 }
 
@@ -834,6 +890,7 @@ class FakeProbe extends ProbeBackend {
   writeMemoryResults: CommandResult[] = [];
   writeRegisterReject?: Error;
   rawResult: CommandResult = ok();
+  flashPaths: string[] = [];
   readResult?: CommandResult;
   readMemoryReject?: Error;
   readAccessSizes: Array<1 | 2 | 4 | undefined> = [];
@@ -893,7 +950,7 @@ class FakeProbe extends ProbeBackend {
     if (this.writeRegisterReject) throw this.writeRegisterReject;
     return ok();
   }
-  async flash(filePath: string, baseAddress?: number): Promise<CommandResult> { this.actions.push(`flash:${filePath}:${baseAddress ?? "embedded"}`); return ok(); }
+  async flash(filePath: string, baseAddress?: number): Promise<CommandResult> { this.flashPaths.push(filePath); this.actions.push(`flash:${filePath}:${baseAddress ?? "embedded"}`); return ok(); }
   async erase(): Promise<CommandResult> { this.actions.push("erase"); return ok(); }
   async setBreakpoint(): Promise<CommandResult> { return ok(); }
   async clearBreakpoints(): Promise<CommandResult> { return ok(); }

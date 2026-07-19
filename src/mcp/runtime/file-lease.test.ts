@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { withDirectoryLease } from "./file-lease";
 
-test("directory lease retries one ambiguous EPERM and publishes when no contender exists", async (context) => {
+test("directory lease uses bounded backoff for transient EPERM and publishes when no contender exists", async (context) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "jlink-file-lease-"));
   const lockPath = path.join(root, "capture.lock");
   const rename = fs.renameSync;
@@ -13,14 +13,14 @@ test("directory lease retries one ambiguous EPERM and publishes when no contende
   context.mock.method(fs, "renameSync", (source: PathLike, destination: PathLike) => {
     if (path.resolve(String(destination)) === path.resolve(lockPath)) {
       publishAttempts += 1;
-      if (publishAttempts === 1) throw Object.assign(new Error("transient publish contention"), { code: "EPERM" });
+      if (publishAttempts <= 3) throw Object.assign(new Error("transient publish contention"), { code: "EPERM" });
     }
     return rename(source, destination);
   });
   try {
     const result = await withDirectoryLease(lockPath, async () => "acquired", { timeoutMs: 0 });
     assert.equal(result, "acquired");
-    assert.equal(publishAttempts, 2);
+    assert.equal(publishAttempts, 4);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -45,7 +45,7 @@ test("directory lease propagates a persistent EPERM when no contender exists", a
       (error: NodeJS.ErrnoException) => error.code === "EPERM",
     );
     assert.equal(operationCalled, false);
-    assert.equal(publishAttempts, 2);
+    assert.equal(publishAttempts, 8);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

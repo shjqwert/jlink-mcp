@@ -59,6 +59,18 @@ The existing local Offline UI source is retained for compatibility. It is intent
 
 Generated captures, exports, acceptance evidence, environment details, local project paths, Probe serial numbers, and Artifact hashes belong under ignored `test-output/` storage and must not be committed or pushed.
 
+Without `runId`, ordinary operations return only their structured response, HSS packages use `test-output/captures/`, and explicit CSV exports use `test-output/exports/`. Every tool accepts an optional validated `runId`; when present, its exact request and result envelope are appended to `test-output/<runId>/commands.ndjson`.
+
+Run the software and simulated acceptance gate with a new immutable run ID:
+
+```powershell
+npm run acceptance:software -- --run-id <run-id>
+```
+
+Optional local-only arguments are `--project-root <path>`, `--artifact <path>`, `--allow-erase`, and `--svd-available`. The software runner never connects to or mutates hardware. It always emits all T01-T20 entries using only `PASS`, `FAIL`, `BLOCKED`, `SKIPPED_WITH_REASON`, or `NOT_TESTED`, and it does not recommend merge while hardware dependencies remain incomplete.
+
+See [Agent-first acceptance](docs/agent-first-acceptance.md) for the evidence layout, direct-tool rules, hardware ordering, and JCAP validation workflow.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

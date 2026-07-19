@@ -41,22 +41,22 @@
 
 ## 5. Add the Agent-First Acceptance Suite (Commit 6)
 
-- [ ] 5.1 Add ignored `test-output/` layout and output routing for no-run captures/exports and explicit immutable `runId` evidence directories.
-- [ ] 5.2 Add environment, precondition, acceptance-index, issue-ledger, command, manifest, log, hash, and test-result schemas using only the fixed acceptance status vocabulary.
-- [ ] 5.3 Automate software and simulated portions of T01-T11, including exact surface scans, Artifact/variable failures, no-hidden-side-effect checks, queue concurrency, and CPU control.
-- [ ] 5.4 Automate simulated and package-format portions of T12-T19, including flash/erase failure paths, HSS smoke/full shapes, write events, interruption, Raw integrity, rebuild equivalence, and bounded CSV export.
-- [ ] 5.5 Add the dependency-aware T20 Agent debugging-loop runner with project manifest preservation and full commit/Artifact/environment provenance.
-- [ ] 5.6 Update current user and Agent documentation for direct tools, explicit prerequisites, JCAP v1, local evidence, and the deliberate Offline UI non-scope.
-- [ ] 5.7 Pass install/build/lint/unit/simulated integration/acceptance-schema checks and verify generated evidence remains ignored before the Commit 6 push.
+- [x] 5.1 Add ignored `test-output/` layout and output routing for no-run captures/exports and explicit immutable `runId` evidence directories.
+- [x] 5.2 Add environment, precondition, acceptance-index, issue-ledger, command, manifest, log, hash, and test-result schemas using only the fixed acceptance status vocabulary.
+- [x] 5.3 Automate software and simulated portions of T01-T11, including exact surface scans, Artifact/variable failures, no-hidden-side-effect checks, queue concurrency, and CPU control.
+- [x] 5.4 Automate simulated and package-format portions of T12-T19, including flash/erase failure paths, HSS smoke/full shapes, write events, interruption, Raw integrity, rebuild equivalence, and bounded CSV export.
+- [x] 5.5 Add the dependency-aware T20 Agent debugging-loop runner with project manifest preservation and full commit/Artifact/environment provenance.
+- [x] 5.6 Update current user and Agent documentation for direct tools, explicit prerequisites, JCAP v1, local evidence, and the deliberate Offline UI non-scope.
+- [x] 5.7 Pass install/build/lint/unit/simulated integration/acceptance-schema checks and verify generated evidence remains ignored before the Commit 6 push.
 
 ## 6. Execute Local Hardware Acceptance (No Commit 7)
 
-- [ ] 6.1 Revalidate the frozen board, Probe, project, Artifact manifest, flash image association, recovery method, and explicit erase permission without mutating the target.
-- [ ] 6.2 Execute T12 flash plus verify first to establish a verified live Artifact generation, recording all vendor side effects and final target state.
+- [x] 6.1 Revalidate the frozen board, Probe, project, Artifact manifest, flash image association, recovery method, and explicit erase permission without mutating the target.
+- [x] 6.2 Execute T12 flash plus verify first to establish a verified live Artifact generation, recording all vendor side effects and final target state.
 - [ ] 6.3 Execute applicable T03-T11 hardware cases in dependency order and record honest PASS, FAIL, BLOCKED, SKIPPED_WITH_REASON, or NOT_TESTED results.
 - [ ] 6.4 Execute T14 Smoke at four variables, 100 Hz, 10 seconds and T14 Full at ten variables, 1 kHz, 60 seconds with at least 57,000 frames and explicit loss/overflow counts.
 - [ ] 6.5 Execute T15 for 60 seconds, writing `0x13579BDF` near 20 seconds and restoring the captured old value near 40 seconds with verified interval events.
 - [ ] 6.6 Execute T16-T20 recovery, integrity, rebuild, query, and end-to-end cases against local ignored evidence.
-- [ ] 6.7 Execute T13 only with `allowErase=true`, immediately flash/verify the associated S19, and explicitly restore execution; otherwise record SKIPPED_WITH_REASON.
+- [x] 6.7 Execute T13 only with `allowErase=true`, immediately flash/verify the associated S19, and explicitly restore execution; otherwise record SKIPPED_WITH_REASON.
 - [ ] 6.8 Keep exact-Z20K146M SVD cases BLOCKED until a validated SVD is configured, and never count raw memory access as SVD coverage.
 - [ ] 6.9 Produce the local Acceptance Index and Issue Ledger and recommend merge only when every applicable T01-T20 case passes and no P0 remains open.

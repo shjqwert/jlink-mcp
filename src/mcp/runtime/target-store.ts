@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { atomicReplaceSync } from "../../utils/atomic-file";
 import { computeArtifactGeneration } from "../artifact/artifact-catalog";
 import { canonicalProbeSerial, ProbeIdentityError } from "./probe-identity";
 
@@ -351,8 +352,12 @@ export class TargetStore {
 
   private writeDocument(document: TargetStoreDocument): void {
     const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-    renameSync(temporary, this.filePath);
+    try {
+      writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+      atomicReplaceSync(temporary, this.filePath);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
   }
 
   private async withLock<T>(fn: () => Promise<T>): Promise<T> {

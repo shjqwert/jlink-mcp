@@ -8,7 +8,6 @@ import {
   readFileSync,
   readSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -17,6 +16,7 @@ import {
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import sqlite3 from "sqlite3";
+import { atomicReplaceSync } from "../../utils/atomic-file";
 import {
   ANALYSIS_V0_MAX_POINTS,
   analyzeJcapV0,
@@ -33,6 +33,7 @@ export const JCAP_STATUS = "stable" as const;
 
 export type JcapV1CaptureState = "active" | "finalizing" | "completed" | "stopped" | "interrupted" | "failed";
 export type JcapV1IndexStatus = "absent" | "building" | "ready" | "rebuild_required" | "failed";
+export type JcapRunMutationGuard = <T>(runId: string, operation: () => Promise<T>) => Promise<T>;
 
 export interface JcapV1Provenance {
   captureId: string;
@@ -323,7 +324,7 @@ export function finalizeJcapV1Metadata(
 export class JcapV1QueryService {
   private readonly rootDir: string;
 
-  constructor(rootDir: string) {
+  constructor(rootDir: string, private readonly guardRunMutation?: JcapRunMutationGuard) {
     this.rootDir = path.resolve(rootDir);
   }
 
@@ -355,7 +356,11 @@ export class JcapV1QueryService {
 
   async analysisRun(input: AnalysisV0RunRequest): Promise<Record<string, unknown>> {
     validateAnalysisRunInput(input);
-    const packageDir = this.packageFor(input.captureId);
+    const location = this.locationFor(input.captureId);
+    return this.mutate(location, () => this.analysisRunPackage(input, location.packageDir));
+  }
+
+  private async analysisRunPackage(input: AnalysisV0RunRequest, packageDir: string): Promise<Record<string, unknown>> {
     const status = await verifyJcapV1Index(packageDir);
     const unavailable = readinessResponse(status, true);
     if (unavailable) return unavailable;
@@ -404,23 +409,35 @@ export class JcapV1QueryService {
   }
 
   async rebuild(input: { captureId: string }): Promise<Record<string, unknown>> {
-    const packageDir = this.packageFor(input.captureId);
-    const status = await verifyJcapV1Index(packageDir);
-    if (["active", "finalizing"].includes(status.captureState)) return { status: "not_ready", ...status };
-    return rebuildJcapV1Index(packageDir);
+    const location = this.locationFor(input.captureId);
+    return this.mutate(location, async () => {
+      const status = await verifyJcapV1Index(location.packageDir);
+      if (["active", "finalizing"].includes(status.captureState)) return { status: "not_ready", ...status };
+      return rebuildJcapV1Index(location.packageDir);
+    });
   }
 
   async exportCsv(input: { captureId: string }): Promise<Record<string, unknown>> {
-    const packageDir = this.packageFor(input.captureId);
-    const status = await verifyJcapV1Index(packageDir);
-    const unavailable = readinessResponse(status, true);
-    const owningRoot = path.dirname(path.dirname(packageDir));
-    return unavailable ?? { ...status, ...await jcapCaptureExportCsv(packageDir, path.join(owningRoot, "exports")) };
+    const location = this.locationFor(input.captureId);
+    return this.mutate(location, async () => {
+      const status = await verifyJcapV1Index(location.packageDir);
+      const unavailable = readinessResponse(status, true);
+      const owningRoot = path.dirname(path.dirname(location.packageDir));
+      return unavailable ?? { ...status, ...await jcapCaptureExportCsv(location.packageDir, path.join(owningRoot, "exports")) };
+    });
   }
 
   private packageFor(captureId: string): string {
+    return this.locationFor(captureId).packageDir;
+  }
+
+  private locationFor(captureId: string): CaptureLocation {
     if (!UUID.test(captureId)) throw new JcapBoundsError("captureId must be a UUID");
-    return resolveCapturePackage(this.rootDir, captureId);
+    return resolveCaptureLocation(this.rootDir, captureId);
+  }
+
+  private mutate<T>(location: CaptureLocation, operation: () => Promise<T>): Promise<T> {
+    return location.runId && this.guardRunMutation ? this.guardRunMutation(location.runId, operation) : operation();
   }
 }
 
@@ -776,7 +793,7 @@ async function rebuildJcapV1IndexUnlocked(root: string): Promise<{ captureState:
       if (current.sha256 !== source.sha256 || current.bytes !== source.bytes || current.validBytes !== source.validBytes) throw new Error("JCAP raw changed while capture.db.tmp was being built");
     }
     assertFinalRawIdentities(readJcapV1Metadata(root), raw.sources, true);
-    renameSync(temporary, databaseFile);
+    atomicReplaceSync(temporary, databaseFile);
     atomicWriteMetadata(path.join(root, "capture.json"), {
       ...recoveryMetadata,
       indexStatus,
@@ -1195,7 +1212,7 @@ function atomicWriteMetadata(file: string, metadata: JcapV1Metadata): void {
     fsyncSync(handle);
     closeSync(handle);
     handle = undefined;
-    renameSync(temporary, file);
+    atomicReplaceSync(temporary, file);
   } finally {
     if (handle !== undefined) closeSync(handle);
     rmSync(temporary, { force: true });
@@ -1509,11 +1526,15 @@ function assertNoDuplicateCaptureIds(found: CaptureLocation[]): void {
 }
 
 function resolveCapturePackage(root: string, captureId: string): string {
+  return resolveCaptureLocation(root, captureId).packageDir;
+}
+
+function resolveCaptureLocation(root: string, captureId: string): CaptureLocation {
   if (!UUID.test(captureId)) throw new JcapBoundsError("captureId must be a UUID");
   const matches = findCapturePackages(root).filter((entry) => entry.captureId.toLowerCase() === captureId.toLowerCase());
   if (!matches.length) throw new JcapCaptureNotFoundError(`JCAP capture was not found: ${captureId}`);
   if (matches.length > 1) throw new JcapCaptureAmbiguousError(`duplicate JCAP captureId: ${captureId}`);
-  return matches[0].packageDir;
+  return matches[0];
 }
 
 async function captureListItem(entry: CaptureLocation): Promise<Record<string, unknown>> {

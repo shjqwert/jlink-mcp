@@ -28,6 +28,11 @@ Target operations SHALL append one bounded NDJSON operation record to `test-outp
 - **THEN** its operation ID, exact request facts, result envelope, timestamps, code commit, Target/Artifact identity, and referenced output hashes are appended
 - **AND** the append does not overwrite earlier records.
 
+#### Scenario: operation completes before command logging fails
+- **WHEN** a successful or failed requested operation has observed explicit side effects but its command record cannot be appended
+- **THEN** the returned evidence error preserves those observed effects and reports that a side effect was issued
+- **AND** retryability is disabled, the original operation error is preserved when present, and the Agent is warned not to retry the operation automatically.
+
 ### Requirement: Acceptance results use a fixed honest vocabulary
 
 Every acceptance case and subcase SHALL use only `PASS`, `FAIL`, `BLOCKED`, `SKIPPED_WITH_REASON`, or `NOT_TESTED`. Missing prerequisites, unsupported capability, or absent evidence SHALL NOT be represented as passing.
@@ -50,6 +55,16 @@ The change SHALL maintain a traceability matrix mapping every applicable T01-T20
 - **WHEN** a run finishes or stops at a blocking failure
 - **THEN** `acceptance-index.json` lists every T01-T20 ID with status, requirement links, evidence references, and blockers
 - **AND** omitted tests appear as `NOT_TESTED` rather than disappearing.
+
+#### Scenario: active Capture prevents run completion
+- **WHEN** a run-scoped JCAP is active, finalizing, malformed, missing required Raw/DB files, still building its index, or fails Raw/SQLite integrity verification
+- **THEN** publication of `acceptance-index.json` is rejected while holding the same run lease
+- **AND** the run remains open until the Capture is stopped or recovered into a stable terminal state with a verified ready index.
+
+#### Scenario: Capture mutation follows durable run ownership
+- **WHEN** rebuild, analysis persistence, or export targets a Capture owned by an acceptance run and the caller omits `runId` or supplies a different run ID
+- **THEN** the mutation is checked while holding the Capture owner's run lease
+- **AND** a completed owner or mismatched active request run is rejected before any Capture file changes.
 
 ### Requirement: HSS acceptance proves the declared ceiling
 

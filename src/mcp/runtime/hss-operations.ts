@@ -5,13 +5,14 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { atomicReplaceSync } from "../../utils/atomic-file";
+import { isValidAcceptanceRunId } from "../acceptance/run-id";
 import { resolveArtifactGeneration, writeArtifactMatchManifest } from "../artifact/artifact-catalog";
 import { symbolLogicalIdentity, type ResolvedSymbol } from "../artifact/symbol-catalog";
 import { HSS_SCALAR_TYPES } from "../hss/hss-contract";
@@ -31,6 +32,7 @@ import {
   type JcapV1Event,
   type JcapV1Metadata,
   type JcapV1VariableDescriptor,
+  type JcapRunMutationGuard,
 } from "../jcap/jcap-v1";
 import type {
   CaptureVariableWriteDelegate,
@@ -59,7 +61,6 @@ import { assertArtifactBindingsCurrent, TargetStore, TargetStoreError, type Stor
 const ACTIVE_SESSION_STATES = new Set<HssSessionState>(["starting", "capturing", "stopping"]);
 const TERMINAL_SESSION_STATES = new Set<HssSessionState>(["completed", "stopped", "interrupted", "failed"]);
 const NATIVE_HSS_SCALAR_TYPES = new Set<string>(HSS_SCALAR_TYPES);
-const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -146,6 +147,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     outputRoot = resolve(process.cwd(), "test-output"),
     stateRoot = dirname(targets.filePath),
     sessionWorkRoot = resolve(tmpdir(), "jlink-mcp-hss"),
+    captureMutationGuard?: JcapRunMutationGuard,
   ) {
     this.outputRoot = resolve(outputRoot);
     this.sessionsRoot = resolve(stateRoot, "hss-sessions");
@@ -153,7 +155,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     mkdirSync(this.outputRoot, { recursive: true });
     mkdirSync(this.sessionsRoot, { recursive: true });
     mkdirSync(this.sessionWorkRoot, { recursive: true });
-    this.query = new JcapV1QueryService(this.outputRoot);
+    this.query = new JcapV1QueryService(this.outputRoot, captureMutationGuard);
     try {
       for (const session of this.sessions()) if (ACTIVE_SESSION_STATES.has(session.state)) this.scheduleMonitor(session.captureId);
     } catch { /* explicit hss_status surfaces malformed durable session records */ }
@@ -1532,8 +1534,12 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     validateSession(session, session.captureId);
     const file = this.sessionFile(session.captureId);
     const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify({ ...session, updatedAt: new Date().toISOString() }, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-    renameSync(temporary, file);
+    try {
+      writeFileSync(temporary, `${JSON.stringify({ ...session, updatedAt: new Date().toISOString() }, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+      atomicReplaceSync(temporary, file);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
   }
 
   private updateSession(captureId: string, update: (current: HssSessionRecord) => HssSessionRecord): HssSessionRecord {
@@ -1629,13 +1635,7 @@ function blockCount(symbols: ResolvedSymbol[]): number {
   return blocks;
 }
 
-export function isValidHssRunId(value: string): boolean {
-  if (!RUN_ID.test(value)) return false;
-  const lower = value.toLowerCase();
-  if (["captures", "exports", ".locks"].includes(lower) || lower.endsWith(".jcap")) return false;
-  const deviceBase = lower.split(".", 1)[0];
-  return !["con", "prn", "aux", "nul", ...Array.from({ length: 9 }, (_, index) => `com${index + 1}`), ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`)].includes(deviceBase);
-}
+export const isValidHssRunId = isValidAcceptanceRunId;
 
 function applyQueue<T>(envelope: OperationEnvelope, execution: { queueSequence: number; queuedAt: string; startedAt: string; endedAt: string; value: T }): void {
   envelope.queueSequence = execution.queueSequence;

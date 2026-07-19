@@ -73,10 +73,11 @@ test("HSS planning enforces ten variables, 1 kHz, and 60 seconds without creatin
 test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and publishes queryable JCAP", async () => {
   const fixture = await createFixture();
   try {
-    const started = await fixture.hss.start(captureInput(fixture, 2, 100, 1));
+    const started = await fixture.hss.start(captureInput(fixture, 2, 100, 1, "acceptance-run"));
     assert.equal(started.ok, true, JSON.stringify(started.error));
     const captureId = String((started.data as { captureId: string }).captureId);
     const packageDir = String((started.data as { packageDir: string }).packageDir);
+    assert.equal(packageDir.startsWith(join(fixture.root, "output", "acceptance-run", "captures")), true);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.kind, "hss");
 
     await assert.rejects(
@@ -166,7 +167,7 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal(exported.ok, true);
     assert.deepEqual(exported.requestedEffects, ["read_bounded_capture_rows", "create_external_csv"]);
     assert.equal(exported.observedEffects.includes("external_csv_created"), true);
-    assert.equal(String((exported.data as { exportFile: string }).exportFile).startsWith(join(fixture.root, "output", "exports")), true);
+    assert.equal(String((exported.data as { exportFile: string }).exportFile).startsWith(join(fixture.root, "output", "acceptance-run", "exports")), true);
     const notInterrupted = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(notInterrupted.error?.code, "CAPTURE_NOT_INTERRUPTED");
   } finally {
@@ -255,7 +256,7 @@ test("active status propagates malformed durable receipt failures instead of rep
   const fixture = await createFixture();
   try {
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
-    assert.equal(started.ok, true);
+    assert.equal(started.ok, true, JSON.stringify(started.error));
     const captureId = String((started.data as { captureId: string }).captureId);
     fixture.adapter.failMemoryReceiptInspection = true;
     const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
@@ -355,7 +356,7 @@ test("failed startup cleanup never terminates a live PID whose capture identity 
 
     fixture.adapter.crashLatest();
     const settled = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
-    assert.equal((settled.capture as { state: string }).state, "interrupted");
+    assert.equal((settled.capture as { state: string }).state, "interrupted", JSON.stringify(settled.error));
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
   } finally {
     fixture.adapter.crashLatest();
@@ -408,8 +409,8 @@ async function createFixture(): Promise<Fixture> {
   };
 }
 
-function captureInput(fixture: Fixture, count: number, rateHz: number, durationSec: number): HssCaptureInput {
-  return { projectRoot: fixture.projectRoot, rateHz, durationSec, variables: Array.from({ length: count }, (_, index) => ({ ref: fixture.ref(index) })) };
+function captureInput(fixture: Fixture, count: number, rateHz: number, durationSec: number, runId?: string): HssCaptureInput {
+  return { projectRoot: fixture.projectRoot, rateHz, durationSec, variables: Array.from({ length: count }, (_, index) => ({ ref: fixture.ref(index) })), ...(runId ? { runId } : {}) };
 }
 
 class FixtureResolver implements TypedSymbolResolver {

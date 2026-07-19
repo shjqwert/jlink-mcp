@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { applyEvidenceLogFailure, operationHadIssuedEffects } from "./server";
+import { createOperationEnvelope, failEnvelope } from "./runtime/operation-envelope";
 
 const EXPECTED_TOOLS = [
   "analysis_profiles", "analysis_run", "artifact_probe", "capture_event_window",
@@ -21,6 +23,27 @@ const EXPECTED_TOOLS = [
   "write_memory", "write_register", "write_variable",
 ].sort();
 
+test("evidence failure classifies every observed explicit side effect as issued", () => {
+  for (const effect of ["halt", "resume", "reset", "raw_command_issued", "hss_helper_started", "capture_finalized"]) {
+    assert.equal(operationHadIssuedEffects({ observedEffects: [effect] }), true, effect);
+  }
+  assert.equal(operationHadIssuedEffects({ observedEffects: [] }), false);
+  const failed = failEnvelope(createOperationEnvelope("hss_stop"), {
+    code: "HSS_STOP_PENDING_STARTUP",
+    stage: "query",
+    message: "durable stop request is pending",
+    retryable: true,
+    writeIssued: false,
+    stateUnknown: true,
+  });
+  failed.observedEffects.push("hss_stop_requested", "capture_marked_stopping");
+  const evidenceFailed = applyEvidenceLogFailure(failed, new Error("commands log unavailable"));
+  assert.equal(evidenceFailed.error?.code, "HSS_STOP_PENDING_STARTUP");
+  assert.equal(evidenceFailed.error?.writeIssued, true);
+  assert.equal(evidenceFailed.error?.retryable, false);
+  assert.match(evidenceFailed.warnings.join("\n"), /do not retry/i);
+});
+
 test("standalone stdio exposes only the Agent-first MCP surface", async (context) => {
   const root = testDirectory(context, "surface-contract");
   const transport = new StdioClientTransport({
@@ -37,6 +60,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     assert.equal(client.getServerVersion()?.name, "jlink-mcp");
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
+    for (const tool of tools) assert.ok(tool.inputSchema.properties?.runId, `${tool.name} must accept optional runId evidence routing`);
     for (const name of ["halt", "resume", "reset", "reset_halt", "read_memory", "write_memory", "flash", "erase", "gdb_command", "probe_command", "hss_start"] as const) {
       const schema = tools.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
       assert.ok(schema.properties?.projectRoot, `${name} must expose projectRoot`);
@@ -71,6 +95,48 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       const envelope = parseEnvelope(await client.callTool({ name, arguments: argumentsValue }));
       assert.notEqual((envelope.error as { code?: string } | undefined)?.code, "NOT_IMPLEMENTED", `${name} must be implemented in Phase 3`);
     }
+    assert.deepEqual(readdirSync(join(root, "evidence")), [], "operations without runId must not create a command log or synthetic run directory");
+    const logged = parseEnvelope(await client.callTool({ name: "target_configure", arguments: { projectRoot: root, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, runId: "surface-run" } }));
+    assert.equal(logged.ok, true, JSON.stringify(logged.error));
+    const commandsFile = join(root, "evidence", "surface-run", "commands.ndjson");
+    const commandLines = readFileSync(commandsFile, "utf8").trim().split(/\r?\n/);
+    assert.equal(commandLines.length, 1);
+    const command = JSON.parse(commandLines[0]) as { sequence: number; tool: string; request: { runId: string }; result: { operationId: string } };
+    assert.equal(command.sequence, 1);
+    assert.equal(command.tool, "target_configure");
+    assert.equal(command.request.runId, "surface-run");
+    assert.equal(command.result.operationId, logged.operationId);
+    const configuredGeneration = ((logged.data as { target: { generation: string } }).target.generation);
+    const completedRun = join(root, "evidence", "completed-run");
+    mkdirSync(completedRun, { recursive: true });
+    writeFileSync(join(completedRun, "run.json"), `${JSON.stringify({ schemaVersion: 1, runId: "completed-run" })}\n`, { flag: "wx" });
+    writeFileSync(join(completedRun, "acceptance-index.json"), "{}\n", { flag: "wx" });
+    const completedRunRequest = parseEnvelope(await client.callTool({ name: "target_configure", arguments: { projectRoot: root, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 2000, runId: "completed-run" } }));
+    assert.equal(completedRunRequest.ok, false);
+    assert.equal((completedRunRequest.error as { code?: string }).code, "RUN_ID_COMPLETE");
+    assert.equal((completedRunRequest.error as { writeIssued?: boolean }).writeIssued, false);
+    const completedCaptureId = "43000000-0000-4000-8000-000000000099";
+    mkdirSync(join(completedRun, "captures", `${completedCaptureId}.jcap`), { recursive: true });
+    const ownerGuarded = parseEnvelope(await client.callTool({ name: "capture_index_rebuild", arguments: { captureId: completedCaptureId } }));
+    assert.equal((ownerGuarded.error as { code?: string }).code, "RUN_ID_COMPLETE");
+    const mismatchedRun = parseEnvelope(await client.callTool({ name: "capture_index_rebuild", arguments: { captureId: completedCaptureId, runId: "surface-run" } }));
+    assert.equal((mismatchedRun.error as { code?: string }).code, "RUN_ID_CAPTURE_MISMATCH");
+    const unchanged = parseEnvelope(await client.callTool({ name: "target_status", arguments: { projectRoot: root } }));
+    assert.equal(((unchanged.data as { target: { generation: string } }).target.generation), configuredGeneration);
+    rmSync(commandsFile);
+    mkdirSync(commandsFile);
+    const effectFailure = parseEnvelope(await client.callTool({ name: "target_configure", arguments: { projectRoot: root, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 2000, runId: "surface-run" } }));
+    assert.equal(effectFailure.ok, false);
+    assert.equal((effectFailure.error as { code?: string }).code, "EVIDENCE_LOG_FAILED");
+    assert.equal((effectFailure.error as { writeIssued?: boolean }).writeIssued, true);
+    const reconfigured = parseEnvelope(await client.callTool({ name: "target_status", arguments: { projectRoot: root } }));
+    assert.notEqual(((reconfigured.data as { target: { generation: string } }).target.generation), configuredGeneration);
+    const evidenceFailure = parseEnvelope(await client.callTool({ name: "target_status", arguments: { projectRoot: root, runId: "surface-run" } }));
+    assert.equal(evidenceFailure.ok, false);
+    assert.equal((evidenceFailure.error as { code?: string }).code, "EVIDENCE_LOG_FAILED");
+    assert.equal((evidenceFailure.error as { retryable?: boolean }).retryable, false);
+    assert.equal((evidenceFailure.error as { writeIssued?: boolean }).writeIssued, false);
+    assert.match((evidenceFailure.warnings as string[]).join("\n"), /do not retry/i);
     assert.deepEqual((await client.listResources()).resources.map(({ uri }) => uri).sort(), [
       "probe://gdb-server-log",
       "probe://status",
@@ -118,9 +184,12 @@ async function connectClient(cwd: string, name: string): Promise<{ client: Clien
 }
 
 function childEnvironment(queueRoot: string): Record<string, string> {
+  const localRoot = dirname(queueRoot);
   return {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
     JLINK_MCP_QUEUE_ROOT: queueRoot,
+    JLINK_MCP_STORAGE_ROOT: join(localRoot, "storage"),
+    JLINK_MCP_EVIDENCE_ROOT: join(localRoot, "evidence"),
   };
 }
 

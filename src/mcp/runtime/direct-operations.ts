@@ -1,8 +1,8 @@
 import type { CommandResult, ProbeBackend, TargetStateObservation } from "../../probe/backend";
 import { ProbeErrorCode } from "../../probe/backend";
-import { chmodSync, copyFileSync, constants, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, copyFileSync, constants, rmSync } from "node:fs";
 import { extname, join } from "node:path";
+import { createRepoTempDir } from "../preflight/temp-preflight";
 import type { QueueMetadata } from "./probe-queue";
 import { ProbeQueue, ProbeQueueError } from "./probe-queue";
 import {
@@ -95,11 +95,19 @@ export interface FlashInput {
   baseAddress?: number;
 }
 
+export type FlashSnapshotCleanup = (snapshotRoot: string) => Promise<Error | undefined>;
+
+export interface FlashSnapshotCleanupOptions {
+  remove?: (snapshotRoot: string) => void;
+  retryDelaysMs?: readonly number[];
+}
+
 export class DirectMcuService {
   constructor(
     readonly targets: TargetStore,
     readonly queue: ProbeQueue,
     private readonly runtimeFor: DirectRuntimeProvider,
+    private readonly cleanupFlashSnapshot: FlashSnapshotCleanup = removeFlashSnapshotDirectory,
   ) {}
 
   async configure(input: TargetConfigureInput): Promise<OperationEnvelope> {
@@ -739,7 +747,7 @@ export class DirectMcuService {
       if (!sameFlashBinding(liveFlashFile, flashFile)) {
         throw new TargetStoreError("FLASH_INPUT_CHANGED", "flash input changed while the request waited for the Probe queue; no hardware command was issued");
       }
-      const snapshotRoot = mkdtempSync(join(tmpdir(), "jlink-mcp-flash-"));
+      const snapshotRoot = await createRepoTempDir("flash-");
       const snapshotPath = join(snapshotRoot, `input${extname(liveFlashFile.path).toLowerCase()}`);
       try {
         copyFileSync(liveFlashFile.path, snapshotPath, constants.COPYFILE_EXCL);
@@ -798,7 +806,12 @@ export class DirectMcuService {
         }
       } finally {
         try { chmodSync(snapshotPath, 0o600); } catch { /* snapshot may not have been created */ }
-        rmSync(snapshotRoot, { recursive: true, force: true });
+        let cleanupError: Error | undefined;
+        try { cleanupError = await this.cleanupFlashSnapshot(snapshotRoot); }
+        catch (error) { cleanupError = error instanceof Error ? error : new Error(String(error)); }
+        if (cleanupError) {
+          envelope.warnings.push(`Temporary flash snapshot cleanup failed; the reported hardware result remains authoritative and local cleanup may be required: ${cleanupError.message}`);
+        }
       }
     });
   }
@@ -983,6 +996,26 @@ export class DirectMcuService {
       const code = error instanceof TargetStoreError ? error.code : "ARTIFACT_STATE_PERSIST_FAILED";
       const message = error instanceof Error ? error.message : String(error);
       throw executionError(code, "artifact_state", message, { writeIssued, stateUnknown: writeIssued });
+    }
+  }
+}
+
+const FLASH_SNAPSHOT_CLEANUP_RETRY_DELAYS_MS = [1, 2, 4, 8, 16, 32, 64] as const;
+const RETRYABLE_FLASH_SNAPSHOT_CLEANUP_CODES = new Set(["EACCES", "EBUSY", "ENOTEMPTY", "EPERM"]);
+
+export async function removeFlashSnapshotDirectory(snapshotRoot: string, options: FlashSnapshotCleanupOptions = {}): Promise<Error | undefined> {
+  const remove = options.remove ?? ((root: string) => rmSync(root, { recursive: true, force: true }));
+  const retryDelays = options.retryDelaysMs ?? FLASH_SNAPSHOT_CLEANUP_RETRY_DELAYS_MS;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      remove(snapshotRoot);
+      return undefined;
+    } catch (error) {
+      const normalized = error instanceof Error ? error : new Error(String(error));
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return undefined;
+      if (!RETRYABLE_FLASH_SNAPSHOT_CLEANUP_CODES.has(String(code)) || attempt >= retryDelays.length) return normalized;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, retryDelays[attempt])));
     }
   }
 }

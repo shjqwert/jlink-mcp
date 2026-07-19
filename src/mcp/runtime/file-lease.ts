@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { basename, dirname, resolve } from "node:path";
 
 const PROCESS_INSTANCE_ID = randomUUID();
+const PUBLISH_RETRY_DELAYS_MS = [1, 2, 4, 8, 16, 32, 64] as const;
 
 interface LeaseRecord {
   token: string;
@@ -55,18 +56,20 @@ function tryCreate(lockPath: string, record: LeaseRecord): boolean {
   mkdirSync(prepared);
   try {
     writeFileSync(resolve(prepared, "owner.json"), JSON.stringify(record), { encoding: "utf8", flag: "wx" });
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; ; attempt += 1) {
       try {
         renameSync(prepared, lockPath);
         return true;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code === "EEXIST" || code === "ENOTEMPTY" || (code === "EPERM" && existsSync(lockPath))) return false;
-        if (code === "EPERM" && attempt === 0) continue;
+        if (code === "EPERM" && attempt < PUBLISH_RETRY_DELAYS_MS.length) {
+          waitSync(PUBLISH_RETRY_DELAYS_MS[attempt]);
+          continue;
+        }
         throw error;
       }
     }
-    throw new Error("unreachable directory lease publish state");
   } finally {
     if (existsSync(prepared)) rmSync(prepared, { recursive: true, force: true });
   }
@@ -122,4 +125,8 @@ function recordLive(record: LeaseRecord): boolean {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function waitSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }

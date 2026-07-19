@@ -6,6 +6,8 @@ import type { ProbeBackend } from "../probe/backend";
 import { createProbeBackend, type ProbeFactoryConfig } from "../probe/factory";
 import { log } from "../utils/logger";
 import { ProcessManager } from "../utils/process-manager";
+import { AcceptanceEvidenceStore, readRepositoryIdentity } from "./acceptance/evidence";
+import { isValidAcceptanceRunId } from "./acceptance/run-id";
 import { DirectMcuService, type CoreRegisterWriteInput, type FlashInput, type MemoryReadInput, type MemoryWriteInput } from "./runtime/direct-operations";
 import { ArtifactVariableService, type VariableRefInput, type VariableWriteInput } from "./runtime/artifact-operations";
 import { SvdRegisterService, type RegisterWriteInput } from "./runtime/svd-operations";
@@ -14,7 +16,7 @@ import { ProbeQueue } from "./runtime/probe-queue";
 import { SessionOperations } from "./runtime/session-operations";
 import { TargetRuntimeRegistry } from "./runtime/target-runtime";
 import { TargetStore, type TargetConfigureInput } from "./runtime/target-store";
-import { HssOperations, isValidHssRunId, type HssCaptureInput } from "./runtime/hss-operations";
+import { HssOperations, type HssCaptureInput } from "./runtime/hss-operations";
 
 export interface JLinkMcpServerOptions {
   cwd?: string;
@@ -35,6 +37,33 @@ export const AGENT_TOOL_NAMES = [
 ] as const;
 
 type AgentToolName = typeof AGENT_TOOL_NAMES[number];
+
+export function operationHadIssuedEffects(envelope: Pick<OperationEnvelope, "observedEffects">): boolean {
+  return envelope.observedEffects.length > 0;
+}
+
+export function applyEvidenceLogFailure(envelope: OperationEnvelope, evidenceError: unknown): OperationEnvelope {
+  const message = `Acceptance command logging failed: ${evidenceError instanceof Error ? evidenceError.message : String(evidenceError)}`;
+  const writeIssued = operationHadIssuedEffects(envelope) || envelope.error?.writeIssued === true;
+  if (envelope.ok) {
+    envelope.warnings.push("The requested operation completed before evidence logging failed; do not retry it automatically.");
+    return failEnvelope(envelope, {
+      code: "EVIDENCE_LOG_FAILED",
+      stage: "evidence",
+      message,
+      retryable: false,
+      writeIssued,
+      stateUnknown: false,
+    });
+  }
+  envelope.warnings.push(message);
+  if (writeIssued && envelope.error) {
+    envelope.error.writeIssued = true;
+    envelope.error.retryable = false;
+    envelope.warnings.push("The failed operation recorded explicit side effects before evidence logging failed; do not retry it automatically.");
+  }
+  return envelope;
+}
 
 const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   list_devices: "List connected J-Link probes without changing target state.",
@@ -97,6 +126,7 @@ const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
 };
 
 const projectRootInput = { projectRoot: z.string().min(1).describe("Existing absolute project root configured by target_configure") };
+const acceptanceRunId = z.string().refine(isValidAcceptanceRunId, "runId must be a bounded immutable non-reserved directory name");
 const uint32 = z.number().int().min(0).max(0xffff_ffff);
 const accessWidth = z.union([z.literal(8), z.literal(16), z.literal(32)]);
 const scalarType = z.enum(["int8", "uint8", "int16", "uint16", "int32", "uint32", "float32"]);
@@ -145,19 +175,31 @@ export class JLinkMcpServer {
   private readonly registers: SvdRegisterService;
   private readonly sessions: SessionOperations;
   private readonly hss: HssOperations;
+  private readonly evidence: AcceptanceEvidenceStore;
   private readonly implemented = new Set<AgentToolName>();
 
   constructor(probeConfig?: ProbeFactoryConfig, _rttPort?: number, _gdbPath?: string, options: JLinkMcpServerOptions = {}) {
     this.discoveryProbe = createProbeBackend(probeConfig ?? { type: "jlink" }, this.discoveryProcesses);
     const cwd = options.cwd ?? process.cwd();
     const stateRoot = options.storageRoot ?? join(cwd, ".jlink-mcp");
+    const evidenceRoot = options.evidenceRoot ?? join(cwd, "test-output");
     this.targets = new TargetStore(stateRoot);
     this.queue = new ProbeQueue(options.queueRoot);
     this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target));
     this.artifacts = new ArtifactVariableService(this.targets, this.direct, stateRoot);
     this.registers = new SvdRegisterService(this.targets, this.direct);
     this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target));
-    this.hss = new HssOperations(this.targets, this.queue, this.artifacts, undefined, options.evidenceRoot ?? join(cwd, "test-output"), stateRoot);
+    this.evidence = new AcceptanceEvidenceStore(evidenceRoot, readRepositoryIdentity(cwd).commit);
+    this.hss = new HssOperations(
+      this.targets,
+      this.queue,
+      this.artifacts,
+      undefined,
+      evidenceRoot,
+      stateRoot,
+      undefined,
+      <T>(runId: string, operation: () => Promise<T>) => this.evidence.guardRunMutation(runId, operation),
+    );
     this.artifacts.setCaptureWriteDelegate(this.hss);
     this.server = new McpServer({ name: "jlink-mcp", version: "0.3.2" });
     this.registerTools();
@@ -312,7 +354,7 @@ export class JLinkMcpServer {
       variables: z.array(hssVariable).min(1).max(10),
       rateHz: z.number().int().min(1).max(1_000),
       durationSec: z.number().int().min(1).max(60),
-      runId: z.string().refine(isValidHssRunId, "runId must be a bounded immutable non-reserved directory name").optional(),
+      runId: acceptanceRunId.optional(),
     };
     const hssSelector = { ...projectRootInput, captureId: z.string().uuid().optional() };
     this.registerEnvelopeTool("hss_capability", projectRootInput, (input) => this.hss.capability(String(input.projectRoot)));
@@ -367,19 +409,41 @@ export class JLinkMcpServer {
     handler: (input: Record<string, unknown>) => OperationEnvelope | Promise<OperationEnvelope>,
   ): void {
     this.implemented.add(name);
-    this.server.registerTool(name, { description: TOOL_DESCRIPTIONS[name], inputSchema }, async (input) => {
+    const schemaWithRunId = Object.hasOwn(inputSchema, "runId") ? inputSchema : { ...inputSchema, runId: acceptanceRunId.optional() };
+    this.server.registerTool(name, { description: TOOL_DESCRIPTIONS[name], inputSchema: schemaWithRunId }, async (input) => {
+      const requestedRunId = (input as Record<string, unknown>).runId;
+      const execute = async (): Promise<OperationEnvelope> => {
+        try { return await handler(input as Record<string, unknown>); }
+        catch (error) {
+          return failEnvelope(createOperationEnvelope(name), {
+            code: "INTERNAL_ERROR",
+            stage: "dispatch",
+            message: error instanceof Error ? error.message : String(error),
+            retryable: false,
+            writeIssued: false,
+            stateUnknown: false,
+          });
+        }
+      };
       let envelope: OperationEnvelope;
-      try {
-        envelope = await handler(input as Record<string, unknown>);
-      } catch (error) {
-        envelope = failEnvelope(createOperationEnvelope(name), {
-          code: "INTERNAL_ERROR",
-          stage: "dispatch",
-          message: error instanceof Error ? error.message : String(error),
-          retryable: false,
-          writeIssued: false,
-          stateUnknown: false,
-        });
+      if (typeof requestedRunId !== "string") envelope = await execute();
+      else {
+        try {
+          const recorded = await this.evidence.executeAndRecordMcpCommand(requestedRunId, name, input as Record<string, unknown>, execute);
+          envelope = recorded.envelope;
+          if (recorded.evidenceError) envelope = applyEvidenceLogFailure(envelope, recorded.evidenceError);
+        } catch (error) {
+          const coded = error as { code?: unknown };
+          const code = typeof coded?.code === "string" ? coded.code : "EVIDENCE_PREFLIGHT_FAILED";
+          envelope = failEnvelope(createOperationEnvelope(name), {
+            code,
+            stage: "evidence_preflight",
+            message: error instanceof Error ? error.message : String(error),
+            retryable: code === "COMMAND_LOG_BUSY" || code === "EVIDENCE_RUN_BUSY",
+            writeIssued: false,
+            stateUnknown: false,
+          });
+        }
       }
       return {
         isError: !envelope.ok,
