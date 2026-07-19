@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { join } from "node:path";
 import type { ProbeBackend } from "../probe/backend";
 import { createProbeBackend, type ProbeFactoryConfig } from "../probe/factory";
 import { log } from "../utils/logger";
@@ -13,6 +14,7 @@ import { ProbeQueue } from "./runtime/probe-queue";
 import { SessionOperations } from "./runtime/session-operations";
 import { TargetRuntimeRegistry } from "./runtime/target-runtime";
 import { TargetStore, type TargetConfigureInput } from "./runtime/target-store";
+import { HssOperations, isValidHssRunId, type HssCaptureInput } from "./runtime/hss-operations";
 
 export interface JLinkMcpServerOptions {
   cwd?: string;
@@ -142,17 +144,21 @@ export class JLinkMcpServer {
   private readonly artifacts: ArtifactVariableService;
   private readonly registers: SvdRegisterService;
   private readonly sessions: SessionOperations;
+  private readonly hss: HssOperations;
   private readonly implemented = new Set<AgentToolName>();
 
   constructor(probeConfig?: ProbeFactoryConfig, _rttPort?: number, _gdbPath?: string, options: JLinkMcpServerOptions = {}) {
     this.discoveryProbe = createProbeBackend(probeConfig ?? { type: "jlink" }, this.discoveryProcesses);
-    const stateRoot = options.storageRoot ?? `${options.cwd ?? process.cwd()}${process.platform === "win32" ? "\\" : "/"}.jlink-mcp`;
+    const cwd = options.cwd ?? process.cwd();
+    const stateRoot = options.storageRoot ?? join(cwd, ".jlink-mcp");
     this.targets = new TargetStore(stateRoot);
     this.queue = new ProbeQueue(options.queueRoot);
     this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target));
     this.artifacts = new ArtifactVariableService(this.targets, this.direct, stateRoot);
     this.registers = new SvdRegisterService(this.targets, this.direct);
     this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target));
+    this.hss = new HssOperations(this.targets, this.queue, this.artifacts, undefined, options.evidenceRoot ?? join(cwd, "test-output"), stateRoot);
+    this.artifacts.setCaptureWriteDelegate(this.hss);
     this.server = new McpServer({ name: "jlink-mcp", version: "0.3.2" });
     this.registerTools();
     this.registerResources();
@@ -300,14 +306,41 @@ export class JLinkMcpServer {
       return envelope;
     });
 
-    const targetPhaseStubs = [
-      "hss_capability", "hss_plan", "hss_start", "hss_status", "hss_stop", "hss_recover",
-    ] as const;
-    for (const name of targetPhaseStubs) this.registerStub(name, projectRootInput);
-    this.registerStub("capture_list", { limit: z.number().int().min(1).max(100).default(50), cursor: z.string().optional() });
-    for (const name of ["capture_summary", "capture_series", "capture_event_window", "capture_index_rebuild", "capture_export_csv"] as const) {
-      this.registerStub(name, { captureId: z.string().uuid() });
-    }
+    const hssVariable = z.object({ ref: variableRef, alias: z.string().min(1).max(128).optional(), unit: z.string().min(1).max(64).optional() }).strict();
+    const hssCapture = {
+      ...projectRootInput,
+      variables: z.array(hssVariable).min(1).max(10),
+      rateHz: z.number().int().min(1).max(1_000),
+      durationSec: z.number().int().min(1).max(60),
+      runId: z.string().refine(isValidHssRunId, "runId must be a bounded immutable non-reserved directory name").optional(),
+    };
+    const hssSelector = { ...projectRootInput, captureId: z.string().uuid().optional() };
+    this.registerEnvelopeTool("hss_capability", projectRootInput, (input) => this.hss.capability(String(input.projectRoot)));
+    this.registerEnvelopeTool("hss_plan", hssCapture, (input) => this.hss.plan(input as unknown as HssCaptureInput));
+    this.registerEnvelopeTool("hss_start", hssCapture, (input) => this.hss.start(input as unknown as HssCaptureInput));
+    this.registerEnvelopeTool("hss_status", hssSelector, (input) => this.hss.status({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
+    this.registerEnvelopeTool("hss_stop", hssSelector, (input) => this.hss.stop({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
+    this.registerEnvelopeTool("hss_recover", hssSelector, (input) => this.hss.recover({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
+    this.registerEnvelopeTool("capture_list", { limit: z.number().int().min(1).max(100).default(50), cursor: z.string().optional() },
+      (input) => this.hss.captureList({ limit: Number(input.limit), cursor: input.cursor as string | undefined }));
+    this.registerEnvelopeTool("capture_summary", { captureId: z.string().uuid() }, (input) => this.hss.captureSummary(String(input.captureId)));
+    this.registerEnvelopeTool("capture_series", {
+      captureId: z.string().uuid(),
+      variables: z.array(z.string().min(1).max(1024)).min(1).max(32),
+      startTick: z.string().regex(/^\d+$/),
+      endTick: z.string().regex(/^\d+$/),
+      bucketCount: z.number().int().min(1).max(4096),
+    }, (input) => this.hss.captureSeries(input as { captureId: string; variables: string[]; startTick: string; endTick: string; bucketCount: number }));
+    this.registerEnvelopeTool("capture_event_window", {
+      captureId: z.string().uuid(),
+      eventId: z.string().uuid(),
+      variables: z.array(z.string().min(1).max(1024)).max(16),
+      beforeMs: z.number().int().min(0).max(60_000),
+      afterMs: z.number().int().min(0).max(60_000),
+      bucketCount: z.number().int().min(1).max(2048),
+    }, (input) => this.hss.captureEventWindow(input as { captureId: string; eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }));
+    this.registerEnvelopeTool("capture_index_rebuild", { captureId: z.string().uuid() }, (input) => this.hss.captureRebuild(String(input.captureId)));
+    this.registerEnvelopeTool("capture_export_csv", { captureId: z.string().uuid() }, (input) => this.hss.captureExport(String(input.captureId)));
     this.registerStub("analysis_profiles", {});
     this.registerStub("analysis_run", { captureId: z.string().uuid(), profile: z.string().min(1) });
 

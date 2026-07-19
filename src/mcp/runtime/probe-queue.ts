@@ -138,6 +138,35 @@ export class ProbeQueue {
     }
   }
 
+  adoptOwner(probeSerial: string, expected: { kind: ProbeOwnerKind; projectRoot: string; targetGeneration: string; resourcePid: number; captureId: string }): ProbeOwner {
+    const probeDir = this.probeDirectory(requireSerial(probeSerial));
+    mkdirSync(probeDir, { recursive: true });
+    const ownerLock = join(probeDir, "owner-update.lock");
+    const lockToken = acquireDirectoryLock(ownerLock, 5_000);
+    try {
+      const existing = readLiveOwnerLocked(probeDir);
+      if (!existing) throw new ProbeQueueError("OWNER_MISSING", "the long-lived Probe owner disappeared before adoption");
+      if (identityRecordLive(existing)) throw new ProbeQueueError("OWNER_ADOPTION_DENIED", "a live controller process still owns the Probe", existing);
+      if (existing.kind !== expected.kind || existing.projectRoot !== expected.projectRoot || existing.targetGeneration !== expected.targetGeneration
+        || existing.resourcePid !== expected.resourcePid || existing.details?.captureId !== expected.captureId) throw new ProbeQueueError("OWNER_CHANGED", "the durable Probe owner does not match the capture recovery journal", existing);
+      const now = new Date().toISOString();
+      const adopted: ProbeOwner = {
+        ...existing,
+        token: randomUUID(),
+        pid: process.pid,
+        processInstanceId,
+        processStartedAt,
+        heartbeatAt: now,
+        acquiredAt: now,
+      };
+      atomicJsonWrite(join(probeDir, "owner.json"), adopted);
+      this.startOwnerHeartbeat(probeDir, adopted.token);
+      return adopted;
+    } finally {
+      releaseDirectoryLock(ownerLock, lockToken);
+    }
+  }
+
   releaseOwner(probeSerial: string, token: string): boolean {
     const probeDir = this.probeDirectory(requireSerial(probeSerial));
     const ownerLock = join(probeDir, "owner-update.lock");

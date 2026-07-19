@@ -50,6 +50,9 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       assert.equal(properties.verify?.default, false);
       assert.equal(properties.restore?.default, false);
     }
+    const eventWindowVariables = tools.find((tool) => tool.name === "capture_event_window")?.inputSchema.properties?.variables as { minItems?: number; maxItems?: number };
+    assert.equal(eventWindowVariables.minItems, undefined);
+    assert.equal(eventWindowVariables.maxItems, 16);
     const ref = { artifactGeneration: "a".repeat(64), qualifiedName: "counter", layoutHash: "b".repeat(64) };
     const phaseThreeCalls = [
       ["artifact_probe", { projectRoot: root }],

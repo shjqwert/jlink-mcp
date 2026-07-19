@@ -31,13 +31,13 @@
 
 ## 4. Implement Direct HSS and JCAP v1 Data Path (Commit 5)
 
-- [ ] 4.1 Implement HSS capability and read-only planning with at most ten synchronized variables, at most 1 kHz, and at most 60 seconds for the current J-Link capability.
-- [ ] 4.2 Implement token-free `hss_start`, `hss_status`, `hss_stop`, and `hss_recover` with explicit lifecycle, helper ABI checks, quality counters, and no backend fallback.
-- [ ] 4.3 Route capture-aware `write_variable` through the Probe owner only for descriptor-declared variables and persist old/requested/readback/restore results with interval-aligned sample references.
-- [ ] 4.4 Implement JCAP v1 `capture.json`, append-only `raw/samples.bin`, append-only `raw/events.bin`, lifecycle states, hashes, CRC/integrity checks, and valid-prefix recovery.
-- [ ] 4.5 Implement atomic terminal `capture.db` publication and atomic rebuild from authoritative metadata and Raw files without modifying Raw hashes or overwriting a valid DB on failure.
-- [ ] 4.6 Implement compatible bounded capture list, summary, series, event-window, and explicit CSV-export operations, with CSV output outside the JCAP package.
-- [ ] 4.7 Add fake-helper and simulated integration tests for the HSS ceiling, ownership, capture-time writes, interrupted recovery, JCAP integrity, DB rebuild equivalence, and bounded queries.
+- [x] 4.1 Implement HSS capability and read-only planning with at most ten synchronized variables, at most 1 kHz, and at most 60 seconds for the current J-Link capability.
+- [x] 4.2 Implement token-free `hss_start`, `hss_status`, `hss_stop`, and `hss_recover` with explicit lifecycle, helper ABI checks, quality counters, and no backend fallback.
+- [x] 4.3 Route capture-aware `write_variable` through the Probe owner only for descriptor-declared variables and persist old/requested/readback/restore results with interval-aligned sample references.
+- [x] 4.4 Implement JCAP v1 `capture.json`, append-only `raw/samples.bin`, append-only `raw/events.bin`, lifecycle states, hashes, CRC/integrity checks, and valid-prefix recovery.
+- [x] 4.5 Implement atomic terminal `capture.db` publication and atomic rebuild from authoritative metadata and Raw files without modifying Raw hashes or overwriting a valid DB on failure.
+- [x] 4.6 Implement compatible bounded capture list, summary, series, event-window, and explicit CSV-export operations, with CSV output outside the JCAP package.
+- [x] 4.7 Add fake-helper and simulated integration tests for the HSS ceiling, ownership, capture-time writes, interrupted recovery, JCAP integrity, DB rebuild equivalence, and bounded queries.
 
 ## 5. Add the Agent-First Acceptance Suite (Commit 6)
 

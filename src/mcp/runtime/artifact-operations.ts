@@ -61,8 +61,19 @@ export interface TypedSymbolResolver {
   search(target: StoredTarget, query: string, limit: number): Promise<Array<Record<string, unknown>>>;
 }
 
+export interface CaptureVariableWriteDelegate {
+  tryWriteVariable(
+    input: VariableWriteInput,
+    target: StoredTarget,
+    resolved: ResolvedSymbol,
+    requested: Buffer,
+    comparator: ScalarComparator,
+  ): Promise<OperationEnvelope | undefined>;
+}
+
 export class ArtifactVariableService {
   private readonly hot: HotVariables;
+  private captureWriteDelegate?: CaptureVariableWriteDelegate;
 
   constructor(
     private readonly targets: TargetStore,
@@ -71,6 +82,15 @@ export class ArtifactVariableService {
     private readonly symbols: TypedSymbolResolver = new GdbTypedSymbolResolver(),
   ) {
     this.hot = new HotVariables(join(storageRoot, "hot-variables.json"));
+  }
+
+  setCaptureWriteDelegate(delegate: CaptureVariableWriteDelegate): void {
+    this.captureWriteDelegate = delegate;
+  }
+
+  async resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{ target: StoredTarget; resolved: ResolvedSymbol }> {
+    const target = this.targets.require(projectRoot);
+    return { target, resolved: await this.resolveReference(target, ref) };
   }
 
   async artifactProbe(input: {
@@ -192,6 +212,17 @@ export class ArtifactVariableService {
       comparator = variableComparator(input.comparator ?? { mode: "exact" }, resolved, input.value);
     } catch (error) {
       return this.failure(createOperationEnvelope("write_variable"), error, "symbol_resolution");
+    }
+    if (this.captureWriteDelegate) {
+      try {
+        const captureEnvelope = await this.captureWriteDelegate.tryWriteVariable(input, target, resolved, requested, comparator);
+        if (captureEnvelope) {
+          decorateTypedWrite(captureEnvelope, resolved);
+          return captureEnvelope;
+        }
+      } catch (error) {
+        return this.failure(createOperationEnvelope("write_variable", target), error, "capture_write");
+      }
     }
     const envelope = await this.direct.structuredWrite({
       projectRoot: target.projectRoot,

@@ -17,6 +17,7 @@ import { ProbeFactoryConfig } from "../probe/factory";
 import { initLogger } from "../utils/logger";
 import { dirname } from "node:path";
 export { JcapV0QueryService, jcapCaptureEventWindow, jcapCaptureExportCsv, jcapCaptureList, jcapCaptureSeries, jcapCaptureSummary, rebuildJcapV0Index, verifyJcapV0Index, writeJcapV0Raw } from "./jcap/jcap-v0";
+export { JcapV1QueryService, rebuildJcapV1Index, verifyJcapV1Index, readJcapV1Metadata, readJcapV1Raw } from "./jcap/jcap-v1";
 
 // Stderr logger for standalone mode
 initLogger({ appendLine(msg: string) { process.stderr.write(msg + "\n"); } });

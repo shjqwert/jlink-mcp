@@ -2,11 +2,13 @@
 #include <bcrypt.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cctype>
 #include <cstdlib>
 #include <cwctype>
 #include <cstdint>
+#include <cstring>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -77,6 +79,9 @@ using JLINKARM_WriteU16_Fn = void (*)(U32, U16);
 using JLINKARM_WriteU32_Fn = void (*)(U32, U32);
 
 static bool suppress_jlink_gui(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed);
+static bool select_exact_jlink_probe(JLINKARM_EMU_SelectByUSBSN_Fn arm_select_sn, const std::string& serial_text, U32* expected_serial, bool* crashed, std::string* error_code, std::string* error_reason);
+static bool configure_no_restart_on_close(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed);
+static bool verify_exact_jlink_probe(JLINKARM_GetSN_Fn arm_get_sn, U32 expected_serial, bool* crashed, std::string* error_code, std::string* error_reason);
 
 static std::string narrow(const std::wstring& input) {
   if (input.empty()) return "";
@@ -208,9 +213,25 @@ static bool sha256_bytes(const std::string& bytes, std::string* sha256) {
   return true;
 }
 
+static std::string crc32_hex(const std::string& bytes) {
+  U32 crc = 0xFFFFFFFFU;
+  for (unsigned char byte : bytes) {
+    crc ^= static_cast<U32>(byte);
+    for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1U) ^ ((crc & 1U) ? 0xEDB88320U : 0U);
+  }
+  std::ostringstream out;
+  out << std::hex << std::nouppercase << std::setfill('0') << std::setw(8) << (crc ^ 0xFFFFFFFFU);
+  return out.str();
+}
+
 static int version() {
   std::cout << "{\"status\":\"ok\",\"helperVersion\":\"" << HSS_HELPER_VERSION
-            << "\",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION << "}";
+            << "\",\"helperProtocolVersion\":" << HSS_HELPER_PROTOCOL_VERSION
+#if defined(_WIN64)
+            << ",\"architecture\":\"x64\"}";
+#else
+            << ",\"architecture\":\"x86\"}";
+#endif
   return 0;
 }
 
@@ -858,7 +879,15 @@ struct PlanSymbol {
   std::string name;
   U32 address;
   U32 size;
+  std::string type = "uint32";
 };
+
+static bool declared_scalar_access_allowed(const std::vector<PlanSymbol>* symbols, U32 address, int length) {
+  if (!symbols || (length != 1 && length != 2 && length != 4)) return false;
+  return std::any_of(symbols->begin(), symbols->end(), [&](const PlanSymbol& symbol) {
+    return symbol.address == address && symbol.size == static_cast<U32>(length);
+  });
+}
 
 struct HssBlockPlan {
   std::vector<JLINK_HSS_MEM_BLOCK_DESC> blocks;
@@ -868,13 +897,13 @@ struct HssBlockPlan {
 
 static std::vector<PlanSymbol> json_symbols(const std::string& text) {
   std::vector<PlanSymbol> symbols;
-  std::regex pattern("\\{[^{}]*\"name\"\\s*:\\s*\"([^\"]+)\"[^{}]*\"address\"\\s*:\\s*\"0x([0-9a-fA-F]+)\"[^{}]*\"size\"\\s*:\\s*(\\d+)[^{}]*\\}");
+  std::regex pattern("\\{[^{}]*\"name\"\\s*:\\s*\"([^\"]+)\"[^{}]*\"address\"\\s*:\\s*\"0x([0-9a-fA-F]+)\"[^{}]*\"size\"\\s*:\\s*(\\d+)[^{}]*\"type\"\\s*:\\s*\"([^\"]+)\"[^{}]*\\}");
   try {
     for (std::sregex_iterator it(text.begin(), text.end(), pattern), end; it != end; ++it) {
       const auto address = std::stoull((*it)[2].str(), nullptr, 16);
       const auto size = std::stoull((*it)[3].str());
       if (address > (std::numeric_limits<U32>::max)() || size > (std::numeric_limits<U32>::max)()) return {};
-      symbols.push_back({(*it)[1].str(), static_cast<U32>(address), static_cast<U32>(size)});
+      symbols.push_back({(*it)[1].str(), static_cast<U32>(address), static_cast<U32>(size), (*it)[4].str()});
     }
   } catch (...) {
     return {};
@@ -890,6 +919,9 @@ static bool valid_jcap_symbols(const std::vector<PlanSymbol>& symbols) {
     if (symbol.name.empty() || symbol.name.size() > 256 || !widen_utf8(symbol.name, &wide_name)
         || !names.insert(symbol.name).second
         || (symbol.size != 1U && symbol.size != 2U && symbol.size != 4U)
+        || !((symbol.size == 1U && (symbol.type == "uint8" || symbol.type == "int8"))
+          || (symbol.size == 2U && (symbol.type == "uint16" || symbol.type == "int16"))
+          || (symbol.size == 4U && (symbol.type == "uint32" || symbol.type == "int32" || symbol.type == "float32")))
         || symbol.address > (std::numeric_limits<U32>::max)() - symbol.size
         || total_bytes > 40U - symbol.size) return false;
     total_bytes += symbol.size;
@@ -898,9 +930,9 @@ static bool valid_jcap_symbols(const std::vector<PlanSymbol>& symbols) {
 }
 
 static bool capture_sample_budget(int requested_rate, int duration_sec, uint64_t* requested_samples) {
-  if (requested_rate < 1 || requested_rate > 16000 || duration_sec < 1 || duration_sec > 60) return false;
+  if (requested_rate < 1 || requested_rate > 1000 || duration_sec < 1 || duration_sec > 60) return false;
   *requested_samples = static_cast<uint64_t>(requested_rate) * static_cast<uint64_t>(duration_sec);
-  return *requested_samples > 0 && *requested_samples <= 960000U && *requested_samples <= (std::numeric_limits<U32>::max)();
+  return *requested_samples > 0 && *requested_samples <= 60000U && *requested_samples <= (std::numeric_limits<U32>::max)();
 }
 
 static bool valid_jcap_samples_path(const std::string& output_file, const std::string& capture_id, std::wstring* output_path) {
@@ -1018,6 +1050,16 @@ static HssSampleDecision observe_hss_sample(HssRecordSequence* sequence, uint32_
   sequence->lastSampleIndex = sample_index;
   ++sequence->emittedSamples;
   return HssSampleDecision::emit;
+}
+
+static bool hss_capture_sample_evidence_validated(bool stop_requested, uint64_t read_attempts, uint64_t decoded_samples) {
+  return stop_requested || (read_attempts > 0 && decoded_samples > 0);
+}
+
+static bool hss_terminal_sequence_validated(bool stop_requested, const HssRecordSequence& sequence, uint64_t decoded_samples) {
+  if (sequence.invalid) return false;
+  if (sequence.emittedSamples == 0) return stop_requested && decoded_samples == 0 && sequence.duplicateSamples == 0;
+  return decoded_samples == sequence.emittedSamples + sequence.duplicateSamples;
 }
 
 enum class PostConnectDecision {
@@ -1179,7 +1221,7 @@ class JcapSampleWriter {
   ~JcapSampleWriter() { close(); }
 
   bool open(const std::wstring& path) {
-    handle_ = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    handle_ = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     return handle_ != INVALID_HANDLE_VALUE;
   }
 
@@ -1195,15 +1237,31 @@ class JcapSampleWriter {
     payload << "{\"sampleIndex\":" << sample_index << ",\"tick\":\"" << tick << "\",\"statusFlags\":" << status_flags << ",\"values\":{";
     for (size_t index = 0; index < symbols.size(); ++index) {
       if (index > 0) payload << ',';
-      payload << '"' << escape(symbols[index].name) << "\":" << values[index];
+      payload << '"' << escape(symbols[index].name) << "\":";
+      const U32 raw = values[index];
+      if (symbols[index].type == "uint8") payload << static_cast<unsigned>(raw & 0xFFU);
+      else if (symbols[index].type == "int8") payload << static_cast<int>(static_cast<int8_t>(raw & 0xFFU));
+      else if (symbols[index].type == "uint16") payload << static_cast<unsigned>(raw & 0xFFFFU);
+      else if (symbols[index].type == "int16") payload << static_cast<int>(static_cast<int16_t>(raw & 0xFFFFU));
+      else if (symbols[index].type == "uint32") payload << raw;
+      else if (symbols[index].type == "int32") {
+        int32_t value = 0;
+        std::memcpy(&value, &raw, sizeof(value));
+        payload << value;
+      } else if (symbols[index].type == "float32") {
+        float value = 0.0F;
+        std::memcpy(&value, &raw, sizeof(value));
+        if (!std::isfinite(value)) return JcapAppendResult::failed;
+        payload << std::setprecision((std::numeric_limits<float>::max_digits10)) << value;
+      } else return JcapAppendResult::failed;
     }
     payload << "}}";
     const std::string payload_bytes = payload.str();
     std::string payload_sha256;
     if (!sha256_bytes(payload_bytes, &payload_sha256)) return JcapAppendResult::failed;
     std::ostringstream header;
-    header << "{\"formatVersion\":0,\"status\":\"experimental\",\"kind\":\"sample\",\"payloadEncoding\":\"json\",\"payloadBytes\":"
-           << payload_bytes.size() << ",\"payloadSha256\":\"" << payload_sha256 << "\"}\n";
+    header << "{\"formatVersion\":1,\"status\":\"stable\",\"kind\":\"sample\",\"payloadEncoding\":\"json\",\"payloadBytes\":"
+           << payload_bytes.size() << ",\"payloadSha256\":\"" << payload_sha256 << "\",\"payloadCrc32\":\"" << crc32_hex(payload_bytes) << "\"}\n";
     const std::string frame = header.str() + payload_bytes + '\n';
     if (bytes_ + frame.size() > byte_budget_) return JcapAppendResult::budgetExhausted;
     if (!write_all(frame)) return JcapAppendResult::failed;
@@ -1495,9 +1553,10 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
   auto fn = reinterpret_cast<JLINK_HSS_GetCaps_Fn>(required(dll, "JLINK_HSS_GetCaps"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_version || !fn) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_version || !fn) {
     FreeLibrary(dll);
     error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS_GetCaps exports missing", dll_utf8);
     return 0;
@@ -1515,18 +1574,25 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     error_json("HSS_DLL_VERSION_INVALID", "JLINKARM_GetDLLVersion failed", dll_utf8);
     return 0;
   }
-  if (!serial_text.empty() && arm_select_sn) {
-    (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
-    if (crashed) {
-      FreeLibrary(dll);
-      error_json("JLINK_SELECT_SN_EXCEPTION", "JLINKARM_EMU_SelectByUSBSN raised a structured exception", dll_utf8);
-      return 0;
-    }
+  U32 expected_serial = 0;
+  std::string selection_error_code;
+  std::string selection_error_reason;
+  if (!select_exact_jlink_probe(arm_select_sn, serial_text, &expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8);
+    return 0;
   }
   int open_rc = call_int0(arm_open, &crashed);
   if (crashed || open_rc < 0) {
     FreeLibrary(dll);
     error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8, true);
+    return 0;
+  }
+  if (!configure_no_restart_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
   }
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
@@ -1537,11 +1603,11 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   }
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
-  (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
-  if (crashed) {
+  const int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  if (crashed || device_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
+    error_json("JLINK_EXEC_DEVICE_FAILED", "JLINKARM_ExecCommand(device) failed with rc=" + std::to_string(device_rc) + ", output=" + std::string(exec_out), dll_utf8);
     return 0;
   }
   char script_exec_out[512] = {};
@@ -1552,13 +1618,34 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "expected J-Link script selection failed or changed before target connect", dll_utf8);
     return 0;
   }
-  (void)call_int1(arm_tif, tif, &crashed);
+  const int tif_rc = call_int1(arm_tif, tif, &crashed);
+  if (crashed || tif_rc < 0) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_TIF_SELECT_FAILED", "JLINKARM_TIF_Select failed", dll_utf8, true);
+    return 0;
+  }
   call_void1(arm_speed, speed, &crashed);
+  if (crashed) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", dll_utf8, true);
+    return 0;
+  }
   int connect_rc = call_int0(arm_connect, &crashed);
   if (crashed || connect_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", dll_utf8);
+    return 0;
+  }
+  if (!verify_exact_jlink_probe(arm_get_sn, expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8, true);
     return 0;
   }
 
@@ -1569,7 +1656,13 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     error_json("HSS_GETCAPS_EXCEPTION", "JLINK_HSS_GetCaps raised a structured exception", dll_utf8);
     return 0;
   }
-  call_void0(arm_close, &crashed);
+  bool close_crashed = false;
+  call_void0(arm_close, &close_crashed);
+  if (close_crashed) {
+    FreeLibrary(dll);
+    error_json("JLINK_CLOSE_FAILED", "JLINKARM_Close raised a structured exception after capability discovery", dll_utf8, true);
+    return 0;
+  }
   if (return_code < 0 || caps.MaxBlocks == 0 || caps.MaxFreq == 0) {
     std::cout
       << "{\"status\":\"error\",\"errorCode\":\"" << (return_code < 0 ? "HSS_GETCAPS_FAILED" : "HSS_GETCAPS_INVALID")
@@ -1698,7 +1791,7 @@ struct ArtifactMatchResult {
 };
 
 static bool artifact_match_capture_allowed(const ArtifactMatchResult& result) {
-  return result.gateErrorCode.empty();
+  return result.gateErrorCode.empty() && result.status == ArtifactMatchStatus::verified;
 }
 
 static bool artifact_match_write_allowed(const ArtifactMatchResult& result) {
@@ -2033,19 +2126,93 @@ static void artifact_match_gate_error(
   std::cout << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
 }
 
-static void write_text_file_a(const std::string& path, const std::string& text) {
-  const std::string temporary = path + ".tmp";
-  {
-    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-    file << text;
+static bool write_text_file_a(const std::string& path, const std::string& text) {
+  static std::atomic<uint64_t> sequence{0};
+  const std::string temporary = path + "." + std::to_string(GetCurrentProcessId()) + "." + std::to_string(++sequence) + ".tmp";
+  std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+  if (!file.is_open()) return false;
+  file.write(text.data(), static_cast<std::streamsize>(text.size()));
+  file.flush();
+  const bool written = file.good();
+  file.close();
+  if (!written || file.fail()) {
+    DeleteFileA(temporary.c_str());
+    return false;
   }
-  MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+  if (!MoveFileExA(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    DeleteFileA(temporary.c_str());
+    return false;
+  }
+  return true;
 }
 
 static bool suppress_jlink_gui(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed) {
   char out[512] = {};
-  (void)call_exec(arm_exec, "SuppressGUI = 1", out, sizeof(out), crashed);
-  return !*crashed;
+  const int rc = call_exec(arm_exec, "SuppressGUI = 1", out, sizeof(out), crashed);
+  return !*crashed && rc >= 0;
+}
+
+static bool select_exact_jlink_probe(
+    JLINKARM_EMU_SelectByUSBSN_Fn arm_select_sn,
+    const std::string& serial_text,
+    U32* expected_serial,
+    bool* crashed,
+    std::string* error_code,
+    std::string* error_reason) {
+  *crashed = false;
+  if (!arm_select_sn) {
+    *error_code = "JLINK_SELECT_SN_EXPORT_MISSING";
+    *error_reason = "JLINKARM_EMU_SelectByUSBSN export is required for exact Probe selection";
+    return false;
+  }
+  if (!parse_u32_text(serial_text, expected_serial) || *expected_serial == 0) {
+    *error_code = "JLINK_SERIAL_INVALID";
+    *error_reason = "configured Probe serial must be one non-zero uint32 value";
+    return false;
+  }
+  const int rc = call_select_sn(arm_select_sn, *expected_serial, crashed);
+  if (*crashed) {
+    *error_code = "JLINK_SELECT_SN_EXCEPTION";
+    *error_reason = "JLINKARM_EMU_SelectByUSBSN raised a structured exception";
+    return false;
+  }
+  if (rc < 0) {
+    *error_code = "JLINK_SELECT_SN_FAILED";
+    *error_reason = "JLINKARM_EMU_SelectByUSBSN rejected the configured Probe";
+    return false;
+  }
+  return true;
+}
+
+static bool configure_no_restart_on_close(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed) {
+  char out[512] = {};
+  const int rc = call_exec(arm_exec, "SetRestartOnClose = 0", out, sizeof(out), crashed);
+  return !*crashed && rc >= 0;
+}
+
+static bool verify_exact_jlink_probe(
+    JLINKARM_GetSN_Fn arm_get_sn,
+    U32 expected_serial,
+    bool* crashed,
+    std::string* error_code,
+    std::string* error_reason) {
+  if (!arm_get_sn) {
+    *error_code = "JLINK_GET_SN_EXPORT_MISSING";
+    *error_reason = "JLINKARM_GetSN export is required to verify the connected Probe";
+    return false;
+  }
+  const U32 actual_serial = call_u320(arm_get_sn, crashed);
+  if (*crashed) {
+    *error_code = "JLINK_GET_SN_EXCEPTION";
+    *error_reason = "JLINKARM_GetSN raised a structured exception";
+    return false;
+  }
+  if (actual_serial != expected_serial) {
+    *error_code = "JLINK_SERIAL_MISMATCH";
+    *error_reason = "connected Probe does not match the configured serial";
+    return false;
+  }
+  return true;
 }
 
 static int connect_preflight(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
@@ -2063,12 +2230,12 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
-  auto arm_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_id = reinterpret_cast<JLINKARM_GetId_Fn>(required(dll, "JLINKARM_GetId"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
 
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn) {
     FreeLibrary(dll);
     error_json("JLINK_BASE_EXPORT_MISSING", "required JLINKARM base exports missing", dll_utf8);
     return 0;
@@ -2081,28 +2248,21 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   const int tif = iface == "JTAG" ? 0 : 1;
   bool crashed = false;
   int select_sn_rc = 0;
-  if (!serial_text.empty() && arm_select_sn) {
-    select_sn_rc = call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
-    if (crashed) {
-      FreeLibrary(dll);
-      error_json("JLINK_SELECT_SN_EXCEPTION", "JLINKARM_EMU_SelectByUSBSN raised a structured exception", dll_utf8);
-      return 0;
-    }
+  U32 expected_serial = 0;
+  std::string selection_error_code;
+  std::string selection_error_reason;
+  if (!select_exact_jlink_probe(arm_select_sn, serial_text, &expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8);
+    return 0;
   }
 
   int open_rc = call_int0(arm_open, &crashed);
-  if (crashed) {
+  if (crashed || open_rc < 0) {
     FreeLibrary(dll);
-    error_json("JLINK_OPEN_EXCEPTION", "JLINKARM_Open raised a structured exception", dll_utf8);
+    error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
     return 0;
   }
-  if (!suppress_jlink_gui(arm_exec, &crashed)) {
-    call_void0(arm_close, &crashed);
-    FreeLibrary(dll);
-    error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", dll_utf8);
-    return 0;
-  }
-
   char close_policy_out[512] = {};
   int close_policy_rc = call_exec(arm_exec, "SetRestartOnClose = 0", close_policy_out, sizeof(close_policy_out), &crashed);
   if (crashed || close_policy_rc < 0) {
@@ -2112,14 +2272,21 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
   }
+  if (!suppress_jlink_gui(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", dll_utf8, true);
+    return 0;
+  }
 
   char exec_out[512] = {};
   std::string device_cmd = "device = " + device;
   int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
-  if (crashed) {
+  if (crashed || device_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8, true);
+    error_json("JLINK_EXEC_DEVICE_FAILED", "JLINKARM_ExecCommand(device) failed with rc=" + std::to_string(device_rc) + ", output=" + std::string(exec_out), dll_utf8, true);
     return 0;
   }
   int tif_rc = call_int1(arm_tif, tif, &crashed);
@@ -2139,10 +2306,17 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   }
 
   int connect_rc = call_int0(arm_connect, &crashed);
-  if (crashed) {
+  if (crashed || connect_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_CONNECT_EXCEPTION", "JLINKARM_Connect raised a structured exception", dll_utf8);
+    error_json("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", dll_utf8);
+    return 0;
+  }
+  if (!verify_exact_jlink_probe(arm_get_sn, expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8, true);
     return 0;
   }
 
@@ -2151,23 +2325,29 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     halted = call_int0(arm_halted, &crashed);
     if (crashed) halted = -2;
   }
-  U32 sn = 0;
-  if (arm_sn) {
-    sn = call_u320(arm_sn, &crashed);
-    if (crashed) sn = 0;
-  }
+  const U32 sn = expected_serial;
   U32 target_id = 0;
+  bool observation_crashed = false;
   if (arm_id) {
-    target_id = call_u320(arm_id, &crashed);
-    if (crashed) target_id = 0;
+    bool id_crashed = false;
+    target_id = call_u320(arm_id, &id_crashed);
+    observation_crashed = observation_crashed || id_crashed;
+    if (id_crashed) target_id = 0;
   }
   int dll_version = 0;
   if (arm_version) {
-    dll_version = call_int0(arm_version, &crashed);
-    if (crashed) dll_version = 0;
+    bool version_crashed = false;
+    dll_version = call_int0(arm_version, &version_crashed);
+    observation_crashed = observation_crashed || version_crashed;
+    if (version_crashed) dll_version = 0;
   }
-  call_void0(arm_close, &crashed);
+  bool close_crashed = false;
+  call_void0(arm_close, &close_crashed);
   FreeLibrary(dll);
+  if (observation_crashed || close_crashed) {
+    error_json(close_crashed ? "JLINK_CLOSE_FAILED" : "JLINK_PREFLIGHT_OBSERVE_FAILED", "J-Link preflight observation or close failed", dll_utf8, true);
+    return 0;
+  }
 
   std::cout
     << "{\"status\":\"" << (connect_rc >= 0 ? "ok" : "error")
@@ -2330,7 +2510,7 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   if (crashed || device_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8, true);
+    error_json("JLINK_EXEC_DEVICE_FAILED", "JLINKARM_ExecCommand(device) failed with rc=" + std::to_string(device_rc) + ", output=" + std::string(exec_out), dll_utf8, true);
     return 0;
   }
   const int tif = iface == "JTAG" ? 0 : 1;
@@ -2543,6 +2723,56 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   return 0;
 }
 
+static bool self_test_write_scalar_no_retry();
+
+static U32 self_test_selected_serial = 0;
+
+static int self_test_select_serial(U32 serial) {
+  self_test_selected_serial = serial;
+  return 0;
+}
+
+static int self_test_reject_serial(U32) {
+  return -1;
+}
+
+static U32 self_test_get_selected_serial() {
+  return self_test_selected_serial;
+}
+
+static U32 self_test_get_wrong_serial() {
+  return self_test_selected_serial + 1U;
+}
+
+static int self_test_exec_success(const char* command, char*, int) {
+  return std::string(command) == "SetRestartOnClose = 0" ? 0 : -1;
+}
+
+static int self_test_exec_failure(const char*, char*, int) {
+  return -1;
+}
+
+static bool self_test_probe_selection_and_close_policy() {
+  U32 expected = 0;
+  bool crashed = false;
+  std::string error_code;
+  std::string error_reason;
+  if (select_exact_jlink_probe(nullptr, "123", &expected, &crashed, &error_code, &error_reason)
+      || error_code != "JLINK_SELECT_SN_EXPORT_MISSING"
+      || select_exact_jlink_probe(self_test_select_serial, "0", &expected, &crashed, &error_code, &error_reason)
+      || error_code != "JLINK_SERIAL_INVALID"
+      || select_exact_jlink_probe(self_test_reject_serial, "123", &expected, &crashed, &error_code, &error_reason)
+      || error_code != "JLINK_SELECT_SN_FAILED") return false;
+  if (!select_exact_jlink_probe(self_test_select_serial, "123", &expected, &crashed, &error_code, &error_reason)
+      || expected != 123U || self_test_selected_serial != 123U
+      || !verify_exact_jlink_probe(self_test_get_selected_serial, expected, &crashed, &error_code, &error_reason)
+      || verify_exact_jlink_probe(self_test_get_wrong_serial, expected, &crashed, &error_code, &error_reason)
+      || error_code != "JLINK_SERIAL_MISMATCH"
+      || !configure_no_restart_on_close(self_test_exec_success, &crashed)
+      || configure_no_restart_on_close(self_test_exec_failure, &crashed)) return false;
+  return true;
+}
+
 static int self_test() {
   U32 parsed_u32 = 0;
   int parsed_int = 0;
@@ -2562,6 +2792,14 @@ static int self_test() {
       || width_read_complete(2, 2U, {0U, 1U}, false)
       || width_read_complete(2, 2U, {0U}, false)) {
     error_json("HSS_SELF_TEST_READ_COUNT_FAILED", "J-Link read completion classification failed");
+    return 0;
+  }
+  if (!self_test_write_scalar_no_retry()) {
+    error_json("HSS_SELF_TEST_WRITE_RETRY_FAILED", "a crashed typed write was retried through JLINKARM_WriteMem");
+    return 0;
+  }
+  if (!self_test_probe_selection_and_close_policy()) {
+    error_json("HSS_SELF_TEST_PROBE_SELECTION_FAILED", "exact Probe selection or no-restart close policy boundary failed");
     return 0;
   }
   if (!prepare_jlink_script("none", L"", "", &no_script, &script_error_code, &script_error_reason)
@@ -2639,6 +2877,14 @@ static int self_test() {
       || observe_hss_sample(&decreasing_sequence, 87U, &decreasing_flags) != HssSampleDecision::invalid
       || !decreasing_sequence.invalid || decreasing_sequence.emittedSamples != 1) {
     error_json("HSS_SELF_TEST_RECORD_DECREASING_FAILED", "decreasing HSS record sequence was not rejected");
+    return 0;
+  }
+  HssRecordSequence empty_stopped_sequence;
+  if (!hss_capture_sample_evidence_validated(true, 0, 0)
+      || hss_capture_sample_evidence_validated(false, 0, 0)
+      || !hss_terminal_sequence_validated(true, empty_stopped_sequence, 0)
+      || hss_terminal_sequence_validated(false, empty_stopped_sequence, 0)) {
+    error_json("HSS_SELF_TEST_ZERO_SAMPLE_STOP_FAILED", "explicit stop before the first sample was not classified as a valid stopped capture");
     return 0;
   }
   PostConnectStabilityEvidence recovery_restart;
@@ -2804,15 +3050,15 @@ static int self_test() {
       || !artifact_match_capture_allowed(transient_mismatch) || !artifact_match_write_allowed(transient_mismatch)
       || partial_read.status != ArtifactMatchStatus::unverified || partial_read.bytesCompared != 0U
       || partial_read.gateErrorCode != "ARTIFACT_MATCH_READ_INCOMPLETE" || artifact_match_capture_allowed(partial_read)
-      || unsupported_reader.status != ArtifactMatchStatus::unverified || !artifact_match_capture_allowed(unsupported_reader)
+      || unsupported_reader.status != ArtifactMatchStatus::unverified || artifact_match_capture_allowed(unsupported_reader)
       || artifact_match_write_allowed(unsupported_reader)
       || !first_verified || second_connect != 2U || match_connection.isVerified(second_connect)) {
     error_json("HSS_SELF_TEST_ARTIFACT_MATCH_FAILED", "artifact match completeness or connection binding failed");
     return 0;
   }
   uint64_t sample_budget = 0;
-  if (!capture_sample_budget(16000, 60, &sample_budget) || sample_budget != 960000U
-      || capture_sample_budget(16001, 60, &sample_budget) || capture_sample_budget(16000, 61, &sample_budget)) {
+  if (!capture_sample_budget(1000, 60, &sample_budget) || sample_budget != 60000U
+      || capture_sample_budget(1001, 60, &sample_budget) || capture_sample_budget(1000, 61, &sample_budget)) {
     error_json("HSS_SELF_TEST_JCAP_BUDGET_FAILED", "JCAP sample budget boundary failed");
     return 0;
   }
@@ -2828,7 +3074,14 @@ static int self_test() {
   const std::vector<PlanSymbol> native_symbols{{"counter", 0x20000000U, 4U}, {"pattern", 0x20000004U, 4U}};
   {
     JcapSampleWriter writer;
-    if (!writer.open(temporaryPath)
+    if (!writer.open(temporaryPath)) {
+      error_json("HSS_SELF_TEST_JCAP_WRITE_FAILED", "deterministic JCAP open failed");
+      return 0;
+    }
+    HANDLE concurrent_reader = CreateFileW(temporaryPath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    const bool concurrent_read_validated = concurrent_reader != INVALID_HANDLE_VALUE;
+    if (concurrent_reader != INVALID_HANDLE_VALUE) CloseHandle(concurrent_reader);
+    if (!concurrent_read_validated
         || writer.append(0U, 0U, 1U, native_symbols, {1U, 2U}, &first_frame) != JcapAppendResult::appended
         || writer.append(1U, 1000000U, 1U, native_symbols, {17U, 18U}) != JcapAppendResult::appended
         || !writer.finalize()) {
@@ -2836,11 +3089,58 @@ static int self_test() {
       return 0;
     }
   }
-  const std::string expected_first_frame =
-    "{\"formatVersion\":0,\"status\":\"experimental\",\"kind\":\"sample\",\"payloadEncoding\":\"json\",\"payloadBytes\":79,\"payloadSha256\":\"2c6b2742e9ff67a9c2304a380ba8532904f9c5de40e8716dae3028f040c35d52\"}\n"
-    "{\"sampleIndex\":0,\"tick\":\"0\",\"statusFlags\":1,\"values\":{\"counter\":1,\"pattern\":2}}\n";
+  const std::string expected_payload = "{\"sampleIndex\":0,\"tick\":\"0\",\"statusFlags\":1,\"values\":{\"counter\":1,\"pattern\":2}}";
+  std::string expected_payload_sha256;
+  if (!sha256_bytes(expected_payload, &expected_payload_sha256)) {
+    error_json("HSS_SELF_TEST_JCAP_BYTES_FAILED", "could not hash the deterministic JCAP payload");
+    return 0;
+  }
+  std::ostringstream expected_header;
+  expected_header << "{\"formatVersion\":1,\"status\":\"stable\",\"kind\":\"sample\",\"payloadEncoding\":\"json\",\"payloadBytes\":"
+                  << expected_payload.size() << ",\"payloadSha256\":\"" << expected_payload_sha256
+                  << "\",\"payloadCrc32\":\"" << crc32_hex(expected_payload) << "\"}\n";
+  const std::string expected_first_frame = expected_header.str() + expected_payload + '\n';
   if (first_frame != expected_first_frame || !sha256_file(temporaryPath, &raw_sha256) || !DeleteFileW(temporaryPath.c_str())) {
     error_json("HSS_SELF_TEST_JCAP_BYTES_FAILED", "JCAP bytes or final close were not deterministic");
+    return 0;
+  }
+  const auto typed_symbols = json_symbols(
+    "{\"symbols\":[{\"name\":\"u8\",\"address\":\"0x20000000\",\"size\":1,\"type\":\"uint8\"},"
+    "{\"name\":\"i8\",\"address\":\"0x20000001\",\"size\":1,\"type\":\"int8\"},"
+    "{\"name\":\"u16\",\"address\":\"0x20000002\",\"size\":2,\"type\":\"uint16\"},"
+    "{\"name\":\"i16\",\"address\":\"0x20000004\",\"size\":2,\"type\":\"int16\"},"
+    "{\"name\":\"u32\",\"address\":\"0x20000008\",\"size\":4,\"type\":\"uint32\"},"
+    "{\"name\":\"i32\",\"address\":\"0x2000000c\",\"size\":4,\"type\":\"int32\"},"
+    "{\"name\":\"f32\",\"address\":\"0x20000010\",\"size\":4,\"type\":\"float32\"}]}"
+  );
+  const std::string typedFile = "hss_selftest_typed_" + std::to_string(GetCurrentProcessId()) + ".bin";
+  DeleteFileA(typedFile.c_str());
+  std::wstring typedPath;
+  std::string typed_frame;
+  if (!widen_utf8(typedFile, &typedPath) || !valid_jcap_symbols(typed_symbols)) {
+    error_json("HSS_SELF_TEST_TYPED_JCAP_FAILED", "typed symbol plan validation failed");
+    return 0;
+  }
+  if (!declared_scalar_access_allowed(&typed_symbols, 0x20000008U, 4)
+      || declared_scalar_access_allowed(&typed_symbols, 0x20000008U, 2)
+      || declared_scalar_access_allowed(&typed_symbols, 0x20000009U, 4)
+      || declared_scalar_access_allowed(&typed_symbols, 0x20000020U, 4)
+      || declared_scalar_access_allowed(&typed_symbols, 0x20000008U, 8)) {
+    error_json("HSS_SELF_TEST_MEMORY_DESCRIPTOR_FAILED", "capture memory IPC descriptor boundary failed");
+    return 0;
+  }
+  {
+    JcapSampleWriter writer;
+    if (!writer.open(typedPath)
+        || writer.append(0U, 0U, 1U, typed_symbols, {255U, 255U, 65535U, 65535U, 0xFFFFFFFFU, 0xFFFFFFFFU, 0x3FC00000U}, &typed_frame) != JcapAppendResult::appended
+        || !writer.finalize()) {
+      error_json("HSS_SELF_TEST_TYPED_JCAP_FAILED", "typed sample encoding failed");
+      return 0;
+    }
+  }
+  const std::string typed_payload = "{\"sampleIndex\":0,\"tick\":\"0\",\"statusFlags\":1,\"values\":{\"u8\":255,\"i8\":-1,\"u16\":65535,\"i16\":-1,\"u32\":4294967295,\"i32\":-1,\"f32\":1.5}}";
+  if (typed_frame.find(typed_payload) == std::string::npos || !DeleteFileW(typedPath.c_str())) {
+    error_json("HSS_SELF_TEST_TYPED_JCAP_FAILED", "typed sample payload was not deterministic");
     return 0;
   }
   const std::string budgetFile = "hss_selftest_budget_" + std::to_string(GetCurrentProcessId()) + ".bin";
@@ -2882,10 +3182,10 @@ static int self_test() {
     return 0;
   }
   std::cout
-    << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v0-exact-utf8-envelope\""
+    << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v1-sha256-crc32-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"failureCloseValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
+    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
@@ -2897,6 +3197,7 @@ static int self_test() {
 
 struct HssMemoryIpc {
   std::string requestFile;
+  std::string claimFile;
   std::string responseFile;
   std::string captureId;
   JLINKARM_ReadMem_Fn readMem = nullptr;
@@ -2910,15 +3211,17 @@ struct HssMemoryIpc {
   JLINKARM_IsHalted_Fn isHalted = nullptr;
   JLINKARM_Go_Fn go = nullptr;
   bool writeAllowed = true;
+  const std::vector<PlanSymbol>* declaredSymbols = nullptr;
 };
 
-static std::string memory_response_error(const std::string& request_id, const std::string& code, const std::string& reason, bool write_issued, int64_t operation_before_qpc = -1, int64_t operation_after_qpc = -1) {
+static std::string memory_response_error(const std::string& request_id, const std::string& code, const std::string& reason, bool write_issued, int64_t operation_before_qpc = -1, int64_t operation_after_qpc = -1, bool state_unknown = false) {
   std::ostringstream out;
   out
     << "{\"requestId\":\"" << escape(request_id)
     << "\",\"status\":\"error\",\"errorCode\":\"" << escape(code)
     << "\",\"reason\":\"" << escape(reason)
-    << "\",\"writeIssued\":" << (write_issued ? "true" : "false");
+    << "\",\"writeIssued\":" << (write_issued ? "true" : "false")
+    << ",\"stateUnknown\":" << (state_unknown ? "true" : "false");
   if (operation_before_qpc >= 0) out << ",\"operationBeforeQpcCounter\":\"" << operation_before_qpc << "\"";
   if (operation_after_qpc >= 0) out << ",\"operationAfterQpcCounter\":\"" << operation_after_qpc << "\"";
   out << ",\"targetReset\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
@@ -2960,35 +3263,78 @@ static bool read_scalar_memory(const HssMemoryIpc& ipc, U32 address, int length,
   return read_count_complete(rc, static_cast<size_t>(length), crashed);
 }
 
-static bool write_scalar_memory(const HssMemoryIpc& ipc, U32 address, const std::vector<unsigned char>& bytes) {
+struct ScalarWriteResult {
+  bool success = false;
+  bool writeIssued = false;
+  bool stateUnknown = false;
+};
+
+static void accumulate_scalar_write_result(const ScalarWriteResult& result, bool* target_written, bool* target_write_unknown) {
+  if (result.success) *target_written = true;
+  if (result.stateUnknown) *target_write_unknown = true;
+}
+
+static ScalarWriteResult write_scalar_memory(const HssMemoryIpc& ipc, U32 address, const std::vector<unsigned char>& bytes) {
   bool crashed = false;
   if (bytes.size() == 1U && ipc.writeU8) {
     call_write_u8(ipc.writeU8, address, bytes[0], &crashed);
-    if (!crashed) return true;
+    return {!crashed, true, crashed};
   } else if (bytes.size() == 2U && ipc.writeU16) {
     const U16 value = static_cast<U16>(bytes[0]) | (static_cast<U16>(bytes[1]) << 8U);
     call_write_u16(ipc.writeU16, address, value, &crashed);
-    if (!crashed) return true;
+    return {!crashed, true, crashed};
   } else if (bytes.size() == 4U && ipc.writeU32) {
     const U32 value = static_cast<U32>(bytes[0]) | (static_cast<U32>(bytes[1]) << 8U) | (static_cast<U32>(bytes[2]) << 16U) | (static_cast<U32>(bytes[3]) << 24U);
     call_write_u32(ipc.writeU32, address, value, &crashed);
-    if (!crashed) return true;
+    return {!crashed, true, crashed};
   }
-  if (!ipc.writeMem) return false;
+  if (!ipc.writeMem) return {};
   const int rc = call_write_mem(ipc.writeMem, address, static_cast<U32>(bytes.size()), bytes.data(), &crashed);
-  return !crashed && rc >= 0;
+  return {!crashed && rc >= 0, true, crashed || rc < 0};
 }
 
-static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_written) {
-  if (ipc.requestFile.empty() || ipc.responseFile.empty()) return false;
+static int self_test_typed_write_calls = 0;
+static int self_test_generic_write_calls = 0;
+
+static void self_test_crashing_write_u8(U32, U8) {
+  ++self_test_typed_write_calls;
+  RaiseException(0xE0424242U, 0, 0, nullptr);
+}
+
+static int self_test_generic_write(U32, U32, const void*) {
+  ++self_test_generic_write_calls;
+  return 0;
+}
+
+static bool self_test_write_scalar_no_retry() {
+  HssMemoryIpc ipc;
+  ipc.writeU8 = self_test_crashing_write_u8;
+  ipc.writeMem = self_test_generic_write;
+  self_test_typed_write_calls = 0;
+  self_test_generic_write_calls = 0;
+  const ScalarWriteResult result = write_scalar_memory(ipc, 0x20000000U, {0x5AU});
+  bool target_written = false;
+  bool target_write_unknown = false;
+  accumulate_scalar_write_result(result, &target_written, &target_write_unknown);
+  return !result.success && result.writeIssued && result.stateUnknown
+    && !target_written && target_write_unknown
+    && self_test_typed_write_calls == 1 && self_test_generic_write_calls == 0;
+}
+
+static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_written, bool* target_write_unknown, bool* response_write_failed) {
+  if (ipc.requestFile.empty() || ipc.claimFile.empty() || ipc.responseFile.empty()) return false;
+  if (GetFileAttributesA(ipc.claimFile.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesA(ipc.responseFile.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
   if (GetFileAttributesA(ipc.requestFile.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
-  const std::string request = read_text_file_a(ipc.requestFile);
-  DeleteFileA(ipc.requestFile.c_str());
+  if (!MoveFileExA(ipc.requestFile.c_str(), ipc.claimFile.c_str(), MOVEFILE_WRITE_THROUGH)) return false;
+  const auto publish_response = [&](const std::string& body) {
+    if (!write_text_file_a(ipc.responseFile, body)) *response_write_failed = true;
+  };
+  const std::string request = read_text_file_a(ipc.claimFile);
   const std::string request_id = json_string(request, "requestId");
   const std::string capture_id = json_string(request, "captureId");
   const std::string op = json_string(request, "op");
   if (request_id.empty() || capture_id != ipc.captureId || (op != "read" && op != "write" && op != "resume")) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_WRITE_REQUEST_INVALID", "memory request is malformed", false));
+    publish_response(memory_response_error(request_id, "HSS_WRITE_REQUEST_INVALID", "memory request is malformed", false));
     return true;
   }
   if (op == "resume") {
@@ -2996,14 +3342,14 @@ static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_writ
     const int before_halted = ipc.isHalted ? call_int0(ipc.isHalted, &crashed) : -1;
     const int64_t before_qpc = qpc_counter();
     if (crashed || before_halted < 0 || before_qpc < 0 || !ipc.go) {
-      write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_CPU_CONTROL_FAILED", "capture-owner resume preflight failed", false));
+      publish_response(memory_response_error(request_id, "HSS_CPU_CONTROL_FAILED", "capture-owner resume preflight failed", false));
       return true;
     }
     if (before_halted > 0) call_void0(ipc.go, &crashed);
     const int64_t after_qpc = qpc_counter();
     const int after_halted = call_int0(ipc.isHalted, &crashed);
     if (crashed || after_halted < 0 || after_qpc < before_qpc) {
-      write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_CPU_CONTROL_FAILED", "capture-owner resume failed", before_halted > 0));
+      publish_response(memory_response_error(request_id, "HSS_CPU_CONTROL_FAILED", "capture-owner resume failed", before_halted > 0));
       return true;
     }
     std::ostringstream out;
@@ -3015,25 +3361,29 @@ static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_writ
         << "\",\"resumeIssued\":" << (before_halted > 0 ? "true" : "false")
         << ",\"targetReset\":false,\"targetWritten\":" << (*target_written ? "true" : "false")
         << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
-    write_text_file_a(ipc.responseFile, out.str());
+    publish_response(out.str());
     return true;
   }
   const std::string address_text = json_string(request, "address");
   U32 address = 0;
   int length = json_int(request, "length", 0);
   if (!parse_u32_text(address_text, &address) || length < 1 || length > 4096) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_WRITE_REQUEST_INVALID", "memory request is malformed", false));
+    publish_response(memory_response_error(request_id, "HSS_WRITE_REQUEST_INVALID", "memory request is malformed", false));
+    return true;
+  }
+  if (!declared_scalar_access_allowed(ipc.declaredSymbols, address, length)) {
+    publish_response(memory_response_error(request_id, "VARIABLE_NOT_IN_CAPTURE", "memory request does not exactly match an immutable capture descriptor", false));
     return true;
   }
   if (!ipc.readMem) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_READMEM_EXPORT_MISSING", "JLINKARM_ReadMem export missing", false));
+    publish_response(memory_response_error(request_id, "JLINK_READMEM_EXPORT_MISSING", "JLINKARM_ReadMem export missing", false));
     return true;
   }
 
   if (op == "read") {
     std::vector<unsigned char> bytes;
     if (!read_scalar_memory(ipc, address, length, &bytes)) {
-      write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_READMEM_FAILED", "JLINKARM_ReadMem failed", false));
+      publish_response(memory_response_error(request_id, "JLINK_READMEM_FAILED", "JLINKARM_ReadMem failed", false));
       return true;
     }
     std::ostringstream out;
@@ -3044,39 +3394,40 @@ static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_writ
       << ",\"bytesHex\":\"" << bytes_hex(bytes)
       << "\",\"targetReset\":false,\"targetWritten\":" << (*target_written ? "true" : "false")
       << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
-    write_text_file_a(ipc.responseFile, out.str());
+    publish_response(out.str());
     return true;
   }
 
   if (!ipc.writeAllowed) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "ARTIFACT_MATCH_UNVERIFIED_WRITE_FORBIDDEN", "unverified Artifact match permits read-only capture only", false));
+    publish_response(memory_response_error(request_id, "ARTIFACT_MATCH_UNVERIFIED_WRITE_FORBIDDEN", "unverified Artifact match permits read-only capture only", false));
     return true;
   }
-  if (!ipc.writeMem) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_WRITEMEM_EXPORT_MISSING", "JLINKARM_WriteMem export missing", false));
+  const bool scalar_writer_available = (length == 1 && ipc.writeU8) || (length == 2 && ipc.writeU16) || (length == 4 && ipc.writeU32);
+  if (!ipc.writeMem && !scalar_writer_available) {
+    publish_response(memory_response_error(request_id, "JLINK_WRITEMEM_EXPORT_MISSING", "JLINKARM_WriteMem export missing", false));
     return true;
   }
   std::vector<unsigned char> bytes;
   const std::string bytes_hex_text = json_string(request, "bytesHex");
   const int access_size = json_int(request, "accessSize", 0);
   if ((access_size != 1 && access_size != 2 && access_size != 4) || length % access_size != 0 || !parse_hex_bytes(bytes_hex_text, &bytes) || bytes.size() != static_cast<size_t>(length)) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_WRITE_BYTES_INVALID", "write bytes are malformed", false));
+    publish_response(memory_response_error(request_id, "HSS_WRITE_BYTES_INVALID", "write bytes are malformed", false));
     return true;
   }
   const int64_t operation_before_qpc = qpc_counter();
   if (operation_before_qpc < 0) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_QPC_UNAVAILABLE", "could not timestamp write start", false));
+    publish_response(memory_response_error(request_id, "HSS_QPC_UNAVAILABLE", "could not timestamp write start", false));
     return true;
   }
-  const bool write_ok = write_scalar_memory(ipc, address, bytes);
+  const ScalarWriteResult write_result = write_scalar_memory(ipc, address, bytes);
+  accumulate_scalar_write_result(write_result, target_written, target_write_unknown);
   const int64_t operation_after_qpc = qpc_counter();
-  if (!write_ok) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "JLINK_WRITEMEM_FAILED", "JLINKARM_WriteMem failed", true, operation_before_qpc, operation_after_qpc));
+  if (!write_result.success) {
+    publish_response(memory_response_error(request_id, "JLINK_WRITEMEM_FAILED", "J-Link memory write failed", write_result.writeIssued, operation_before_qpc, operation_after_qpc, write_result.stateUnknown));
     return true;
   }
-  *target_written = true;
   if (operation_after_qpc < operation_before_qpc) {
-    write_text_file_a(ipc.responseFile, memory_response_error(request_id, "HSS_QPC_UNAVAILABLE", "could not timestamp write completion", true, operation_before_qpc));
+    publish_response(memory_response_error(request_id, "HSS_QPC_UNAVAILABLE", "could not timestamp write completion", true, operation_before_qpc));
     return true;
   }
   std::ostringstream out;
@@ -3088,7 +3439,7 @@ static bool handle_hss_memory_request(const HssMemoryIpc& ipc, bool* target_writ
        << "\",\"operationAfterQpcCounter\":\"" << operation_after_qpc << "\""
     << ",\"writeIssued\":true,\"targetReset\":false,\"targetWritten\":true"
     << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
-  write_text_file_a(ipc.responseFile, out.str());
+  publish_response(out.str());
   return true;
 }
 
@@ -3149,12 +3500,13 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
   auto arm_halt = reinterpret_cast<JLINKARM_Halt_Fn>(required(dll, "JLINKARM_Halt"));
   auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
   auto arm_reset = reinterpret_cast<JLINKARM_Reset_Fn>(required(dll, "JLINKARM_Reset"));
   auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_halted || !arm_version
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted || !arm_version
       || (!state_only && ((operation == "halt" && !arm_halt) || (operation == "resume" && !arm_go)
         || (operation == "reset" && (!arm_reset || (halt_after_reset ? !arm_halt : !arm_go)))))) {
     FreeLibrary(dll);
@@ -3168,32 +3520,80 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
     error_json("HSS_DLL_VERSION_INVALID", "JLINKARM_GetDLLVersion failed", dll_utf8);
     return 0;
   }
-  if (!serial_text.empty() && arm_select_sn) (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
+  U32 expected_serial = 0;
+  std::string selection_error_code;
+  std::string selection_error_reason;
+  if (!select_exact_jlink_probe(arm_select_sn, serial_text, &expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8);
+    return 0;
+  }
   const int open_rc = call_int0(arm_open, &crashed);
-  if (crashed || open_rc < 0 || !suppress_jlink_gui(arm_exec, &crashed)) {
+  if (crashed || open_rc < 0) {
     if (open_rc >= 0) call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json("JLINK_OPEN_FAILED", "J-Link CPU-control open failed", dll_utf8);
     return 0;
   }
-  char exec_out[512] = {};
-  const std::string device_cmd = "device = " + device;
-  (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
-  char script_exec_out[512] = {};
-  int script_rc = -1;
-  if (crashed || !apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
-    call_void0(arm_close, &crashed);
+  if (!configure_no_restart_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
-    error_json(script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "trusted ScriptFile selection failed before CPU control", dll_utf8);
+    error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
   }
-  (void)call_int1(arm_tif, iface == "JTAG" ? 0 : 1, &crashed);
+  if (!suppress_jlink_gui(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", dll_utf8, true);
+    return 0;
+  }
+  char exec_out[512] = {};
+  const std::string device_cmd = "device = " + device;
+  const int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  if (crashed || device_rc < 0) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_EXEC_DEVICE_FAILED", "JLINKARM_ExecCommand(device) failed with rc=" + std::to_string(device_rc) + ", output=" + std::string(exec_out), dll_utf8, true);
+    return 0;
+  }
+  char script_exec_out[512] = {};
+  int script_rc = -1;
+  if (!apply_jlink_script(arm_exec, script_selection, &script_rc, script_exec_out, sizeof(script_exec_out), &crashed)) {
+    call_void0(arm_close, &crashed);
+    FreeLibrary(dll);
+    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "trusted ScriptFile selection failed before CPU control", dll_utf8);
+    return 0;
+  }
+  const int tif_rc = call_int1(arm_tif, iface == "JTAG" ? 0 : 1, &crashed);
+  if (crashed || tif_rc < 0) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_TIF_SELECT_FAILED", "JLINKARM_TIF_Select failed", dll_utf8, true);
+    return 0;
+  }
   call_void1(arm_speed, speed, &crashed);
+  if (crashed) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", dll_utf8, true);
+    return 0;
+  }
   const int connect_rc = call_int0(arm_connect, &crashed);
   if (crashed || connect_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json("JLINK_CONNECT_FAILED", "J-Link CPU-control connect failed", dll_utf8);
+    return 0;
+  }
+  if (!verify_exact_jlink_probe(arm_get_sn, expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8, true);
     return 0;
   }
   int64_t operation_before_qpc = state_only ? qpc_counter() : -1;
@@ -3207,6 +3607,20 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
   bool reset_issued = false;
   bool halt_issued = false;
   bool resume_issued = false;
+  const auto report_control_error = [&](const std::string& code, const std::string& reason, bool state_unknown, int observed_after_halted = -1) {
+    std::cout
+      << "{\"status\":\"error\",\"errorCode\":\"" << escape(code)
+      << "\",\"reason\":\"" << escape(reason)
+      << "\",\"operation\":\"" << escape(operation)
+      << "\",\"beforeState\":\"" << (before_halted > 0 ? "halted" : "running") << "\""
+      << ",\"afterState\":\"" << (state_unknown || observed_after_halted < 0 ? "unknown" : observed_after_halted > 0 ? "halted" : "running") << "\""
+      << ",\"writeIssued\":false,\"stateUnknown\":" << (state_unknown ? "true" : "false")
+      << ",\"targetReset\":" << (reset_issued ? "true" : "false")
+      << ",\"resetIssued\":" << (reset_issued ? "true" : "false")
+      << ",\"haltIssued\":" << (halt_issued ? "true" : "false")
+      << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
+      << ",\"targetWritten\":false,\"flashIssued\":false}";
+  };
   if (!state_only) {
     bool control_crashed = false;
     operation_before_qpc = qpc_counter();
@@ -3217,46 +3631,54 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
       return 0;
     }
     if (operation == "halt") {
+      halt_issued = true;
       call_void0(arm_halt, &control_crashed);
-      halt_issued = !control_crashed;
     } else if (operation == "resume") {
+      resume_issued = true;
       call_void0(arm_go, &control_crashed);
-      resume_issued = !control_crashed;
     } else {
+      reset_issued = true;
       call_void0(arm_reset, &control_crashed);
-      reset_issued = !control_crashed;
       if (!control_crashed) {
         if (halt_after_reset) {
+          halt_issued = true;
           call_void0(arm_halt, &control_crashed);
-          halt_issued = !control_crashed;
         } else {
+          resume_issued = true;
           call_void0(arm_go, &control_crashed);
-          resume_issued = !control_crashed;
         }
       }
     }
     const int64_t operation_after_control_qpc = qpc_counter();
     if (control_crashed) {
-      call_void0(arm_close, &crashed);
+      bool close_crashed = false;
+      call_void0(arm_close, &close_crashed);
       FreeLibrary(dll);
-      error_json("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control export raised a structured exception", dll_utf8);
+      report_control_error("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control export raised a structured exception", true);
       return 0;
     }
     if (operation_after_control_qpc < operation_before_qpc) {
-      call_void0(arm_close, &crashed);
+      bool close_crashed = false;
+      call_void0(arm_close, &close_crashed);
       FreeLibrary(dll);
-      error_json("HSS_QPC_UNAVAILABLE", "could not timestamp CPU-control after hardware action", dll_utf8);
+      report_control_error("HSS_QPC_UNAVAILABLE", "could not timestamp CPU-control after hardware action", true);
       return 0;
     }
     timebase_counter = operation_after_control_qpc;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
-  const int after_halted = call_int0(arm_halted, &crashed);
+  bool after_state_crashed = false;
+  const int after_halted = call_int0(arm_halted, &after_state_crashed);
   const int64_t operation_after_qpc = state_only ? qpc_counter() : timebase_counter;
-  call_void0(arm_close, &crashed);
+  bool close_crashed = false;
+  call_void0(arm_close, &close_crashed);
   FreeLibrary(dll);
-  if (crashed || after_halted < 0 || operation_before_qpc < 0 || operation_after_qpc < operation_before_qpc) {
-    error_json("HSS_CPU_CONTROL_FAILED", "J-Link CPU-control operation or state check failed", dll_utf8);
+  if (after_state_crashed || close_crashed || after_halted < 0 || operation_before_qpc < 0 || operation_after_qpc < operation_before_qpc) {
+    report_control_error(
+      close_crashed ? "JLINK_CLOSE_FAILED" : after_state_crashed || after_halted < 0 ? "HSS_CPU_STATE_OBSERVE_FAILED" : "HSS_QPC_UNAVAILABLE",
+      close_crashed ? "JLINKARM_Close raised a structured exception after CPU control" : after_state_crashed || after_halted < 0 ? "post-operation target state could not be observed" : "CPU-control timestamps are invalid",
+      true,
+      after_state_crashed ? -1 : after_halted);
     return 0;
   }
   std::cout
@@ -3347,6 +3769,7 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
   auto arm_read_mem = reinterpret_cast<JLINKARM_ReadMem_Fn>(required(dll, "JLINKARM_ReadMem"));
   auto arm_write_mem = reinterpret_cast<JLINKARM_WriteMem_Fn>(required(dll, "JLINKARM_WriteMem"));
@@ -3356,31 +3779,65 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   auto arm_write_u8 = reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8"));
   auto arm_write_u16 = reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16"));
   auto arm_write_u32 = reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_version || !arm_read_mem || !arm_write_mem) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_version || !arm_read_mem || !arm_write_mem) {
     FreeLibrary(dll); error_json("HSS_WRITE_EXPORT_MISSING", "required J-Link write export is missing", narrow(dll_path)); return 0;
   }
   bool crashed = false;
   const int dll_version = call_int0(arm_version, &crashed);
-  if (!serial_text.empty() && arm_select_sn) (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
+  U32 expected_serial = 0;
+  std::string selection_error_code;
+  std::string selection_error_reason;
+  if (crashed || dll_version <= 0) {
+    FreeLibrary(dll); error_json("HSS_DLL_VERSION_INVALID", "JLINKARM_GetDLLVersion failed", narrow(dll_path)); return 0;
+  }
+  if (!select_exact_jlink_probe(arm_select_sn, serial_text, &expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    FreeLibrary(dll); error_json(selection_error_code, selection_error_reason, narrow(dll_path)); return 0;
+  }
   const int open_rc = call_int0(arm_open, &crashed);
-  if (crashed || dll_version <= 0 || open_rc < 0 || !suppress_jlink_gui(arm_exec, &crashed)) {
+  if (crashed || open_rc < 0) {
     if (open_rc >= 0) call_void0(arm_close, &crashed); FreeLibrary(dll); error_json("JLINK_OPEN_FAILED", "J-Link variable-write open failed", narrow(dll_path)); return 0;
+  }
+  if (!configure_no_restart_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false; call_void0(arm_close, &close_crashed); FreeLibrary(dll); error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", narrow(dll_path), true); return 0;
+  }
+  if (!suppress_jlink_gui(arm_exec, &crashed)) {
+    bool close_crashed = false; call_void0(arm_close, &close_crashed); FreeLibrary(dll); error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", narrow(dll_path), true); return 0;
   }
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
-  (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  const int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  if (crashed || device_rc < 0) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_EXEC_DEVICE_FAILED", "JLINKARM_ExecCommand(device) failed with rc=" + std::to_string(device_rc) + ", output=" + std::string(exec_out), narrow(dll_path), true);
+    return 0;
+  }
   char script_out[512] = {};
   int script_rc = -1;
-  if (crashed || !apply_jlink_script(arm_exec, script_selection, &script_rc, script_out, sizeof(script_out), &crashed)) {
-    call_void0(arm_close, &crashed); FreeLibrary(dll); error_json("JLINK_SCRIPT_SELECT_FAILED", "trusted ScriptFile selection failed before variable write", narrow(dll_path)); return 0;
+  if (!apply_jlink_script(arm_exec, script_selection, &script_rc, script_out, sizeof(script_out), &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json(crashed || script_rc != 0 ? "JLINK_SCRIPT_SELECT_FAILED" : "HSS_JLINK_SCRIPT_IDENTITY_CHANGED", "trusted ScriptFile selection failed before variable write", narrow(dll_path), true);
+    return 0;
   }
-  (void)call_int1(arm_tif, iface == "JTAG" ? 0 : 1, &crashed);
+  const int tif_rc = call_int1(arm_tif, iface == "JTAG" ? 0 : 1, &crashed);
+  if (crashed || tif_rc < 0) {
+    bool close_crashed = false; call_void0(arm_close, &close_crashed); FreeLibrary(dll); error_json("JLINK_TIF_SELECT_FAILED", "JLINKARM_TIF_Select failed", narrow(dll_path), true); return 0;
+  }
   call_void1(arm_speed, speed, &crashed);
+  if (crashed) {
+    bool close_crashed = false; call_void0(arm_close, &close_crashed); FreeLibrary(dll); error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", narrow(dll_path), true); return 0;
+  }
   ArtifactMatchConnectionState connection;
   const int connect_rc = call_int0(arm_connect, &crashed);
   const uint64_t connect_ordinal = connection.connected();
   if (crashed || connect_rc < 0 || connect_ordinal != manifest.connectOrdinal) {
     call_void0(arm_close, &crashed); FreeLibrary(dll); artifact_match_gate_error("ARTIFACT_MATCH_BINDING_MISMATCH", "variable-write connection does not match the plan", capture_id, manifest_sha256); return 0;
+  }
+  if (!verify_exact_jlink_probe(arm_get_sn, expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    bool close_crashed = false; call_void0(arm_close, &close_crashed); FreeLibrary(dll); artifact_match_gate_error(selection_error_code, selection_error_reason, capture_id, manifest_sha256); return 0;
   }
   ArtifactMatchResult match = compare_artifact_ranges(manifest, [&](U32 read_address, U32 count, U8* data, std::string* reason) {
     bool read_crashed = false;
@@ -3395,23 +3852,25 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
     artifact_match_gate_error(code, match.reason, capture_id, manifest_sha256, &manifest, &match);
     return 0;
   }
-  HssMemoryIpc ipc{"", "", capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32, nullptr, nullptr, true};
+  HssMemoryIpc ipc{"", "", "", capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32, nullptr, nullptr, true, nullptr};
   std::vector<unsigned char> old_bytes;
   std::vector<unsigned char> readback_bytes;
   if (!read_scalar_memory(ipc, address, length, &old_bytes)) {
     call_void0(arm_close, &crashed); FreeLibrary(dll); artifact_match_gate_error("JLINK_READMEM_FAILED", "old-value read failed before variable write", capture_id, manifest_sha256, &manifest, &match); return 0;
   }
   const int64_t before_qpc = qpc_counter();
-  const bool write_ok = before_qpc >= 0 && write_scalar_memory(ipc, address, requested);
+  const ScalarWriteResult write_result = before_qpc >= 0 ? write_scalar_memory(ipc, address, requested) : ScalarWriteResult{};
   const int64_t after_qpc = qpc_counter();
   const bool readback_ok = read_scalar_memory(ipc, address, length, &readback_bytes);
-  call_void0(arm_close, &crashed);
+  bool close_crashed = false;
+  call_void0(arm_close, &close_crashed);
   FreeLibrary(dll);
-  if (!write_ok || after_qpc < before_qpc || !readback_ok) {
-    std::cout << "{\"status\":\"error\",\"errorCode\":\"" << (!write_ok ? "JLINK_WRITEMEM_FAILED" : !readback_ok ? "READBACK_FAILED" : "HSS_QPC_UNAVAILABLE")
-              << "\",\"reason\":\"variable write or readback failed\",\"writeIssued\":" << (write_ok ? "true" : "false");
+  if (!write_result.success || after_qpc < before_qpc || !readback_ok || close_crashed) {
+    std::cout << "{\"status\":\"error\",\"errorCode\":\"" << (!write_result.success ? "JLINK_WRITEMEM_FAILED" : !readback_ok ? "READBACK_FAILED" : after_qpc < before_qpc ? "HSS_QPC_UNAVAILABLE" : "JLINK_CLOSE_FAILED")
+              << "\",\"reason\":\"variable write or readback failed\",\"writeIssued\":" << (write_result.writeIssued ? "true" : "false")
+              << ",\"stateUnknown\":" << (write_result.stateUnknown || close_crashed ? "true" : "false");
     write_artifact_match_evidence(manifest, manifest_sha256, match);
-    std::cout << ",\"targetWritten\":" << (write_ok ? "true" : "false") << ",\"targetReset\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
+    std::cout << ",\"targetWritten\":" << (write_result.success ? "true" : "false") << ",\"targetReset\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
     return 0;
   }
   std::cout << "{\"status\":\"ok\",\"command\":\"variable-write\",\"dllVersion\":" << dll_version
@@ -3448,10 +3907,14 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string jlink_script_mode = option_utf8(options, L"--jlink-script-mode", "");
   const bool runtime_identity_validated = json_bool(plan, "runtimeIdentityValidated", false);
   const std::string output_file = json_string(plan, "outputFile");
+  const std::string pid_file = json_string(plan, "pidFile");
+  const std::string ready_file = json_string(plan, "readyFile");
   const std::string stop_file = json_string(plan, "stopFile");
   const std::string write_request_file = json_string(plan, "writeRequestFile");
+  const std::string write_claim_file = json_string(plan, "writeClaimFile");
   const std::string write_response_file = json_string(plan, "writeResponseFile");
   const std::string capture_id = json_string(plan, "captureId");
+  const std::string helper_instance_nonce = json_string(plan, "helperInstanceNonce");
   const std::string qpc_epoch_text = json_string(plan, "qpcEpochCounter");
   const std::string qpc_frequency_text = json_string(plan, "qpcFrequency");
   const std::string device = json_string(plan, "device", "");
@@ -3480,10 +3943,16 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   int64_t planned_qpc_frequency = 0;
   std::wstring output_path;
   const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}");
-  if (dll_utf8.empty() || output_file.empty() || !std::regex_match(capture_id, uuid) || symbols.size() > 10
+  if (dll_utf8.empty() || output_file.empty() || pid_file.empty() || ready_file.empty() || write_request_file.empty() || write_claim_file.empty() || write_response_file.empty()
+      || !std::regex_match(capture_id, uuid) || !std::regex_match(helper_instance_nonce, uuid) || symbols.size() > 10
       || !valid_jcap_symbols(symbols) || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
       || !valid_jcap_samples_path(output_file, capture_id, &output_path)) {
     error_json("HSS_PLAN_INVALID", "plan is missing required fields");
+    return 0;
+  }
+  if (!write_text_file_a(pid_file, "{\"captureId\":\"" + escape(capture_id) + "\",\"helperNonce\":\"" + escape(helper_instance_nonce)
+      + "\",\"pid\":" + std::to_string(GetCurrentProcessId()) + "}")) {
+    error_json("HSS_PID_JOURNAL_FAILED", "Helper ownership journal could not be published");
     return 0;
   }
   if (!parse_qpc_decimal(qpc_epoch_text, &qpc_epoch) || !parse_qpc_decimal(qpc_frequency_text, &planned_qpc_frequency)
@@ -3607,6 +4076,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
   auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
   auto arm_read_mem = reinterpret_cast<JLINKARM_ReadMem_Fn>(required(dll, "JLINKARM_ReadMem"));
@@ -3621,7 +4091,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto hss_start = reinterpret_cast<JLINK_HSS_Start_Fn>(required(dll, "JLINK_HSS_Start"));
   auto hss_read = reinterpret_cast<JLINK_HSS_Read_Fn>(required(dll, "JLINK_HSS_Read"));
   auto hss_stop = reinterpret_cast<JLINK_HSS_Stop_Fn>(required(dll, "JLINK_HSS_Stop"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_halted || !arm_read_mem || !arm_read_u32 || !arm_version || !hss_start || !hss_read || !hss_stop) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted || !arm_read_mem || !arm_read_u32 || !arm_version || !hss_start || !hss_read || !hss_stop) {
     FreeLibrary(dll);
     error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS exports missing", dll_utf8);
     return 0;
@@ -3634,18 +4104,25 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     error_json("HSS_DLL_VERSION_INVALID", "JLINKARM_GetDLLVersion failed", dll_utf8);
     return 0;
   }
-  if (!serial_text.empty() && arm_select_sn) {
-    (void)call_select_sn(arm_select_sn, static_cast<U32>(std::stoul(serial_text)), &crashed);
-    if (crashed) {
-      FreeLibrary(dll);
-      error_json("JLINK_SELECT_SN_EXCEPTION", "JLINKARM_EMU_SelectByUSBSN raised a structured exception", dll_utf8);
-      return 0;
-    }
+  U32 expected_serial = 0;
+  std::string selection_error_code;
+  std::string selection_error_reason;
+  if (!select_exact_jlink_probe(arm_select_sn, serial_text, &expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8);
+    return 0;
   }
   int open_rc = call_int0(arm_open, &crashed);
   if (crashed || open_rc < 0) {
     FreeLibrary(dll);
     error_json("JLINK_OPEN_FAILED", "JLINKARM_Open failed", dll_utf8);
+    return 0;
+  }
+  if (!configure_no_restart_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
   }
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
@@ -3656,11 +4133,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   }
   char exec_out[512] = {};
   const std::string device_cmd = "device = " + device;
-  (void)call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
-  if (crashed) {
+  const int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  if (crashed || device_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    error_json("JLINK_EXEC_DEVICE_EXCEPTION", "JLINKARM_ExecCommand(device) raised a structured exception", dll_utf8);
+    error_json("JLINK_EXEC_DEVICE_FAILED", "JLINKARM_ExecCommand(device) failed with rc=" + std::to_string(device_rc) + ", output=" + std::string(exec_out), dll_utf8);
     return 0;
   }
   char script_exec_out[512] = {};
@@ -3672,14 +4149,35 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
   const int tif = iface == "JTAG" ? 0 : 1;
-  (void)call_int1(arm_tif, tif, &crashed);
+  const int tif_rc = call_int1(arm_tif, tif, &crashed);
+  if (crashed || tif_rc < 0) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_TIF_SELECT_FAILED", "JLINKARM_TIF_Select failed", dll_utf8, true);
+    return 0;
+  }
   call_void1(arm_speed, speed, &crashed);
+  if (crashed) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", dll_utf8, true);
+    return 0;
+  }
   ArtifactMatchConnectionState artifact_match_connection;
   int connect_rc = call_int0(arm_connect, &crashed);
   if (crashed || connect_rc < 0) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", dll_utf8);
+    return 0;
+  }
+  if (!verify_exact_jlink_probe(arm_get_sn, expected_serial, &crashed, &selection_error_code, &selection_error_reason)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json(selection_error_code, selection_error_reason, dll_utf8, true);
     return 0;
   }
   const uint64_t connect_ordinal = artifact_match_connection.connected();
@@ -3781,7 +4279,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (!artifact_match_capture_allowed(artifact_match_result)) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
-    const std::string& code = artifact_match_result.gateErrorCode;
+    const std::string code = artifact_match_result.gateErrorCode.empty() ? "ARTIFACT_MATCH_UNVERIFIED_HSS_FORBIDDEN" : artifact_match_result.gateErrorCode;
     stream_fault(capture_id, code, artifact_match_result.reason, qpc_counter());
     artifact_match_gate_error(code, artifact_match_result.reason, capture_id, artifact_match_manifest_sha256, &artifact_match_manifest, &artifact_match_result, qpc_epoch, actual_qpc_frequency);
     return 0;
@@ -3828,6 +4326,32 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       : "HSS Start counter conversion and raw close failed");
     return 0;
   }
+  uint64_t heartbeat_sequence = 0;
+  int64_t last_heartbeat_ns = now_ns();
+  bool ready_journal_write_failed = false;
+  const auto publish_ready_heartbeat = [&](int64_t counter) {
+    const bool published = counter >= 0 && write_text_file_a(ready_file, "{\"status\":\"ready\",\"captureId\":\"" + escape(capture_id)
+      + "\",\"helperNonce\":\"" + escape(helper_instance_nonce) + "\",\"pid\":" + std::to_string(GetCurrentProcessId())
+      + ",\"qpcCounter\":\"" + std::to_string(counter) + "\",\"heartbeatSequence\":" + std::to_string(heartbeat_sequence++) + "}");
+    if (!published) ready_journal_write_failed = true;
+    else last_heartbeat_ns = now_ns();
+    return published;
+  };
+  const auto refresh_ready_heartbeat = [&]() {
+    return now_ns() - last_heartbeat_ns < 1000000000LL || publish_ready_heartbeat(qpc_counter());
+  };
+  if (!publish_ready_heartbeat(hss_start_qpc)) {
+    const bool raw_closed = raw_writer.finalize();
+    bool stop_crashed = false;
+    (void)call_hss_stop(hss_stop, &stop_crashed);
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    std::cout << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"HSS_READY_JOURNAL_FAILED\",\"reason\":\"Helper readiness journal could not be published\",\"captureId\":\"" << escape(capture_id)
+              << "\",\"hssStartIssued\":true,\"rawOpened\":true,\"rawClosed\":" << (raw_closed ? "true" : "false")
+              << ",\"stateUnknown\":" << (stop_crashed || close_crashed ? "true" : "false") << "}";
+    return 0;
+  }
   const U32 read_buffer_bytes = (std::max)(hss_sample_stride_bytes, 4096U);
   std::vector<unsigned char> read_buffer(read_buffer_bytes);
   uint64_t valid_samples = 0;
@@ -3850,33 +4374,38 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   bool first_read_sample_prefix_changed = false;
   bool last_read_sample_prefix_changed = false;
   bool target_written = false;
+  bool target_write_unknown = false;
   bool stop_requested = false;
   bool budget_exhausted = false;
   bool raw_write_failed = false;
+  bool ipc_response_write_failed = false;
   int first_changed_offset = -1;
   std::string first_changed_bytes;
   int payload_first_changed_offset = -1;
   std::string payload_first_changed_bytes;
   const int64_t started_ns = now_ns();
+  const int64_t planned_duration_ns = static_cast<int64_t>(duration_sec) * 1000000000LL;
+  const int64_t capture_deadline_ns = started_ns + planned_duration_ns;
   if (read_mode == "drain") {
-    const int64_t drain_until_ns = started_ns + static_cast<int64_t>(duration_sec) * 1000000000LL;
-    while (now_ns() < drain_until_ns) {
+    while (now_ns() < capture_deadline_ns && !ready_journal_write_failed) {
       if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
         stop_requested = true;
         break;
       }
+      (void)refresh_ready_heartbeat();
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
   HssRecordSequence record_sequence;
-  const HssMemoryIpc memory_ipc{write_request_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32, arm_halted, arm_go, artifact_match_write_allowed(artifact_match_result)};
-  for (uint64_t attempt = 0; attempt < requested_samples && record_sequence.emittedSamples < requested_samples
-      && !record_sequence.invalid && !budget_exhausted && !raw_write_failed; ++attempt) {
+  const HssMemoryIpc memory_ipc{write_request_file, write_claim_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32, arm_halted, arm_go, artifact_match_write_allowed(artifact_match_result), &symbols};
+  for (uint64_t attempt = 0; attempt < requested_samples && (read_mode == "drain" || now_ns() < capture_deadline_ns)
+      && !record_sequence.invalid && !budget_exhausted && !raw_write_failed && !ipc_response_write_failed && !ready_journal_write_failed; ++attempt) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
       stop_requested = true;
       break;
     }
-    (void)handle_hss_memory_request(memory_ipc, &target_written);
+    (void)handle_hss_memory_request(memory_ipc, &target_written, &target_write_unknown, &ipc_response_write_failed);
+    (void)refresh_ready_heartbeat();
     if (read_mode == "periodic") {
       while (true) {
         const int64_t wait_ns = sample_due_ns(started_ns, attempt, requested_rate) - now_ns();
@@ -3975,12 +4504,25 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       ++decoded_samples;
       ++valid_samples;
     }
-    if (crashed || record_sequence.invalid || budget_exhausted || raw_write_failed) break;
+    if (crashed || record_sequence.invalid || budget_exhausted || raw_write_failed || ipc_response_write_failed || ready_journal_write_failed) break;
+  }
+  while (read_mode == "periodic" && !stop_requested && !crashed && !record_sequence.invalid && !budget_exhausted && !raw_write_failed && !ipc_response_write_failed && !ready_journal_write_failed
+      && now_ns() < capture_deadline_ns) {
+    if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      stop_requested = true;
+      break;
+    }
+    (void)handle_hss_memory_request(memory_ipc, &target_written, &target_write_unknown, &ipc_response_write_failed);
+    (void)refresh_ready_heartbeat();
+    const int64_t remaining_ns = capture_deadline_ns - now_ns();
+    if (remaining_ns > 0) std::this_thread::sleep_for(std::chrono::nanoseconds((std::min)(remaining_ns, 1'000'000LL)));
   }
   const bool raw_closed = raw_writer.finalize();
   if (raw_write_failed || !raw_closed) stream_fault(capture_id, "HSS_RAW_WRITE_FAILED", "raw/samples.bin append, flush, or close failed", qpc_counter());
   if (record_sequence.invalid) stream_fault(capture_id, "HSS_SAMPLE_INDEX_INVALID", "HSS sample index decreased or wrapped", qpc_counter());
   if (crashed || read_errors > 0) stream_fault(capture_id, "HSS_READ_FAILED", "JLINK_HSS_Read failed or returned a short record", qpc_counter());
+  if (ipc_response_write_failed) stream_fault(capture_id, "HSS_MEMORY_RESPONSE_JOURNAL_FAILED", "capture-owner memory response could not be published durably", qpc_counter());
+  if (ready_journal_write_failed) stream_fault(capture_id, "HSS_READY_JOURNAL_FAILED", "capture-bound Helper heartbeat could not be refreshed durably", qpc_counter());
   if (budget_exhausted) stream_lifecycle(capture_id, "sample_budget_stop", qpc_counter(), ",\"samplesBytes\":" + std::to_string(raw_writer.bytes()) + ",\"samplesByteBudget\":" + std::to_string(JcapSampleWriter::kByteBudget));
   const bool read_crashed = crashed;
   bool stop_crashed = false;
@@ -3999,18 +4541,20 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const double header_changed_ratio = read_attempts > 0 ? static_cast<double>(header_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const double payload_changed_ratio = read_attempts > 0 ? static_cast<double>(payload_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const bool read_failed = !stop_requested && hss_capture_failed(read_crashed, record_sequence.emittedSamples);
-  const bool lifecycle_validated = start_rc >= 0 && read_attempts > 0 && decoded_samples > 0 && stop_rc >= 0
-    && !read_crashed && !stop_crashed && !close_crashed && raw_closed && raw_hashed;
-  const bool decoder_semantics_validated = !record_sequence.invalid
-    && record_sequence.emittedSamples > 0
-    && decoded_samples == record_sequence.emittedSamples + record_sequence.duplicateSamples
-    && (stop_requested || budget_exhausted || record_sequence.emittedSamples + record_sequence.droppedSamples >= requested_samples)
+  const uint64_t missing_samples = record_sequence.emittedSamples < requested_samples ? requested_samples - record_sequence.emittedSamples : 0;
+  const bool duration_validated = elapsed_ns >= planned_duration_ns;
+  const bool sample_threshold_met = record_sequence.emittedSamples * 100ULL >= requested_samples * 95ULL;
+  const bool lifecycle_validated = start_rc >= 0 && stop_rc >= 0
+    && !read_crashed && !stop_crashed && !close_crashed && raw_closed && raw_hashed
+    && hss_capture_sample_evidence_validated(stop_requested, read_attempts, decoded_samples);
+  const bool decoder_semantics_validated = hss_terminal_sequence_validated(stop_requested, record_sequence, decoded_samples)
+    && (stop_requested || budget_exhausted || (duration_validated && sample_threshold_met))
     && read_errors == 0 && !raw_write_failed;
-  const bool validation_failed = read_failed || raw_write_failed || !lifecycle_validated || !decoder_semantics_validated;
+  const bool validation_failed = read_failed || raw_write_failed || ipc_response_write_failed || ready_journal_write_failed || !lifecycle_validated || !decoder_semantics_validated;
   std::cout
     << "{\"record\":\"result\",\"status\":\"" << (validation_failed ? "error" : stop_requested || budget_exhausted ? "stopped" : "ok") << "\"";
   if (validation_failed) {
-    std::cout << ",\"errorCode\":\"" << (record_sequence.invalid ? "HSS_SAMPLE_INDEX_INVALID" : !lifecycle_validated ? "HSS_LIFECYCLE_VALIDATION_FAILED" : !decoder_semantics_validated ? "HSS_DECODE_VALIDATION_FAILED" : "HSS_READ_FAILED")
+    std::cout << ",\"errorCode\":\"" << (ready_journal_write_failed ? "HSS_READY_JOURNAL_FAILED" : ipc_response_write_failed ? "HSS_MEMORY_RESPONSE_JOURNAL_FAILED" : record_sequence.invalid ? "HSS_SAMPLE_INDEX_INVALID" : !lifecycle_validated ? "HSS_LIFECYCLE_VALIDATION_FAILED" : !decoder_semantics_validated ? "HSS_DECODE_VALIDATION_FAILED" : "HSS_READ_FAILED")
               << "\",\"reason\":\"JLINK_HSS Start/Read/Stop or decoded sample validation failed\"";
   }
   std::cout
@@ -4057,8 +4601,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"lifecycleValidated\":" << (lifecycle_validated ? "true" : "false")
     << ",\"decoderSemanticsValidated\":" << (decoder_semantics_validated ? "true" : "false")
     << ",\"emptyReads\":" << empty_reads
-    << ",\"shortReads\":" << short_reads
-     << ",\"missingSamples\":" << record_sequence.droppedSamples
+     << ",\"shortReads\":" << short_reads
+     << ",\"missingSamples\":" << missing_samples
     << ",\"bytesPerSample\":" << bytes_per_sample
     << ",\"readBufferBytes\":" << read_buffer_bytes
     << ",\"firstReadReturnCode\":" << first_read_rc
@@ -4091,11 +4635,15 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadChangedRatio\":" << payload_changed_ratio
     << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
-     << ",\"timeouts\":0,\"overflows\":0,\"droppedSamples\":" << record_sequence.droppedSamples;
+     << ",\"qualityStatus\":\"partial\",\"timeouts\":null,\"overflows\":null,\"droppedSamples\":" << record_sequence.droppedSamples
+     << ",\"qualityEvidence\":{\"missingSamples\":\"derived_from_planned_minus_emitted\",\"droppedSamples\":\"derived_from_sample_index_gaps\",\"overflows\":\"not_observable_from_JLINK_HSS_API\",\"readErrors\":\"measured_from_read_results\",\"timeouts\":\"not_observable_from_JLINK_HSS_API\"}"
+     << ",\"durationValidated\":" << (duration_validated ? "true" : "false")
+     << ",\"sampleThresholdMet\":" << (sample_threshold_met ? "true" : "false");
   write_post_connect_evidence(post_connect_evidence);
   write_artifact_match_evidence(artifact_match_manifest, artifact_match_manifest_sha256, artifact_match_result);
   std::cout
     << ",\"targetReset\":false,\"targetWritten\":" << (target_written ? "true" : "false")
+    << ",\"stateUnknown\":" << (target_write_unknown || (ipc_response_write_failed && target_written) ? "true" : "false")
     << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
      << ",\"segment\":{\"file\":\"samples.bin\",\"sampleStart\":" << (record_sequence.hasSample ? record_sequence.firstSampleIndex : 0)
      << ",\"sampleCount\":" << sample_count

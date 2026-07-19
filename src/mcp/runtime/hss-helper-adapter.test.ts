@@ -1,0 +1,222 @@
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import {
+  HssAdapterError,
+  NativeHssHelperAdapter,
+  type HssCaptureControlFiles,
+  type HssMemoryRequest,
+} from "./hss-helper-adapter";
+
+const captureId = "51000000-0000-4000-8000-000000000001";
+const helperNonce = "52000000-0000-4000-8000-000000000001";
+const operationId1 = "54000000-0000-4000-8000-000000000001";
+const operationId2 = "54000000-0000-4000-8000-000000000002";
+
+test("native adapter accepts only an exact live Helper ready journal", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-ready-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  try {
+    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId, helperNonce, pid: process.pid, qpcCounter: "123", heartbeatSequence: 0 }));
+    const launch = { pid: process.pid, launchedAt: new Date().toISOString(), captureId, helperNonce };
+    await adapter.waitUntilReady(control, launch, 100);
+    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId: "53000000-0000-4000-8000-000000000001", helperNonce, pid: process.pid, qpcCounter: "123", heartbeatSequence: 0 }));
+    await assert.rejects(
+      () => adapter.waitUntilReady(control, launch, 100),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_READY_INVALID",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capture liveness requires the exact identity and an advancing Helper heartbeat before adoption", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-heartbeat-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  try {
+    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId, helperNonce, pid: process.pid, qpcCounter: "100", heartbeatSequence: 7 }));
+    assert.equal(adapter.isCaptureAlive(control, process.pid, captureId, helperNonce), true);
+    assert.equal(adapter.isCaptureAlive(control, process.pid, captureId, "53000000-0000-4000-8000-000000000001"), false);
+    const advance = setTimeout(() => {
+      writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId, helperNonce, pid: process.pid, qpcCounter: "101", heartbeatSequence: 8 }));
+    }, 25);
+    assert.equal(await adapter.confirmCaptureAlive(control, process.pid, captureId, helperNonce, 250), true);
+    clearTimeout(advance);
+    assert.equal(await adapter.confirmCaptureAlive(control, process.pid, captureId, helperNonce, 50), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("timed-out IPC reconciles a late response without issuing or attributing the next write", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-ipc-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  try {
+    const firstResponder = respondOnce(control, 40);
+    await assert.rejects(
+      () => adapter.requestMemory(control, writeRequest("01000000", 1, operationId1), 10),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_REQUEST_TIMEOUT" && error.currentRequestIssued && error.stateUnknown,
+    );
+    assert.equal((await firstResponder).bytesHex, "01000000");
+
+    await assert.rejects(
+      () => adapter.requestMemory(control, writeRequest("02000000", 2, operationId2), 100),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_LATE_RESPONSE_RECONCILED" && !error.currentRequestIssued && error.stateUnknown,
+    );
+    assert.equal(existsSync(control.requestFile), false);
+    assert.equal(existsSync(control.claimFile), false);
+    const recovered = adapter.listMemoryTransactions(control);
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].request.eventContext?.requestedValue, 1);
+    adapter.acknowledgeMemoryTransactions(control, [recovered[0].request.requestId]);
+
+    const secondResponder = respondOnce(control, 0);
+    const response = await adapter.requestMemory(control, writeRequest("02000000", 2, operationId2), 500);
+    assert.equal(response.status, "ok");
+    assert.equal((await secondResponder).bytesHex, "02000000");
+    assert.equal(adapter.listMemoryTransactions(control).length, 1);
+    adapter.acknowledgeMemoryTransactions(control, [response.requestId]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("IPC crash windows remain fail-closed and never publish a replacement request", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-crash-windows-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  const nextRequest = { captureId, op: "read" as const, address: "0x20000000", length: 4, accessSize: 4 as const };
+  try {
+    const publishedRead = "55000000-0000-4000-8000-000000000001";
+    writeFileSync(control.requestFile, JSON.stringify({ formatVersion: 1, requestId: publishedRead, createdAt: new Date().toISOString(), ...nextRequest }));
+    await assert.rejects(
+      () => adapter.requestMemory(control, nextRequest, 25),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_REQUEST_PENDING" && !error.stateUnknown && !error.currentRequestIssued,
+    );
+    assert.equal(JSON.parse(readFileSync(control.requestFile, "utf8")).requestId, publishedRead);
+    rmSync(control.requestFile);
+
+    writeFileSync(control.requestFile, JSON.stringify({ formatVersion: 1, requestId: "55000000-0000-4000-8000-000000000002", createdAt: new Date().toISOString(), ...writeRequest("01000000", 1, operationId1) }));
+    await assert.rejects(
+      () => adapter.requestMemory(control, nextRequest, 25),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_REQUEST_PENDING" && error.stateUnknown && !error.currentRequestIssued,
+    );
+    rmSync(control.requestFile);
+
+    writeFileSync(control.claimFile, JSON.stringify({ formatVersion: 1, requestId: "55000000-0000-4000-8000-000000000003", createdAt: new Date().toISOString(), ...writeRequest("01000000", 1, operationId1) }));
+    await assert.rejects(
+      () => adapter.requestMemory(control, nextRequest, 25),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_REQUEST_INDETERMINATE" && error.stateUnknown && !error.currentRequestIssued,
+    );
+    assert.equal(existsSync(control.claimFile), true);
+    rmSync(control.claimFile);
+
+    const lateRead = "55000000-0000-4000-8000-000000000004";
+    writeFileSync(control.claimFile, JSON.stringify({ formatVersion: 1, requestId: lateRead, createdAt: new Date().toISOString(), ...nextRequest }));
+    writeFileSync(control.responseFile, JSON.stringify({ requestId: lateRead, status: "ok", op: "read", bytesHex: "00000000", writeIssued: false }));
+    await assert.rejects(
+      () => adapter.requestMemory(control, nextRequest, 25),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_LATE_RESPONSE_RECONCILED" && !error.stateUnknown && !error.currentRequestIssued,
+    );
+    assert.equal(existsSync(control.responseFile), false);
+    assert.equal(existsSync(control.requestFile), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("live Helper response journals are rejected above the 1 MiB bound", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-response-bound-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  try {
+    const responder = (async () => {
+      while (!existsSync(control.requestFile)) await delay(2);
+      const request = JSON.parse(readFileSync(control.requestFile, "utf8")) as { requestId: string };
+      renameSync(control.requestFile, control.claimFile);
+      writeFileSync(control.responseFile, JSON.stringify({ requestId: request.requestId, status: "ok", writeIssued: true, padding: "x".repeat(1024 * 1024) }), { encoding: "utf8", flag: "wx" });
+    })();
+    await assert.rejects(
+      () => adapter.requestMemory(control, writeRequest("01000000", 1, operationId1), 500),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_RESPONSE_INVALID" && error.currentRequestIssued && error.stateUnknown,
+    );
+    await responder;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("combined durable transaction receipts are rejected above the 1 MiB recovery bound", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-receipt-bound-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  const requestId = "55000000-0000-4000-8000-000000000005";
+  try {
+    writeFileSync(control.claimFile, JSON.stringify({
+      formatVersion: 1,
+      requestId,
+      createdAt: new Date().toISOString(),
+      ...writeRequest("01000000", 1, operationId1),
+      padding: "x".repeat(600_000),
+    }));
+    writeFileSync(control.responseFile, JSON.stringify({ requestId, status: "ok", writeIssued: true, padding: "y".repeat(600_000) }));
+    assert.throws(
+      () => adapter.listMemoryTransactions(control),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_RECEIPT_LIMIT" && error.stateUnknown,
+    );
+    assert.equal(existsSync(control.claimFile), true);
+    assert.equal(existsSync(control.responseFile), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function writeRequest(bytesHex: string, requestedValue: number, operationId: string): HssMemoryRequest {
+  return {
+    captureId,
+    op: "write",
+    operationId,
+    eventContext: { logicalIdentity: "counter", requestedValue, phase: "write", endian: "little" },
+    address: "0x20000000",
+    length: 4,
+    accessSize: 4,
+    bytesHex,
+  };
+}
+
+function controlFiles(root: string): HssCaptureControlFiles {
+  const file = (name: string) => path.join(root, name);
+  return {
+    planPath: file("capture-plan.json"),
+    pidFile: file("helper.owner.json"),
+    readyFile: file("helper.ready.json"),
+    stdoutPath: file("helper.stdout.ndjson"),
+    stderrPath: file("helper.stderr.log"),
+    stopFile: file("stop.request"),
+    requestFile: file("memory.request.json"),
+    claimFile: file("memory.request.claimed.json"),
+    responseFile: file("memory.response.json"),
+  };
+}
+
+async function respondOnce(control: HssCaptureControlFiles, delayMs: number): Promise<{ bytesHex: string }> {
+  const deadline = Date.now() + 1_000;
+  while (!existsSync(control.requestFile)) {
+    if (Date.now() >= deadline) throw new Error("fixture request did not appear");
+    await delay(2);
+  }
+  const request = JSON.parse(readFileSync(control.requestFile, "utf8")) as { requestId: string; bytesHex: string };
+  renameSync(control.requestFile, control.claimFile);
+  await delay(delayMs);
+  writeFileSync(control.responseFile, JSON.stringify({ requestId: request.requestId, status: "ok", writeIssued: true }), { encoding: "utf8", flag: "wx" });
+  return { bytesHex: request.bytesHex };
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
