@@ -78,6 +78,7 @@ test("JLinkBackend uses helper bytes and rejects a read that changes target stat
   let response: Record<string, unknown> = {
     status: "ok",
     probeSerial: 123456,
+    memoryCacheDisabled: true,
     targetWasHaltedRaw: 0,
     targetWasHaltedAfterReadRaw: 0,
     samples: [{ valid: true, bytes: "11223344" }],
@@ -104,7 +105,12 @@ test("JLinkBackend uses helper bytes and rejects a read that changes target stat
   assert.ok(invocations[0].args.includes(dll));
   assert.deepEqual(invocations[0].args.slice(invocations[0].args.indexOf("--access-size"), invocations[0].args.indexOf("--access-size") + 2), ["--access-size", "4"]);
 
-  response = { ...response, targetWasHaltedAfterReadRaw: 1 };
+  response = { ...response, memoryCacheDisabled: false };
+  const cachePolicyMissing = await backend.readMemory(0x20000000, 4, 4);
+  assert.equal(cachePolicyMissing.success, false);
+  assert.match(cachePolicyMissing.error ?? "", /caching was disabled/i);
+
+  response = { ...response, memoryCacheDisabled: true, targetWasHaltedAfterReadRaw: 1 };
   const changed = await backend.readMemory(0x20000000, 4, 4);
   assert.equal(changed.success, false);
   assert.equal(changed.errorCode, ProbeErrorCode.HIDDEN_STATE_CHANGE);
@@ -132,6 +138,7 @@ test("JLinkBackend uses helper bytes and rejects a read that changes target stat
     probeSerial: 123456,
     targetWasHaltedRaw: 0,
     targetWasHaltedAfterOperationRaw: 0,
+    memoryCacheDisabled: true,
     targetWritten: true,
     writeFailed: false,
     writeReturnCode: 0,
@@ -145,6 +152,41 @@ test("JLinkBackend uses helper bytes and rejects a read that changes target stat
   assert.equal(invocations.at(-1)?.args.includes("01020304"), true);
   assert.deepEqual(invocations.at(-1)?.args.slice(invocations.at(-1)!.args.indexOf("--access-size"), invocations.at(-1)!.args.indexOf("--access-size") + 2), ["--access-size", "4"]);
   assert.equal(invocations.at(-1)?.args.includes("--samples"), false);
+
+  response = {
+    ...response,
+    oldBytes: "00000000",
+    verificationStartedAtUnixMs: 1_700_000_000_000,
+    verificationEndedAtUnixMs: 1_700_000_000_010,
+    readbacks: [{ index: 0, atUnixMs: 1_700_000_000_005, bytes: "01020304" }],
+    restoreIssued: true,
+    restoreWriteFailed: false,
+    restoreReadFailed: false,
+    restoreReadbackBytes: "00000000",
+  };
+  const transaction = await backend.writeMemoryTransaction({
+    address: 0x20000000,
+    bytes: Buffer.from([1, 2, 3, 4]),
+    accessSize: 4,
+    captureOld: true,
+    verifyReads: 1,
+    verifyIntervalMs: 0,
+    verifyDurationMs: 0,
+    restore: true,
+    expectedTargetState: "running",
+  });
+  assert.equal(transaction.command.success, true);
+  assert.equal(transaction.oldBytes?.toString("hex"), "00000000");
+  assert.deepEqual(transaction.readbacks.map((bytes) => bytes.toString("hex")), ["01020304"]);
+  assert.deepEqual(transaction.readbackObservedAt, ["2023-11-14T22:13:20.005Z"]);
+  assert.equal(transaction.verificationStartedAt, "2023-11-14T22:13:20.000Z");
+  assert.equal(transaction.verificationEndedAt, "2023-11-14T22:13:20.010Z");
+  assert.equal(transaction.restoreVerified, true);
+  assert.equal(transaction.targetStateBefore, "running");
+  assert.equal(transaction.targetStateAfter, "running");
+  assert.deepEqual(invocations.at(-1)?.args.slice(invocations.at(-1)!.args.indexOf("--capture-old")), [
+    "--capture-old", "true", "--verify-reads", "1", "--verify-interval-ms", "0", "--verify-duration-ms", "0", "--restore", "true", "--expected-target-state", "running",
+  ]);
 
   response = { ...response, targetWasHaltedAfterOperationRaw: 1 };
   const changedWrite = await backend.writeMemoryBytes(0x20000000, Buffer.from([1, 2, 3, 4]), 4);

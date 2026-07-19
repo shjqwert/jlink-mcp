@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
-import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig } from "./backend";
+import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig, type ProbeMemoryTransactionInput, type ProbeMemoryTransactionResult } from "./backend";
 import { ProcessManager, terminateChildProcess } from "../utils/process-manager";
 import { log, logError } from "../utils/logger";
 import * as path from "path";
@@ -184,7 +184,7 @@ export class JLinkBackend extends ProbeBackend {
     });
   }
 
-  private async accessMemoryNonIntrusive(address: number, length: number, accessSize: 1 | 2 | 4, writeBytes?: Buffer): Promise<CommandResult> {
+  private async accessMemoryNonIntrusive(address: number, length: number, accessSize: 1 | 2 | 4, writeBytes?: Buffer, transaction?: ProbeMemoryTransactionInput): Promise<CommandResult> {
     if (!Number.isSafeInteger(address) || address < 0 || address > 0xffff_ffff
       || !Number.isSafeInteger(length) || length < 1 || length > 4096
       || address + length > 0x1_0000_0000
@@ -218,6 +218,19 @@ export class JLinkBackend extends ProbeBackend {
     ];
     if (writeBytes) args.push("--bytes-hex", writeBytes.toString("hex"));
     else args.push("--samples", "1", "--interval-ms", "0");
+    if (transaction) {
+      args.push(
+        "--capture-old", String(transaction.captureOld),
+        "--verify-reads", String(transaction.verifyReads),
+        "--verify-interval-ms", String(transaction.verifyIntervalMs),
+        "--verify-duration-ms", String(transaction.verifyDurationMs),
+        "--restore", String(transaction.restore),
+        "--expected-target-state", transaction.expectedTargetState,
+      );
+    }
+    const transactionTimeoutMs = transaction
+      ? Math.min(70_000, Math.max(30_000, Math.max(transaction.verifyDurationMs, transaction.verifyReads * transaction.verifyIntervalMs) + 10_000))
+      : 30_000;
     return new Promise<CommandResult>((resolveResult) => {
       const proc = this.spawnProcess(helper, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
       let stdout = "";
@@ -227,7 +240,7 @@ export class JLinkBackend extends ProbeBackend {
       const timeout = setTimeout(() => {
         timedOut = true;
         void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
-      }, 30_000);
+      }, transactionTimeoutMs);
       timeout.unref();
       proc.stdout?.on("data", (data: Buffer) => { stdout += data.toString(); });
       proc.stderr?.on("data", (data: Buffer) => { stderr += data.toString(); });
@@ -255,6 +268,7 @@ export class JLinkBackend extends ProbeBackend {
           writeFailed?: boolean;
           writeReturnCode?: number;
           writeIssued?: boolean;
+          memoryCacheDisabled?: boolean;
           closeFailed?: boolean;
           stateUnknown?: boolean;
           samples?: Array<{ valid?: boolean; bytes?: string }>;
@@ -267,10 +281,14 @@ export class JLinkBackend extends ProbeBackend {
         }
         const operationFailed = writeBytes
           ? response.status !== "ok" || response.writeFailed || response.closeFailed || response.targetWritten !== true
-          : response.status !== "ok" || response.readFailed || !response.samples?.[0]?.valid;
+            || response.memoryCacheDisabled !== true
+          : response.status !== "ok" || response.readFailed || !response.samples?.[0]?.valid
+            || response.memoryCacheDisabled !== true;
         if (operationFailed) {
           const identityFailure = response.errorCode === "JLINK_PROBE_IDENTITY_MISMATCH" || response.errorCode === "JLINK_SELECT_SN_FAILED";
-          const fallback = writeBytes ? "JLINKARM_WriteMem failed" : "JLINKARM_ReadMem failed";
+          const fallback = response.memoryCacheDisabled !== true
+            ? "memory helper did not prove that J-Link DLL caching was disabled"
+            : writeBytes ? "JLINKARM_WriteMem failed" : "JLINKARM_ReadMem failed";
           resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: response.reason ?? response.errorCode ?? fallback, errorCode: identityFailure ? ProbeErrorCode.PROBE_IDENTITY_MISMATCH : ProbeErrorCode.TARGET_UNREACHABLE, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? response.writeIssued === true : false, stateUnknown: response.stateUnknown ?? true });
           return;
         }
@@ -374,6 +392,49 @@ export class JLinkBackend extends ProbeBackend {
       return { success: false, rawOutput: "", output: "", error: "memory write is empty or unaligned", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
     return this.accessMemoryNonIntrusive(address, bytes.length, accessSize, bytes);
+  }
+  async writeMemoryTransaction(input: ProbeMemoryTransactionInput): Promise<ProbeMemoryTransactionResult> {
+    const command = await this.accessMemoryNonIntrusive(input.address, input.bytes.length, input.accessSize, input.bytes, input);
+    let response: {
+      oldBytes?: string;
+      readbacks?: Array<{ bytes?: string; atUnixMs?: number }>;
+      verificationStartedAtUnixMs?: number;
+      verificationEndedAtUnixMs?: number;
+      restoreIssued?: boolean;
+      restoreReadbackBytes?: string;
+      restoreReadFailed?: boolean;
+      restoreWriteFailed?: boolean;
+      targetWasHaltedRaw?: number;
+      targetWasHaltedAfterOperationRaw?: number;
+    } = {};
+    try { response = JSON.parse(command.rawOutput.trim()) as typeof response; }
+    catch { /* command retains the authoritative transport failure */ }
+    const oldBytes = transactionBytes(response.oldBytes, input.bytes.length);
+    const readbacks = Array.isArray(response.readbacks)
+      ? response.readbacks.map(({ bytes }) => transactionBytes(bytes, input.bytes.length)).filter((bytes): bytes is Buffer => Boolean(bytes))
+      : [];
+    const readbackObservedAt = Array.isArray(response.readbacks)
+      ? response.readbacks.flatMap(({ bytes, atUnixMs }) => transactionBytes(bytes, input.bytes.length) && transactionTimestamp(atUnixMs) ? [transactionTimestamp(atUnixMs)!] : [])
+      : [];
+    const restoreReadback = transactionBytes(response.restoreReadbackBytes, input.bytes.length);
+    return {
+      command,
+      ...(oldBytes ? { oldBytes } : {}),
+      readbacks,
+      ...(readbackObservedAt.length === readbacks.length ? { readbackObservedAt } : {}),
+      ...(transactionTimestamp(response.verificationStartedAtUnixMs) ? { verificationStartedAt: transactionTimestamp(response.verificationStartedAtUnixMs)! } : {}),
+      ...(transactionTimestamp(response.verificationEndedAtUnixMs) ? { verificationEndedAt: transactionTimestamp(response.verificationEndedAtUnixMs)! } : {}),
+      ...(restoreReadback ? { restoreReadback } : {}),
+      restoreIssued: response.restoreIssued === true,
+      restoreVerified: response.restoreIssued === true && response.restoreWriteFailed !== true && response.restoreReadFailed !== true
+        && Boolean(oldBytes && restoreReadback?.equals(oldBytes)),
+      ...(response.targetWasHaltedRaw === 0 || response.targetWasHaltedRaw === 1
+        ? { targetStateBefore: response.targetWasHaltedRaw === 1 ? "halted" as const : "running" as const }
+        : {}),
+      ...(response.targetWasHaltedAfterOperationRaw === 0 || response.targetWasHaltedAfterOperationRaw === 1
+        ? { targetStateAfter: response.targetWasHaltedAfterOperationRaw === 1 ? "halted" as const : "running" as const }
+        : {}),
+    };
   }
   async readMemoryForExclusiveOwner(owner: string, address: number, length: number): Promise<CommandResult> {
     if (this.getExclusiveOwner() !== owner) return this.ownerMemoryRejected(owner);
@@ -598,6 +659,17 @@ export class JLinkBackend extends ProbeBackend {
     this.processManager.kill(GDB_SERVER_PROCESS);
     this.setState(ProbeState.DISCONNECTED);
   }
+}
+
+function transactionBytes(value: string | undefined, expectedLength: number): Buffer | undefined {
+  if (typeof value !== "string" || !new RegExp(`^[0-9a-fA-F]{${expectedLength * 2}}$`).test(value)) return undefined;
+  return Buffer.from(value, "hex");
+}
+
+function transactionTimestamp(value: number | undefined): string | undefined {
+  if (value === undefined || !Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000_000) return undefined;
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? undefined : timestamp.toISOString();
 }
 
 function waitForGdbServerReady(processHandle: ChildProcess, timeoutMs: number): Promise<{ ready: boolean; message: string }> {

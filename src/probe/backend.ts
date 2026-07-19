@@ -95,6 +95,32 @@ export interface TargetStateObservation {
   result: CommandResult;
 }
 
+export interface ProbeMemoryTransactionInput {
+  address: number;
+  bytes: Buffer;
+  accessSize: 1 | 2 | 4;
+  captureOld: boolean;
+  verifyReads: number;
+  verifyIntervalMs: number;
+  verifyDurationMs: number;
+  restore: boolean;
+  expectedTargetState: "running" | "halted";
+}
+
+export interface ProbeMemoryTransactionResult {
+  command: CommandResult;
+  oldBytes?: Buffer;
+  readbacks: Buffer[];
+  readbackObservedAt?: string[];
+  verificationStartedAt?: string;
+  verificationEndedAt?: string;
+  restoreReadback?: Buffer;
+  restoreIssued: boolean;
+  restoreVerified: boolean;
+  targetStateBefore?: "running" | "halted";
+  targetStateAfter?: "running" | "halted";
+}
+
 export type ProbeType = "jlink";
 
 /**
@@ -278,6 +304,10 @@ export abstract class ProbeBackend {
 
   async writeMemoryBytes(_address: number, _bytes: Buffer, _accessSize: 1 | 2 | 4): Promise<CommandResult> {
     return { success: false, rawOutput: "", output: "", error: "structured memory writes are not supported by this backend", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+  }
+
+  async writeMemoryTransaction(_input: ProbeMemoryTransactionInput): Promise<ProbeMemoryTransactionResult | undefined> {
+    return undefined;
   }
 
   async observeTargetState(): Promise<TargetStateObservation> {

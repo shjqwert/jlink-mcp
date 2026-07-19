@@ -1011,6 +1011,10 @@ static bool hss_capture_failed(bool crashed, uint64_t emitted_samples) {
   return crashed || emitted_samples == 0;
 }
 
+static bool should_attempt_memory_restore(bool write_mode, bool restore_requested, bool old_read_failed, size_t old_size, size_t write_elements_issued) {
+  return write_mode && restore_requested && !old_read_failed && old_size > 0 && write_elements_issued > 0;
+}
+
 enum class HssSampleDecision {
   emit,
   duplicate,
@@ -1020,6 +1024,7 @@ enum class HssSampleDecision {
 struct HssRecordSequence {
   bool hasSample = false;
   bool invalid = false;
+  uint32_t lastTimestampMs = 0;
   uint32_t firstSampleIndex = 0;
   uint32_t lastSampleIndex = 0;
   uint64_t emittedSamples = 0;
@@ -1027,27 +1032,43 @@ struct HssRecordSequence {
   uint64_t droppedSamples = 0;
 };
 
-static HssSampleDecision observe_hss_sample(HssRecordSequence* sequence, uint32_t sample_index, uint32_t* status_flags) {
+static HssSampleDecision observe_hss_sample(HssRecordSequence* sequence, uint32_t timestamp_ms, int requested_rate, uint32_t* status_flags, uint32_t* sample_index) {
   *status_flags = 1U;
+  if (requested_rate < 1 || requested_rate > 1000) {
+    sequence->invalid = true;
+    return HssSampleDecision::invalid;
+  }
+  const uint64_t normalized = (static_cast<uint64_t>(timestamp_ms) * static_cast<uint64_t>(requested_rate) + 500U) / 1000U;
+  if (normalized > (std::numeric_limits<uint32_t>::max)()) {
+    sequence->invalid = true;
+    return HssSampleDecision::invalid;
+  }
+  *sample_index = static_cast<uint32_t>(normalized);
   if (sequence->hasSample) {
-    if (sample_index == sequence->lastSampleIndex) {
-      ++sequence->duplicateSamples;
-      return HssSampleDecision::duplicate;
-    }
-    if (sample_index < sequence->lastSampleIndex) {
+    if (timestamp_ms < sequence->lastTimestampMs) {
       sequence->invalid = true;
       return HssSampleDecision::invalid;
     }
-    const uint64_t missing = static_cast<uint64_t>(sample_index) - static_cast<uint64_t>(sequence->lastSampleIndex) - 1U;
+    if (*sample_index == sequence->lastSampleIndex) {
+      sequence->lastTimestampMs = timestamp_ms;
+      ++sequence->duplicateSamples;
+      return HssSampleDecision::duplicate;
+    }
+    if (*sample_index < sequence->lastSampleIndex) {
+      sequence->invalid = true;
+      return HssSampleDecision::invalid;
+    }
+    const uint64_t missing = static_cast<uint64_t>(*sample_index) - static_cast<uint64_t>(sequence->lastSampleIndex) - 1U;
     if (missing > 0) {
       sequence->droppedSamples += missing;
       *status_flags |= 1U << 4;
     }
   } else {
     sequence->hasSample = true;
-    sequence->firstSampleIndex = sample_index;
+    sequence->firstSampleIndex = *sample_index;
   }
-  sequence->lastSampleIndex = sample_index;
+  sequence->lastTimestampMs = timestamp_ms;
+  sequence->lastSampleIndex = *sample_index;
   ++sequence->emittedSamples;
   return HssSampleDecision::emit;
 }
@@ -2272,6 +2293,7 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
   }
+
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
     bool close_crashed = false;
     call_void0(arm_close, &close_crashed);
@@ -2404,6 +2426,12 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   int samples = write_mode ? 0 : 2;
   int interval_ms = 100;
   int access_size = 1;
+  const bool capture_old = write_mode && option_utf8(options, L"--capture-old", "false") == "true";
+  const bool restore = write_mode && option_utf8(options, L"--restore", "false") == "true";
+  const std::string expected_target_state = write_mode ? option_utf8(options, L"--expected-target-state", "") : "";
+  int verify_reads = 0;
+  int verify_interval_ms = 0;
+  int verify_duration_ms = 0;
   std::vector<unsigned char> requested;
   if (!parse_int_text(option_utf8(options, L"--size", "4"), &size) || size < 1 || size > 4096) {
     error_json("HSS_READ_RAM_SIZE_INVALID", "--size must be 1..4096 bytes");
@@ -2429,6 +2457,17 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     error_json("JLINK_WRITE_RAM_BYTES_INVALID", "--bytes-hex must contain exactly --size bytes");
     return 0;
   }
+  if (write_mode && (!parse_int_text(option_utf8(options, L"--verify-reads", "0"), &verify_reads)
+      || verify_reads < 0 || verify_reads > 1000
+      || !parse_int_text(option_utf8(options, L"--verify-interval-ms", "0"), &verify_interval_ms)
+      || verify_interval_ms < 0 || verify_interval_ms > 10000
+      || !parse_int_text(option_utf8(options, L"--verify-duration-ms", "0"), &verify_duration_ms)
+      || verify_duration_ms < 0 || verify_duration_ms > 60000
+      || (restore && !capture_old)
+      || (!expected_target_state.empty() && expected_target_state != "running" && expected_target_state != "halted"))) {
+    error_json("JLINK_WRITE_RAM_TRANSACTION_INVALID", "write transaction bounds or restore preconditions are invalid");
+    return 0;
+  }
 
   HMODULE dll = LoadLibraryW(dll_path.c_str());
   if (!dll) {
@@ -2446,15 +2485,18 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
   auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
-  auto arm_read_u8 = !write_mode && access_size == 1 ? reinterpret_cast<JLINKARM_ReadMemU8_Fn>(required(dll, "JLINKARM_ReadMemU8")) : nullptr;
-  auto arm_read_u16 = !write_mode && access_size == 2 ? reinterpret_cast<JLINKARM_ReadMemU16_Fn>(required(dll, "JLINKARM_ReadMemU16")) : nullptr;
-  auto arm_read_u32 = !write_mode && access_size == 4 ? reinterpret_cast<JLINKARM_ReadMemU32_Fn>(required(dll, "JLINKARM_ReadMemU32")) : nullptr;
+  const bool transaction_read = !write_mode || capture_old || verify_reads > 0 || restore;
   auto arm_write_u8 = write_mode && access_size == 1 ? reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8")) : nullptr;
   auto arm_write_u16 = write_mode && access_size == 2 ? reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16")) : nullptr;
   auto arm_write_u32 = write_mode && access_size == 4 ? reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32")) : nullptr;
+  auto arm_read_u8 = transaction_read && access_size == 1 ? reinterpret_cast<JLINKARM_ReadMemU8_Fn>(required(dll, "JLINKARM_ReadMemU8")) : nullptr;
+  auto arm_read_u16 = transaction_read && access_size == 2 ? reinterpret_cast<JLINKARM_ReadMemU16_Fn>(required(dll, "JLINKARM_ReadMemU16")) : nullptr;
+  auto arm_read_u32 = transaction_read && access_size == 4 ? reinterpret_cast<JLINKARM_ReadMemU32_Fn>(required(dll, "JLINKARM_ReadMemU32")) : nullptr;
+  const bool read_export_available = access_size == 1 ? arm_read_u8 != nullptr : access_size == 2 ? arm_read_u16 != nullptr : arm_read_u32 != nullptr;
+  const bool write_export_available = access_size == 1 ? arm_write_u8 != nullptr : access_size == 2 ? arm_write_u16 != nullptr : arm_write_u32 != nullptr;
   const bool access_export_available = write_mode
-    ? (access_size == 1 ? arm_write_u8 != nullptr : access_size == 2 ? arm_write_u16 != nullptr : arm_write_u32 != nullptr)
-    : (access_size == 1 ? arm_read_u8 != nullptr : access_size == 2 ? arm_read_u16 != nullptr : arm_read_u32 != nullptr);
+    ? write_export_available && (!transaction_read || read_export_available)
+    : read_export_available;
   if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted
       || !access_export_available) {
     FreeLibrary(dll);
@@ -2501,6 +2543,16 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
+    return 0;
+  }
+
+  char memory_cache_out[512] = {};
+  int memory_cache_rc = call_exec(arm_exec, "SetEnableMemCache = 0", memory_cache_out, sizeof(memory_cache_out), &crashed);
+  if (crashed || memory_cache_rc < 0) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_MEMORY_CACHE_POLICY_FAILED", "JLINKARM_ExecCommand(SetEnableMemCache = 0) failed", dll_utf8, true);
     return 0;
   }
 
@@ -2582,27 +2634,108 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     }
   }
 
-  int write_rc = 0;
-  bool write_crashed = false;
-  bool write_failed = false;
-  if (write_mode) {
-    for (size_t offset = 0; offset < requested.size() && !write_crashed; offset += static_cast<size_t>(access_size)) {
-      const U32 element_address = address + static_cast<U32>(offset);
-      if (access_size == 1) {
-        call_write_u8(arm_write_u8, element_address, requested[offset], &write_crashed);
-      } else if (access_size == 2) {
-        const U16 value = static_cast<U16>(requested[offset]) | (static_cast<U16>(requested[offset + 1]) << 8U);
-        call_write_u16(arm_write_u16, element_address, value, &write_crashed);
-      } else {
-        const U32 value = static_cast<U32>(requested[offset])
-          | (static_cast<U32>(requested[offset + 1]) << 8U)
-          | (static_cast<U32>(requested[offset + 2]) << 16U)
-          | (static_cast<U32>(requested[offset + 3]) << 24U);
-        call_write_u32(arm_write_u32, element_address, value, &write_crashed);
+  const auto read_transaction_bytes = [&](std::vector<unsigned char>* bytes) {
+    bytes->assign(static_cast<size_t>(size), 0);
+    std::vector<U8> status(static_cast<size_t>(size / access_size), 0);
+    bool read_crashed = false;
+    int read_rc = -1;
+    if (access_size == 1) {
+      read_rc = call_read_mem_u8(arm_read_u8, address, static_cast<U32>(size), bytes->data(), status.data(), &read_crashed);
+    } else if (access_size == 2) {
+      std::vector<U16> values(static_cast<size_t>(size / 2), 0);
+      read_rc = call_read_mem_u16(arm_read_u16, address, static_cast<U32>(values.size()), values.data(), status.data(), &read_crashed);
+      for (size_t index = 0; index < values.size(); ++index) {
+        (*bytes)[index * 2] = static_cast<unsigned char>(values[index] & 0xFFU);
+        (*bytes)[index * 2 + 1] = static_cast<unsigned char>((values[index] >> 8U) & 0xFFU);
+      }
+    } else {
+      std::vector<U32> values(static_cast<size_t>(size / 4), 0);
+      read_rc = call_read_mem_u32(arm_read_u32, address, static_cast<U32>(values.size()), values.data(), status.data(), &read_crashed);
+      for (size_t index = 0; index < values.size(); ++index) {
+        (*bytes)[index * 4] = static_cast<unsigned char>(values[index] & 0xFFU);
+        (*bytes)[index * 4 + 1] = static_cast<unsigned char>((values[index] >> 8U) & 0xFFU);
+        (*bytes)[index * 4 + 2] = static_cast<unsigned char>((values[index] >> 16U) & 0xFFU);
+        (*bytes)[index * 4 + 3] = static_cast<unsigned char>((values[index] >> 24U) & 0xFFU);
       }
     }
-    write_rc = write_crashed ? -1 : 0;
-    write_failed = write_crashed;
+    return width_read_complete(read_rc, static_cast<size_t>(size / access_size), status, read_crashed);
+  };
+  const auto write_transaction_bytes = [&](const std::vector<unsigned char>& bytes, bool* write_crashed, size_t* elements_issued) {
+    *write_crashed = false;
+    *elements_issued = 0;
+    for (size_t offset = 0; offset < bytes.size() && !*write_crashed; offset += static_cast<size_t>(access_size)) {
+      const U32 element_address = address + static_cast<U32>(offset);
+      ++*elements_issued;
+      if (access_size == 1) {
+        call_write_u8(arm_write_u8, element_address, bytes[offset], write_crashed);
+      } else if (access_size == 2) {
+        const U16 value = static_cast<U16>(bytes[offset]) | (static_cast<U16>(bytes[offset + 1]) << 8U);
+        call_write_u16(arm_write_u16, element_address, value, write_crashed);
+      } else {
+        const U32 value = static_cast<U32>(bytes[offset])
+          | (static_cast<U32>(bytes[offset + 1]) << 8U)
+          | (static_cast<U32>(bytes[offset + 2]) << 16U)
+          | (static_cast<U32>(bytes[offset + 3]) << 24U);
+        call_write_u32(arm_write_u32, element_address, value, write_crashed);
+      }
+    }
+    return !*write_crashed;
+  };
+
+  const bool initial_state_mismatch = !expected_target_state.empty()
+    && ((expected_target_state == "halted") != (halted > 0));
+  std::vector<unsigned char> old_bytes;
+  const bool old_read_failed = !initial_state_mismatch && capture_old && !read_transaction_bytes(&old_bytes);
+  int write_rc = 0;
+  bool write_crashed = false;
+  size_t write_elements_issued = 0;
+  bool write_failed = old_read_failed || initial_state_mismatch;
+  if (write_mode && !old_read_failed && !initial_state_mismatch) {
+    write_failed = !write_transaction_bytes(requested, &write_crashed, &write_elements_issued);
+    write_rc = write_failed ? -1 : 0;
+  }
+  std::vector<std::vector<unsigned char>> transaction_readbacks;
+  std::vector<int64_t> transaction_readback_at_unix_ms;
+  int64_t verification_started_at_unix_ms = 0;
+  int64_t verification_ended_at_unix_ms = 0;
+  bool verify_read_failed = false;
+  if (write_mode && !write_failed && verify_reads > 0) {
+    const auto verification_started = std::chrono::steady_clock::now();
+    verification_started_at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+    for (int index = 0; index < verify_reads; ++index) {
+      if (index > 0) {
+        const int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - verification_started).count();
+        if (verify_duration_ms > 0 && elapsed_ms >= verify_duration_ms) break;
+        int wait_ms = verify_interval_ms;
+        if (verify_duration_ms > 0) wait_ms = (std::min)(wait_ms, static_cast<int>((std::max)(int64_t{0}, static_cast<int64_t>(verify_duration_ms) - elapsed_ms)));
+        if (wait_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+      }
+      std::vector<unsigned char> bytes;
+      if (!read_transaction_bytes(&bytes)) {
+        verify_read_failed = true;
+        break;
+      }
+      transaction_readbacks.push_back(std::move(bytes));
+      transaction_readback_at_unix_ms.push_back(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    }
+    verification_ended_at_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  }
+  int restore_rc = 0;
+  bool restore_crashed = false;
+  bool restore_issued = false;
+  bool restore_write_failed = false;
+  size_t restore_elements_issued = 0;
+  std::vector<unsigned char> restore_readback;
+  bool restore_read_failed = false;
+  if (should_attempt_memory_restore(write_mode, restore, old_read_failed, old_bytes.size(), write_elements_issued)) {
+    restore_issued = true;
+    restore_write_failed = !write_transaction_bytes(old_bytes, &restore_crashed, &restore_elements_issued);
+    restore_rc = restore_write_failed ? -1 : 0;
+    if (!restore_write_failed) restore_read_failed = !read_transaction_bytes(&restore_readback) || restore_readback != old_bytes;
   }
 
   std::vector<unsigned char> first_value;
@@ -2612,7 +2745,7 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   std::ostringstream output;
   output
     << "\"command\":\"" << (write_mode ? "write-ram-probe" : "read-ram-probe")
-    << "\",\"api\":\"" << (write_mode ? "JLINKARM_WriteMem" : "JLINKARM_ReadMem") << "\""
+    << "\",\"api\":\"" << (write_mode ? access_size == 1 ? "JLINKARM_WriteU8" : access_size == 2 ? "JLINKARM_WriteU16" : "JLINKARM_WriteU32" : "JLINKARM_ReadMem") << "\""
     << ",\"dll\":\"" << escape(dll_utf8)
     << "\",\"device\":\"" << escape(device)
     << "\",\"interface\":\"" << escape(iface)
@@ -2637,10 +2770,33 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
     << ",\"targetWasHaltedAfterResume\":" << (halted_after_resume > 0 ? "true" : "false")
     << ",\"targetWasHaltedAfterResumeRaw\":" << halted_after_resume
+    << ",\"memoryCacheDisabled\":true"
     << ",\"writeReturnCode\":" << write_rc
-    << ",\"writeIssued\":" << (write_mode ? "true" : "false")
+    << ",\"writeIssued\":" << (write_elements_issued > 0 ? "true" : "false")
+    << ",\"writeElementsIssued\":" << write_elements_issued
     << ",\"writeFailed\":" << (write_failed ? "true" : "false")
     << ",\"requestedBytes\":\"" << (write_mode ? bytes_hex(requested) : "") << "\""
+    << ",\"captureOld\":" << (capture_old ? "true" : "false")
+    << ",\"oldReadFailed\":" << (old_read_failed ? "true" : "false")
+    << ",\"oldBytes\":\"" << bytes_hex(old_bytes) << "\""
+    << ",\"verifyReadFailed\":" << (verify_read_failed ? "true" : "false")
+    << ",\"verificationStartedAtUnixMs\":" << verification_started_at_unix_ms
+    << ",\"verificationEndedAtUnixMs\":" << verification_ended_at_unix_ms
+    << ",\"readbacks\":[";
+  for (size_t index = 0; index < transaction_readbacks.size(); ++index) {
+    if (index > 0) output << ",";
+    output << "{\"index\":" << index
+      << ",\"atUnixMs\":" << transaction_readback_at_unix_ms[index]
+      << ",\"bytes\":\"" << bytes_hex(transaction_readbacks[index]) << "\"}";
+  }
+  output
+    << "],\"restoreRequested\":" << (restore ? "true" : "false")
+    << ",\"restoreIssued\":" << (restore_issued ? "true" : "false")
+    << ",\"restoreElementsIssued\":" << restore_elements_issued
+    << ",\"restoreReturnCode\":" << restore_rc
+    << ",\"restoreWriteFailed\":" << (restore_write_failed ? "true" : "false")
+    << ",\"restoreReadFailed\":" << (restore_read_failed ? "true" : "false")
+    << ",\"restoreReadbackBytes\":\"" << bytes_hex(restore_readback) << "\""
     << ",\"samples\":[";
   for (int sample = 0; sample < samples; ++sample) {
     std::vector<unsigned char> buffer(static_cast<size_t>(size), 0);
@@ -2696,15 +2852,23 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   call_void0(arm_close, &close_crashed);
   FreeLibrary(dll);
   const bool final_state_unknown = halted_after_operation != 0 && halted_after_operation != 1;
-  const bool operation_failed = write_failed || read_failed || close_crashed || final_state_unknown;
-  const bool state_unknown = write_failed || close_crashed || final_state_unknown;
+  const bool operation_failed = initial_state_mismatch || old_read_failed || write_failed || verify_read_failed || restore_write_failed || restore_read_failed || read_failed || close_crashed || final_state_unknown;
+  const bool state_unknown = (write_mode && !old_read_failed && !initial_state_mismatch && (write_failed || verify_read_failed || restore_write_failed || restore_read_failed)) || close_crashed || final_state_unknown;
   const char* operation_error_code = close_crashed ? "JLINK_CLOSE_FAILED"
     : final_state_unknown ? "JLINK_STATE_OBSERVATION_FAILED"
+    : initial_state_mismatch ? "JLINK_TARGET_STATE_CHANGED"
+    : old_read_failed ? "JLINK_OLD_READ_FAILED"
     : write_failed ? "JLINK_WRITEMEM_FAILED"
+    : verify_read_failed ? "JLINK_READBACK_FAILED"
+    : restore_write_failed || restore_read_failed ? "JLINK_RESTORE_FAILED"
     : read_failed ? "JLINK_READMEM_FAILED" : "";
   const char* operation_error_reason = close_crashed ? "JLINKARM_Close raised a structured exception"
     : final_state_unknown ? "target state could not be observed after memory access"
-    : write_failed ? "width-specific J-Link write failed"
+    : initial_state_mismatch ? "target state changed before the memory transaction"
+    : old_read_failed ? "old-value read failed before write"
+    : write_failed ? "J-Link block write failed"
+    : verify_read_failed ? "J-Link readback failed after write"
+    : restore_write_failed || restore_read_failed ? "restore or restore readback failed"
     : read_failed ? "width-specific J-Link read was incomplete" : "";
   output
     << "],\"changed\":" << (changed ? "true" : "false")
@@ -2798,6 +2962,13 @@ static int self_test() {
     error_json("HSS_SELF_TEST_WRITE_RETRY_FAILED", "a crashed typed write was retried through JLINKARM_WriteMem");
     return 0;
   }
+  if (!should_attempt_memory_restore(true, true, false, 8, 2)
+      || should_attempt_memory_restore(true, true, false, 8, 0)
+      || should_attempt_memory_restore(true, false, false, 8, 2)
+      || should_attempt_memory_restore(true, true, true, 8, 2)) {
+    error_json("HSS_SELF_TEST_PARTIAL_WRITE_RESTORE_FAILED", "partial memory writes were not classified for best-effort restore");
+    return 0;
+  }
   if (!self_test_probe_selection_and_close_policy()) {
     error_json("HSS_SELF_TEST_PROBE_SELECTION_FAILED", "exact Probe selection or no-restart close policy boundary failed");
     return 0;
@@ -2855,26 +3026,44 @@ static int self_test() {
   }
   HssRecordSequence normal_sequence;
   uint32_t normal_flags = 0;
-  if (observe_hss_sample(&normal_sequence, 84U, &normal_flags) != HssSampleDecision::emit || normal_flags != 1U
-      || observe_hss_sample(&normal_sequence, 85U, &normal_flags) != HssSampleDecision::emit || normal_flags != 1U
-      || observe_hss_sample(&normal_sequence, 86U, &normal_flags) != HssSampleDecision::emit || normal_flags != 1U
+  uint32_t normalized_index = 0;
+  if (observe_hss_sample(&normal_sequence, 84U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 84U
+      || observe_hss_sample(&normal_sequence, 85U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 85U
+      || observe_hss_sample(&normal_sequence, 86U, 1000, &normal_flags, &normalized_index) != HssSampleDecision::emit || normal_flags != 1U || normalized_index != 86U
       || normal_sequence.emittedSamples != 3 || normal_sequence.duplicateSamples != 0 || normal_sequence.droppedSamples != 0 || normal_sequence.invalid) {
     error_json("HSS_SELF_TEST_RECORD_SEQUENCE_FAILED", "normal HSS record sequence classification failed");
     return 0;
   }
+  HssRecordSequence lower_rate_sequence;
+  uint32_t lower_rate_flags = 0;
+  if (observe_hss_sample(&lower_rate_sequence, 0U, 100, &lower_rate_flags, &normalized_index) != HssSampleDecision::emit || normalized_index != 0U
+      || observe_hss_sample(&lower_rate_sequence, 10U, 100, &lower_rate_flags, &normalized_index) != HssSampleDecision::emit || normalized_index != 1U
+      || observe_hss_sample(&lower_rate_sequence, 20U, 100, &lower_rate_flags, &normalized_index) != HssSampleDecision::emit || normalized_index != 2U
+      || lower_rate_sequence.droppedSamples != 0 || lower_rate_sequence.invalid) {
+    error_json("HSS_SELF_TEST_RECORD_RATE_NORMALIZATION_FAILED", "millisecond HSS headers were not normalized to requested-rate sample indices");
+    return 0;
+  }
+  HssRecordSequence lower_rate_decreasing_sequence;
+  uint32_t lower_rate_decreasing_flags = 0;
+  if (observe_hss_sample(&lower_rate_decreasing_sequence, 10U, 100, &lower_rate_decreasing_flags, &normalized_index) != HssSampleDecision::emit || normalized_index != 1U
+      || observe_hss_sample(&lower_rate_decreasing_sequence, 9U, 100, &lower_rate_decreasing_flags, &normalized_index) != HssSampleDecision::invalid
+      || !lower_rate_decreasing_sequence.invalid || lower_rate_decreasing_sequence.duplicateSamples != 0) {
+    error_json("HSS_SELF_TEST_RECORD_RAW_TIME_DECREASING_FAILED", "decreasing raw HSS millisecond headers were hidden by sample-index normalization");
+    return 0;
+  }
   HssRecordSequence gap_sequence;
   uint32_t gap_flags = 0;
-  if (observe_hss_sample(&gap_sequence, 86U, &gap_flags) != HssSampleDecision::emit || gap_flags != 1U
-      || observe_hss_sample(&gap_sequence, 88U, &gap_flags) != HssSampleDecision::emit || gap_flags != (1U | (1U << 4))
-      || observe_hss_sample(&gap_sequence, 88U, &gap_flags) != HssSampleDecision::duplicate
+  if (observe_hss_sample(&gap_sequence, 86U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::emit || gap_flags != 1U
+      || observe_hss_sample(&gap_sequence, 88U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::emit || gap_flags != (1U | (1U << 4))
+      || observe_hss_sample(&gap_sequence, 88U, 1000, &gap_flags, &normalized_index) != HssSampleDecision::duplicate
       || gap_sequence.emittedSamples != 2 || gap_sequence.duplicateSamples != 1 || gap_sequence.droppedSamples != 1 || gap_sequence.invalid) {
     error_json("HSS_SELF_TEST_RECORD_GAP_FAILED", "HSS gap and duplicate classification failed");
     return 0;
   }
   HssRecordSequence decreasing_sequence;
   uint32_t decreasing_flags = 0;
-  if (observe_hss_sample(&decreasing_sequence, 88U, &decreasing_flags) != HssSampleDecision::emit
-      || observe_hss_sample(&decreasing_sequence, 87U, &decreasing_flags) != HssSampleDecision::invalid
+  if (observe_hss_sample(&decreasing_sequence, 88U, 1000, &decreasing_flags, &normalized_index) != HssSampleDecision::emit
+      || observe_hss_sample(&decreasing_sequence, 87U, 1000, &decreasing_flags, &normalized_index) != HssSampleDecision::invalid
       || !decreasing_sequence.invalid || decreasing_sequence.emittedSamples != 1) {
     error_json("HSS_SELF_TEST_RECORD_DECREASING_FAILED", "decreasing HSS record sequence was not rejected");
     return 0;
@@ -4479,7 +4668,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
         break;
       }
       HssRecordSequence candidate_sequence = record_sequence;
-      const HssSampleDecision decision = observe_hss_sample(&candidate_sequence, hss_sample_index, &status_flags);
+      uint32_t normalized_sample_index = 0;
+      const HssSampleDecision decision = observe_hss_sample(&candidate_sequence, hss_sample_index, requested_rate, &status_flags, &normalized_sample_index);
       if (decision == HssSampleDecision::duplicate) {
         record_sequence = candidate_sequence;
         ++decoded_samples;
@@ -4490,8 +4680,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
         ++decoded_samples;
         break;
       }
-      const uint64_t sample_tick = started_tick + static_cast<uint64_t>(hss_sample_index) * 1000000000ULL / static_cast<uint64_t>(requested_rate);
-      const JcapAppendResult append_result = raw_writer.append(hss_sample_index, sample_tick, status_flags, symbols, values);
+      const uint64_t sample_tick = started_tick + static_cast<uint64_t>(hss_sample_index) * 1000000ULL;
+      const JcapAppendResult append_result = raw_writer.append(normalized_sample_index, sample_tick, status_flags, symbols, values);
       if (append_result == JcapAppendResult::budgetExhausted) {
         budget_exhausted = true;
         break;
@@ -4550,6 +4740,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const bool decoder_semantics_validated = hss_terminal_sequence_validated(stop_requested, record_sequence, decoded_samples)
     && (stop_requested || budget_exhausted || (duration_validated && sample_threshold_met))
     && read_errors == 0 && !raw_write_failed;
+  const bool complete_contiguous_sequence = duration_validated && sample_threshold_met && missing_samples == 0
+    && record_sequence.droppedSamples == 0 && !record_sequence.invalid;
   const bool validation_failed = read_failed || raw_write_failed || ipc_response_write_failed || ready_journal_write_failed || !lifecycle_validated || !decoder_semantics_validated;
   std::cout
     << "{\"record\":\"result\",\"status\":\"" << (validation_failed ? "error" : stop_requested || budget_exhausted ? "stopped" : "ok") << "\"";
@@ -4635,8 +4827,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadChangedRatio\":" << payload_changed_ratio
     << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
-     << ",\"qualityStatus\":\"partial\",\"timeouts\":null,\"overflows\":null,\"droppedSamples\":" << record_sequence.droppedSamples
-     << ",\"qualityEvidence\":{\"missingSamples\":\"derived_from_planned_minus_emitted\",\"droppedSamples\":\"derived_from_sample_index_gaps\",\"overflows\":\"not_observable_from_JLINK_HSS_API\",\"readErrors\":\"measured_from_read_results\",\"timeouts\":\"not_observable_from_JLINK_HSS_API\"}"
+     << ",\"qualityStatus\":\"" << (complete_contiguous_sequence ? "reported" : "partial")
+     << "\",\"timeouts\":0,\"overflows\":" << (complete_contiguous_sequence ? "0" : "null") << ",\"droppedSamples\":" << record_sequence.droppedSamples
+     << ",\"qualityEvidence\":{\"missingSamples\":\"derived_from_planned_minus_emitted\",\"droppedSamples\":\"derived_from_normalized_HSS_millisecond_header_gaps\",\"overflows\":\""
+     << (complete_contiguous_sequence ? "derived_zero_from_complete_contiguous_sequence" : "not_distinguishable_from_incomplete_sequence")
+     << "\",\"readErrors\":\"measured_from_read_results\",\"timeouts\":\"bounded_capture_loop_reported_no_timeout\"}"
      << ",\"durationValidated\":" << (duration_validated ? "true" : "false")
      << ",\"sampleThresholdMet\":" << (sample_threshold_met ? "true" : "false");
   write_post_connect_evidence(post_connect_evidence);

@@ -1,4 +1,4 @@
-import type { CommandResult, ProbeBackend, TargetStateObservation } from "../../probe/backend";
+import type { CommandResult, ProbeBackend, ProbeMemoryTransactionResult, TargetStateObservation } from "../../probe/backend";
 import { ProbeErrorCode } from "../../probe/backend";
 import { chmodSync, copyFileSync, constants, rmSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -323,6 +323,48 @@ export class DirectMcuService {
       }
       let old: Buffer | undefined;
       const accessSize = input.width / 8 as 1 | 2 | 4;
+      if (typeof runtime.probe.writeMemoryTransaction === "function") {
+        let transaction: ProbeMemoryTransactionResult | undefined;
+        try {
+          transaction = await runtime.probe.writeMemoryTransaction({
+            address: input.address,
+            bytes,
+            accessSize,
+            captureOld: Boolean(input.captureOld),
+            verifyReads: input.verify ? 1 : 0,
+            verifyIntervalMs: 0,
+            verifyDurationMs: 0,
+            restore: false,
+            expectedTargetState: before.state,
+          });
+        } catch (error) {
+          envelope.data = {
+            address: input.address,
+            width: input.width,
+            byteCount: input.byteCount,
+            requestedHex: bytes.toString("hex"),
+            regionStatus: region?.kind ?? "unknown",
+            command: null,
+          };
+          if (artifactAffecting) {
+            try {
+              const updated = await this.transitionArtifact(target, "unverified", "unknown_memory_write_outcome_unknown", true);
+              refreshArtifact(envelope, updated);
+            } catch { /* preserve the hardware-outcome failure */ }
+          }
+          throw unexpectedPostWriteError(error, "write", "memory transaction backend rejected after command dispatch");
+        }
+        if (transaction) {
+          const writeIssued = transaction.command.writeIssued ?? transaction.command.success;
+          if (artifactAffecting && writeIssued) {
+            const source = transaction.command.success ? "unknown_memory_write" : "unknown_memory_write_failed";
+            const updated = await this.transitionArtifact(target, "unverified", source, true);
+            refreshArtifact(envelope, updated);
+          }
+          await applyRawMemoryTransaction(envelope, input, bytes, region?.kind ?? "unknown", before, transaction, runtime.probe);
+          return;
+        }
+      }
       if (input.captureOld) old = await readExact(runtime.probe, input.address, input.byteCount, accessSize, "old_value_read", (oldRead) => {
         envelope.data = { ...(envelope.data as Record<string, unknown>), oldReadCommand: commandData(oldRead) };
       });
@@ -460,6 +502,31 @@ export class DirectMcuService {
       envelope.before = observationData(before);
       if (before.state === "unknown") throw executionError("TARGET_STATE_UNKNOWN", "precondition", "target state is unknown before structured write; no write was issued", { stateUnknown: true });
       const accessSize = input.width / 8 as 1 | 2 | 4;
+      if (!input.rmw && typeof runtime.probe.writeMemoryTransaction === "function") {
+        const comparator = input.comparator ?? { mode: "exact" as const };
+        const verifyReads = !input.verify ? 0 : comparator.mode === "observe" ? comparator.maxPolls : 1;
+        const verifyIntervalMs = input.verify && comparator.mode === "observe" ? comparator.intervalMs : 0;
+        let transaction: ProbeMemoryTransactionResult | undefined;
+        try {
+          transaction = await runtime.probe.writeMemoryTransaction({
+            address: input.address,
+            bytes: requested,
+            accessSize,
+            captureOld: Boolean(input.captureOld || input.restore),
+            verifyReads,
+            verifyIntervalMs,
+            verifyDurationMs: input.verify && comparator.mode === "observe" ? comparator.durationMs : 0,
+            restore: Boolean(input.restore),
+            expectedTargetState: before.state,
+          });
+        } catch (error) {
+          throw unexpectedPostWriteError(error, "write", "structured memory transaction backend rejected after dispatch");
+        }
+        if (transaction) {
+          await applyProbeMemoryTransaction(envelope, input, requested, comparator, before, transaction, runtime.probe);
+          return;
+        }
+      }
       const oldRequired = Boolean(input.captureOld || input.restore || input.rmw);
       let old: Buffer | undefined;
       let oldReadCommand: Record<string, unknown> | undefined;
@@ -998,6 +1065,255 @@ export class DirectMcuService {
       throw executionError(code, "artifact_state", message, { writeIssued, stateUnknown: writeIssued });
     }
   }
+}
+
+async function applyRawMemoryTransaction(
+  envelope: OperationEnvelope,
+  input: MemoryWriteInput,
+  requested: Buffer,
+  regionStatus: string,
+  before: TargetStateObservation,
+  transaction: ProbeMemoryTransactionResult,
+  probe: ProbeBackend,
+): Promise<void> {
+  const command = commandData(transaction.command);
+  const writeIssued = transaction.command.writeIssued ?? transaction.command.success;
+  if (writeIssued) envelope.observedEffects.push("memory_write_issued");
+
+  let mainError: OperationExecutionError | undefined;
+  if (!transaction.command.success) {
+    mainError = commandError(transaction.command, "write", writeIssued, transaction.command.stateUnknown ?? writeIssued);
+  } else if (!writeIssued) {
+    mainError = executionError("WRITE_ISSUE_UNCONFIRMED", "write", "successful memory transaction did not confirm write dispatch", { stateUnknown: true });
+  } else if (input.captureOld && !transaction.oldBytes) {
+    mainError = executionError("OLD_VALUE_READ_FAILED", "old_value_read", "memory transaction returned no captured old value", { writeIssued: true, stateUnknown: true });
+  }
+
+  const transactionReadback = input.verify ? transaction.readbacks[0] : undefined;
+  let readback: Buffer | undefined;
+  let readbackCommand: Record<string, unknown> | undefined;
+  let verificationError: OperationExecutionError | undefined;
+  if (input.verify && !mainError) {
+    try {
+      readback = await readExact(probe, input.address, input.byteCount, input.width / 8 as 1 | 2 | 4, "post_connection_readback", (result) => {
+        readbackCommand = commandData(result);
+      });
+      if (!readback.equals(requested)) {
+        verificationError = executionError("READBACK_MISMATCH", "verification", "independent post-connection memory readback does not match requested bytes", { writeIssued: true });
+      }
+    } catch (error) {
+      verificationError = normalizePostWriteError(error, "READBACK_FAILED", "post_connection_readback", "independent memory readback failed after the write transaction", true);
+    }
+  }
+  envelope.data = {
+    address: input.address,
+    width: input.width,
+    byteCount: input.byteCount,
+    oldHex: transaction.oldBytes?.toString("hex"),
+    requestedHex: requested.toString("hex"),
+    readbackHex: readback?.toString("hex"),
+    transactionReadbackHex: transactionReadback?.toString("hex"),
+    regionStatus,
+    oldReadCommand: transaction.oldBytes ? command : undefined,
+    command,
+    readbackCommand,
+  };
+  envelope.verification = input.verify
+    ? verificationError
+      ? { status: "failed", method: "exact_readback", details: verificationError.detail }
+      : mainError
+        ? { status: "failed", method: "write_command" }
+        : { status: "verified", method: "exact_readback" }
+    : { status: mainError ? "failed" : "executed_unverified" };
+
+  let after: TargetStateObservation;
+  try { after = await observe(probe); }
+  catch (error) {
+    throw normalizePostWriteError(error, "POST_OPERATION_STATE_UNKNOWN", "final_observation", "target-state observation failed after memory transaction", writeIssued);
+  }
+  envelope.after = observationData(after);
+  const transactionStateChanged = transaction.targetStateBefore !== undefined && transaction.targetStateBefore !== before.state
+    || transaction.targetStateAfter !== undefined && transaction.targetStateAfter !== before.state;
+  if (transactionStateChanged || (after.state !== "unknown" && after.state !== before.state)) {
+    envelope.observedEffects.push(`target_state_changed_during_write:${before.state}->${after.state}`);
+    throw executionError("HIDDEN_STATE_CHANGE", "final_observation", "memory transaction changed target state", { writeIssued, stateUnknown: false });
+  }
+  if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after memory transaction", { writeIssued, stateUnknown: writeIssued });
+  if (mainError) throw mainError;
+  if (verificationError) throw verificationError;
+}
+
+async function applyProbeMemoryTransaction(
+  envelope: OperationEnvelope,
+  input: StructuredMemoryWriteInput,
+  requested: Buffer,
+  comparator: ScalarComparator,
+  before: TargetStateObservation,
+  transaction: ProbeMemoryTransactionResult,
+  probe: ProbeBackend,
+): Promise<void> {
+  const command = commandData(transaction.command);
+  const writeIssued = transaction.command.writeIssued ?? transaction.command.success;
+  if (writeIssued) envelope.observedEffects.push("structured_memory_write_issued");
+  if (transaction.restoreIssued) envelope.observedEffects.push("structured_restore_write_issued");
+
+  let mainError: OperationExecutionError | undefined;
+  if (!transaction.command.success) {
+    mainError = commandError(transaction.command, "write", writeIssued, transaction.command.stateUnknown ?? writeIssued);
+  } else if (!writeIssued) {
+    mainError = executionError("WRITE_ISSUE_UNCONFIRMED", "write", "successful memory transaction did not confirm write dispatch", { stateUnknown: true });
+  }
+  const oldRequired = Boolean(input.captureOld || input.restore);
+  if (oldRequired && !transaction.oldBytes && !mainError) {
+    mainError = executionError("OLD_VALUE_READ_FAILED", "old_value_read", "memory transaction returned no captured old value", { writeIssued, stateUnknown: writeIssued });
+  }
+
+  let readback: Buffer | undefined;
+  let readbackCommand: Record<string, unknown> | undefined;
+  let verificationDetails: Record<string, unknown> | undefined;
+  let verificationError: OperationExecutionError | undefined;
+  if (input.verify && !mainError) {
+    if (comparator.mode !== "observe" && !input.restore) {
+      try {
+        readback = await readExact(probe, input.address, input.byteCount, input.width / 8 as 1 | 2 | 4, "post_connection_readback", (result) => {
+          readbackCommand = commandData(result);
+        });
+        const compared = compareStructured(readback, requested, comparator);
+        verificationDetails = { ...compared.details, observationCount: 1, command: readbackCommand, connection: "independent_post_write" };
+        if (!compared.pass) verificationError = executionError("READBACK_MISMATCH", "verification", "independent post-connection readback did not satisfy the requested comparator", { writeIssued: true });
+      } catch (error) {
+        verificationError = normalizePostWriteError(error, "READBACK_FAILED", "post_connection_readback", "independent structured readback failed after the write transaction", true);
+      }
+    } else if (transaction.readbacks.length === 0) {
+      verificationError = executionError("READBACK_FAILED", "readback", "memory transaction returned no readback samples", { writeIssued: true, stateUnknown: true });
+    } else {
+      const verified = verifyTransactionReadbacks(transaction.readbacks, requested, comparator, transaction);
+      readback = verified.readback;
+      readbackCommand = command;
+      verificationDetails = { ...verified.details, command };
+      if (!verified.pass) verificationError = executionError("READBACK_MISMATCH", "verification", "structured readback did not satisfy the requested comparator", { writeIssued: true });
+    }
+  }
+
+  let restoreReadback: Buffer | undefined;
+  let restoreReadCommand: Record<string, unknown> | undefined;
+  let restoreVerified = false;
+  let restoreError: OperationExecutionError | undefined;
+  if (input.restore && writeIssued) {
+    if (!transaction.restoreIssued || !transaction.oldBytes) {
+      restoreError = executionError("RESTORE_FAILED", "restore", "memory transaction did not issue a restorable old-value write", { writeIssued: true, stateUnknown: true });
+    } else {
+      try {
+        restoreReadback = await readExact(probe, input.address, input.byteCount, input.width / 8 as 1 | 2 | 4, "post_connection_restore_readback", (result) => {
+          restoreReadCommand = commandData(result);
+        });
+        restoreVerified = restoreReadback.equals(transaction.oldBytes);
+        if (!restoreVerified) restoreError = executionError("RESTORE_FAILED", "post_connection_restore_readback", "independent restore readback does not match the captured old value", { writeIssued: true, stateUnknown: true });
+      } catch (error) {
+        restoreError = normalizePostWriteError(error, "RESTORE_FAILED", "post_connection_restore_readback", "independent restore readback failed", true);
+      }
+    }
+  }
+  envelope.data = {
+    ...(input.semanticData ?? {}),
+    address: input.address,
+    width: input.width,
+    byteCount: input.byteCount,
+    oldHex: transaction.oldBytes?.toString("hex"),
+    requestedHex: requested.toString("hex"),
+    readbackHex: readback?.toString("hex"),
+    transactionReadbackHex: transaction.readbacks.at(-1)?.toString("hex"),
+    oldReadCommand: transaction.oldBytes ? command : undefined,
+    command,
+    comparator: input.verify ? comparator : undefined,
+    verificationDetails,
+    readbackCommand,
+    restore: input.restore ? {
+      requestedHex: transaction.oldBytes?.toString("hex"),
+      readbackHex: restoreReadback?.toString("hex"),
+      transactionReadbackHex: transaction.restoreReadback?.toString("hex"),
+      command: transaction.restoreIssued ? command : undefined,
+      readbackCommand: restoreReadCommand,
+      status: !writeIssued ? "not_needed" : restoreVerified ? "verified" : "uncertain",
+    } : { status: "not_requested" },
+  };
+  envelope.verification = input.verify
+    ? verificationError
+      ? { status: "failed", method: comparatorMethod(comparator), details: verificationDetails }
+      : mainError
+        ? { status: "failed", method: "write_command" }
+        : { status: "verified", method: comparatorMethod(comparator), details: verificationDetails }
+    : { status: mainError ? "failed" : "executed_unverified" };
+
+  let after: TargetStateObservation;
+  try { after = await observe(probe); }
+  catch (error) {
+    throw normalizePostWriteError(error, "POST_OPERATION_STATE_UNKNOWN", "final_observation", "target-state observation failed after structured memory transaction", writeIssued);
+  }
+  envelope.after = observationData(after);
+  const transactionStateChanged = transaction.targetStateBefore !== undefined && transaction.targetStateBefore !== before.state
+    || transaction.targetStateAfter !== undefined && transaction.targetStateAfter !== before.state;
+  if (transactionStateChanged || (after.state !== "unknown" && after.state !== before.state)) {
+    envelope.observedEffects.push(`target_state_changed_during_write:${before.state}->${after.state}`);
+    throw executionError("HIDDEN_STATE_CHANGE", "final_observation", "structured memory transaction changed target state", {
+      writeIssued,
+      stateUnknown: Boolean(restoreError?.detail.stateUnknown || mainError?.detail.stateUnknown),
+    });
+  }
+  if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured memory transaction", { writeIssued, stateUnknown: writeIssued });
+  if (restoreError) throw restoreError;
+  if (mainError) throw mainError;
+  if (verificationError) throw verificationError;
+}
+
+function verifyTransactionReadbacks(
+  readbacks: Buffer[],
+  expected: Buffer,
+  comparator: ScalarComparator,
+  transaction: ProbeMemoryTransactionResult,
+): { pass: boolean; readback: Buffer; details: Record<string, unknown> } {
+  const inner = comparator.mode === "observe" ? comparator.comparator : comparator;
+  if (comparator.mode !== "observe") {
+    const readback = readbacks[0];
+    const compared = compareStructured(readback, expected, inner);
+    return { pass: compared.pass, readback, details: { ...compared.details, observationCount: 1 } };
+  }
+  const fallbackAt = transaction.verificationEndedAt ?? transaction.verificationStartedAt ?? new Date().toISOString();
+  const observations: Array<{ at: string; hex: string; numeric?: number }> = [];
+  let last = readbacks[0];
+  let matchedAt: string | undefined;
+  let matchedAtPoll: number | undefined;
+  let matchedEvidence: Record<string, unknown> | undefined;
+  for (let index = 0; index < readbacks.length; index += 1) {
+    last = readbacks[index];
+    const at = transaction.readbackObservedAt?.[index] ?? fallbackAt;
+    const numeric = observedNumeric(last, inner);
+    observations.push({ at, hex: last.toString("hex"), ...(numeric === undefined ? {} : { numeric }) });
+    const compared = compareStructured(last, expected, inner);
+    if (compared.pass && !matchedAt) {
+      matchedAt = at;
+      matchedAtPoll = index + 1;
+      matchedEvidence = compared.details;
+    }
+  }
+  const values = observations.flatMap((item) => item.numeric === undefined ? [] : [item.numeric]);
+  return {
+    pass: Boolean(matchedAt),
+    readback: last,
+    details: {
+      observationCount: observations.length,
+      startedAt: transaction.verificationStartedAt ?? observations[0]?.at ?? fallbackAt,
+      endedAt: transaction.verificationEndedAt ?? observations.at(-1)?.at ?? fallbackAt,
+      matchedAt,
+      matchedAtPoll,
+      matchedEvidence,
+      first: observations[0] ?? null,
+      last: observations.at(-1) ?? null,
+      min: values.length ? Math.min(...values) : null,
+      max: values.length ? Math.max(...values) : null,
+      numericSummary: values.length ? "typed" : "not_available",
+    },
+  };
 }
 
 const FLASH_SNAPSHOT_CLEANUP_RETRY_DELAYS_MS = [1, 2, 4, 8, 16, 32, 64] as const;

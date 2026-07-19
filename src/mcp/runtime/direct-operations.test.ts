@@ -7,6 +7,8 @@ import {
   ProbeErrorCode,
   type CommandResult,
   type GDBServerInfo,
+  type ProbeMemoryTransactionInput,
+  type ProbeMemoryTransactionResult,
   type TargetStateObservation,
 } from "../../probe/backend";
 import { repoTempRoot } from "../preflight/temp-preflight";
@@ -251,6 +253,74 @@ test("write_memory performs explicit exact readback only when requested", async 
   assert.deepEqual(probe.actions, ["read:20000000:4", "write:20000000:4:4", "read:20000000:4"]);
   assert.equal((result.data as { oldHex: string }).oldHex, "00000000");
   assert.equal((result.data as { readbackHex: string }).readbackHex, "01020304");
+});
+
+test("write_memory consumes one-connection Probe transaction evidence", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "write-probe-transaction");
+  const old = Buffer.from("00000000", "hex");
+  const requested = Buffer.from("01020304", "hex");
+  probe.memory.set(0x20000000, requested);
+  probe.transactionResult = {
+    command: { ...ok(), writeIssued: true, stateUnknown: false },
+    oldBytes: old,
+    readbacks: [requested],
+    readbackObservedAt: ["2026-07-19T00:00:00.005Z"],
+    verificationStartedAt: "2026-07-19T00:00:00.000Z",
+    verificationEndedAt: "2026-07-19T00:00:00.010Z",
+    restoreIssued: false,
+    restoreVerified: false,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+  const result = await service.writeMemory({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: requested.toString("hex"),
+    captureOld: true,
+    verify: true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.verification.status, "verified");
+  assert.deepEqual(probe.actions, ["transaction:20000000:4:1:0:0:false", "read:20000000:4"]);
+  assert.equal(probe.transactionInput?.captureOld, true);
+  assert.equal(probe.transactionInput?.verifyDurationMs, 0);
+  const data = result.data as { oldHex: string; requestedHex: string; readbackHex: string };
+  assert.equal(data.oldHex, old.toString("hex"));
+  assert.equal(data.requestedHex, requested.toString("hex"));
+  assert.equal(data.readbackHex, requested.toString("hex"));
+});
+
+test("write_memory rejects a same-connection readback that does not persist", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "write-probe-post-connection-mismatch");
+  const old = Buffer.from("00000000", "hex");
+  const requested = Buffer.from("01020304", "hex");
+  probe.memory.set(0x20000000, old);
+  probe.transactionResult = {
+    command: { ...ok(), writeIssued: true, stateUnknown: false },
+    oldBytes: old,
+    readbacks: [requested],
+    restoreIssued: false,
+    restoreVerified: false,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+  const result = await service.writeMemory({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: requested.toString("hex"),
+    captureOld: true,
+    verify: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "READBACK_MISMATCH");
+  const data = result.data as { readbackHex: string; transactionReadbackHex: string };
+  assert.equal(data.transactionReadbackHex, requested.toString("hex"));
+  assert.equal(data.readbackHex, old.toString("hex"));
+  assert.deepEqual(probe.actions, ["transaction:20000000:4:1:0:0:false", "read:20000000:4"]);
 });
 
 test("readback mismatch retains the actual memory and core-register values", async (context) => {
@@ -716,6 +786,127 @@ test("structured writes default to no old read and no readback", async (context)
   assert.deepEqual(probe.actions, ["write:20000000:4:4"]);
 });
 
+test("structured writes consume one-connection Probe transaction evidence", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-probe-transaction");
+  const old = Buffer.from("01000000", "hex");
+  const requested = Buffer.from("02000000", "hex");
+  probe.memory.set(0x20000000, old);
+  probe.transactionResult = {
+    command: { ...ok(), writeIssued: true, stateUnknown: false },
+    oldBytes: old,
+    readbacks: [requested],
+    restoreReadback: old,
+    restoreIssued: true,
+    restoreVerified: true,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: requested.toString("hex"),
+    knownRegion: "ram",
+    captureOld: true,
+    verify: true,
+    restore: true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.verification.status, "verified");
+  assert.deepEqual(probe.actions, ["transaction:20000000:4:1:0:0:true", "read:20000000:4"]);
+  assert.equal(probe.transactionInput?.expectedTargetState, "running");
+  assert.equal(probe.transactionInput?.verifyDurationMs, 0);
+  const data = result.data as { oldHex: string; requestedHex: string; readbackHex: string; restore: { status: string; readbackHex: string } };
+  assert.equal(data.oldHex, old.toString("hex"));
+  assert.equal(data.requestedHex, requested.toString("hex"));
+  assert.equal(data.readbackHex, requested.toString("hex"));
+  assert.equal(data.restore.status, "verified");
+  assert.equal(data.restore.readbackHex, old.toString("hex"));
+});
+
+test("structured exact verification rejects a transaction-local value that does not persist", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-probe-post-connection-mismatch");
+  const old = Buffer.from("01000000", "hex");
+  const requested = Buffer.from("02000000", "hex");
+  probe.memory.set(0x20000000, old);
+  probe.transactionResult = {
+    command: { ...ok(), writeIssued: true, stateUnknown: false },
+    oldBytes: old,
+    readbacks: [requested],
+    restoreIssued: false,
+    restoreVerified: false,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: requested.toString("hex"),
+    knownRegion: "ram",
+    captureOld: true,
+    verify: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "READBACK_MISMATCH");
+  const data = result.data as { readbackHex: string; transactionReadbackHex: string };
+  assert.equal(data.transactionReadbackHex, requested.toString("hex"));
+  assert.equal(data.readbackHex, old.toString("hex"));
+  assert.deepEqual(probe.actions, ["transaction:20000000:4:1:0:0:false", "read:20000000:4"]);
+});
+
+test("one-connection observe verification retains bounded timeline and numeric evidence", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-probe-observe");
+  const requested = Buffer.from("02000000", "hex");
+  probe.transactionResult = {
+    command: { ...ok(), writeIssued: true, stateUnknown: false },
+    readbacks: [Buffer.from("00000000", "hex"), requested, Buffer.from("03000000", "hex")],
+    readbackObservedAt: ["2026-07-19T00:00:00.000Z", "2026-07-19T00:00:00.010Z", "2026-07-19T00:00:00.020Z"],
+    verificationStartedAt: "2026-07-19T00:00:00.000Z",
+    verificationEndedAt: "2026-07-19T00:00:00.020Z",
+    restoreIssued: false,
+    restoreVerified: false,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: requested.toString("hex"),
+    knownRegion: "ram",
+    verify: true,
+    comparator: {
+      mode: "observe",
+      durationMs: 100,
+      maxPolls: 3,
+      intervalMs: 10,
+      comparator: { mode: "exact", type: "uint32", endian: "little" },
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(probe.actions, ["transaction:20000000:4:3:10:100:false"]);
+  const details = result.verification.details as {
+    observationCount: number;
+    matchedAt: string;
+    matchedAtPoll: number;
+    min: number;
+    max: number;
+    first: { numeric: number };
+    last: { numeric: number };
+  };
+  assert.equal(details.observationCount, 3);
+  assert.equal(details.matchedAt, "2026-07-19T00:00:00.010Z");
+  assert.equal(details.matchedAtPoll, 2);
+  assert.equal(details.min, 0);
+  assert.equal(details.max, 3);
+  assert.equal(details.first.numeric, 0);
+  assert.equal(details.last.numeric, 3);
+});
+
 test("structured restore is forced, verified, and retains a failed main comparison", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "structured-restore");
   const old = Buffer.from("01000000", "hex");
@@ -738,6 +929,38 @@ test("structured restore is forced, verified, and retains a failed main comparis
   assert.equal(result.error?.stateUnknown, false);
   assert.equal((result.data as { restore: { status: string } }).restore.status, "verified");
   assert.equal(probe.memory.get(0x20000000)?.toString("hex"), old.toString("hex"));
+});
+
+test("partial transaction failure retains the main error after verified compensation", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-partial-write-restored");
+  const old = Buffer.from("0100000002000000", "hex");
+  probe.memory.set(0x20000000, old);
+  probe.transactionResult = {
+    command: { success: false, rawOutput: "partial write failed", output: "", error: "partial write failed", writeIssued: true, stateUnknown: true },
+    oldBytes: old,
+    readbacks: [],
+    restoreReadback: old,
+    restoreIssued: true,
+    restoreVerified: true,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 8,
+    dataHex: "0300000004000000",
+    knownRegion: "ram",
+    captureOld: true,
+    verify: true,
+    restore: true,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "PROBE_COMMAND_FAILED");
+  assert.match(result.error?.message ?? "", /partial write failed/);
+  assert.equal((result.data as { restore: { status: string } }).restore.status, "verified");
+  assert.deepEqual(probe.actions, ["transaction:20000000:8:1:0:0:true", "read:20000000:8"]);
 });
 
 test("structured restore uncertainty is explicit after an issued write", async (context) => {
@@ -897,6 +1120,8 @@ class FakeProbe extends ProbeBackend {
   observations: TargetStateObservation[] = [];
   observationCalls = 0;
   observationRejectOnCall?: number;
+  transactionInput?: ProbeMemoryTransactionInput;
+  transactionResult?: ProbeMemoryTransactionResult;
 
   override async observeTargetState(): Promise<TargetStateObservation> {
     this.observationCalls += 1;
@@ -932,6 +1157,12 @@ class FakeProbe extends ProbeBackend {
     if (this.writeMemoryResult) return this.writeMemoryResult;
     this.memory.set(address, Buffer.from(bytes));
     return ok();
+  }
+  override async writeMemoryTransaction(input: ProbeMemoryTransactionInput): Promise<ProbeMemoryTransactionResult | undefined> {
+    if (!this.transactionResult) return undefined;
+    this.transactionInput = input;
+    this.actions.push(`transaction:${input.address.toString(16)}:${input.bytes.length}:${input.verifyReads}:${input.verifyIntervalMs}:${input.verifyDurationMs}:${input.restore}`);
+    return this.transactionResult;
   }
   async readAllRegisters(): Promise<CommandResult> {
     this.actions.push("read-registers");
