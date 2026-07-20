@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { canonicalProbeSerial, ProbeIdentityError } from "./probe-identity";
 
-export type ProbeOwnerKind = "hss" | "gdb";
+export type ProbeOwnerKind = "hss" | "gdb" | "memory";
 
 export interface ProbeOwner {
   kind: ProbeOwnerKind;
@@ -188,6 +188,29 @@ export class ProbeQueue {
     }
   }
 
+  updateOwnerResource(
+    probeSerial: string,
+    token: string,
+    resourcePid: number,
+    details?: Record<string, unknown>,
+  ): ProbeOwner {
+    if (!validOptionalPid(resourcePid) || resourcePid === undefined) throw new ProbeQueueError("OWNER_RESOURCE_PID_INVALID", "owner resource PID must be a live positive integer");
+    const probeDir = this.probeDirectory(requireSerial(probeSerial));
+    const ownerLock = join(probeDir, "owner-update.lock");
+    const lockToken = acquireDirectoryLock(ownerLock, 5_000);
+    try {
+      const owner = readLiveOwnerLocked(probeDir);
+      if (!owner || owner.token !== token || owner.pid !== process.pid || owner.processInstanceId !== processInstanceId) {
+        throw new ProbeQueueError("OWNER_TOKEN_MISMATCH", "only the process that acquired the Probe owner may update its resource identity", owner);
+      }
+      const updated: ProbeOwner = { ...owner, resourcePid, ...(details ? { details } : {}) };
+      atomicJsonWrite(join(probeDir, "owner.json"), updated);
+      return updated;
+    } finally {
+      releaseDirectoryLock(ownerLock, lockToken);
+    }
+  }
+
   private async runCrossProcess<T>(
     probeSerial: string,
     operation: (metadata: QueueMetadata) => Promise<T>,
@@ -352,9 +375,9 @@ function validOptionalPid(pid: number | undefined): boolean {
 }
 
 function ownerError(owner: ProbeOwner): ProbeQueueError {
-  return owner.kind === "hss"
-    ? new ProbeQueueError("CAPTURE_ACTIVE", "HSS capture owns this Probe", owner)
-    : new ProbeQueueError("GDB_SESSION_ACTIVE", "J-Link GDB Server owns this Probe", owner);
+  if (owner.kind === "hss") return new ProbeQueueError("CAPTURE_ACTIVE", "HSS capture owns this Probe", owner);
+  if (owner.kind === "gdb") return new ProbeQueueError("GDB_SESSION_ACTIVE", "J-Link GDB Server owns this Probe", owner);
+  return new ProbeQueueError("MEMORY_SESSION_ACTIVE", "persistent native memory session owns this Probe", owner);
 }
 
 function readTickets(ticketsDir: string): TicketRecord[] {

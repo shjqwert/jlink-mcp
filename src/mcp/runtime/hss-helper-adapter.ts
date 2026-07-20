@@ -46,6 +46,8 @@ export interface HssTimebase {
   qpcFrequency: string;
 }
 
+export type HssTargetState = "running" | "halted" | "unknown";
+
 export interface HssCaptureControlFiles {
   planPath: string;
   pidFile: string;
@@ -105,6 +107,7 @@ export interface HssHelperAdapter {
   readonly backend: HssRuntimeFacts["backend"];
   inspectRuntime(target: StoredTarget): Promise<HssRuntimeFacts>;
   capability(target: StoredTarget, runtime?: HssRuntimeFacts): Promise<HssCapabilityFacts>;
+  observeTargetState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState>;
   qpcTimebase(runtime: HssRuntimeFacts): Promise<HssTimebase>;
   launchCapture(runtime: HssRuntimeFacts, control: HssCaptureControlFiles): Promise<HssCaptureLaunch>;
   waitUntilReady(control: HssCaptureControlFiles, launch: HssCaptureLaunch, timeoutMs?: number): Promise<void>;
@@ -130,6 +133,12 @@ export class HssAdapterError extends Error {
     super(message);
     this.name = "HssAdapterError";
   }
+}
+
+export function hssTargetStateFromConnectPreflight(observed: Record<string, unknown>): HssTargetState {
+  if (observed.targetWasHaltedRaw === 1) return "halted";
+  if (observed.targetWasHaltedRaw === 0) return "running";
+  throw new HssAdapterError("HSS_TARGET_STATE_UNKNOWN", "HSS target-state preflight returned no usable execution state", true, true);
 }
 
 export class NativeHssHelperAdapter implements HssHelperAdapter {
@@ -225,6 +234,26 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
         reason: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  async observeTargetState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState> {
+    assertRuntimeIdentity(runtime);
+    const observed = await runJson(runtime.helperPath, [
+      "connect-preflight",
+      "--dll", runtime.runtimePath,
+      "--device", target.device,
+      "--interface", target.interface,
+      "--serial", target.probeSerial,
+      "--speed", String(target.speed),
+      "--jlink-script-mode", "none",
+    ], 30_000);
+    if (observed.status !== "ok") {
+      throw new HssAdapterError(String(observed.errorCode ?? "HSS_CONNECT_PREFLIGHT_FAILED"), String(observed.reason ?? "target state could not be observed through the HSS helper"), true, true);
+    }
+    if (observed.targetReset !== false || observed.targetWritten !== false || observed.flashIssued !== false || observed.resetIssued !== false || observed.haltIssued !== false) {
+      throw new HssAdapterError("HSS_CONNECT_PREFLIGHT_SIDE_EFFECT", "HSS target-state preflight reported an unexpected target side effect", false, true);
+    }
+    return hssTargetStateFromConnectPreflight(observed);
   }
 
   async qpcTimebase(runtime: HssRuntimeFacts): Promise<HssTimebase> {

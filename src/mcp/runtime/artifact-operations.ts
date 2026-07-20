@@ -31,12 +31,15 @@ import {
   type ScalarComparator,
 } from "./direct-operations";
 
-export interface VariableRefInput {
+export interface LegacyVariableRefInput {
   artifactGeneration: string;
   qualifiedName: string;
   memberPath?: string;
   layoutHash: string;
 }
+
+/** Public callers use a logical selector. The legacy structured form remains internal/backward-compatible. */
+export type VariableRefInput = string | LegacyVariableRefInput;
 
 export type VariableNonObserveComparatorInput =
   | { mode: "exact" }
@@ -53,6 +56,7 @@ export interface VariableWriteInput {
   captureOld?: boolean;
   verify?: boolean;
   restore?: boolean;
+  verificationConnection?: "same_session" | "independent_session";
   comparator?: VariableComparatorInput;
 }
 
@@ -69,6 +73,11 @@ export interface CaptureVariableWriteDelegate {
     requested: Buffer,
     comparator: ScalarComparator,
   ): Promise<OperationEnvelope | undefined>;
+}
+
+interface ResolvedReference {
+  resolved: ResolvedSymbol;
+  cacheRefreshed: boolean;
 }
 
 export class ArtifactVariableService {
@@ -88,9 +97,10 @@ export class ArtifactVariableService {
     this.captureWriteDelegate = delegate;
   }
 
-  async resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{ target: StoredTarget; resolved: ResolvedSymbol }> {
+  async resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{ target: StoredTarget; resolved: ResolvedSymbol; cacheRefreshed: boolean }> {
     const target = this.targets.require(projectRoot);
-    return { target, resolved: await this.resolveReference(target, ref) };
+    const reference = await this.resolveReference(target, ref);
+    return { target, resolved: reference.resolved, cacheRefreshed: reference.cacheRefreshed };
   }
 
   async artifactProbe(input: {
@@ -106,19 +116,26 @@ export class ArtifactVariableService {
         projectRoot: target.projectRoot,
         explicitArtifact: input.explicitArtifact,
         explicitMap: input.explicitMap,
+        configuredArtifact: target.artifact?.path,
+        configuredArtifactSha256: target.artifact?.sha256,
+        configuredMap: target.map?.path,
         maxFiles: input.maxFiles,
         maxDepth: input.maxDepth,
         maxCandidates: input.maxCandidates,
       });
       envelope.data = {
         ...result,
-        selectionRequired: !result.explicit && result.candidates.length > 1,
+        selectionRequired: !result.explicit && (result.scanTruncated || result.candidates.length > 1),
       };
-      if (!result.explicit && result.candidates.length !== 1) {
+      if (!result.explicit && (result.scanTruncated || result.candidates.length !== 1)) {
         throw new ArtifactCatalogError(
-          result.candidates.length === 0 ? "ARTIFACT_NOT_FOUND" : "ARTIFACT_SELECTION_REQUIRED",
-          result.candidates.length === 0 ? "no supported Artifact candidate was found" : "multiple Artifact candidates require explicitArtifact",
-          { candidates: result.candidates },
+          result.candidates.length === 0 && !result.scanTruncated ? "ARTIFACT_NOT_FOUND" : "ARTIFACT_SELECTION_REQUIRED",
+          result.candidates.length === 0 && !result.scanTruncated
+            ? "no supported Artifact candidate was found"
+            : result.scanTruncated
+              ? "artifact discovery reached a configured bound; select an explicitArtifact before proceeding"
+              : "multiple Artifact candidates require explicitArtifact",
+          { candidates: result.candidates, scanTruncated: result.scanTruncated, reachedBound: result.reachedBound },
         );
       }
       envelope.verification = { status: "observed", method: "bounded_content_probe" };
@@ -135,15 +152,15 @@ export class ArtifactVariableService {
 
   async symbolResolve(projectRoot: string, selector: string): Promise<OperationEnvelope> {
     return this.offline("symbol_resolve", projectRoot, async (envelope, target) => {
-      const resolved = await this.resolveCurrent(target, selector);
-      envelope.data = resolved;
+      const resolved = await this.resolveReference(target, selector);
+      envelope.data = { ...resolved.resolved, cacheRefreshed: resolved.cacheRefreshed };
       envelope.verification = { status: "verified", method: "elf_dwarf_layout" };
     });
   }
 
   async hotAdd(projectRoot: string, ref: VariableRefInput, requestedType?: HssScalarType): Promise<OperationEnvelope> {
     return this.offline("hot_variable_add", projectRoot, async (envelope, target) => {
-      const resolved = await this.resolveReference(target, ref);
+      const resolved = (await this.resolveReference(target, ref)).resolved;
       envelope.data = this.hot.add(resolved, hotContext(target), requestedType ?? resolved.type);
       envelope.verification = { status: "verified", method: "logical_reference_persisted" };
     });
@@ -171,9 +188,12 @@ export class ArtifactVariableService {
   async readVariable(projectRoot: string, ref: VariableRefInput): Promise<OperationEnvelope> {
     let target: StoredTarget;
     let resolved: ResolvedSymbol;
+    let cacheRefreshed = false;
     try {
       target = this.targets.require(projectRoot);
-      resolved = await this.resolveReference(target, ref);
+      const reference = await this.resolveReference(target, ref);
+      resolved = reference.resolved;
+      cacheRefreshed = reference.cacheRefreshed;
       if (target.liveArtifactMatch.status === "mismatch") throw new TypedAccessError("ARTIFACT_MISMATCH", "Artifact match is mismatch; symbol read was not issued");
     } catch (error) {
       return this.failure(createOperationEnvelope("read_variable"), error, "symbol_resolution");
@@ -193,31 +213,44 @@ export class ArtifactVariableService {
       const raw = envelope.data as { dataHex?: string };
       if (!raw.dataHex) return failEnvelope(envelope, operationError("READ_LENGTH_MISMATCH", "decode", "typed variable read returned no bytes"));
       const bytes = Buffer.from(raw.dataHex, "hex");
-      envelope.data = { ...raw, resolved, typedValue: decodeHssValue(resolved.type, bytes, resolved.endian) };
+      envelope.data = { ...raw, resolved, cacheRefreshed, typedValue: decodeHssValue(resolved.type, bytes, resolved.endian) };
     }
     return envelope;
   }
 
   async writeVariable(input: VariableWriteInput): Promise<OperationEnvelope> {
+    const normalizedInput: VariableWriteInput = {
+      ...input,
+      captureOld: input.captureOld ?? true,
+      verify: input.verify ?? true,
+      restore: input.restore ?? false,
+      verificationConnection: input.verificationConnection ?? "same_session",
+    };
     let target: StoredTarget;
     let resolved: ResolvedSymbol;
     let requested: Buffer;
     let comparator: ScalarComparator;
+    let cacheRefreshed = false;
     try {
-      target = this.targets.require(input.projectRoot);
+      target = this.targets.require(normalizedInput.projectRoot);
       if (target.liveArtifactMatch.status !== "verified") throw new TypedAccessError(target.liveArtifactMatch.status === "mismatch" ? "ARTIFACT_MISMATCH" : "ARTIFACT_NOT_VERIFIED", "write_variable requires a verified live Artifact match");
-      resolved = await this.resolveReference(target, input.ref);
+      const reference = await this.resolveReference(target, normalizedInput.ref);
+      resolved = reference.resolved;
+      cacheRefreshed = reference.cacheRefreshed;
       if (resolved.region !== "ram") throw new TypedAccessError("VARIABLE_NOT_WRITABLE", "typed variable writes require a DWARF RAM symbol");
-      requested = encodeHssValue(resolved.type, input.value, resolved.endian);
-      comparator = variableComparator(input.comparator ?? { mode: "exact" }, resolved, input.value);
+      requested = encodeHssValue(resolved.type, normalizedInput.value, resolved.endian);
+      comparator = variableComparator(normalizedInput.comparator ?? { mode: "exact" }, resolved, normalizedInput.value);
     } catch (error) {
       return this.failure(createOperationEnvelope("write_variable"), error, "symbol_resolution");
     }
     if (this.captureWriteDelegate) {
       try {
-        const captureEnvelope = await this.captureWriteDelegate.tryWriteVariable(input, target, resolved, requested, comparator);
+        const captureEnvelope = await this.captureWriteDelegate.tryWriteVariable(normalizedInput, target, resolved, requested, comparator);
         if (captureEnvelope) {
           decorateTypedWrite(captureEnvelope, resolved);
+          if (captureEnvelope.data && typeof captureEnvelope.data === "object" && !Array.isArray(captureEnvelope.data)) {
+            captureEnvelope.data = { ...captureEnvelope.data as Record<string, unknown>, cacheRefreshed };
+          }
           return captureEnvelope;
         }
       } catch (error) {
@@ -230,18 +263,22 @@ export class ArtifactVariableService {
       width: resolved.size * 8 as 8 | 16 | 32,
       byteCount: resolved.size,
       dataHex: requested.toString("hex"),
-      captureOld: input.captureOld ?? false,
-      verify: input.verify ?? false,
-      restore: input.restore ?? false,
+      captureOld: normalizedInput.captureOld,
+      verify: normalizedInput.verify,
+      restore: normalizedInput.restore,
+      verificationConnection: normalizedInput.verificationConnection,
       comparator,
       knownRegion: "ram",
       operationTool: "write_variable",
       expectedTargetGeneration: target.generation,
       expectedArtifactGeneration: target.artifact!.generation,
       allowedArtifactMatch: ["verified"],
-      semanticData: { resolved, requestedValue: input.value },
+      semanticData: { resolved, requestedValue: normalizedInput.value },
     });
     decorateTypedWrite(envelope, resolved);
+    if (envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data)) {
+      envelope.data = { ...envelope.data as Record<string, unknown>, cacheRefreshed };
+    }
     return envelope;
   }
 
@@ -254,12 +291,15 @@ export class ArtifactVariableService {
     return this.symbols.resolve(target, selector);
   }
 
-  private async resolveReference(target: StoredTarget, ref: VariableRefInput): Promise<ResolvedSymbol> {
+  private async resolveReference(target: StoredTarget, ref: VariableRefInput): Promise<ResolvedReference> {
     this.requireCurrentArtifact(target);
-    if (target.artifact!.generation !== ref.artifactGeneration) throw new TypedAccessError("STALE_ARTIFACT_REFERENCE", "variable reference belongs to a stale Artifact generation");
-    const resolved = await this.symbols.resolve(target, symbolLogicalIdentity(ref));
-    if (resolved.ref.layoutHash !== ref.layoutHash) throw new TypedAccessError("STALE_ARTIFACT_REFERENCE", "variable layout hash changed; resolve the selector again");
-    return resolved;
+    if (typeof ref !== "string" && target.artifact!.generation !== ref.artifactGeneration) throw new TypedAccessError("STALE_ARTIFACT_REFERENCE", "legacy variable reference belongs to a stale Artifact generation");
+    const resolved = await this.symbols.resolve(target, typeof ref === "string" ? ref : symbolLogicalIdentity(ref));
+    if (typeof ref !== "string" && resolved.ref.layoutHash !== ref.layoutHash) throw new TypedAccessError("STALE_ARTIFACT_REFERENCE", "legacy variable layout hash changed; resolve the selector again");
+    const context = hotContext(target);
+    const cached = this.hot.get(resolved.ref, context);
+    if (!cached.ok) this.hot.add(resolved, context);
+    return { resolved, cacheRefreshed: !cached.ok };
   }
 
   private async offline(

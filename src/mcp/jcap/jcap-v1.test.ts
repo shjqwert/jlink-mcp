@@ -123,7 +123,7 @@ test("JCAP v1 finalizes exactly four durable files and round-trips bounded queri
       outcome: "completed", error: null,
     });
     writer.appendEvent({
-      eventId: eventId(3), eventSequence: 2, type: "quality", tick: "30", qualityStatus: "reported",
+      eventId: eventId(3), eventSequence: 2, type: "quality", tick: "30", qualityStatus: "reported", qualitySource: "jlink",
       missingSamples: 0, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0,
       durationValidated: true, qualityEvidence: { source: "fixture" },
     });
@@ -156,17 +156,20 @@ test("JCAP v1 finalizes exactly four durable files and round-trips bounded queri
     assert.deepEqual(indexedWrite.sampleAlignment, { method: "terminal_raw_nearest", status: "resolved" });
     assert.deepEqual(indexedWrite.neighbors, { before: { sampleIndex: 0, tick: "10" }, after: { sampleIndex: 1, tick: "20" } });
 
+    const query = new JcapV1QueryService(root);
     unlinkSync(path.join(packageDir, "capture.db"));
-    await rebuildJcapV1Index(packageDir);
+    assert.equal((await query.summary({ captureId })).indexRebuilt, true);
     assert.deepEqual(rawHashes(packageDir), beforeHashes);
     assert.deepEqual(await jcapCaptureSeries({ packageDir, variables: ["counter", "feedback"], startTick: "10", endTick: "30", bucketCount: 2 }), seriesBefore);
     assert.deepEqual(await jcapCaptureEventWindow({ packageDir, eventId: eventId(2), variables: ["counter"], beforeMs: 0, afterMs: 0, bucketCount: 1 }), windowBefore);
+
+    writeFileSync(path.join(packageDir, "capture.db"), "not a sqlite database");
+    assert.equal((await query.series({ captureId, variables: ["counter"], startTick: "10", endTick: "30", bucketCount: 2 })).indexRebuilt, true);
 
     const exported = await jcapCaptureExportCsv(packageDir, path.join(root, "exports"));
     assert.equal(exported.rows, 6);
     assert.equal(path.dirname(exported.exportFile), path.join(root, "exports"));
     assert.deepEqual(readdirSync(packageDir).sort(), ["capture.db", "capture.json", "raw"]);
-    const query = new JcapV1QueryService(root);
     const listed = await query.list();
     assert.equal((listed.captures as Array<Record<string, unknown>>)[0].captureId, captureId);
     await assert.rejects(() => query.series({ captureId, variables: Array.from({ length: 33 }, (_, index) => `v${index}`), startTick: "0", endTick: "1", bucketCount: 1 }), JcapBoundsError);
@@ -193,13 +196,13 @@ test("JCAP v1 recovery indexes a valid prefix without changing a truncated Raw t
   const packageDir = path.join(root, "captures", `${captureId}.jcap`);
   const events: JcapV1Event[] = [
     { eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
-    { eventId: eventId(2), eventSequence: 1, type: "quality", tick: "30", qualityStatus: "partial", missingSamples: 1, droppedSamples: null, overflows: null, readErrors: null, timeouts: null, durationValidated: null, qualityEvidence: { source: "fixture" } },
+    { eventId: eventId(2), eventSequence: 1, type: "quality", tick: "30", qualityStatus: "partial", qualitySource: "target_counter", missingSamples: 1, droppedSamples: null, overflows: null, readErrors: null, timeouts: null, durationValidated: null, qualityEvidence: { source: "fixture" } },
     { eventId: eventId(3), eventSequence: 2, type: "lifecycle", tick: "31", state: "interrupted" },
   ];
   try {
     writeJcapV1Raw({ packageDir, metadata: metadata(), samples, events });
     appendFileSync(path.join(packageDir, "raw", "samples.bin"), Buffer.from('{"formatVersion":1'));
-    finalizeJcapV1Metadata(packageDir, "interrupted", { missingSamples: 1 }, "partial");
+    finalizeJcapV1Metadata(packageDir, "interrupted", { missingSamples: 1 }, "partial", "target_counter");
     const before = rawHashes(packageDir);
     const rebuilt = await rebuildJcapV1Index(packageDir);
     assert.equal(rebuilt.captureState, "interrupted");
@@ -306,7 +309,7 @@ test("JCAP v1 rejects a completed capture below the 95 percent planned sample th
       samples,
       events: [
         { eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
-        { eventId: eventId(2), eventSequence: 1, type: "quality", tick: "30", qualityStatus: "reported", ...quality, durationValidated: true, qualityEvidence: { source: "fixture" } },
+        { eventId: eventId(2), eventSequence: 1, type: "quality", tick: "30", qualityStatus: "reported", qualitySource: "jlink", ...quality, durationValidated: true, qualityEvidence: { source: "fixture" } },
         { eventId: eventId(3), eventSequence: 2, type: "lifecycle", tick: "30", state: "finalizing" },
         { eventId: eventId(4), eventSequence: 3, type: "lifecycle", tick: "31", state: "completed" },
       ],
@@ -341,7 +344,7 @@ test("JCAP v1 full ceiling shape round-trips 60,000 synchronized ten-variable fr
       }), true);
     }
     writer.appendEvent({
-      eventId: eventId(2), eventSequence: 1, type: "quality", tick: "60000000000", qualityStatus: "reported",
+      eventId: eventId(2), eventSequence: 1, type: "quality", tick: "60000000000", qualityStatus: "reported", qualitySource: "jlink",
       ...quality, durationValidated: true, qualityEvidence: { source: "full-shape-fixture", expectedFrames: 60_000 },
     });
     const built = await finalizeJcapV1Capture({

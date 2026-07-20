@@ -13,6 +13,7 @@ import {
 } from "../../probe/backend";
 import { repoTempRoot } from "../preflight/temp-preflight";
 import { DirectMcuService, removeFlashSnapshotDirectory, type FlashSnapshotCleanup } from "./direct-operations";
+import { MemorySessionManager, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore } from "./target-store";
 
@@ -151,6 +152,58 @@ test("core-register access reports HALT_REQUIRED before issuing any register com
   assert.equal(write.error?.code, "HALT_REQUIRED");
   assert.equal(write.error?.writeIssued, false);
   assert.deepEqual(probe.actions, []);
+});
+
+test("diagnose_crash collects Cortex-M fault and validated exception-frame evidence without changing state", async (context) => {
+  const { service, probe, projectRoot, targets } = await fixture(context, "diagnose-crash");
+  await targets.configure({
+    projectRoot,
+    device: "TEST",
+    probeSerial: "123456",
+    interface: "SWD",
+    speed: 1000,
+    memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "ram", writable: true }],
+  });
+  probe.targetState = "halted";
+  probe.registersReadResult = { success: true, rawOutput: "PC = 08000100, LR = FFFFFFFD, MSP = 20000020, PSP = 20000020", output: "" };
+  const fault = Buffer.alloc(60);
+  fault.writeUInt32LE(0x00008200, 36); // CFSR: precise bus fault + valid BFAR.
+  fault.writeUInt32LE(0x08000100, 52);
+  probe.memory.set(0xe000ed04, fault);
+  const frame = Buffer.alloc(32);
+  frame.writeUInt32LE(0x08000104, 24);
+  frame.writeUInt32LE(0x01000000, 28);
+  probe.memory.set(0x20000020, frame);
+
+  const result = await service.diagnoseCrash(projectRoot);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.before.targetState, "halted");
+  assert.equal(result.after.targetState, "halted");
+  const data = result.data as {
+    coreRegisters: { registers: Record<string, string> };
+    faultRegisters: { raw: Record<string, string>; decoded: { cfsrHfsr: string } };
+    frame: { status: string; stacked?: Record<string, string> };
+  };
+  assert.equal(data.coreRegisters.registers.PC, "0x08000100");
+  assert.equal(data.faultRegisters.raw.CFSR, "0x00008200");
+  assert.equal(data.faultRegisters.raw.BFAR, "0x08000100");
+  assert.match(data.faultRegisters.decoded.cfsrHfsr, /PRECISERR/);
+  assert.equal(data.frame.status, "verified");
+  assert.equal(data.frame.stacked?.pc, "0x08000104");
+  assert.deepEqual(probe.actions, ["read-registers", "read:e000ed04:60", "read:20000020:32"]);
+});
+
+test("diagnose_crash refuses a running target without issuing reads", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "diagnose-crash-running");
+  probe.targetState = "running";
+
+  const result = await service.diagnoseCrash(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HALT_REQUIRED");
+  assert.deepEqual(probe.actions, []);
+  assert.equal(probe.targetState, "running");
 });
 
 test("failed core-register reads preserve command failure and final-state evidence", async (context) => {
@@ -770,6 +823,34 @@ test("target_configure is rejected while a long-lived Probe owner is active", as
   queue.releaseOwner(before.probeSerial, owner.token);
 });
 
+test("a foreign memory owner blocks direct control and reconfiguration with owner facts", async (context) => {
+  const { probe, targets, queue, projectRoot } = await fixture(context, "foreign-memory-owner");
+  const sessions = new MemorySessionManager(queue, new UnavailableMemorySessionLauncher(), 10_000);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
+  const target = targets.require(projectRoot);
+  let owner!: ReturnType<ProbeQueue["claimOwner"]>;
+  await queue.runExclusive(target.probeSerial, async (metadata) => {
+    owner = queue.claimOwner(target.probeSerial, {
+      kind: "memory",
+      projectRoot: target.projectRoot,
+      targetGeneration: target.generation,
+    }, metadata.leaseToken);
+  });
+
+  const control = await service.control("halt", projectRoot);
+  assert.equal(control.ok, false);
+  assert.equal(control.error?.code, "MEMORY_SESSION_ACTIVE");
+  assert.equal((control.probe?.owner as { token: string }).token, owner.token);
+  assert.equal(probe.actions.length, 0);
+
+  const configured = await service.configure({ projectRoot, device: target.device, probeSerial: target.probeSerial, interface: target.interface, speed: target.speed });
+  assert.equal(configured.ok, false);
+  assert.equal(configured.error?.code, "MEMORY_SESSION_ACTIVE");
+  assert.equal(((configured.before as { owner: { token: string } }).owner).token, owner.token);
+  assert.equal(targets.require(projectRoot).generation, target.generation);
+  queue.releaseOwner(target.probeSerial, owner.token);
+});
+
 test("structured writes default to no old read and no readback", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "structured-default");
   const result = await service.structuredWrite({
@@ -784,6 +865,56 @@ test("structured writes default to no old read and no readback", async (context)
   assert.equal(result.ok, true);
   assert.equal(result.verification.status, "executed_unverified");
   assert.deepEqual(probe.actions, ["write:20000000:4:4"]);
+});
+
+test("write_variable independent verification uses a second runtime and labels its evidence", async (context) => {
+  const { probe: writingProbe, targets, queue, projectRoot } = await fixture(context, "structured-independent-verification");
+  const verifyingProbe = new FakeProbe();
+  verifyingProbe.memory.set(0x20000000, Buffer.from("78563412", "hex"));
+  let runtimeCalls = 0;
+  const service = new DirectMcuService(targets, queue, async () => ({ probe: ++runtimeCalls === 1 ? writingProbe : verifyingProbe }));
+
+  const result = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "ram",
+    verify: true,
+    verificationConnection: "independent_session",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(runtimeCalls, 2);
+  assert.deepEqual(writingProbe.actions, ["write:20000000:4:4"]);
+  assert.deepEqual(verifyingProbe.actions, ["read:20000000:4"]);
+  const data = result.data as { verificationConnection: string; verificationSource: string; targetConsumption: string };
+  assert.equal(data.verificationConnection, "independent_session");
+  assert.equal(data.verificationSource, "independent_session_readback");
+  assert.equal(data.targetConsumption, "not_observed");
+});
+
+test("write_variable fails closed when a same-session backend is unavailable", async (context) => {
+  const { probe, targets, queue, projectRoot } = await fixture(context, "structured-same-session-unavailable");
+  const sessions = new MemorySessionManager(queue, new UnavailableMemorySessionLauncher(), 10_000);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
+
+  const result = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "ram",
+    verify: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "SAME_SESSION_UNAVAILABLE");
+  assert.deepEqual(probe.actions, []);
 });
 
 test("structured writes consume one-connection Probe transaction evidence", async (context) => {
@@ -1060,6 +1191,41 @@ test("structured restore is not attempted when the main write is explicitly unis
   assert.deepEqual(probe.actions, ["read:20000000:4", "write:20000000:4:4"]);
 });
 
+test("pre-dispatch memory-session write failures remain unissued and skip restore", async (context) => {
+  const { targets, queue, projectRoot } = await fixture(context, "memory-session-pre-dispatch");
+  const launcher = new PreDispatchMemorySessionLauncher();
+  const sessions = new MemorySessionManager(queue, launcher, 10_000);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe: launcher.probe }), undefined, sessions);
+
+  const raw = await service.writeMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4, dataHex: "01000000" });
+  assert.equal(raw.ok, false);
+  assert.equal(raw.error?.writeIssued, false);
+  assert.equal(raw.error?.stateUnknown, true);
+  assert.deepEqual(launcher.probe.actions, []);
+
+  launcher.probe.observations.push(
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "unknown", source: "unavailable", result: { success: false, rawOutput: "memory session unavailable", output: "", errorCode: ProbeErrorCode.PROBE_BUSY } },
+  );
+  const structured = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "02000000",
+    knownRegion: "ram",
+    verify: true,
+    restore: true,
+  });
+  assert.equal(structured.ok, false);
+  assert.equal(structured.error?.writeIssued, false);
+  assert.equal(structured.error?.stateUnknown, true);
+  assert.equal((structured.data as { restore: { status: string } }).restore.status, "not_needed");
+  assert.deepEqual(launcher.probe.actions, ["read:20000000:4"]);
+  await sessions.dispose();
+});
+
 test("structured hidden target drift preserves restore uncertainty", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "structured-drift-restore-uncertain");
   probe.memory.set(0x20000000, Buffer.from("01000000", "hex"));
@@ -1196,6 +1362,49 @@ class FakeProbe extends ProbeBackend {
   setDevice(): void {}
   async listDevices(): Promise<CommandResult> { return ok(); }
   dispose(): void {}
+}
+
+class UnavailableMemorySessionLauncher implements MemorySessionLauncher {
+  async open(): Promise<undefined> { return undefined; }
+}
+
+class PreDispatchMemorySessionLauncher implements MemorySessionLauncher {
+  readonly probe = new PreDispatchProbe();
+  private readonly session = new PreDispatchMemorySession(this.probe);
+  async open(_target: Parameters<MemorySessionLauncher["open"]>[0], onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    onStarted?.(this.session.pid, this.session.runtime);
+    return this.session;
+  }
+}
+
+class PreDispatchMemorySession implements PersistentMemorySession {
+  readonly pid = process.pid;
+  readonly runtime: MemorySessionRuntimeFacts = {
+    helperPath: "fixture-helper.exe",
+    runtimePath: "fixture-jlink.dll",
+    helperSha256: "a".repeat(64),
+    runtimeSha256: "b".repeat(64),
+  };
+  private alive = true;
+  constructor(readonly probe: ProbeBackend) {}
+  isAlive(): boolean { return this.alive; }
+  isReusable(): boolean { return this.alive; }
+  async close(): Promise<void> { this.alive = false; }
+  onExit(): () => void { return () => undefined; }
+}
+
+class PreDispatchProbe extends FakeProbe {
+  override async writeMemoryBytes(): Promise<CommandResult> {
+    return {
+      success: false,
+      rawOutput: "memory session unavailable before dispatch",
+      output: "",
+      error: "memory session unavailable before dispatch",
+      errorCode: ProbeErrorCode.PROBE_BUSY,
+      writeIssued: false,
+      stateUnknown: true,
+    };
+  }
 }
 
 function ok(): CommandResult {

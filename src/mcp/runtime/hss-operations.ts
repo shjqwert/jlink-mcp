@@ -13,9 +13,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { atomicReplaceSync } from "../../utils/atomic-file";
 import { isValidAcceptanceRunId } from "../acceptance/run-id";
-import { resolveArtifactGeneration, writeArtifactMatchManifest } from "../artifact/artifact-catalog";
+import { resolveArtifactGeneration, writeArtifactMatchManifest, type ArtifactGeneration } from "../artifact/artifact-catalog";
 import { symbolLogicalIdentity, type ResolvedSymbol } from "../artifact/symbol-catalog";
 import { HSS_SCALAR_TYPES } from "../hss/hss-contract";
+import { HSS_STATUS_FLAGS } from "../hss/hss-status-flags";
 import { decodeHssValue, encodeHssValue, hssTypedByteSize } from "../hss/hss-typed-value";
 import {
   appendJcapV1Event,
@@ -31,9 +32,11 @@ import {
   type JcapV1CaptureState,
   type JcapV1Event,
   type JcapV1Metadata,
+  type AnalysisV0RunRequest,
   type JcapV1VariableDescriptor,
   type JcapRunMutationGuard,
 } from "../jcap/jcap-v1";
+import { ANALYSIS_V0_MAX_POINTS } from "../jcap/analysis-v0";
 import type {
   CaptureVariableWriteDelegate,
   ArtifactVariableService,
@@ -56,6 +59,7 @@ import {
 } from "./hss-helper-adapter";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
 import { ProbeQueue, ProbeQueueError, type ProbeOwner } from "./probe-queue";
+import { MemorySessionError, type MemorySessionManager } from "./memory-session";
 import { assertArtifactBindingsCurrent, TargetStore, TargetStoreError, type StoredTarget } from "./target-store";
 
 const ACTIVE_SESSION_STATES = new Set<HssSessionState>(["starting", "capturing", "stopping"]);
@@ -70,11 +74,19 @@ export interface HssVariableInput {
   unit?: string;
 }
 
+export interface HssQualityOracleInput {
+  ref: VariableRefInput;
+  expectedIncrement: number;
+  tolerance: number;
+}
+
 export interface HssCaptureInput {
   projectRoot: string;
   variables: HssVariableInput[];
   rateHz: number;
   durationSec: number;
+  qualityOracle?: HssQualityOracleInput;
+  dryRun?: boolean;
   runId?: string;
 }
 
@@ -87,6 +99,7 @@ interface PreparedVariable {
   requested: HssVariableInput;
   resolved: ResolvedSymbol;
   descriptor: JcapV1VariableDescriptor;
+  cacheRefreshed: boolean;
 }
 
 interface PreparedCapture {
@@ -94,8 +107,24 @@ interface PreparedCapture {
   variables: PreparedVariable[];
   rateHz: number;
   durationSec: number;
+  qualityOracle?: PreparedQualityOracle;
   runId?: string;
   blockCount: number;
+}
+
+interface PreparedQualityOracle {
+  logicalIdentity: string;
+  expectedIncrement: number;
+  tolerance: number;
+  modulus: number;
+}
+
+interface HssStartPreflight {
+  target: StoredTarget;
+  capability: HssCapabilityFacts;
+  artifact: ArtifactGeneration;
+  nonvolatileRanges: Array<{ start: number; end: number }>;
+  ramRanges: Array<{ start: number; end: number }>;
 }
 
 type HssSessionState = "starting" | "capturing" | "stopping" | "completed" | "stopped" | "interrupted" | "failed";
@@ -125,6 +154,7 @@ interface HssSessionRecord {
   rateHz: number;
   durationSec: number;
   descriptors: JcapV1VariableDescriptor[];
+  qualityOracle?: PreparedQualityOracle;
   runtime: HssRuntimeFacts;
   capability: HssCapabilityFacts;
   result?: Record<string, unknown>;
@@ -148,6 +178,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     stateRoot = dirname(targets.filePath),
     sessionWorkRoot = resolve(tmpdir(), "jlink-mcp-hss"),
     captureMutationGuard?: JcapRunMutationGuard,
+    private readonly memorySessions?: MemorySessionManager,
   ) {
     this.outputRoot = resolve(outputRoot);
     this.sessionsRoot = resolve(stateRoot, "hss-sessions");
@@ -200,6 +231,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         durationSec: prepared.durationSec,
         requestedSamples: prepared.rateHz * prepared.durationSec,
         blockCount: prepared.blockCount,
+        qualityOracle: prepared.qualityOracle ?? null,
         limits: HSS_EFFECTIVE_LIMITS,
         runtime,
         runId: prepared.runId ?? null,
@@ -215,30 +247,112 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     }
   }
 
+  private async preflightStart(prepared: PreparedCapture, runtime: HssRuntimeFacts): Promise<HssStartPreflight> {
+    const target = this.targets.requireCurrent(prepared.target);
+    if (this.activeSession(target.projectRoot)) throw new HssOperationError("CAPTURE_ACTIVE", "an active capture owns this Target; no second Helper was started", true);
+    if (target.liveArtifactMatch.status !== "verified") throw new HssOperationError("ARTIFACT_NOT_VERIFIED", "symbol HSS requires a verified live Artifact match");
+    const capability = await this.adapter.capability(target, runtime);
+    if (!capability.available) throw new HssOperationError(capability.errorCode ?? "HSS_UNAVAILABLE", capability.reason ?? "HSS capability is unavailable", true);
+    if (prepared.rateHz > Math.floor(capability.hardware?.maxFreq ?? 0)) throw new HssOperationError("HSS_RATE_UNSUPPORTED", `rateHz ${prepared.rateHz} exceeds hardware maxFreq ${capability.hardware?.maxFreq ?? 0}`);
+    if (prepared.blockCount > (capability.hardware?.maxBlocks ?? 0)) throw new HssOperationError("HSS_BLOCK_LIMIT", `capture needs ${prepared.blockCount} blocks but hardware reports ${capability.hardware?.maxBlocks ?? 0}`);
+    const capture = await this.validateCapturePrerequisites({ ...prepared, target }, runtime);
+    return { target, capability, ...capture };
+  }
+
+  private async validateCapturePrerequisites(prepared: PreparedCapture, runtime: HssRuntimeFacts): Promise<Pick<HssStartPreflight, "artifact" | "nonvolatileRanges" | "ramRanges">> {
+    const target = prepared.target;
+    if (!target.artifact || !runtime.runtimePath || !runtime.runtimeSha256 || !runtime.helperPath || !SHA256.test(runtime.runtimeSha256)) {
+      throw new HssOperationError("HSS_RUNTIME_IDENTITY_UNAVAILABLE", "HSS start requires a configured Artifact and hashed helper/runtime identity");
+    }
+    if (!/^\d+$/.test(target.probeSerial)) throw new HssOperationError("PROBE_SELECTION_REQUIRED", "native HSS requires an explicit numeric J-Link serial");
+    const nonvolatileRanges = target.memoryRegions.filter((region) => region.kind === "flash" || region.kind === "rom").map((region) => ({ start: region.start, end: region.start + region.length }));
+    const ramRanges = target.memoryRegions.filter((region) => region.kind === "ram").map((region) => ({ start: region.start, end: region.start + region.length }));
+    if (!nonvolatileRanges.length || !ramRanges.length) throw new HssOperationError("ARTIFACT_REGION_UNKNOWN", "HSS start requires explicit nonvolatile and RAM memoryRegions in target_configure");
+    for (const variable of prepared.variables) {
+      if (!ramRanges.some((range) => variable.resolved.address >= range.start && variable.resolved.address + variable.resolved.size <= range.end)) {
+        throw new HssOperationError("HSS_VARIABLE_REGION_UNVERIFIED", `${variable.descriptor.logicalIdentity} is outside explicit RAM memoryRegions`);
+      }
+    }
+    const artifact = await resolveArtifactGeneration({
+      projectRoot: target.projectRoot,
+      explicitArtifact: target.artifact.path,
+      explicitMap: target.map?.path,
+      maxFiles: 2,
+      maxDepth: 0,
+      maxCandidates: 1,
+    });
+    if (artifact.generation !== target.artifact.generation || artifact.sha256 !== target.artifact.sha256) {
+      throw new HssOperationError("ARTIFACT_GENERATION_STALE", "configured Artifact changed before HSS start");
+    }
+    return { artifact, nonvolatileRanges, ramRanges };
+  }
+
+  private async dryRun(prepared: PreparedCapture): Promise<OperationEnvelope> {
+    const envelope = createOperationEnvelope("hss_start", prepared.target);
+    try {
+      const runtime = await this.adapter.inspectRuntime(prepared.target);
+      if (!runtime.available) throw new HssOperationError(runtime.errorCode ?? "HSS_UNAVAILABLE", runtime.reason ?? "HSS runtime is unavailable");
+      const execution = await this.queue.runExclusive(prepared.target.probeSerial, async () => this.preflightStart(prepared, runtime));
+      const layout = frameLayout(prepared);
+      applyQueue(envelope, execution);
+      envelope.before = { targetGeneration: execution.value.target.generation, artifactGeneration: execution.value.target.artifact!.generation, owner: this.queue.getOwner(execution.value.target.probeSerial) ?? null };
+      envelope.after = envelope.before;
+      envelope.data = {
+        dryRun: true,
+        backend: this.adapter.backend,
+        variables: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed } as Record<string, unknown>)),
+        rateHz: prepared.rateHz,
+        durationSec: prepared.durationSec,
+        requestedSamples: prepared.rateHz * prepared.durationSec,
+        frameLayout: layout,
+        estimatedDataBytes: layout.hssSampleStrideBytes * prepared.rateHz * prepared.durationSec,
+        blockCount: prepared.blockCount,
+        qualityOracle: prepared.qualityOracle ?? null,
+        limits: HSS_EFFECTIVE_LIMITS,
+        runtime,
+        capability: execution.value.capability,
+      };
+      envelope.verification = { status: "verified", method: "typed_resolution_runtime_capability_current_artifact_and_static_layout" };
+      return finishEnvelope(envelope, true);
+    } catch (error) {
+      return this.failure(envelope, error, "dry_run");
+    }
+  }
+
   async start(input: HssCaptureInput): Promise<OperationEnvelope> {
     const initial = createOperationEnvelope("hss_start");
     let prepared: PreparedCapture;
     try { prepared = await this.prepare(input); }
     catch (error) { return this.failure(initial, error, "validation"); }
+    if (input.dryRun) return this.dryRun(prepared);
     const envelope = createOperationEnvelope("hss_start", prepared.target);
     envelope.requestedEffects = ["connect_probe", "start_hss_capture", "create_jcap_package"];
     try {
       const existing = this.activeSession(prepared.target.projectRoot);
       if (existing) throw new HssOperationError("CAPTURE_ACTIVE", `capture ${existing.captureId} is already active for this project`, true);
-      const runtime = await this.adapter.inspectRuntime(prepared.target);
-      if (!runtime.available) throw new HssOperationError(runtime.errorCode ?? "HSS_UNAVAILABLE", runtime.reason ?? "HSS runtime is unavailable");
+      const localMemoryOwner = this.memorySessions?.localOwnerForTarget(prepared.target);
       const execution = await this.queue.runExclusive(prepared.target.probeSerial, async (metadata) => {
-        const current = this.targets.requireCurrent(prepared.target);
-        const durableActive = this.activeSession(current.projectRoot);
-        if (durableActive) {
-          throw new HssOperationError("CAPTURE_ACTIVE", `capture ${durableActive.captureId} is already active for this project`, true);
+        const currentBeforeClose = this.targets.requireCurrent(prepared.target);
+        const runtime = await this.adapter.inspectRuntime(currentBeforeClose);
+        if (!runtime.available) throw new HssOperationError(runtime.errorCode ?? "HSS_UNAVAILABLE", runtime.reason ?? "HSS runtime is unavailable");
+        const memoryClose = await this.memorySessions?.closeForTarget(currentBeforeClose);
+        if (memoryClose) {
+          const targetStateAfterReconnect = await this.adapter.observeTargetState(currentBeforeClose, runtime);
+          envelope.data = {
+            ...(envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {}),
+            memorySessionClose: { targetStateBeforeClose: memoryClose.targetStateBeforeClose, targetStateAfterReconnect },
+          };
+          if (memoryClose.targetStateBeforeClose === "unknown" || targetStateAfterReconnect === "unknown") {
+            throw new HssOperationError("POST_OPERATION_STATE_UNKNOWN", "memory-session close could not prove the target state before HSS start", false, false, true);
+          }
+          if (memoryClose.targetStateBeforeClose !== targetStateAfterReconnect) {
+            throw new HssOperationError("HIDDEN_STATE_CHANGE", `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${targetStateAfterReconnect}`);
+          }
         }
-        if (current.liveArtifactMatch.status !== "verified") throw new HssOperationError("ARTIFACT_NOT_VERIFIED", "symbol HSS requires a verified live Artifact match");
-        const capability = await this.adapter.capability(current, runtime);
-        if (!capability.available) throw new HssOperationError(capability.errorCode ?? "HSS_UNAVAILABLE", capability.reason ?? "HSS capability is unavailable", true);
-        if (prepared.rateHz > Math.floor(capability.hardware?.maxFreq ?? 0)) throw new HssOperationError("HSS_RATE_UNSUPPORTED", `rateHz ${prepared.rateHz} exceeds hardware maxFreq ${capability.hardware?.maxFreq ?? 0}`);
-        if (prepared.blockCount > (capability.hardware?.maxBlocks ?? 0)) throw new HssOperationError("HSS_BLOCK_LIMIT", `capture needs ${prepared.blockCount} blocks but hardware reports ${capability.hardware?.maxBlocks ?? 0}`);
-        const created = await this.createCapture({ ...prepared, target: current }, runtime, capability);
+        const preflight = await this.preflightStart(prepared, runtime);
+        const current = preflight.target;
+        const capability = preflight.capability;
+        const created = await this.createCapture({ ...prepared, target: current }, runtime, capability, preflight);
         let session: HssSessionRecord = {
           formatVersion: 1,
           captureId: created.captureId,
@@ -262,6 +376,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
           rateHz: prepared.rateHz,
           durationSec: prepared.durationSec,
           descriptors: prepared.variables.map(({ descriptor }) => descriptor),
+          ...(prepared.qualityOracle ? { qualityOracle: prepared.qualityOracle } : {}),
           runtime,
           capability,
         };
@@ -354,12 +469,23 @@ export class HssOperations implements CaptureVariableWriteDelegate {
           const normalized = normalizeHssError(error instanceof Error ? error : new Error(String(error)), "HSS_START_FAILED", false);
           throw new HssOperationError(normalized.code, normalized.message, normalized.retryable, normalized.writeIssued, normalized.stateUnknown, { captureId: created.captureId, packageDir: created.packageDir });
         }
-      });
+      }, localMemoryOwner ? {
+        allowedOwnerKinds: ["memory"],
+        ownerTarget: { projectRoot: prepared.target.projectRoot, targetGeneration: prepared.target.generation },
+        requiredOwner: localMemoryOwner,
+      } : {});
       applyQueue(envelope, execution);
       envelope.before = { owner: null, targetGeneration: prepared.target.generation };
       envelope.after = { owner: this.queue.getOwner(prepared.target.probeSerial) ?? null, targetGeneration: prepared.target.generation };
       envelope.capture = captureSummary(execution.value);
-      envelope.data = { captureId: execution.value.captureId, state: execution.value.state, packageDir: execution.value.packageDir, limits: HSS_EFFECTIVE_LIMITS };
+      envelope.data = {
+        ...(envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {}),
+        captureId: execution.value.captureId,
+        state: execution.value.state,
+        packageDir: execution.value.packageDir,
+        limits: HSS_EFFECTIVE_LIMITS,
+        variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
+      };
       envelope.outputFiles = packageFiles(execution.value.packageDir);
       envelope.observedEffects = ["hss_helper_started", "hss_helper_ready", "probe_owner_claimed", "jcap_capture_active"];
       envelope.verification = { status: "observed", method: "helper_ready_journal_pid_owner_and_active_jcap_metadata" };
@@ -377,7 +503,13 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         const settled = this.readSession(execution.value.captureId);
         envelope.after = { owner: this.queue.getOwner(settled.probeSerial) ?? null, targetGeneration: settled.targetGeneration };
         envelope.capture = captureSummary(settled);
-        envelope.data = { captureId: settled.captureId, state: settled.state, packageDir: settled.packageDir, limits: HSS_EFFECTIVE_LIMITS };
+        envelope.data = {
+          captureId: settled.captureId,
+          state: settled.state,
+          packageDir: settled.packageDir,
+          limits: HSS_EFFECTIVE_LIMITS,
+          variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
+        };
         envelope.outputFiles = packageFiles(settled.packageDir);
         envelope.observedEffects = ["hss_helper_started", "probe_owner_claimed", "helper_exited_during_start", "capture_finalized", "probe_owner_released"];
         if (settlement.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
@@ -839,6 +971,9 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         requestedHex: requested.toString("hex"),
         oldHex: old?.toString("hex") ?? null,
         readbackHex: readback?.toString("hex") ?? null,
+        verificationConnection: "capture_owner",
+        verificationSource: input.verify ? "capture_owner_readback" : "not_requested",
+        targetConsumption: "not_observed",
         writeAttempted: writeRequestDispatched,
         writeIssued,
         stateUnknown: writeStateUnknown || restoreStateUnknown,
@@ -853,7 +988,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
       ];
       if (timingDegraded) envelope.warnings.push("The helper QPC interval regressed behind the durable event timeline; the event uses an explicit controller fallback interval and the operation is reported as failed.");
       envelope.verification = input.verify
-        ? { status: verification?.pass ? "verified" : writeStateUnknown ? "state_unknown" : writeIssued ? "failed" : "not_executed", method: comparatorMethod(comparator), details: verification?.details }
+        ? { status: verification?.pass ? "verified" : writeStateUnknown ? "state_unknown" : writeIssued ? "failed" : "not_executed", method: comparatorMethod(comparator), details: { source: "capture_owner_readback", ...(verification?.details ?? {}) } }
         : { status: writeStateUnknown ? "state_unknown" : writeIssued ? "executed_unverified" : "not_executed", method: writeIssued ? "helper_write_acknowledged_without_readback" : "write_not_issued" };
       if (restoreError) {
         const normalized = normalizeHssError(restoreError, "RESTORE_FAILED", writeIssued || restoreIssued);
@@ -891,6 +1026,24 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     return this.queryEnvelope("capture_export_csv", () => this.query.exportCsv({ captureId }));
   }
 
+  analysisProfiles(): OperationEnvelope {
+    const envelope = createOperationEnvelope("analysis_profiles");
+    envelope.data = {
+      analyzerVersion: "analysis-v0",
+      maxPoints: ANALYSIS_V0_MAX_POINTS,
+      profiles: [
+        { name: "generic_control", version: 0, roles: ["command", "feedback"], findings: ["write_window_comparison", "control_response"] },
+        { name: "generic_state_machine", version: 0, roles: ["state"], findings: ["state_transition", "state_duration"] },
+      ],
+    };
+    envelope.verification = { status: "verified", method: "implemented_profile_registry" };
+    return finishEnvelope(envelope, true);
+  }
+
+  async analysisRun(input: AnalysisV0RunRequest): Promise<OperationEnvelope> {
+    return this.queryEnvelope("analysis_run", () => this.query.analysisRun(input));
+  }
+
   private async prepare(input: HssCaptureInput): Promise<PreparedCapture> {
     if (!Number.isSafeInteger(input.rateHz) || input.rateHz < 1 || input.rateHz > HSS_EFFECTIVE_LIMITS.maxRateHz) throw new HssOperationError("HSS_RATE_BOUNDS", `rateHz must be 1..${HSS_EFFECTIVE_LIMITS.maxRateHz}`);
     if (!Number.isSafeInteger(input.durationSec) || input.durationSec < 1 || input.durationSec > HSS_EFFECTIVE_LIMITS.maxDurationSec) throw new HssOperationError("HSS_DURATION_BOUNDS", `durationSec must be 1..${HSS_EFFECTIVE_LIMITS.maxDurationSec}`);
@@ -921,6 +1074,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
       prepared.push({
         requested: variable,
         resolved,
+        cacheRefreshed: current.cacheRefreshed,
         descriptor: {
           logicalIdentity: identity,
           type: resolved.type,
@@ -933,10 +1087,41 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         },
       });
     }
-    return { target, variables: prepared, rateHz: input.rateHz, durationSec: input.durationSec, ...(input.runId ? { runId: input.runId } : {}), blockCount: blockCount(prepared.map(({ resolved }) => resolved)) };
+    let qualityOracle: PreparedQualityOracle | undefined;
+    if (input.qualityOracle) {
+      if (!Number.isSafeInteger(input.qualityOracle.expectedIncrement) || input.qualityOracle.expectedIncrement < 1
+        || !Number.isSafeInteger(input.qualityOracle.tolerance) || input.qualityOracle.tolerance < 0) {
+        throw new HssOperationError("HSS_QUALITY_ORACLE_BOUNDS", "qualityOracle expectedIncrement must be positive and tolerance must be non-negative safe integers");
+      }
+      const oracle = await this.artifacts.resolveCaptureVariable(target.projectRoot, input.qualityOracle.ref);
+      if (oracle.target.generation !== target.generation) throw new HssOperationError("TARGET_GENERATION_CHANGED", "Target generation changed during HSS quality-oracle resolution", true);
+      const logicalIdentity = symbolLogicalIdentity(oracle.resolved.ref);
+      const variable = prepared.find((candidate) => candidate.descriptor.logicalIdentity === logicalIdentity);
+      if (!variable) throw new HssOperationError("HSS_QUALITY_ORACLE_UNDECLARED", "qualityOracle.ref must identify one of the declared capture variables");
+      if (!/^uint(?:8|16|32)$/.test(variable.descriptor.type)) throw new HssOperationError("HSS_QUALITY_ORACLE_TYPE", "qualityOracle requires a declared unsigned scalar capture variable");
+      const modulus = 2 ** (variable.descriptor.size * 8);
+      if (input.qualityOracle.expectedIncrement + input.qualityOracle.tolerance >= modulus) {
+        throw new HssOperationError("HSS_QUALITY_ORACLE_BOUNDS", "qualityOracle expectedIncrement plus tolerance must be smaller than the counter modulus");
+      }
+      qualityOracle = {
+        logicalIdentity,
+        expectedIncrement: input.qualityOracle.expectedIncrement,
+        tolerance: input.qualityOracle.tolerance,
+        modulus,
+      };
+    }
+    return {
+      target,
+      variables: prepared,
+      rateHz: input.rateHz,
+      durationSec: input.durationSec,
+      ...(qualityOracle ? { qualityOracle } : {}),
+      ...(input.runId ? { runId: input.runId } : {}),
+      blockCount: blockCount(prepared.map(({ resolved }) => resolved)),
+    };
   }
 
-  private async createCapture(prepared: PreparedCapture, runtime: HssRuntimeFacts, capability: HssCapabilityFacts): Promise<{
+  private async createCapture(prepared: PreparedCapture, runtime: HssRuntimeFacts, capability: HssCapabilityFacts, preflight: HssStartPreflight): Promise<{
     captureId: string;
     createdAt: string;
     packageDir: string;
@@ -946,24 +1131,12 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     qpcEpochCounter: string;
     qpcFrequency: string;
   }> {
-    const target = prepared.target;
-    if (!target.artifact || !runtime.runtimePath || !runtime.runtimeSha256 || !runtime.helperPath || !SHA256.test(runtime.runtimeSha256)) throw new HssOperationError("HSS_RUNTIME_IDENTITY_UNAVAILABLE", "HSS start requires a hashed helper/runtime identity");
-    if (!/^\d+$/.test(target.probeSerial)) throw new HssOperationError("PROBE_SELECTION_REQUIRED", "native HSS requires an explicit numeric J-Link serial");
-    const nonvolatileRanges = target.memoryRegions.filter((region) => region.kind === "flash" || region.kind === "rom").map((region) => ({ start: region.start, end: region.start + region.length }));
-    const ramRanges = target.memoryRegions.filter((region) => region.kind === "ram").map((region) => ({ start: region.start, end: region.start + region.length }));
-    if (!nonvolatileRanges.length || !ramRanges.length) throw new HssOperationError("ARTIFACT_REGION_UNKNOWN", "HSS start requires explicit nonvolatile and RAM memoryRegions in target_configure");
-    for (const variable of prepared.variables) {
-      if (!ramRanges.some((range) => variable.resolved.address >= range.start && variable.resolved.address + variable.resolved.size <= range.end)) throw new HssOperationError("HSS_VARIABLE_REGION_UNVERIFIED", `${variable.descriptor.logicalIdentity} is outside explicit RAM memoryRegions`);
+    const target = preflight.target;
+    if (!target.artifact) throw new HssOperationError("ARTIFACT_NOT_CONFIGURED", "HSS start requires a configured typed ELF Artifact");
+    if (!runtime.runtimePath || !runtime.runtimeSha256 || !runtime.helperPath || !SHA256.test(runtime.runtimeSha256)) {
+      throw new HssOperationError("HSS_RUNTIME_IDENTITY_UNAVAILABLE", "HSS start requires a hashed helper/runtime identity");
     }
-    const artifact = await resolveArtifactGeneration({
-      projectRoot: target.projectRoot,
-      explicitArtifact: target.artifact.path,
-      explicitMap: target.map?.path,
-      maxFiles: 2,
-      maxDepth: 0,
-      maxCandidates: 1,
-    });
-    if (artifact.generation !== target.artifact.generation || artifact.sha256 !== target.artifact.sha256) throw new HssOperationError("ARTIFACT_GENERATION_STALE", "configured Artifact changed before HSS start");
+    const { artifact, nonvolatileRanges, ramRanges } = preflight;
     const captureId = randomUUID();
     const helperNonce = randomUUID();
     const createdAt = new Date().toISOString();
@@ -1014,6 +1187,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
           runtimeSha256: runtime.runtimeSha256,
           capability: capability.hardware ?? null,
           effectiveLimits: capability.effective,
+          qualityOracle: prepared.qualityOracle ?? null,
         },
         target: { projectRoot: target.projectRoot, generation: target.generation, device: target.device, probeSerial: target.probeSerial, interface: target.interface, speed: target.speed },
         script: { mode: "none" },
@@ -1061,6 +1235,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
       resumeBeforeStart: false,
       requireFirstSampleIndexZero: false,
       postConnectStabilityRequired: false,
+      qualityOracle: prepared.qualityOracle ?? null,
       symbols: prepared.variables.map(({ descriptor, resolved }) => ({ name: descriptor.logicalIdentity, address: hexAddress(resolved.address), size: resolved.size, type: descriptor.type })),
     };
     writeFileSync(control.planPath, JSON.stringify(plan), { encoding: "utf8", flag: "wx" });
@@ -1092,6 +1267,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         rateHz: prepared.rateHz,
         durationSec: prepared.durationSec,
         descriptors: prepared.variables.map(({ descriptor }) => descriptor),
+        ...(prepared.qualityOracle ? { qualityOracle: prepared.qualityOracle } : {}),
         runtime,
         capability,
         lastError: { code: errorCode(error, "HSS_CREATE_FAILED"), message: error instanceof Error ? error.message : String(error) },
@@ -1220,7 +1396,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
       const records = this.adapter.readRecords(session.control);
       const result = [...records].reverse().find((record) => record.record === "result") ?? [...records].reverse().find((record) => typeof record.status === "string");
       let state: Exclude<JcapV1CaptureState, "active" | "finalizing"> = result?.status === "ok" ? "completed" : result?.status === "stopped" ? "stopped" : result?.status === "error" ? "failed" : "interrupted";
-      let raw;
+      let raw: ReturnType<typeof readJcapV1Raw> | undefined;
       let damagedEventTail = false;
       try {
         raw = readJcapV1Raw(session.packageDir);
@@ -1232,17 +1408,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         session = { ...session, lastError: { code: "JCAP_RAW_INVALID", message: error instanceof Error ? error.message : String(error) } };
       }
       try {
-        const qualityEvidence = qualityEvidenceFrom(result);
-        if ((state === "completed" || state === "stopped") && qualityEvidence.status === "unknown") {
-          state = "failed";
-          session = {
-            ...session,
-            lastError: {
-              code: "HSS_QUALITY_FACTS_MISSING",
-              message: "helper terminal result omitted one or more required capture quality counters",
-            },
-          };
-        }
+        const qualityEvidence = qualityEvidenceFrom(result, raw, session.qualityOracle, session.rateHz);
         if (state === "completed" && qualityEvidence.durationValidated !== true) {
           state = "failed";
           session = {
@@ -1269,7 +1435,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
             errorCode: result?.errorCode ?? null,
           });
         }
-        finalizeJcapV1Metadata(session.packageDir, state, qualityEvidence.counters, qualityEvidence.status);
+        finalizeJcapV1Metadata(session.packageDir, state, qualityEvidence.counters, qualityEvidence.status, qualityEvidence.source);
         if (state !== "failed") await rebuildJcapV1Index(session.packageDir);
         session = {
           ...session,
@@ -1326,6 +1492,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
       type: "quality",
       tick: maxTick(tail.lastEventTick, terminalTick),
       qualityStatus: quality.status,
+      qualitySource: quality.source,
       missingSamples: quality.counters.missingSamples,
       droppedSamples: quality.counters.droppedSamples,
       overflows: quality.counters.overflows,
@@ -1333,6 +1500,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
       timeouts: quality.counters.timeouts,
       durationValidated: quality.durationValidated,
       qualityEvidence: quality.provenance,
+      inferredDroppedBeforeSampleIndexes: quality.inferredDroppedBeforeSampleIndexes,
     });
   }
 
@@ -1578,6 +1746,8 @@ export class HssOperations implements CaptureVariableWriteDelegate {
       ? ["read_authoritative_capture", "build_temporary_capture_index", "atomically_publish_capture_db"]
       : tool === "capture_export_csv"
         ? ["read_bounded_capture_rows", "create_external_csv"]
+        : tool === "analysis_run"
+          ? ["read_bounded_capture_index", "persist_derived_analysis"]
         : ["read_bounded_capture_index"];
     try {
       envelope.data = await operation();
@@ -1591,6 +1761,9 @@ export class HssOperations implements CaptureVariableWriteDelegate {
           envelope.observedEffects.push("external_csv_created");
         }
         envelope.verification = { status: typeof data.exportFile === "string" ? "verified" : "observed", method: "bounded_external_csv_export" };
+      } else if (tool === "analysis_run") {
+        if (typeof data.analysisRunId === "string") envelope.observedEffects.push("derived_analysis_persisted");
+        envelope.verification = { status: typeof data.analysisRunId === "string" ? "verified" : "observed", method: "deterministic_bounded_jcap_analysis" };
       } else {
         envelope.verification = { status: "verified", method: "bounded_jcap_v1_query" };
       }
@@ -1604,10 +1777,28 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     if (error instanceof HssOperationError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: error.writeIssued, stateUnknown: error.stateUnknown });
     if (error instanceof HssAdapterError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
     if (error instanceof TargetStoreError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: false, writeIssued: false, stateUnknown: false });
-    if (error instanceof ProbeQueueError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.code.endsWith("_ACTIVE"), writeIssued: false, stateUnknown: false });
+    if (error instanceof MemorySessionError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
+    if (error instanceof ProbeQueueError) {
+      attachQueueOwner(envelope, error);
+      const code = queueFailureCode(error);
+      return failEnvelope(envelope, { code, stage, message: error.message, retryable: code.endsWith("_ACTIVE"), writeIssued: false, stateUnknown: false });
+    }
     const coded = error as { code?: unknown };
     return failEnvelope(envelope, { code: typeof coded?.code === "string" ? coded.code : "HSS_OPERATION_FAILED", stage, message: error instanceof Error ? error.message : String(error), retryable: false, writeIssued: false, stateUnknown: false });
   }
+}
+
+function queueFailureCode(error: ProbeQueueError): string {
+  return error.code === "OWNER_CHANGED" && error.owner?.kind === "memory" ? "MEMORY_SESSION_ACTIVE" : error.code;
+}
+
+function attachQueueOwner(envelope: OperationEnvelope, error: ProbeQueueError): void {
+  if (!error.owner) return;
+  if (envelope.probe) envelope.probe.owner = error.owner;
+  const before = envelope.before && typeof envelope.before === "object" && !Array.isArray(envelope.before)
+    ? envelope.before as Record<string, unknown>
+    : {};
+  envelope.before = { ...before, owner: error.owner };
 }
 
 class HssOperationError extends Error {
@@ -1635,6 +1826,22 @@ function blockCount(symbols: ResolvedSymbol[]): number {
   return blocks;
 }
 
+function frameLayout(prepared: PreparedCapture): {
+  hssSampleHeaderBytes: number;
+  valueBytes: number;
+  hssSampleStrideBytes: number;
+  values: Array<{ logicalIdentity: string; type: string; bytes: number }>;
+} {
+  const values = prepared.variables.map(({ descriptor, resolved }) => ({
+    logicalIdentity: descriptor.logicalIdentity,
+    type: descriptor.type,
+    bytes: resolved.size,
+  }));
+  const valueBytes = values.reduce((total, value) => total + value.bytes, 0);
+  const hssSampleHeaderBytes = 4;
+  return { hssSampleHeaderBytes, valueBytes, hssSampleStrideBytes: hssSampleHeaderBytes + valueBytes, values };
+}
+
 export const isValidHssRunId = isValidAcceptanceRunId;
 
 function applyQueue<T>(envelope: OperationEnvelope, execution: { queueSequence: number; queuedAt: string; startedAt: string; endedAt: string; value: T }): void {
@@ -1645,7 +1852,15 @@ function applyQueue<T>(envelope: OperationEnvelope, execution: { queueSequence: 
 }
 
 function captureSummary(session: HssSessionRecord): Record<string, unknown> {
-  return { captureId: session.captureId, state: session.state, packageDir: session.packageDir, requestedRateHz: session.rateHz, durationSec: session.durationSec, variables: session.descriptors.length };
+  return {
+    captureId: session.captureId,
+    state: session.state,
+    packageDir: session.packageDir,
+    requestedRateHz: session.rateHz,
+    durationSec: session.durationSec,
+    variables: session.descriptors.length,
+    qualityOracle: session.qualityOracle ?? null,
+  };
 }
 
 function packageFiles(packageDir: string): string[] {
@@ -1659,21 +1874,204 @@ function safeMetadata(packageDir: string): JcapV1Metadata | { error: string } {
 
 interface QualityEvidence {
   status: JcapV1Metadata["qualityStatus"];
+  source: JcapV1Metadata["qualitySource"];
   counters: JcapV1Metadata["quality"];
   durationValidated: boolean | null;
   provenance: Record<string, unknown>;
+  inferredDroppedBeforeSampleIndexes: number[];
 }
 
-function qualityEvidenceFrom(result?: Record<string, unknown>): QualityEvidence {
+function qualityEvidenceFrom(
+  result: Record<string, unknown> | undefined,
+  raw: ReturnType<typeof readJcapV1Raw> | undefined,
+  oracle: PreparedQualityOracle | undefined,
+  rateHz: number,
+): QualityEvidence {
   const names = ["missingSamples", "droppedSamples", "overflows", "readErrors", "timeouts"] as const;
   const counters = Object.fromEntries(names.map((name) => [name, Number.isSafeInteger(result?.[name]) && Number(result?.[name]) >= 0 ? Number(result![name]) : null])) as JcapV1Metadata["quality"];
-  const observed = names.filter((name) => counters[name] !== null).length;
-  const status: JcapV1Metadata["qualityStatus"] = observed === names.length ? "reported" : observed > 0 ? "partial" : "unknown";
   const durationValidated = result?.durationValidated === true ? true : result?.durationValidated === false ? false : null;
   const provenance = result?.qualityEvidence && typeof result.qualityEvidence === "object" && !Array.isArray(result.qualityEvidence)
     ? sanitizeResult(result.qualityEvidence as Record<string, unknown>)
     : {};
-  return { status, counters, durationValidated, provenance };
+  if (result?.qualitySource === "jlink" && result.qualityCountersValidated === true && names.every((name) => counters[name] !== null)) {
+    return {
+      status: "reported",
+      source: "jlink",
+      counters,
+      durationValidated,
+      provenance: { source: "jlink", countersValidated: true, ...provenance },
+      inferredDroppedBeforeSampleIndexes: [],
+    };
+  }
+  if (oracle) return targetCounterQualityEvidence(raw, oracle, durationValidated, rateHz);
+  return {
+    status: "partial",
+    source: "none",
+    counters: { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null },
+    durationValidated,
+    provenance: { source: "none", reason: "no_qualified_quality_source" },
+    inferredDroppedBeforeSampleIndexes: [],
+  };
+}
+
+function targetCounterQualityEvidence(
+  raw: ReturnType<typeof readJcapV1Raw> | undefined,
+  oracle: PreparedQualityOracle,
+  durationValidated: boolean | null,
+  rateHz: number,
+): QualityEvidence {
+  const configuration = {
+    logicalIdentity: oracle.logicalIdentity,
+    expectedIncrement: oracle.expectedIncrement,
+    tolerance: oracle.tolerance,
+    modulus: oracle.modulus,
+  };
+  if (!raw) {
+    return {
+      status: "partial",
+      source: "target_counter",
+      counters: { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null },
+      durationValidated,
+      provenance: { source: "target_counter", configuration, diagnostic: "raw_unavailable" },
+      inferredDroppedBeforeSampleIndexes: [],
+    };
+  }
+  const writeIntervals = raw.events.flatMap((event) => {
+    if (event.type !== "variable_write" || event.logicalIdentity !== oracle.logicalIdentity) return [];
+    const start = validTick(event.operationStartTick) ?? validTick(event.tick);
+    const end = validTick(event.operationEndTick) ?? validTick(event.tick);
+    return start !== undefined && end !== undefined ? [{ start: BigInt(start), end: BigInt(end) }] : [];
+  });
+  let evaluatedPairs = 0;
+  let inferredMissedFrames = 0;
+  let ambiguous = false;
+  const diagnostics = new Set<string>();
+  const inferredDroppedBeforeSampleIndexes: number[] = [];
+  for (let index = 1; index < raw.samples.length; index += 1) {
+    const previous = raw.samples[index - 1];
+    const current = raw.samples[index];
+    if (!oracleSampleIsValid(previous) || !oracleSampleIsValid(current)) {
+      ambiguous = true;
+      diagnostics.add("invalid_sample");
+      continue;
+    }
+    const previousTick = BigInt(previous.tick);
+    const currentTick = BigInt(current.tick);
+    if (writeIntervals.some((interval) => interval.start <= currentTick && interval.end >= previousTick)) {
+      ambiguous = true;
+      diagnostics.add("write_interval");
+      continue;
+    }
+    const previousValue = previous.values[oracle.logicalIdentity];
+    const currentValue = current.values[oracle.logicalIdentity];
+    if (!validCounterValue(previousValue, oracle.modulus) || !validCounterValue(currentValue, oracle.modulus)) {
+      ambiguous = true;
+      diagnostics.add("counter_value_invalid");
+      continue;
+    }
+    if (currentValue < previousValue) {
+      ambiguous = true;
+      diagnostics.add("counter_wrap_or_reset_ambiguous");
+      continue;
+    }
+    const delta = currentValue - previousValue;
+    const frames = counterFrameCount(delta, oracle);
+    if (!frames) {
+      ambiguous = true;
+      diagnostics.add(delta < oracle.expectedIncrement ? "counter_reset_or_nonadvancing" : "counter_delta_ambiguous");
+      continue;
+    }
+    if (additionalModuloWrapCouldFit(delta, frames, previousTick, currentTick, oracle, rateHz)) {
+      ambiguous = true;
+      diagnostics.add("counter_modulo_alias_ambiguous");
+      continue;
+    }
+    evaluatedPairs += 1;
+    if (frames >= 2) {
+      inferredMissedFrames += frames - 1;
+      inferredDroppedBeforeSampleIndexes.push(current.sampleIndex);
+    }
+  }
+  if (ambiguous || evaluatedPairs === 0) {
+    return {
+      status: "partial",
+      source: "target_counter",
+      counters: { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null },
+      durationValidated,
+      provenance: {
+        source: "target_counter",
+        configuration,
+        evaluatedPairs,
+        diagnostics: [...diagnostics].sort(),
+      },
+      inferredDroppedBeforeSampleIndexes: [],
+    };
+  }
+  return {
+    status: "reported",
+    source: "target_counter",
+    counters: { missingSamples: inferredMissedFrames, droppedSamples: null, overflows: null, readErrors: null, timeouts: null },
+    durationValidated,
+    provenance: {
+      source: "target_counter",
+      configuration,
+      evaluatedPairs,
+      inferredMissedFrames,
+    },
+    inferredDroppedBeforeSampleIndexes,
+  };
+}
+
+function validTick(value: unknown): string | undefined {
+  return typeof value === "string" && /^\d+$/.test(value) ? value : undefined;
+}
+
+function validCounterValue(value: unknown, modulus: number): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) < modulus;
+}
+
+function counterFrameCount(delta: number, oracle: PreparedQualityOracle): number | undefined {
+  const candidates = counterFrameRange(delta, oracle);
+  return candidates && candidates.minimumFrames === candidates.maximumFrames ? candidates.minimumFrames : undefined;
+}
+
+function counterFrameRange(
+  delta: number,
+  oracle: PreparedQualityOracle,
+): { minimumFrames: number; maximumFrames: number } | undefined {
+  if (delta < 1) return undefined;
+  const minimumFrames = Math.max(1, Math.ceil((delta - oracle.tolerance) / oracle.expectedIncrement));
+  const maximumFrames = Math.floor((delta + oracle.tolerance) / oracle.expectedIncrement);
+  return minimumFrames <= maximumFrames ? { minimumFrames, maximumFrames } : undefined;
+}
+
+function additionalModuloWrapCouldFit(
+  delta: number,
+  frames: number,
+  previousTick: bigint,
+  currentTick: bigint,
+  oracle: PreparedQualityOracle,
+  rateHz: number,
+): boolean {
+  const wrappedCandidates = counterFrameRange(delta + oracle.modulus, oracle);
+  if (!wrappedCandidates) return false;
+  const minimumWrappedFrames = Math.max(wrappedCandidates.minimumFrames, frames + 1);
+  if (minimumWrappedFrames > wrappedCandidates.maximumFrames) return false;
+  if (!Number.isSafeInteger(rateHz) || rateHz < 1 || currentTick <= previousTick) return true;
+  const elapsedFramesUpperBound = ((currentTick - previousTick) * BigInt(rateHz) + 999_999_999n) / 1_000_000_000n + 1n;
+  return BigInt(minimumWrappedFrames) <= elapsedFramesUpperBound;
+}
+
+function oracleSampleIsValid(sample: { statusFlags: number }): boolean {
+  const invalid = HSS_STATUS_FLAGS.read_error
+    | HSS_STATUS_FLAGS.timeout
+    | HSS_STATUS_FLAGS.overflow
+    | HSS_STATUS_FLAGS.dropped_before_this_sample
+    | HSS_STATUS_FLAGS.target_halted
+    | HSS_STATUS_FLAGS.write_nearby
+    | HSS_STATUS_FLAGS.write_in_progress
+    | HSS_STATUS_FLAGS.backend_busy;
+  return (sample.statusFlags & HSS_STATUS_FLAGS.valid) !== 0 && (sample.statusFlags & invalid) === 0;
 }
 
 function jcapTail(packageDir: string): { nextEventSequence: number; lastEventTick: string; lastSampleTick: string } {
@@ -1757,7 +2155,10 @@ function validateSession(value: HssSessionRecord, captureId: string): void {
   if (!value || value.formatVersion !== 1 || value.captureId !== captureId || !value.projectRoot || !value.targetGeneration || !value.probeSerial || !ACTIVE_SESSION_STATES.has(value.state) && !TERMINAL_SESSION_STATES.has(value.state) || !value.packageDir || !value.sessionDir
     || !value.control || !value.control.planPath || !value.control.pidFile || !value.control.readyFile || !value.control.stdoutPath || !value.control.stderrPath || !value.control.stopFile || !value.control.requestFile || !value.control.claimFile || !value.control.responseFile
     || !Number.isSafeInteger(value.helperPid) || value.helperPid < 0 || !provisional && value.helperPid < 1 || !value.ownerToken || !provisional && value.ownerToken === "pending"
-    || !UUID.test(value.helperNonce) || !/^\d+$/.test(value.qpcEpochCounter) || !/^\d+$/.test(value.qpcFrequency) || BigInt(value.qpcFrequency) < 1n || !Array.isArray(value.descriptors)) throw new HssOperationError("HSS_SESSION_INVALID", `invalid HSS session record: ${basename(captureId)}`);
+    || !UUID.test(value.helperNonce) || !/^\d+$/.test(value.qpcEpochCounter) || !/^\d+$/.test(value.qpcFrequency) || BigInt(value.qpcFrequency) < 1n || !Array.isArray(value.descriptors)
+    || value.qualityOracle !== undefined && (!value.qualityOracle.logicalIdentity || !Number.isSafeInteger(value.qualityOracle.expectedIncrement) || value.qualityOracle.expectedIncrement < 1
+      || !Number.isSafeInteger(value.qualityOracle.tolerance) || value.qualityOracle.tolerance < 0 || !Number.isSafeInteger(value.qualityOracle.modulus) || value.qualityOracle.modulus < 2
+      || value.qualityOracle.expectedIncrement + value.qualityOracle.tolerance >= value.qualityOracle.modulus)) throw new HssOperationError("HSS_SESSION_INVALID", `invalid HSS session record: ${basename(captureId)}`);
 }
 
 function hexAddress(address: number): string {

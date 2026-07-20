@@ -26,6 +26,7 @@ import {
   type AnalysisV0Role,
   type AnalysisV0Source,
 } from "./analysis-v0";
+import { HSS_STATUS_FLAGS } from "../hss/hss-status-flags";
 import { withDirectoryLease } from "../runtime/file-lease";
 
 export const JCAP_FORMAT_VERSION = 1 as const;
@@ -33,6 +34,7 @@ export const JCAP_STATUS = "stable" as const;
 
 export type JcapV1CaptureState = "active" | "finalizing" | "completed" | "stopped" | "interrupted" | "failed";
 export type JcapV1IndexStatus = "absent" | "building" | "ready" | "rebuild_required" | "failed";
+export type JcapV1QualitySource = "none" | "jlink" | "target_counter";
 export type JcapRunMutationGuard = <T>(runId: string, operation: () => Promise<T>) => Promise<T>;
 
 export interface JcapV1Provenance {
@@ -84,6 +86,7 @@ export interface JcapV1Metadata {
   sampleCount: number;
   eventCount: number;
   qualityStatus: "unknown" | "partial" | "reported";
+  qualitySource: JcapV1QualitySource;
   quality: { missingSamples: number | null; droppedSamples: number | null; overflows: number | null; readErrors: number | null; timeouts: number | null };
   raw: { samples: JcapV1RawIdentity; events: JcapV1RawIdentity };
   diagnostics: JcapRawDiagnostic[];
@@ -238,6 +241,7 @@ export function createJcapV1Metadata(input: {
     sampleCount: 0,
     eventCount: 0,
     qualityStatus: "unknown",
+    qualitySource: "none",
     quality: { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null },
     raw: {
       samples: { file: "raw/samples.bin", bytes: 0, validBytes: 0, sha256: null },
@@ -299,6 +303,7 @@ export function finalizeJcapV1Metadata(
   state: Exclude<JcapV1CaptureState, "active" | "finalizing">,
   quality: Partial<JcapV1Metadata["quality"]> = {},
   qualityStatus: JcapV1Metadata["qualityStatus"] = "unknown",
+  qualitySource: JcapV1QualitySource = qualityStatus === "reported" ? "jlink" : "none",
 ): JcapV1Metadata {
   const root = checkedPackageDir(packageDir);
   const raw = readJcapV1Raw(root);
@@ -312,6 +317,7 @@ export function finalizeJcapV1Metadata(
     sampleCount: raw.samples.length,
     eventCount: raw.events.length,
     qualityStatus,
+    qualitySource,
     quality: { ...current.quality, ...quality },
     raw: rawIdentities(raw.sources),
     diagnostics: raw.diagnostics,
@@ -335,23 +341,34 @@ export class JcapV1QueryService {
   }
 
   async summary(input: { captureId: string }): Promise<Record<string, unknown>> {
-    return jcapCaptureSummary(this.packageFor(input.captureId));
+    const location = this.locationFor(input.captureId);
+    return this.mutate(location, async () => {
+      const ready = await this.ensureQueryableIndex(location);
+      if (ready.unavailable) return ready.unavailable;
+      return { ...await jcapCaptureSummary(location.packageDir), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
+    });
   }
 
   async series(input: { captureId: string; variables: string[]; startTick: string; endTick: string; bucketCount: number }): Promise<Record<string, unknown>> {
     validateSeriesBounds(input.variables, input.startTick, input.endTick, input.bucketCount, LIMITS.seriesVariables, LIMITS.seriesBuckets);
-    const packageDir = this.packageFor(input.captureId);
-    const unavailable = readinessResponse(await verifyJcapV1Index(packageDir), true);
-    return unavailable ?? jcapCaptureSeries({ packageDir, variables: input.variables, startTick: input.startTick, endTick: input.endTick, bucketCount: input.bucketCount });
+    const location = this.locationFor(input.captureId);
+    return this.mutate(location, async () => {
+      const ready = await this.ensureQueryableIndex(location);
+      if (ready.unavailable) return ready.unavailable;
+      return { ...await jcapCaptureSeries({ packageDir: location.packageDir, variables: input.variables, startTick: input.startTick, endTick: input.endTick, bucketCount: input.bucketCount }), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
+    });
   }
 
   async eventWindow(input: { captureId: string; eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }): Promise<Record<string, unknown>> {
     if (!UUID.test(input.eventId)) throw new JcapBoundsError("eventId must be a UUID");
     if (!Number.isInteger(input.beforeMs) || input.beforeMs < 0 || input.beforeMs > LIMITS.eventMs || !Number.isInteger(input.afterMs) || input.afterMs < 0 || input.afterMs > LIMITS.eventMs) throw new JcapBoundsError("event window must be 0..60000 ms");
     validateEventWindowBounds(input.variables, input.bucketCount);
-    const packageDir = this.packageFor(input.captureId);
-    const unavailable = readinessResponse(await verifyJcapV1Index(packageDir), true);
-    return unavailable ?? jcapCaptureEventWindow({ packageDir, eventId: input.eventId, variables: input.variables, beforeMs: input.beforeMs, afterMs: input.afterMs, bucketCount: input.bucketCount });
+    const location = this.locationFor(input.captureId);
+    return this.mutate(location, async () => {
+      const ready = await this.ensureQueryableIndex(location);
+      if (ready.unavailable) return ready.unavailable;
+      return { ...await jcapCaptureEventWindow({ packageDir: location.packageDir, eventId: input.eventId, variables: input.variables, beforeMs: input.beforeMs, afterMs: input.afterMs, bucketCount: input.bucketCount }), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
+    });
   }
 
   async analysisRun(input: AnalysisV0RunRequest): Promise<Record<string, unknown>> {
@@ -361,8 +378,8 @@ export class JcapV1QueryService {
   }
 
   private async analysisRunPackage(input: AnalysisV0RunRequest, packageDir: string): Promise<Record<string, unknown>> {
-    const status = await verifyJcapV1Index(packageDir);
-    const unavailable = readinessResponse(status, true);
+    const ready = await this.ensureQueryableIndex({ packageDir, captureId: input.captureId, cursor: input.captureId });
+    const unavailable = ready.unavailable;
     if (unavailable) return unavailable;
     const database = await openDatabase(path.join(packageDir, "capture.db"));
     try {
@@ -402,7 +419,7 @@ export class JcapV1QueryService {
       });
       bounded(result, LIMITS.analysisBytes);
       await persistAnalysisRun(database, result);
-      return result;
+      return { ...result, ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
     } finally {
       await closeDatabase(database);
     }
@@ -420,11 +437,22 @@ export class JcapV1QueryService {
   async exportCsv(input: { captureId: string }): Promise<Record<string, unknown>> {
     const location = this.locationFor(input.captureId);
     return this.mutate(location, async () => {
-      const status = await verifyJcapV1Index(location.packageDir);
-      const unavailable = readinessResponse(status, true);
+      const ready = await this.ensureQueryableIndex(location);
+      const unavailable = ready.unavailable;
       const owningRoot = path.dirname(path.dirname(location.packageDir));
-      return unavailable ?? { ...status, ...await jcapCaptureExportCsv(location.packageDir, path.join(owningRoot, "exports")) };
+      return unavailable ?? { ...ready.status, ...await jcapCaptureExportCsv(location.packageDir, path.join(owningRoot, "exports")), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
     });
+  }
+
+  private async ensureQueryableIndex(location: Pick<CaptureLocation, "packageDir" | "captureId" | "cursor">): Promise<{ status: Awaited<ReturnType<typeof verifyJcapV1Index>>; indexRebuilt: boolean; unavailable?: Record<string, unknown> }> {
+    let status = await verifyJcapV1Index(location.packageDir);
+    let indexRebuilt = false;
+    if (status.indexStatus === "rebuild_required" && !["active", "finalizing"].includes(status.captureState)) {
+      await rebuildJcapV1Index(location.packageDir);
+      status = await verifyJcapV1Index(location.packageDir);
+      indexRebuilt = true;
+    }
+    return { status, indexRebuilt, unavailable: readinessResponse(status, true) };
   }
 
   private packageFor(captureId: string): string {
@@ -605,9 +633,10 @@ export class JcapV1Writer {
     state: Exclude<JcapV1CaptureState, "active" | "finalizing">,
     quality: Partial<JcapV1Metadata["quality"]> = {},
     qualityStatus: JcapV1Metadata["qualityStatus"] = "unknown",
+    qualitySource: JcapV1QualitySource = qualityStatus === "reported" ? "jlink" : "none",
   ): JcapV1Metadata {
     if (this.samplesHandle !== undefined || this.eventsHandle !== undefined) throw new Error("close both Raw writers before finalizing capture metadata");
-    return finalizeJcapV1Metadata(this.packageDir, state, quality, qualityStatus);
+    return finalizeJcapV1Metadata(this.packageDir, state, quality, qualityStatus, qualitySource);
   }
 }
 
@@ -637,6 +666,7 @@ export async function finalizeJcapV1Capture(input: {
   interruptedEvent: JcapV1Event;
   quality?: Partial<JcapV1Metadata["quality"]>;
   qualityStatus?: JcapV1Metadata["qualityStatus"];
+  qualitySource?: JcapV1QualitySource;
 }): ReturnType<typeof rebuildJcapV1Index> {
   if (input.finalizingEvent.type !== "lifecycle" || input.finalizingEvent.state !== "finalizing") throw new Error("finalizingEvent must enter finalizing");
   if (input.terminalEvent.type !== "lifecycle" || !["completed", "stopped", "failed"].includes(input.terminalEvent.state as string)) throw new Error("terminalEvent must enter completed, stopped, or failed");
@@ -660,7 +690,7 @@ export async function finalizeJcapV1Capture(input: {
     input.writer.closeEvents();
     throw error;
   }
-  input.writer.finalize(state, input.quality ?? {}, input.qualityStatus ?? "unknown");
+  input.writer.finalize(state, input.quality ?? {}, input.qualityStatus ?? "unknown", input.qualitySource ?? (input.qualityStatus === "reported" ? "jlink" : "none"));
   return rebuildJcapV1Index(input.writer.packageDir);
 }
 
@@ -754,6 +784,7 @@ async function rebuildJcapV1IndexUnlocked(root: string): Promise<{ captureState:
         event_count: String(raw.events.length),
         sample_value_count: String(raw.samples.length * raw.metadata.variables.length),
         quality_status: raw.metadata.qualityStatus,
+        quality_source: raw.metadata.qualitySource,
       };
       for (const source of raw.sources) {
         const prefix = source.file === "raw/samples.bin" ? "samples" : "events";
@@ -767,10 +798,12 @@ async function rebuildJcapV1IndexUnlocked(root: string): Promise<{ captureState:
         const diagnostic = raw.diagnostics.find((item) => item.file === source.file);
         await run(database, "INSERT INTO raw_sources(file,sha256,bytes,valid_bytes,diagnostic) VALUES(?,?,?,?,?)", [source.file, source.sha256, source.bytes, source.validBytes, diagnostic ? JSON.stringify(diagnostic) : null]);
       }
+      const inferredDroppedBefore = inferredDroppedBeforeSampleIndexes(raw.events);
       for (const sample of raw.samples) {
         const tickKey = u64Key(sample.tick);
-        await run(database, "INSERT INTO samples(sample_index,tick,tick_key,status_flags) VALUES(?,?,?,?)", [sample.sampleIndex, sample.tick, tickKey, sample.statusFlags]);
-        for (const [variable, value] of Object.entries(sample.values)) await run(database, "INSERT INTO sample_values(sample_index,tick,tick_key,status_flags,variable,value) VALUES(?,?,?,?,?,?)", [sample.sampleIndex, sample.tick, tickKey, sample.statusFlags, variable, value]);
+        const statusFlags = sample.statusFlags | (inferredDroppedBefore.has(sample.sampleIndex) ? HSS_STATUS_FLAGS.dropped_before_this_sample : 0);
+        await run(database, "INSERT INTO samples(sample_index,tick,tick_key,status_flags) VALUES(?,?,?,?)", [sample.sampleIndex, sample.tick, tickKey, statusFlags]);
+        for (const [variable, value] of Object.entries(sample.values)) await run(database, "INSERT INTO sample_values(sample_index,tick,tick_key,status_flags,variable,value) VALUES(?,?,?,?,?,?)", [sample.sampleIndex, sample.tick, tickKey, statusFlags, variable, value]);
       }
       for (const event of raw.events) {
         const indexedEvent = resolveEventForIndex(event, raw.samples);
@@ -830,7 +863,7 @@ export async function verifyJcapV1Index(packageDir: string): Promise<{ captureSt
     const integrity = await get<IntegrityRow>(database, "PRAGMA integrity_check");
     const meta = Object.fromEntries((await all<MetaRow>(database, "SELECT key,value FROM meta")).map((row) => [row.key, row.value]));
     const captureState = meta.capture_state as JcapV1CaptureState;
-    if (integrity?.integrity_check !== "ok" || meta.schema_version !== "1" || meta.format_version !== "1" || meta.format_status !== JCAP_STATUS || meta.capture_id !== metadata.captureId || meta.index_status !== "ready" || meta.quality_status !== metadata.qualityStatus || !isCaptureState(captureState) || captureState !== metadata.state) return { captureState: metadata.state, indexStatus: "rebuild_required" };
+    if (integrity?.integrity_check !== "ok" || meta.schema_version !== "1" || meta.format_version !== "1" || meta.format_status !== JCAP_STATUS || meta.capture_id !== metadata.captureId || meta.index_status !== "ready" || meta.quality_status !== metadata.qualityStatus || meta.quality_source !== metadata.qualitySource || !isCaptureState(captureState) || captureState !== metadata.state) return { captureState: metadata.state, indexStatus: "rebuild_required" };
     const sources = await all<SourceRow>(database, "SELECT file,sha256,bytes,valid_bytes,diagnostic FROM raw_sources");
     const expectedSources = new Set(["raw/samples.bin", "raw/events.bin"]);
     if (sources.length !== expectedSources.size || sources.some((source) => !expectedSources.delete(source.file))) return { captureState, indexStatus: "rebuild_required" };
@@ -876,6 +909,8 @@ export async function jcapCaptureSummary(packageDir: string): Promise<Record<str
     sampleCount: metadata.sampleCount,
     eventCount: metadata.eventCount,
     variables: metadata.variables.map((variable) => variable.logicalIdentity),
+    qualityStatus: metadata.qualityStatus,
+    qualitySource: metadata.qualitySource,
     quality: metadata.quality,
     sources: Object.values(metadata.raw).map((source) => ({ file: source.file, sha256: source.sha256, bytes: source.bytes, valid_bytes: source.validBytes })),
   };
@@ -901,6 +936,8 @@ export async function jcapCaptureSummary(packageDir: string): Promise<Record<str
       provenance,
       sampleCount,
       eventCount,
+      qualityStatus: metadata.qualityStatus,
+      qualitySource: metadata.qualitySource,
       ...(typeof tickRange?.start_tick === "string" && typeof tickRange.end_tick === "string" ? { startTick: tickRange.start_tick, endTick: tickRange.end_tick } : {}),
       variables: variables.length ? variables : base.variables,
       sources,
@@ -1182,14 +1219,12 @@ function validateMetadata(value: JcapV1Metadata, packageDir?: string): void {
     if (typeof helperSha256 !== "string" || !SHA256.test(helperSha256) || typeof runtimeSha256 !== "string" || !SHA256.test(runtimeSha256)) throw new Error("native JCAP provenance is missing helper/runtime hashes");
   }
   if (!["unknown", "partial", "reported"].includes(value.qualityStatus)) throw new Error("capture.json quality status is invalid");
+  if (!["none", "jlink", "target_counter"].includes(value.qualitySource)) throw new Error("capture.json quality source is invalid");
   const qualityKeys = ["missingSamples", "droppedSamples", "overflows", "readErrors", "timeouts"] as const;
   if (!isRecord(value.quality) || Object.keys(value.quality).length !== qualityKeys.length || qualityKeys.some((key) => !Object.hasOwn(value.quality, key))) throw new Error("capture.json quality counters are invalid");
   for (const count of [value.sampleCount, value.eventCount]) if (!Number.isSafeInteger(count) || count < 0) throw new Error("capture.json contains an invalid count");
-  const observedQuality = qualityKeys.filter((key) => value.quality[key] !== null);
   if (qualityKeys.some((key) => value.quality[key] !== null && (!Number.isSafeInteger(value.quality[key]) || Number(value.quality[key]) < 0))
-    || value.qualityStatus === "unknown" && observedQuality.length !== 0
-    || value.qualityStatus === "partial" && (observedQuality.length === 0 || observedQuality.length === qualityKeys.length)
-    || value.qualityStatus === "reported" && observedQuality.length !== qualityKeys.length) throw new Error("capture.json quality evidence is inconsistent");
+    || !qualityEvidenceIsConsistent(value.qualityStatus, value.qualitySource, value.quality)) throw new Error("capture.json quality evidence is inconsistent");
   if (!isRecord(value.raw) || !validRawIdentity(value.raw.samples, "raw/samples.bin") || !validRawIdentity(value.raw.events, "raw/events.bin") || !Array.isArray(value.diagnostics)
     || value.diagnostics.some((diagnostic) => !isRecord(diagnostic) || !["raw/samples.bin", "raw/events.bin"].includes(String(diagnostic.file))
       || !Number.isSafeInteger(diagnostic.offset) || diagnostic.offset < 0 || !Number.isSafeInteger(diagnostic.length) || diagnostic.length < 0
@@ -1284,13 +1319,36 @@ function validateEvent(event: JcapV1Event, previousSequence: number, previousTic
 function validateQualityEvent(event: JcapV1Event): void {
   const keys = ["missingSamples", "droppedSamples", "overflows", "readErrors", "timeouts"] as const;
   if (!["unknown", "partial", "reported"].includes(String(event.qualityStatus))) throw new Error("JCAP quality event status is invalid");
-  const observed = keys.filter((key) => event[key] !== null);
+  if (!["none", "jlink", "target_counter"].includes(String(event.qualitySource))) throw new Error("JCAP quality event source is invalid");
   if (keys.some((key) => event[key] !== null && (!Number.isSafeInteger(event[key]) || Number(event[key]) < 0))
-    || event.qualityStatus === "unknown" && observed.length !== 0
-    || event.qualityStatus === "partial" && (observed.length === 0 || observed.length === keys.length)
-    || event.qualityStatus === "reported" && observed.length !== keys.length) throw new Error("JCAP quality event counters are invalid");
+    || !qualityEvidenceIsConsistent(event.qualityStatus as JcapV1Metadata["qualityStatus"], event.qualitySource as JcapV1QualitySource, Object.fromEntries(keys.map((key) => [key, event[key]])) as JcapV1Metadata["quality"])) throw new Error("JCAP quality event counters are invalid");
   if (event.durationValidated !== null && typeof event.durationValidated !== "boolean") throw new Error("JCAP quality duration evidence is invalid");
   if (event.qualityEvidence !== undefined && !isRecord(event.qualityEvidence)) throw new Error("JCAP quality provenance is invalid");
+  if (event.inferredDroppedBeforeSampleIndexes !== undefined && (!Array.isArray(event.inferredDroppedBeforeSampleIndexes)
+    || event.inferredDroppedBeforeSampleIndexes.some((value) => !Number.isSafeInteger(value) || Number(value) < 0)
+    || event.inferredDroppedBeforeSampleIndexes.some((value, index, values) => index > 0 && Number(value) <= Number(values[index - 1])))) {
+    throw new Error("JCAP quality inferred-loss indexes are invalid");
+  }
+}
+
+function qualityEvidenceIsConsistent(
+  status: JcapV1Metadata["qualityStatus"],
+  source: JcapV1QualitySource,
+  quality: JcapV1Metadata["quality"],
+): boolean {
+  const keys = ["missingSamples", "droppedSamples", "overflows", "readErrors", "timeouts"] as const;
+  const observed = keys.filter((key) => quality[key] !== null);
+  if (status === "unknown") return source === "none" && observed.length === 0;
+  if (source === "none") return status === "partial" && quality.droppedSamples === null && quality.overflows === null;
+  if (source === "jlink") return status === "reported" && observed.length === keys.length;
+  return quality.droppedSamples === null && quality.overflows === null
+    && (status === "partial" || status === "reported" && quality.missingSamples !== null);
+}
+
+function inferredDroppedBeforeSampleIndexes(events: readonly JcapV1Event[]): Set<number> {
+  const quality = [...events].reverse().find((event) => event.type === "quality");
+  if (!quality || quality.qualitySource !== "target_counter" || !Array.isArray(quality.inferredDroppedBeforeSampleIndexes)) return new Set();
+  return new Set(quality.inferredDroppedBeforeSampleIndexes as number[]);
 }
 
 function assertQualityFacts(metadata: JcapV1Metadata, events: readonly JcapV1Event[]): void {
@@ -1301,6 +1359,7 @@ function assertQualityFacts(metadata: JcapV1Metadata, events: readonly JcapV1Eve
     return;
   }
   if (quality.qualityStatus !== metadata.qualityStatus) throw new Error("Raw quality status does not match capture.json");
+  if (quality.qualitySource !== metadata.qualitySource) throw new Error("Raw quality source does not match capture.json");
   for (const key of ["missingSamples", "droppedSamples", "overflows", "readErrors", "timeouts"] as const) {
     if (quality[key] !== metadata.quality[key]) throw new Error("Raw quality counters do not match capture.json");
   }

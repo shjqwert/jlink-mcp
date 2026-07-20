@@ -2904,6 +2904,344 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   return 0;
 }
 
+static const char* memory_session_state_name(int halted) {
+  return halted == 0 ? "running" : halted == 1 ? "halted" : "unknown";
+}
+
+static void memory_session_reply(
+  const std::string& id,
+  bool ok,
+  const std::string& code,
+  const std::string& reason,
+  const char* state_before,
+  const char* state_after,
+  bool write_issued,
+  const std::vector<unsigned char>* bytes = nullptr,
+  const char* api = "",
+  bool state_unknown = false
+) {
+  std::cout << "{\"id\":\"" << escape(id)
+    << "\",\"status\":\"" << (ok ? "ok" : "error") << "\"";
+  if (!ok) std::cout << ",\"errorCode\":\"" << escape(code) << "\",\"reason\":\"" << escape(reason) << "\"";
+  if (bytes) std::cout << ",\"bytesHex\":\"" << bytes_hex(*bytes) << "\"";
+  if (api && *api) std::cout << ",\"api\":\"" << escape(api) << "\"";
+  std::cout << ",\"targetStateBefore\":\"" << state_before
+    << "\",\"targetStateAfter\":\"" << state_after
+    << "\",\"writeIssued\":" << (write_issued ? "true" : "false")
+    << ",\"stateUnknown\":" << (state_unknown ? "true" : "false")
+    << "}\n" << std::flush;
+}
+
+static bool wait_for_memory_session_activation(std::string* error_code, std::string* error_reason) {
+  HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+  if (input == INVALID_HANDLE_VALUE || input == NULL) {
+    *error_code = "MEMORY_SESSION_ACTIVATION_STREAM_INVALID";
+    *error_reason = "memory-session activation stream is unavailable";
+    return false;
+  }
+  const ULONGLONG deadline = GetTickCount64() + 8000ULL;
+  std::string line;
+  while (GetTickCount64() < deadline) {
+    DWORD available = 0;
+    if (!PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr)) {
+      *error_code = "MEMORY_SESSION_ACTIVATION_STREAM_CLOSED";
+      *error_reason = "memory-session activation stream closed before activation";
+      return false;
+    }
+    if (available == 0) {
+      Sleep(10);
+      continue;
+    }
+    char chunk[256] = {};
+    DWORD read = 0;
+    const DWORD requested = available < sizeof(chunk) ? available : static_cast<DWORD>(sizeof(chunk));
+    if (!ReadFile(input, chunk, requested, &read, nullptr) || read == 0) {
+      *error_code = "MEMORY_SESSION_ACTIVATION_STREAM_CLOSED";
+      *error_reason = "memory-session activation stream closed before activation";
+      return false;
+    }
+    line.append(chunk, read);
+    if (line.size() > 1024U) {
+      *error_code = "MEMORY_SESSION_ACTIVATION_INVALID";
+      *error_reason = "memory-session activation exceeds its bound";
+      return false;
+    }
+    const size_t newline = line.find('\n');
+    if (newline == std::string::npos) continue;
+    if (line.find_first_not_of(" \t\r\n", newline + 1) != std::string::npos) {
+      *error_code = "MEMORY_SESSION_ACTIVATION_INVALID";
+      *error_reason = "memory-session activation must be the first protocol message";
+      return false;
+    }
+    const std::string activation_line = line.substr(0, newline);
+    StrictJson activation;
+    std::string parse_reason;
+    std::string op;
+    if (!StrictJsonParser(activation_line).parse(&activation, &parse_reason) || activation.type != StrictJson::Type::object
+        || !json_exact_keys(activation, { "op" }) || !json_text(json_member(activation, "op"), &op) || op != "activate") {
+      *error_code = "MEMORY_SESSION_ACTIVATION_INVALID";
+      *error_reason = "memory-session requires an exact activate protocol message";
+      return false;
+    }
+    return true;
+  }
+  *error_code = "MEMORY_SESSION_ACTIVATION_TIMEOUT";
+  *error_reason = "memory-session activation was not received before timeout";
+  return false;
+}
+
+static int memory_session(const std::wstring& dll_path, const std::map<std::wstring, std::wstring>& options) {
+  const std::string dll_utf8 = narrow(dll_path);
+  const std::string device = option_utf8(options, L"--device", "");
+  const std::string iface = option_utf8(options, L"--interface", "SWD");
+  const std::string serial_text = option_utf8(options, L"--serial", "");
+  int speed = 0;
+  U32 expected_serial = 0;
+  const auto startup_error = [&](const std::string& code, const std::string& reason, bool state_unknown = false) {
+    std::cout << "{\"status\":\"error\",\"errorCode\":\"" << escape(code)
+      << "\",\"reason\":\"" << escape(reason)
+      << "\",\"stateUnknown\":" << (state_unknown ? "true" : "false") << "}\n" << std::flush;
+    return 0;
+  };
+  if (dll_path.empty()) return startup_error("HSS_DLL_PATH_MISSING", "--dll is required");
+  if (device.empty() || (iface != "SWD" && iface != "JTAG") || !parse_u32_text(serial_text, &expected_serial) || expected_serial == 0
+      || !parse_int_text(option_utf8(options, L"--speed", ""), &speed) || speed < 1) {
+    return startup_error("MEMORY_SESSION_CONFIG_INVALID", "device, interface, serial, and positive speed are required");
+  }
+
+  std::string activation_code;
+  std::string activation_reason;
+  if (!wait_for_memory_session_activation(&activation_code, &activation_reason)) {
+    return startup_error(activation_code, activation_reason);
+  }
+
+  HMODULE dll = LoadLibraryW(dll_path.c_str());
+  if (!dll) return startup_error("HSS_DLL_LOAD_FAILED", "LoadLibraryW failed");
+  auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
+  auto arm_close = reinterpret_cast<JLINKARM_Close_Fn>(required(dll, "JLINKARM_Close"));
+  auto arm_exec = reinterpret_cast<JLINKARM_ExecCommand_Fn>(required(dll, "JLINKARM_ExecCommand"));
+  auto arm_tif = reinterpret_cast<JLINKARM_TIF_Select_Fn>(required(dll, "JLINKARM_TIF_Select"));
+  auto arm_speed = reinterpret_cast<JLINKARM_SetSpeed_Fn>(required(dll, "JLINKARM_SetSpeed"));
+  auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
+  auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
+  auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
+  auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
+  auto arm_read_u8 = reinterpret_cast<JLINKARM_ReadMemU8_Fn>(required(dll, "JLINKARM_ReadMemU8"));
+  auto arm_read_u16 = reinterpret_cast<JLINKARM_ReadMemU16_Fn>(required(dll, "JLINKARM_ReadMemU16"));
+  auto arm_read_u32 = reinterpret_cast<JLINKARM_ReadMemU32_Fn>(required(dll, "JLINKARM_ReadMemU32"));
+  auto arm_write_u8 = reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8"));
+  auto arm_write_u16 = reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16"));
+  auto arm_write_u32 = reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32"));
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted
+      || !arm_read_u8 || !arm_read_u16 || !arm_read_u32 || !arm_write_u8 || !arm_write_u16 || !arm_write_u32) {
+    FreeLibrary(dll);
+    return startup_error("JLINK_BASE_EXPORT_MISSING", "required J-Link memory-session exports are unavailable");
+  }
+
+  bool crashed = false;
+  int rc = call_select_sn(arm_select_sn, expected_serial, &crashed);
+  if (crashed || rc < 0) { FreeLibrary(dll); return startup_error("JLINK_SELECT_SN_FAILED", "JLINKARM_EMU_SelectByUSBSN failed"); }
+  rc = call_int0(arm_open, &crashed);
+  if (crashed || rc < 0) { FreeLibrary(dll); return startup_error("JLINK_OPEN_FAILED", "JLINKARM_Open failed", true); }
+  char exec_out[512] = {};
+  rc = call_exec(arm_exec, "SetRestartOnClose = 0", exec_out, sizeof(exec_out), &crashed);
+  if (crashed || rc < 0) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", true);
+  }
+  rc = call_exec(arm_exec, "SetEnableMemCache = 0", exec_out, sizeof(exec_out), &crashed);
+  if (crashed || rc < 0) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_MEMORY_CACHE_POLICY_FAILED", "JLINKARM_ExecCommand(SetEnableMemCache = 0) failed", true);
+  }
+  const std::string device_cmd = "device = " + device;
+  rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
+  if (crashed || rc < 0) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_EXEC_DEVICE_FAILED", "JLINKARM_ExecCommand(device) failed", true);
+  }
+  rc = call_int1(arm_tif, iface == "JTAG" ? 0 : 1, &crashed);
+  if (crashed || rc < 0) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_TIF_SELECT_FAILED", "JLINKARM_TIF_Select failed", true);
+  }
+  call_void1(arm_speed, speed, &crashed);
+  if (crashed) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_SET_SPEED_EXCEPTION", "JLINKARM_SetSpeed raised a structured exception", true);
+  }
+  rc = call_int0(arm_connect, &crashed);
+  if (crashed || rc < 0) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_CONNECT_FAILED", "JLINKARM_Connect failed", true);
+  }
+  const U32 actual_serial = call_u320(arm_get_sn, &crashed);
+  if (crashed || actual_serial != expected_serial) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_PROBE_IDENTITY_MISMATCH", "connected J-Link serial does not match --serial", true);
+  }
+  int initial_halted = call_int0(arm_halted, &crashed);
+  if (crashed || (initial_halted != 0 && initial_halted != 1)) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_STATE_OBSERVATION_FAILED", "target state could not be observed after connect", true);
+  }
+  std::cout << "{\"status\":\"ready\",\"command\":\"memory-session\",\"probeSerial\":" << actual_serial
+    << ",\"device\":\"" << escape(device) << "\",\"interface\":\"" << escape(iface)
+    << "\",\"speedKhz\":" << speed << ",\"targetState\":\"" << memory_session_state_name(initial_halted)
+    << "\",\"memoryCacheDisabled\":true,\"targetReset\":false,\"targetWritten\":false,\"haltIssued\":false}\n" << std::flush;
+
+  const auto observe_state = [&]() {
+    bool state_crashed = false;
+    const int state = call_int0(arm_halted, &state_crashed);
+    return state_crashed || (state != 0 && state != 1) ? -1 : state;
+  };
+  const auto read_bytes = [&](U32 address, int size, int access_size, std::vector<unsigned char>* bytes) {
+    bytes->assign(static_cast<size_t>(size), 0);
+    std::vector<U8> status(static_cast<size_t>(size / access_size), 0);
+    bool read_crashed = false;
+    int read_rc = -1;
+    if (access_size == 1) {
+      read_rc = call_read_mem_u8(arm_read_u8, address, static_cast<U32>(size), bytes->data(), status.data(), &read_crashed);
+    } else if (access_size == 2) {
+      std::vector<U16> values(static_cast<size_t>(size / 2), 0);
+      read_rc = call_read_mem_u16(arm_read_u16, address, static_cast<U32>(values.size()), values.data(), status.data(), &read_crashed);
+      for (size_t index = 0; index < values.size(); ++index) {
+        (*bytes)[index * 2] = static_cast<unsigned char>(values[index] & 0xFFU);
+        (*bytes)[index * 2 + 1] = static_cast<unsigned char>((values[index] >> 8U) & 0xFFU);
+      }
+    } else {
+      std::vector<U32> values(static_cast<size_t>(size / 4), 0);
+      read_rc = call_read_mem_u32(arm_read_u32, address, static_cast<U32>(values.size()), values.data(), status.data(), &read_crashed);
+      for (size_t index = 0; index < values.size(); ++index) {
+        (*bytes)[index * 4] = static_cast<unsigned char>(values[index] & 0xFFU);
+        (*bytes)[index * 4 + 1] = static_cast<unsigned char>((values[index] >> 8U) & 0xFFU);
+        (*bytes)[index * 4 + 2] = static_cast<unsigned char>((values[index] >> 16U) & 0xFFU);
+        (*bytes)[index * 4 + 3] = static_cast<unsigned char>((values[index] >> 24U) & 0xFFU);
+      }
+    }
+    return width_read_complete(read_rc, static_cast<size_t>(size / access_size), status, read_crashed);
+  };
+  const auto write_bytes = [&](U32 address, const std::vector<unsigned char>& bytes, int access_size) {
+    bool write_crashed = false;
+    for (size_t offset = 0; offset < bytes.size(); offset += static_cast<size_t>(access_size)) {
+      const U32 element_address = address + static_cast<U32>(offset);
+      if (access_size == 1) {
+        call_write_u8(arm_write_u8, element_address, bytes[offset], &write_crashed);
+      } else if (access_size == 2) {
+        const U16 value = static_cast<U16>(bytes[offset]) | (static_cast<U16>(bytes[offset + 1]) << 8U);
+        call_write_u16(arm_write_u16, element_address, value, &write_crashed);
+      } else {
+        const U32 value = static_cast<U32>(bytes[offset])
+          | (static_cast<U32>(bytes[offset + 1]) << 8U)
+          | (static_cast<U32>(bytes[offset + 2]) << 16U)
+          | (static_cast<U32>(bytes[offset + 3]) << 24U);
+        call_write_u32(arm_write_u32, element_address, value, &write_crashed);
+      }
+      if (write_crashed) return false;
+    }
+    return true;
+  };
+
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line.size() > 1024U * 1024U) {
+      memory_session_reply("", false, "MEMORY_SESSION_REQUEST_LIMIT", "request exceeds 1 MiB", "unknown", "unknown", false, nullptr, "", true);
+      continue;
+    }
+    StrictJson request;
+    std::string parse_reason;
+    if (!StrictJsonParser(line).parse(&request, &parse_reason) || request.type != StrictJson::Type::object) {
+      memory_session_reply("", false, "MEMORY_SESSION_REQUEST_INVALID", parse_reason.empty() ? "request must be a JSON object" : parse_reason, "unknown", "unknown", false, nullptr, "", true);
+      continue;
+    }
+    std::string id;
+    std::string op;
+    if (!json_text(json_member(request, "id"), &id) || !uuid_v4(id) || !json_text(json_member(request, "op"), &op)) {
+      memory_session_reply(id, false, "MEMORY_SESSION_REQUEST_INVALID", "request requires a UUID id and operation", "unknown", "unknown", false, nullptr, "", true);
+      continue;
+    }
+    const int before = observe_state();
+    if (before < 0) {
+      memory_session_reply(id, false, "JLINK_STATE_OBSERVATION_FAILED", "target state could not be observed before request", "unknown", "unknown", false, nullptr, "", true);
+      continue;
+    }
+    const char* before_name = memory_session_state_name(before);
+    if (op == "close") {
+      if (!json_exact_keys(request, { "id", "op" })) {
+        memory_session_reply(id, false, "MEMORY_SESSION_REQUEST_INVALID", "close request has unexpected fields", before_name, before_name, false);
+        continue;
+      }
+      bool close_crashed = false;
+      call_void0(arm_close, &close_crashed);
+      FreeLibrary(dll);
+      memory_session_reply(id, !close_crashed, close_crashed ? "JLINK_CLOSE_FAILED" : "", close_crashed ? "JLINKARM_Close raised a structured exception" : "", before_name, "unknown", false, nullptr, "JLINKARM_Close", true);
+      return 0;
+    }
+    if (op == "state") {
+      if (!json_exact_keys(request, { "id", "op" })) {
+        memory_session_reply(id, false, "MEMORY_SESSION_REQUEST_INVALID", "state request has unexpected fields", before_name, before_name, false);
+        continue;
+      }
+      memory_session_reply(id, true, "", "", before_name, before_name, false, nullptr, "JLINKARM_IsHalted");
+      continue;
+    }
+
+    std::string address_text;
+    uint64_t size_u64 = 0;
+    uint64_t access_u64 = 0;
+    U32 address = 0;
+    const bool memory_shape = (op == "read" && json_exact_keys(request, { "id", "op", "address", "size", "accessSize" }))
+      || (op == "write" && json_exact_keys(request, { "id", "op", "address", "size", "accessSize", "bytesHex" }));
+    if (!memory_shape || !json_text(json_member(request, "address"), &address_text) || !parse_u32_text(address_text, &address)
+        || !json_u64(json_member(request, "size"), &size_u64) || !json_u64(json_member(request, "accessSize"), &access_u64)
+        || size_u64 < 1 || size_u64 > 4096 || (access_u64 != 1 && access_u64 != 2 && access_u64 != 4)
+        || size_u64 % access_u64 != 0 || address % static_cast<U32>(access_u64) != 0) {
+      memory_session_reply(id, false, "MEMORY_SESSION_REQUEST_INVALID", "memory request fields or alignment are invalid", before_name, before_name, false);
+      continue;
+    }
+    const int size = static_cast<int>(size_u64);
+    const int access_size = static_cast<int>(access_u64);
+    if (op == "read") {
+      std::vector<unsigned char> bytes;
+      const bool read_ok = read_bytes(address, size, access_size, &bytes);
+      const int after = observe_state();
+      if (!read_ok || after < 0) {
+        memory_session_reply(id, false, after < 0 ? "JLINK_STATE_OBSERVATION_FAILED" : "JLINK_READMEM_FAILED",
+          after < 0 ? "target state could not be observed after read" : "width-specific J-Link read was incomplete",
+          before_name, memory_session_state_name(after), false, nullptr, "JLINKARM_ReadMem", after < 0);
+      } else {
+        memory_session_reply(id, true, "", "", before_name, memory_session_state_name(after), false, &bytes, "JLINKARM_ReadMem");
+      }
+      continue;
+    }
+    if (op == "write") {
+      std::string requested_hex;
+      std::vector<unsigned char> bytes;
+      if (!json_text(json_member(request, "bytesHex"), &requested_hex) || !parse_hex_bytes(requested_hex, &bytes) || bytes.size() != static_cast<size_t>(size)) {
+        memory_session_reply(id, false, "MEMORY_SESSION_REQUEST_INVALID", "write bytesHex does not match size", before_name, before_name, false);
+        continue;
+      }
+      const bool write_ok = write_bytes(address, bytes, access_size);
+      const int after = observe_state();
+      if (!write_ok || after < 0) {
+        memory_session_reply(id, false, after < 0 ? "JLINK_STATE_OBSERVATION_FAILED" : "JLINK_WRITE_FAILED",
+          after < 0 ? "target state could not be observed after write" : "J-Link width-specific write raised a structured exception",
+          before_name, memory_session_state_name(after), true, nullptr,
+          access_size == 1 ? "JLINKARM_WriteU8" : access_size == 2 ? "JLINKARM_WriteU16" : "JLINKARM_WriteU32", true);
+      } else {
+        memory_session_reply(id, true, "", "", before_name, memory_session_state_name(after), true, nullptr,
+          access_size == 1 ? "JLINKARM_WriteU8" : access_size == 2 ? "JLINKARM_WriteU16" : "JLINKARM_WriteU32");
+      }
+      continue;
+    }
+    memory_session_reply(id, false, "MEMORY_SESSION_REQUEST_INVALID", "unsupported memory-session operation", before_name, before_name, false);
+  }
+  bool close_crashed = false;
+  call_void0(arm_close, &close_crashed);
+  FreeLibrary(dll);
+  return 0;
+}
+
 static bool self_test_write_scalar_no_retry();
 
 static U32 self_test_selected_serial = 0;
@@ -4917,6 +5255,7 @@ int wmain(int argc, wchar_t** argv) {
   if (command == L"connect-preflight") return connect_preflight(dll_path, options);
   if (command == L"read-ram-probe") return ram_probe_access(dll_path, options, false);
   if (command == L"write-ram-probe") return ram_probe_access(dll_path, options, true);
+  if (command == L"memory-session") return memory_session(dll_path, options);
   if (command == L"self-test") return self_test();
   if (command == L"cpu-control") return cpu_control(options, false);
   if (command == L"target-state") return cpu_control(options, true);

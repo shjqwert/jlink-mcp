@@ -6,6 +6,7 @@ import type { GDBResponse, GDBTargetExecutionState, GDBUnexpectedExit } from "..
 import { ProbeBackend, ProbeErrorCode, type CommandResult, type GDBServerInfo, type TargetStateObservation } from "../../probe/backend";
 import { RTTClient } from "../../rtt/rtt-client";
 import { DirectMcuService } from "./direct-operations";
+import { MemorySessionManager } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
 import { SessionOperations, type SessionGdbClient } from "./session-operations";
 import { TargetStore } from "./target-store";
@@ -194,6 +195,21 @@ test("GDB backtrace returns HALT_REQUIRED and never halts implicitly", async (co
   assert.equal(fixtureValue.gdb.backtraceCalls, 0);
 });
 
+test("managedGdbBacktrace only reuses an already-owned managed GDB session", async (context) => {
+  const fixtureValue = await fixture(context, "managed-gdb-backtrace");
+  assert.equal(await fixtureValue.sessions.managedGdbBacktrace(fixtureValue.projectRoot), undefined);
+
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.backtraceResult = { success: true, output: "#0 fault_handler" };
+  const backtrace = await fixtureValue.sessions.managedGdbBacktrace(fixtureValue.projectRoot);
+  assert.equal(backtrace?.ok, true, JSON.stringify(backtrace?.error));
+  assert.equal(backtrace?.tool, "gdb_backtrace");
+  assert.equal((backtrace?.data as { output: string }).output, "#0 fault_handler");
+  assert.equal(fixtureValue.gdb.backtraceCalls, 1);
+  assert.equal(fixtureValue.probe.haltCalls, 0);
+});
+
 test("GDB backtrace reports a hidden transition from halted to running", async (context) => {
   const fixtureValue = await fixture(context, "gdb-backtrace-hidden-running");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
@@ -236,15 +252,17 @@ test("GDB client disconnect requires an explicitly running target and keeps the 
   assert.equal((disconnected.data as { gdbServerStillRunning: boolean }).gdbServerStillRunning, true);
 });
 
-test("GDB Server stop refuses to hide a resume of a halted client", async (context) => {
+test("GDB Server stop leaves an already halted target halted and reports its final state", async (context) => {
   const fixtureValue = await fixture(context, "gdb-stop-halted");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   fixtureValue.gdb.executionState = "halted";
-  const refused = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
-  assert.equal(refused.ok, false);
-  assert.equal(refused.error?.code, "RESUME_REQUIRED");
-  assert.equal(fixtureValue.probe.serverRunning, true);
-  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial)?.kind, "gdb");
+  fixtureValue.probe.targetState = "halted";
+  const stopped = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+  assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+  assert.equal((stopped.after as { targetExecutionState: string }).targetExecutionState, "halted");
+  assert.equal(fixtureValue.probe.serverRunning, false);
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
+  assert.equal(fixtureValue.probe.haltCalls, 0);
 });
 
 test("GDB Server start refuses a halted target before any process side effect", async (context) => {
@@ -362,6 +380,38 @@ test("HSS owner returns CAPTURE_ACTIVE without disturbing the owner", async (con
   assert.equal(result.error?.code, "CAPTURE_ACTIVE");
   assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial)?.token, owner.token);
   assert.equal(fixtureValue.rtt.connectCalls, 0);
+  fixtureValue.queue.releaseOwner(fixtureValue.target.probeSerial, owner.token);
+});
+
+test("memory owner blocks every GDB operation with MEMORY_SESSION_ACTIVE and owner facts", async (context) => {
+  const fixtureValue = await fixture(context, "memory-owner");
+  const sessions = new SessionOperations(fixtureValue.targets, fixtureValue.queue, async () => fixtureValue.runtime, new MemorySessionManager(fixtureValue.queue));
+  let owner!: ReturnType<ProbeQueue["claimOwner"]>;
+  await fixtureValue.queue.runExclusive(fixtureValue.target.probeSerial, async (metadata) => {
+    owner = fixtureValue.queue.claimOwner(fixtureValue.target.probeSerial, {
+      kind: "memory",
+      projectRoot: fixtureValue.target.projectRoot,
+      targetGeneration: fixtureValue.target.generation,
+    }, metadata.leaseToken);
+  });
+
+  const results = await Promise.all([
+    sessions.gdbServerStart(fixtureValue.projectRoot),
+    sessions.gdbCommand(fixtureValue.projectRoot, "info threads"),
+    sessions.gdbWait(fixtureValue.projectRoot, 1),
+    sessions.gdbBacktrace(fixtureValue.projectRoot),
+    sessions.gdbDisconnect(fixtureValue.projectRoot),
+    sessions.gdbServerStop(fixtureValue.projectRoot),
+  ]);
+  for (const result of results) {
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "MEMORY_SESSION_ACTIVE");
+    assert.equal((result.probe?.owner as { token: string }).token, owner.token);
+  }
+  assert.equal(fixtureValue.probe.serverRunning, false);
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+  assert.equal(fixtureValue.gdb.waitCalls, 0);
+  assert.equal(fixtureValue.gdb.backtraceCalls, 0);
   fixtureValue.queue.releaseOwner(fixtureValue.target.probeSerial, owner.token);
 });
 

@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   HssAdapterError,
   NativeHssHelperAdapter,
+  hssTargetStateFromConnectPreflight,
   type HssCaptureControlFiles,
   type HssMemoryRequest,
 } from "./hss-helper-adapter";
@@ -14,6 +15,17 @@ const captureId = "51000000-0000-4000-8000-000000000001";
 const helperNonce = "52000000-0000-4000-8000-000000000001";
 const operationId1 = "54000000-0000-4000-8000-000000000001";
 const operationId2 = "54000000-0000-4000-8000-000000000002";
+
+test("HSS connect preflight accepts only explicit halted-state observations", () => {
+  assert.equal(hssTargetStateFromConnectPreflight({ targetWasHaltedRaw: 0 }), "running");
+  assert.equal(hssTargetStateFromConnectPreflight({ targetWasHaltedRaw: 1 }), "halted");
+  for (const raw of [-2, -1, undefined]) {
+    assert.throws(
+      () => hssTargetStateFromConnectPreflight({ targetWasHalted: false, targetWasHaltedRaw: raw }),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_TARGET_STATE_UNKNOWN" && error.stateUnknown,
+    );
+  }
+});
 
 test("native adapter accepts only an exact live Helper ready journal", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-ready-"));

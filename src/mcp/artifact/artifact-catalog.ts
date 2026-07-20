@@ -10,7 +10,8 @@ const DEFAULT_MAX_ARTIFACT_BYTES = 256 * 1024 * 1024;
 const DEFAULT_MAX_HASHED_BYTES = 512 * 1024 * 1024;
 const MAX_MATCH_BYTES = 64 * 1024 * 1024;
 const MAX_MATCH_RANGES = 4096;
-const EXCLUDED_NAMES = new Set([".git", "node_modules", ".jlink-mcp"]);
+const EXCLUDED_NAMES = new Set([".git", "node_modules", ".jlink-mcp", ".tmp", "test-output", "reports", "out", "dist", "coverage", "build"]);
+const COMMON_ARTIFACT_DIRECTORIES = ["Debug/Exe", "Debug/List", "Release/Exe", "Release/List"];
 
 export type ArtifactFormat = "elf" | "intel-hex" | "srec" | "raw-bin";
 export type ArtifactClassification = "typed-debug-artifact" | "untyped-elf" | "flash-image";
@@ -40,9 +41,12 @@ export interface ArtifactGeneration extends ArtifactCandidate {
 export interface ArtifactDiscoveryResult {
   projectRoot: string;
   explicit: boolean;
+  configured: boolean;
   candidates: ArtifactCandidate[];
   mapCandidates: string[];
   scannedFiles: number;
+  scanTruncated: boolean;
+  reachedBound?: "maxFiles" | "maxDepth" | "maxCandidates" | "maxHashedBytes";
 }
 
 export interface AddressRange {
@@ -79,6 +83,9 @@ export async function discoverArtifacts(input: {
   projectRoot: string;
   explicitArtifact?: string;
   explicitMap?: string;
+  configuredArtifact?: string;
+  configuredArtifactSha256?: string;
+  configuredMap?: string;
   configuredCacheDirs?: string[];
   maxFiles?: number;
   maxDepth?: number;
@@ -115,10 +122,33 @@ export async function discoverArtifacts(input: {
     return {
       projectRoot,
       explicit: true,
+      configured: false,
       candidates: [candidate],
       mapCandidates: explicitMap ? [explicitMap] : [],
       scannedFiles: 1 + (explicitMap ? 1 : 0),
+      scanTruncated: false,
     };
+  }
+
+  const configuredArtifact = input.configuredArtifact
+    ? await existingProjectFile(input.configuredArtifact, projectRoot, limits.maxArtifactBytes).catch(() => undefined)
+    : undefined;
+  const configuredMap = input.configuredMap
+    ? await existingProjectFile(input.configuredMap, projectRoot, limits.maxArtifactBytes).catch(() => undefined)
+    : undefined;
+  if (configuredArtifact && input.configuredArtifactSha256) {
+    const candidate = await probeCandidate(configuredArtifact, limits.maxArtifactBytes);
+    if (candidate && candidate.sha256 === input.configuredArtifactSha256) {
+      return {
+        projectRoot,
+        explicit: false,
+        configured: true,
+        candidates: [pairMapCandidates(candidate, configuredMap ? [configuredMap] : [])],
+        mapCandidates: configuredMap ? [configuredMap] : [],
+        scannedFiles: 1 + (configuredMap ? 1 : 0),
+        scanTruncated: false,
+      };
+    }
   }
 
   const configured = (input.configuredCacheDirs ?? []).map((path) => normalized(resolve(projectRoot, path)));
@@ -126,12 +156,55 @@ export async function discoverArtifacts(input: {
   const mapCandidates: string[] = explicitMap ? [explicitMap] : [];
   let scannedFiles = 0;
   let hashedBytes = 0;
+  let scanTruncated = false;
+  let reachedBound: ArtifactDiscoveryResult["reachedBound"];
+  const visitedDirectories = new Set<string>();
+  const visitedFiles = new Set<string>();
+
+  const truncate = (bound: NonNullable<ArtifactDiscoveryResult["reachedBound"]>): void => {
+    if (!scanTruncated) reachedBound = bound;
+    scanTruncated = true;
+  };
+
+  const scanFile = async (path: string): Promise<void> => {
+    if (scanTruncated) return;
+    const canonical = await realpath(path);
+    if (visitedFiles.has(normalized(canonical))) return;
+    if (scannedFiles >= limits.maxFiles) {
+      truncate("maxFiles");
+      return;
+    }
+    visitedFiles.add(normalized(canonical));
+    scannedFiles += 1;
+    if (extname(canonical).toLowerCase() === ".map" && !mapCandidates.includes(canonical)) mapCandidates.push(canonical);
+    const candidate = await probeCandidate(canonical, limits.maxArtifactBytes);
+    if (!candidate) return;
+    if (hashedBytes + candidate.size > limits.maxHashedBytes) {
+      truncate("maxHashedBytes");
+      return;
+    }
+    if (candidates.length >= limits.maxCandidates) {
+      truncate("maxCandidates");
+      return;
+    }
+    hashedBytes += candidate.size;
+    candidates.push(candidate);
+  };
 
   const walk = async (directory: string, depth: number): Promise<void> => {
-    if (depth > limits.maxDepth) throw new ArtifactCatalogError("ARTIFACT_SCAN_LIMIT", "artifact scan exceeded maxDepth", { maxDepth: limits.maxDepth });
-    const handle = await opendir(directory);
+    if (scanTruncated) return;
+    if (depth > limits.maxDepth) {
+      truncate("maxDepth");
+      return;
+    }
+    let canonical: string;
+    try { canonical = await realpath(directory); } catch { return; }
+    if (visitedDirectories.has(normalized(canonical))) return;
+    visitedDirectories.add(normalized(canonical));
+    const handle = await opendir(canonical);
     for await (const entry of handle) {
-      const path = join(directory, entry.name);
+      if (scanTruncated) return;
+      const path = join(canonical, entry.name);
       if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         if (EXCLUDED_NAMES.has(entry.name.toLowerCase()) || configured.some((cache) => insideNormalized(path, cache))) continue;
@@ -139,28 +212,28 @@ export async function discoverArtifacts(input: {
         continue;
       }
       if (!entry.isFile()) continue;
-      scannedFiles += 1;
-      if (scannedFiles > limits.maxFiles) throw new ArtifactCatalogError("ARTIFACT_SCAN_LIMIT", "artifact scan exceeded maxFiles", { maxFiles: limits.maxFiles });
-      if (extname(entry.name).toLowerCase() === ".map") {
-        const mapPath = await realpath(path);
-        if (!mapCandidates.includes(mapPath)) mapCandidates.push(mapPath);
-      }
-      const candidate = await probeCandidate(path, limits.maxArtifactBytes);
-      if (!candidate) continue;
-      hashedBytes += candidate.size;
-      if (hashedBytes > limits.maxHashedBytes) throw new ArtifactCatalogError("ARTIFACT_SCAN_LIMIT", "artifact candidate hashing exceeded maxHashedBytes", { maxHashedBytes: limits.maxHashedBytes });
-      candidates.push(candidate);
-      if (candidates.length > limits.maxCandidates) throw new ArtifactCatalogError("ARTIFACT_SCAN_LIMIT", "artifact scan exceeded maxCandidates", { maxCandidates: limits.maxCandidates });
+      await scanFile(path);
     }
   };
+
+  for (const relativeDirectory of COMMON_ARTIFACT_DIRECTORIES) {
+    const directory = resolve(projectRoot, relativeDirectory);
+    try {
+      if ((await stat(directory)).isDirectory()) await walk(directory, 0);
+    } catch { /* absent common output directories are normal */ }
+    if (scanTruncated) break;
+  }
   await walk(projectRoot, 0);
   mapCandidates.sort();
   return {
     projectRoot,
     explicit: false,
-    candidates: candidates.sort(byPath).map((candidate) => pairMapCandidates(candidate, mapCandidates)),
+    configured: false,
+    candidates: candidates.map((candidate) => pairMapCandidates(candidate, mapCandidates)),
     mapCandidates,
     scannedFiles,
+    scanTruncated,
+    ...(reachedBound ? { reachedBound } : {}),
   };
 }
 

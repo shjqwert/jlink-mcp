@@ -1,0 +1,199 @@
+import assert from "node:assert/strict";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import test, { type TestContext } from "node:test";
+import type { ProbeBackend } from "../../probe/backend";
+import { MemorySessionError, MemorySessionManager, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
+import { ProbeQueue } from "./probe-queue";
+import { TargetStore, type StoredTarget } from "./target-store";
+
+test("persistent memory session reuses one native connection and publishes a durable owner", async (context) => {
+  const { target, queue, manager, launcher } = await fixture(context, 10_000);
+  let first!: ProbeBackend | undefined;
+  let second!: ProbeBackend | undefined;
+  await queue.runExclusive(target.probeSerial, async (metadata) => {
+    first = await manager.probeFor(target, metadata);
+    second = await manager.probeFor(target, metadata);
+  });
+
+  assert.equal(first, second);
+  assert.equal(launcher.opens, 1);
+  assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
+  assert.equal(queue.getOwner(target.probeSerial)?.resourcePid, 7001);
+
+  await queue.runExclusive(target.probeSerial, async () => {
+    assert.equal((await manager.closeForTarget(target))?.targetStateBeforeClose, "unknown");
+  }, { allowedOwnerKinds: ["memory"], ownerTarget: { projectRoot: target.projectRoot, targetGeneration: target.generation } });
+  assert.equal(launcher.sessions[0].closeCalls, 1);
+  assert.equal(queue.getOwner(target.probeSerial), undefined);
+});
+
+test("memory startup persists the native PID before helper readiness completes", async (context) => {
+  const { target, queue } = await fixture(context, 10_000);
+  const launcher = new BlockingLauncher(7999);
+  const manager = new MemorySessionManager(queue, launcher, 10_000);
+  const opening = queue.runExclusive(target.probeSerial, async (metadata) => manager.probeFor(target, metadata));
+
+  await waitUntil(() => queue.getOwner(target.probeSerial)?.resourcePid === 7999);
+  assert.deepEqual(queue.getOwner(target.probeSerial)?.details?.runtime, {
+    helperSha256: "a".repeat(64),
+    runtimeSha256: "b".repeat(64),
+  });
+  launcher.finishStart();
+  await opening;
+  assert.equal(queue.getOwner(target.probeSerial)?.resourcePid, 7999);
+});
+
+test("an unproven startup failure retains the resource owner fail-closed", async (context) => {
+  const { target, queue } = await fixture(context, 10_000);
+  const manager = new MemorySessionManager(queue, new UnprovenStartupFailureLauncher(), 10_000);
+
+  await assert.rejects(
+    queue.runExclusive(target.probeSerial, async (metadata) => manager.probeFor(target, metadata)),
+    (error: unknown) => error instanceof MemorySessionError && error.code === "MEMORY_SESSION_STARTUP_EXIT_UNCONFIRMED",
+  );
+  assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
+  assert.equal(queue.getOwner(target.probeSerial)?.resourcePid, 7998);
+});
+
+test("persistent memory session idle timeout releases the Probe for a competing owner", async (context) => {
+  const { target, queue, manager, launcher } = await fixture(context, 10);
+  await queue.runExclusive(target.probeSerial, async (metadata) => {
+    await manager.probeFor(target, metadata);
+  });
+
+  await waitUntil(() => queue.getOwner(target.probeSerial) === undefined);
+  assert.equal(launcher.sessions[0].closeCalls, 1);
+  await queue.runExclusive(target.probeSerial, async (metadata) => {
+    const owner = queue.claimOwner(target.probeSerial, { kind: "gdb", projectRoot: target.projectRoot, targetGeneration: target.generation }, metadata.leaseToken);
+    queue.releaseOwner(target.probeSerial, owner.token);
+  });
+});
+
+test("an indeterminate memory session remains fail-closed and is never reused", async (context) => {
+  const { target, queue, manager, launcher } = await fixture(context, 10_000);
+  await queue.runExclusive(target.probeSerial, async (metadata) => {
+    await manager.probeFor(target, metadata);
+  });
+  launcher.sessions[0].reusable = false;
+  launcher.sessions[0].closeError = new Error("helper exit unconfirmed");
+
+  await assert.rejects(
+    queue.runExclusive(target.probeSerial, async (metadata) => manager.probeFor(target, metadata), {
+      allowedOwnerKinds: ["memory"],
+      ownerTarget: { projectRoot: target.projectRoot, targetGeneration: target.generation },
+    }),
+    /helper exit unconfirmed/,
+  );
+  assert.equal(launcher.opens, 1);
+  assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
+});
+
+test("a different Target cannot tear down a local persistent memory owner", async (context) => {
+  const { target, store, queue, manager, launcher } = await fixture(context, 10_000);
+  await queue.runExclusive(target.probeSerial, async (metadata) => {
+    await manager.probeFor(target, metadata);
+  });
+  const otherProject = join(target.projectRoot, "..", "other-project");
+  mkdirSync(otherProject, { recursive: true });
+  const other = await store.configure({ projectRoot: otherProject, device: "TEST", probeSerial: "654321", interface: "SWD", speed: 1000 });
+
+  await assert.rejects(
+    queue.runExclusive(other.probeSerial, async (metadata) => manager.probeFor(other, metadata)),
+    /MEMORY_SESSION_ACTIVE|local persistent memory session/,
+  );
+  assert.equal(launcher.sessions[0].closeCalls, 0);
+  assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
+});
+
+async function fixture(context: TestContext, idleTimeoutMs: number): Promise<{ target: StoredTarget; store: TargetStore; queue: ProbeQueue; manager: MemorySessionManager; launcher: FakeLauncher }> {
+  const root = join(process.env.TEMP ?? process.cwd(), `jlink-mcp-memory-session-${context.name.replace(/[^a-z0-9]+/gi, "-")}-${process.pid}-${Date.now()}`);
+  mkdirSync(root, { recursive: true });
+  const projectRoot = join(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  const store = new TargetStore(join(root, "state"));
+  const target = await store.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
+  const queue = new ProbeQueue(join(root, "queue"));
+  const launcher = new FakeLauncher();
+  return { target, store, queue, launcher, manager: new MemorySessionManager(queue, launcher, idleTimeoutMs) };
+}
+
+class FakeLauncher implements MemorySessionLauncher {
+  opens = 0;
+  readonly sessions: FakeSession[] = [];
+
+  async open(_target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    const session = new FakeSession(7000 + ++this.opens);
+    this.sessions.push(session);
+    onStarted?.(session.pid, session.runtime);
+    return session;
+  }
+}
+
+class BlockingLauncher implements MemorySessionLauncher {
+  readonly session: FakeSession;
+  private releaseStart?: () => void;
+
+  constructor(pid: number) { this.session = new FakeSession(pid); }
+
+  async open(_target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    onStarted?.(this.session.pid, this.session.runtime);
+    await new Promise<void>((resolveStart) => { this.releaseStart = resolveStart; });
+    return this.session;
+  }
+
+  finishStart(): void { this.releaseStart?.(); }
+}
+
+class UnprovenStartupFailureLauncher implements MemorySessionLauncher {
+  async open(_target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    onStarted?.(7998, startupRuntime());
+    throw new Error("fixture cannot prove child exit");
+  }
+}
+
+class FakeSession implements PersistentMemorySession {
+  readonly probe = {} as ProbeBackend;
+  readonly runtime: MemorySessionRuntimeFacts = {
+    helperPath: "helper.exe",
+    runtimePath: "JLink_x64.dll",
+    helperSha256: "a".repeat(64),
+    runtimeSha256: "b".repeat(64),
+  };
+  closeCalls = 0;
+  reusable = true;
+  closeError?: Error;
+  private alive = true;
+  private readonly listeners = new Set<() => void>();
+
+  constructor(readonly pid: number) {}
+
+  isAlive(): boolean { return this.alive; }
+  isReusable(): boolean { return this.alive && this.reusable; }
+  onExit(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+    if (this.closeError) throw this.closeError;
+    this.alive = false;
+    for (const listener of this.listeners) listener();
+    this.listeners.clear();
+  }
+}
+
+function startupRuntime(): MemorySessionRuntimeFacts {
+  return {
+    helperPath: "helper.exe",
+    runtimePath: "JLink_x64.dll",
+    helperSha256: "a".repeat(64),
+    runtimeSha256: "b".repeat(64),
+  };
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!predicate() && Date.now() < deadline) await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+  assert.equal(predicate(), true, "condition did not become true before timeout");
+}

@@ -52,7 +52,7 @@ test("queued variable reads report the current downgraded Artifact match", async
   assert.match(result.warnings.join("\n"), /ARTIFACT_UNVERIFIED/);
 });
 
-test("variable writes require verified Artifact match and default to no readback", async (context) => {
+test("variable writes require verified Artifact match and default to capture-old plus exact readback", async (context) => {
   const fixture = await createFixture(context, "write-gate");
   const ref = (await fixture.resolver.resolve(fixture.target, "counter")).ref;
   const blocked = await fixture.service.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9 });
@@ -66,8 +66,8 @@ test("variable writes require verified Artifact match and default to no readback
   });
   const written = await fixture.service.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9 });
   assert.equal(written.ok, true);
-  assert.equal(written.verification.status, "executed_unverified");
-  assert.deepEqual(fixture.probe.actions, ["write:20000000:4"]);
+  assert.equal(written.verification.status, "verified");
+  assert.deepEqual(fixture.probe.actions, ["read:20000000:4", "write:20000000:4", "read:20000000:4"]);
 });
 
 test("variable writes map exact, tolerance, masked, and observe comparators", async (context) => {
@@ -85,7 +85,7 @@ test("variable writes map exact, tolerance, masked, and observe comparators", as
       probeSerial: fixture.target.probeSerial,
       artifactGeneration: fixture.target.artifact?.generation,
     });
-    const result = await fixture.service.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9, verify: true, comparator: item.comparator });
+    const result = await fixture.service.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9, captureOld: false, verify: true, comparator: item.comparator });
     assert.equal(result.ok, true, item.name);
     assert.equal(result.verification.method, item.method, item.name);
     assert.deepEqual(fixture.probe.actions, ["write:20000000:4", "read:20000000:4"], item.name);
@@ -141,6 +141,32 @@ test("Hot Variables persist logical references across service restart", async (c
   assert.equal("address" in variables[0], false);
 });
 
+test("logical selectors refresh the internal cache after Artifact generation changes", async (context) => {
+  const fixture = await createFixture(context, "logical-selector-refresh");
+  fixture.probe.memory.set(0x20000000, Buffer.from("78563412", "hex"));
+  const resolved = await fixture.service.symbolResolve(fixture.projectRoot, "counter");
+  assert.equal(resolved.ok, true);
+  assert.equal((resolved.data as { cacheRefreshed: boolean }).cacheRefreshed, true);
+
+  const currentRead = await fixture.service.readVariable(fixture.projectRoot, "counter");
+  assert.equal(currentRead.ok, true);
+  assert.equal((currentRead.data as { cacheRefreshed: boolean }).cacheRefreshed, false);
+
+  writeFileSync(fixture.artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 5, 6, 7, 8]));
+  await fixture.targets.configure({
+    projectRoot: fixture.projectRoot,
+    device: "TEST",
+    probeSerial: "123456",
+    interface: "SWD",
+    speed: 1000,
+    artifactPath: fixture.artifactPath,
+  });
+  const refreshedRead = await fixture.service.readVariable(fixture.projectRoot, "counter");
+  assert.equal(refreshedRead.ok, true, JSON.stringify(refreshedRead.error));
+  assert.equal((refreshedRead.data as { cacheRefreshed: boolean }).cacheRefreshed, true);
+  assert.deepEqual(fixture.probe.actions, ["read:20000000:4", "read:20000000:4"]);
+});
+
 test("non-intrusive variable read failure returns HALT_REQUIRED without halting", async (context) => {
   const fixture = await createFixture(context, "halt-required");
   fixture.probe.readResult = { success: false, rawOutput: "running read unavailable", output: "", error: "running read unavailable", errorCode: ProbeErrorCode.NON_INTRUSIVE_READ_UNAVAILABLE };
@@ -168,6 +194,7 @@ test("DWARF error classification keeps missing members distinct from MAP-only ro
 
 test("artifact_probe returns a structured selection error with bounded candidates", async (context) => {
   const fixture = await createFixture(context, "artifact-selection");
+  writeFileSync(fixture.artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 2, 3, 5]));
   writeFileSync(join(fixture.projectRoot, "one.bin"), Buffer.from([1]));
   writeFileSync(join(fixture.projectRoot, "two.bin"), Buffer.from([2]));
   const result = await fixture.service.artifactProbe({ projectRoot: fixture.projectRoot, maxCandidates: 8 });

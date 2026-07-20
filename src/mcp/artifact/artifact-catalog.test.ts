@@ -48,6 +48,34 @@ test("implicit artifact ambiguity is a structured rejection", async () => {
   );
 });
 
+test("configured Artifacts win first and bounded discovery keeps accumulated priority candidates", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jlink-artifact-priority-"));
+  const debugExe = join(root, "Debug", "Exe");
+  await mkdir(debugExe, { recursive: true });
+  const configuredPath = join(root, "configured.out");
+  const priorityPath = join(debugExe, "priority.out");
+  const remainingPath = join(root, "remaining.out");
+  await writeFile(configuredPath, elfWithDwarfFixture());
+  await writeFile(priorityPath, elfFixture(0x08001000));
+  await writeFile(remainingPath, elfFixture(0x08002000));
+
+  const configuredIdentity = await resolveArtifactGeneration({ projectRoot: root, explicitArtifact: configuredPath });
+  const configured = await discoverArtifacts({
+    projectRoot: root,
+    configuredArtifact: configuredPath,
+    configuredArtifactSha256: configuredIdentity.sha256,
+  });
+  assert.equal(configured.configured, true);
+  assert.equal(configured.scanTruncated, false);
+  assert.deepEqual(configured.candidates.map((candidate) => candidate.path), [configuredPath]);
+
+  const bounded = await discoverArtifacts({ projectRoot: root, maxCandidates: 1 });
+  assert.equal(bounded.configured, false);
+  assert.equal(bounded.scanTruncated, true);
+  assert.equal(bounded.reachedBound, "maxCandidates");
+  assert.deepEqual(bounded.candidates.map((candidate) => candidate.path), [priorityPath]);
+});
+
 test("explicit external inputs are accepted but malformed HEX, SREC, and MAP are rejected", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "jlink-artifact-external-project-"));
   const externalRoot = await mkdtemp(join(tmpdir(), "jlink-artifact-external-pack-"));

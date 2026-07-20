@@ -1,10 +1,12 @@
 import type { CommandResult, ProbeBackend, ProbeMemoryTransactionResult, TargetStateObservation } from "../../probe/backend";
-import { ProbeErrorCode } from "../../probe/backend";
-import { chmodSync, copyFileSync, constants, rmSync } from "node:fs";
+import { ProbeErrorCode, decodeFaultRegisters } from "../../probe/backend";
+import { chmodSync, copyFileSync, constants, readFileSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
 import { createRepoTempDir } from "../preflight/temp-preflight";
+import { parseElfFlashSegments } from "../../gdb/elf-resolver";
 import type { QueueMetadata } from "./probe-queue";
 import { ProbeQueue, ProbeQueueError } from "./probe-queue";
+import { MemorySessionError, MemorySessionManager, persistentMemorySessionEvidence } from "./memory-session";
 import {
   createOperationEnvelope,
   executionError,
@@ -65,6 +67,7 @@ export interface StructuredMemoryWriteInput extends MemoryReadInput {
   captureOld?: boolean;
   verify?: boolean;
   restore?: boolean;
+  verificationConnection?: "same_session" | "independent_session";
   comparator?: ScalarComparator;
   knownRegion: "ram" | "peripheral";
   rmw?: { mask: number; value: number; endian: HssTargetEndian };
@@ -97,6 +100,13 @@ export interface FlashInput {
 
 export type FlashSnapshotCleanup = (snapshotRoot: string) => Promise<Error | undefined>;
 
+interface DirectQueueOptions {
+  persistentMemorySession?: boolean;
+  requirePersistentMemorySession?: boolean;
+  verificationConnection?: "same_session" | "independent_session";
+  verificationRequested?: boolean;
+}
+
 export interface FlashSnapshotCleanupOptions {
   remove?: (snapshotRoot: string) => void;
   retryDelaysMs?: readonly number[];
@@ -108,20 +118,29 @@ export class DirectMcuService {
     readonly queue: ProbeQueue,
     private readonly runtimeFor: DirectRuntimeProvider,
     private readonly cleanupFlashSnapshot: FlashSnapshotCleanup = removeFlashSnapshotDirectory,
+    private readonly memorySessions?: MemorySessionManager,
   ) {}
 
   async configure(input: TargetConfigureInput): Promise<OperationEnvelope> {
     const envelope = createOperationEnvelope("target_configure");
+    let previous: StoredTarget | undefined;
     try {
-      const previous = this.targets.get(input.projectRoot);
-      const serialized = previous
-        ? await this.queue.runExclusive(previous.probeSerial, async () => {
-          const currentPrevious = this.targets.require(previous.projectRoot);
-          if (currentPrevious.generation !== previous.generation || currentPrevious.probeSerial !== previous.probeSerial) {
+      const previousTarget = this.targets.get(input.projectRoot);
+      previous = previousTarget;
+      const localMemoryOwner = previousTarget ? this.memorySessions?.localOwnerForTarget(previousTarget) : undefined;
+      const serialized = previousTarget
+        ? await this.queue.runExclusive(previousTarget.probeSerial, async () => {
+          const currentPrevious = this.targets.require(previousTarget.projectRoot);
+          if (currentPrevious.generation !== previousTarget.generation || currentPrevious.probeSerial !== previousTarget.probeSerial) {
             throw new TargetStoreError("TARGET_GENERATION_CHANGED", "Target configuration changed while target_configure waited for the Probe queue; retry against the current generation");
           }
-          return this.targets.configure(input, previous.generation);
-        })
+          await this.memorySessions?.closeForTarget(currentPrevious);
+          return this.targets.configure(input, previousTarget.generation);
+        }, localMemoryOwner ? {
+          allowedOwnerKinds: ["memory" as const],
+          ownerTarget: { projectRoot: previousTarget.projectRoot, targetGeneration: previousTarget.generation },
+          requiredOwner: localMemoryOwner,
+        } : {})
         : undefined;
       const target = serialized?.value ?? await this.targets.configure(input, null);
       const configured = createOperationEnvelope("target_configure", target);
@@ -245,7 +264,7 @@ export class DirectMcuService {
       }
       if (readFailure) throw readFailure;
       envelope.verification = { status: "observed", method: "probe_read" };
-    });
+    }, { persistentMemorySession: true });
   }
 
   structuredReadBatch(input: StructuredMemoryReadBatchInput): Promise<OperationEnvelope> {
@@ -296,7 +315,7 @@ export class DirectMcuService {
       if (after.state !== before.state) throw executionError("HIDDEN_STATE_CHANGE", "final_observation", "structured reads changed target run state", { stateUnknown: false });
       if (readFailure) throw readFailure;
       envelope.verification = { status: "observed", method: "probe_read_batch" };
-    });
+    }, { persistentMemorySession: true });
   }
 
   writeMemory(input: MemoryWriteInput): Promise<OperationEnvelope> {
@@ -468,7 +487,7 @@ export class DirectMcuService {
       if (before.state !== after.state) {
         throw executionError("HIDDEN_STATE_CHANGE", "final_observation", `memory write changed target state from ${before.state} to ${after.state}`, { writeIssued: true, stateUnknown: false });
       }
-    });
+    }, { persistentMemorySession: true });
   }
 
   structuredWrite(input: StructuredMemoryWriteInput): Promise<OperationEnvelope> {
@@ -479,6 +498,8 @@ export class DirectMcuService {
       requested = parseWriteBytes(input.dataHex, input.byteCount, input.width);
       validateStructuredComparator(input.comparator ?? { mode: "exact" }, input.byteCount, requested);
       if (input.restore && !input.captureOld) input = { ...input, captureOld: true };
+      if (input.verificationConnection === "independent_session" && !input.verify) throw executionError("VERIFICATION_CONNECTION_INVALID", "validation", "independent-session verification requires verify=true");
+      if (input.verificationConnection === "independent_session" && input.restore) throw executionError("VERIFICATION_CONNECTION_INVALID", "validation", "independent-session verification cannot be combined with restore");
       if (input.rmw && input.byteCount !== input.width / 8) throw executionError("RMW_WIDTH_INVALID", "validation", "read-modify-write requires exactly one declared-width register");
     } catch (error) {
       return Promise.resolve(this.failure(createOperationEnvelope(tool), error, "validation"));
@@ -584,9 +605,26 @@ export class DirectMcuService {
       let readback: Buffer | undefined;
       let verificationDetails: Record<string, unknown> | undefined;
       let verificationError: OperationExecutionError | undefined;
+      let finalProbe = runtime.probe;
+      let memorySessionClose: Record<string, unknown> | undefined;
       if (!mainError && input.verify) {
         try {
-          const result = await verifyStructuredValue(runtime.probe, input.address, input.byteCount, accessSize, requested, input.comparator ?? { mode: "exact" });
+          if (input.verificationConnection === "independent_session") {
+            const closed = await this.memorySessions?.closeForTarget(target);
+            const independentRuntime = await this.runtimeFor(target);
+            const targetStateAfterReconnect = await observe(independentRuntime.probe);
+            finalProbe = independentRuntime.probe;
+            if (closed) {
+              memorySessionClose = { targetStateBeforeClose: closed.targetStateBeforeClose, targetStateAfterReconnect: targetStateAfterReconnect.state };
+              if (closed.targetStateBeforeClose === "unknown" || targetStateAfterReconnect.state === "unknown") {
+                throw executionError("POST_OPERATION_STATE_UNKNOWN", "memory_session_close", "memory-session close could not prove the target state before independent verification", { writeIssued: true, stateUnknown: true });
+              }
+              if (closed.targetStateBeforeClose !== targetStateAfterReconnect.state) {
+                throw executionError("HIDDEN_STATE_CHANGE", "memory_session_close", `memory-session close changed target state from ${closed.targetStateBeforeClose} to ${targetStateAfterReconnect.state}`, { writeIssued: true, stateUnknown: false });
+              }
+            }
+          }
+          const result = await verifyStructuredValue(finalProbe, input.address, input.byteCount, accessSize, requested, input.comparator ?? { mode: "exact" });
           readback = result.readback;
           verificationDetails = result.details;
           if (!result.pass) verificationError = executionError("READBACK_MISMATCH", "verification", "structured readback did not satisfy the requested comparator", { writeIssued: true });
@@ -627,6 +665,7 @@ export class DirectMcuService {
         command,
         comparator: input.verify ? input.comparator ?? { mode: "exact" } : undefined,
         verificationDetails,
+        ...(memorySessionClose ? { memorySessionClose } : {}),
         restore: input.restore ? {
           requestedHex: old?.toString("hex"),
           readbackHex: restoreReadback?.toString("hex"),
@@ -645,8 +684,21 @@ export class DirectMcuService {
 
       let after: TargetStateObservation;
       try {
-        after = await observe(runtime.probe);
+        after = await observe(finalProbe);
       } catch (error) {
+        if (!writeIssued) {
+          if (error instanceof OperationExecutionError) {
+            throw executionError(error.detail.code, error.detail.stage, error.detail.message, {
+              retryable: error.detail.retryable,
+              writeIssued: false,
+              stateUnknown: error.detail.stateUnknown || mainError?.detail.stateUnknown === true,
+            });
+          }
+          throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target-state observation failed after structured write", {
+            writeIssued: false,
+            stateUnknown: true,
+          });
+        }
         throw normalizePostWriteError(error, "POST_OPERATION_STATE_UNKNOWN", "final_observation", "target-state observation failed after structured write", writeIssued);
       }
       envelope.after = observationData(after);
@@ -657,10 +709,15 @@ export class DirectMcuService {
           stateUnknown: Boolean(restoreError?.detail.stateUnknown || mainError?.detail.stateUnknown),
         });
       }
-      if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured write", { writeIssued, stateUnknown: writeIssued });
+      if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured write", { writeIssued, stateUnknown: true });
       if (restoreError) throw restoreError;
       if (mainError) throw mainError;
       if (verificationError) throw verificationError;
+    }, {
+      persistentMemorySession: true,
+      requirePersistentMemorySession: tool === "write_variable" && (input.verificationConnection ?? "same_session") === "same_session",
+      verificationConnection: input.verificationConnection ?? "same_session",
+      verificationRequested: Boolean(input.verify),
     });
   }
 
@@ -728,6 +785,57 @@ export class DirectMcuService {
       const expected = [...Array.from({ length: 13 }, (_, index) => `R${index}`), "SP", "LR", "PC", "XPSR", "CONTROL", "PRIMASK", "BASEPRI", "FAULTMASK", "MSP", "PSP"];
       envelope.data = { registers, omitted: expected.filter((register) => registers[register] === undefined), command: commandData(completed) };
       envelope.verification = { status: "observed", method: "probe_register_read" };
+    });
+  }
+
+  diagnoseCrash(projectRoot: string): Promise<OperationEnvelope> {
+    return this.queued("diagnose_crash", projectRoot, [], async (envelope, target, runtime) => {
+      const before = await observe(runtime.probe);
+      envelope.before = observationData(before);
+      if (before.state === "running") {
+        envelope.data = {
+          targetExecutionState: before.state,
+          diagnosis: { status: "partial", architecture: "cortex_m_unconfirmed", frameStatus: "not_collected", backtrace: { status: "unavailable", prerequisite: "target must already be halted" } },
+        };
+        throw executionError("HALT_REQUIRED", "precondition", "crash diagnosis requires an already halted target");
+      }
+      if (before.state === "unknown") {
+        throw executionError("TARGET_STATE_UNKNOWN", "precondition", "target state is unknown before crash diagnosis; no register or memory read was issued", { stateUnknown: true });
+      }
+
+      let registerCommand: CommandResult | undefined;
+      try { registerCommand = await runtime.probe.readAllRegisters(); }
+      catch (error) { throw unexpectedReadError(error, "core-register collection backend rejected"); }
+      if (!registerCommand.success) throw coreReadError(registerCommand);
+      const registers = runtime.probe.parseRegisters(registerCommand.rawOutput || registerCommand.output) ?? {};
+      const faultBytes = await readExact(runtime.probe, 0xE000ED04, 60, 4, "fault_register_read");
+      const fault = cortexMFaultSnapshot(faultBytes);
+      const frame = await cortexMExceptionFrame(runtime.probe, target, registers);
+      const addresses = distinctNumbers([
+        registerNumber(registers.PC),
+        registerNumber(registers.LR),
+        registerNumber(frame.stacked?.pc),
+        registerNumber(fault.raw.MMFAR),
+        registerNumber(fault.raw.BFAR),
+      ]);
+      const artifactMapping = mapArtifactAddresses(target, addresses);
+
+      envelope.data = {
+        targetExecutionState: "halted",
+        architecture: "cortex_m",
+        coreRegisters: { registers, command: commandData(registerCommand) },
+        faultRegisters: fault,
+        frame,
+        artifactMapping,
+        backtrace: { status: "unavailable", prerequisite: "open and halt an explicit managed GDB session before requesting its backtrace" },
+      };
+      let after: TargetStateObservation;
+      try { after = await observe(runtime.probe); }
+      catch (error) { throw unexpectedReadObservationError(error, "crash diagnosis"); }
+      envelope.after = observationData(after);
+      if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after crash diagnosis", { stateUnknown: true });
+      if (after.state !== before.state) throw executionError("HIDDEN_STATE_CHANGE", "final_observation", `crash diagnosis changed target state from ${before.state} to ${after.state}`);
+      envelope.verification = { status: "observed", method: "halted_core_fault_stack_and_artifact_evidence" };
     });
   }
 
@@ -983,10 +1091,11 @@ export class DirectMcuService {
     projectRoot: string,
     requestedEffects: string[],
     operation: (envelope: OperationEnvelope, target: StoredTarget, runtime: DirectTargetRuntime) => Promise<void>,
+    options: DirectQueueOptions = {},
   ): Promise<OperationEnvelope> {
     let target: StoredTarget;
     try { target = this.targets.require(projectRoot); } catch (error) { return Promise.resolve(this.failure(createOperationEnvelope(tool), error, "target_lookup")); }
-    return this.queuedWithTarget(tool, target, requestedEffects, operation);
+    return this.queuedWithTarget(tool, target, requestedEffects, operation, options);
   }
 
   private async queuedWithTarget(
@@ -994,19 +1103,48 @@ export class DirectMcuService {
     target: StoredTarget,
     requestedEffects: string[],
     operation: (envelope: OperationEnvelope, target: StoredTarget, runtime: DirectTargetRuntime) => Promise<void>,
+    options: DirectQueueOptions = {},
   ): Promise<OperationEnvelope> {
     const envelope = createOperationEnvelope(tool, target);
     envelope.requestedEffects = requestedEffects;
     let activeMetadata: QueueMetadata | undefined;
     let activeTarget: StoredTarget | undefined;
     try {
+      const localMemoryOwner = this.memorySessions?.localOwnerForTarget(target);
       const execution = await this.queue.runExclusive(target.probeSerial, async (metadata) => {
         activeMetadata = metadata;
         applyQueueMetadata(envelope, metadata);
         const current = this.targets.requireCurrent(target);
         activeTarget = current;
         refreshArtifact(envelope, current);
-        await operation(envelope, current, await this.runtimeFor(current));
+        const memoryClose = options.persistentMemorySession ? undefined : await this.memorySessions?.closeForTarget(current);
+        const persistentProbe = options.persistentMemorySession ? await this.memorySessions?.probeFor(current, metadata) : undefined;
+        if (options.requirePersistentMemorySession && this.memorySessions && !persistentProbe) {
+          throw new MemorySessionError("SAME_SESSION_UNAVAILABLE", "write_variable requires a validated persistent memory session for same-session verification", true, false);
+        }
+        const runtime = persistentProbe ? { probe: persistentProbe } : await this.runtimeFor(current);
+        let memorySessionClose: Record<string, unknown> | undefined;
+        try {
+          if (memoryClose) {
+            const afterClose = await observe(runtime.probe);
+            memorySessionClose = { targetStateBeforeClose: memoryClose.targetStateBeforeClose, targetStateAfterReconnect: afterClose.state };
+            if (memoryClose.targetStateBeforeClose === "unknown" || afterClose.state === "unknown") {
+              throw executionError("POST_OPERATION_STATE_UNKNOWN", "memory_session_close", "memory-session close could not prove the target state before the competing operation", { stateUnknown: true });
+            }
+            if (memoryClose.targetStateBeforeClose !== afterClose.state) {
+              throw executionError("HIDDEN_STATE_CHANGE", "memory_session_close", `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${afterClose.state}`, { stateUnknown: false });
+            }
+          }
+          await operation(envelope, current, runtime);
+        } finally {
+          if (memorySessionClose) {
+            envelope.data = {
+              ...(envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {}),
+              memorySessionClose,
+            };
+          }
+          if (options.persistentMemorySession) this.annotateMemorySession(envelope, tool, persistentProbe, options.verificationConnection, options.verificationRequested);
+        }
         const completed = this.targets.requireCurrent(current);
         refreshArtifact(envelope, completed);
         if (observationInvalidatesConnectionEvidence(envelope)) {
@@ -1015,7 +1153,11 @@ export class DirectMcuService {
           refreshArtifact(envelope, updated);
           envelope.warnings.push("Live Artifact verification was invalidated because a state observation lost Probe/Target identity.");
         }
-      });
+      }, localMemoryOwner ? {
+        allowedOwnerKinds: ["memory"],
+        ownerTarget: { projectRoot: target.projectRoot, targetGeneration: target.generation },
+        requiredOwner: localMemoryOwner,
+      } : {});
       envelope.timestamps.endedAt = execution.endedAt;
       return finishEnvelope(envelope, true);
     } catch (error) {
@@ -1048,8 +1190,38 @@ export class DirectMcuService {
   private failure(envelope: OperationEnvelope, error: unknown, stage: string): OperationEnvelope {
     if (error instanceof OperationExecutionError) return failEnvelope(envelope, error.detail);
     if (error instanceof TargetStoreError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: false, writeIssued: false, stateUnknown: false });
-    if (error instanceof ProbeQueueError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.code.endsWith("_ACTIVE") || error.code.includes("BUSY"), writeIssued: false, stateUnknown: false });
+    if (error instanceof ProbeQueueError) {
+      attachQueueOwner(envelope, error);
+      const code = queueFailureCode(error);
+      return failEnvelope(envelope, { code, stage, message: error.message, retryable: code.endsWith("_ACTIVE") || error.code.includes("BUSY"), writeIssued: false, stateUnknown: false });
+    }
+    if (error instanceof MemorySessionError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
     return failEnvelope(envelope, { code: "INTERNAL_ERROR", stage, message: error instanceof Error ? error.message : String(error), retryable: false, writeIssued: false, stateUnknown: false });
+  }
+
+  private annotateMemorySession(
+    envelope: OperationEnvelope,
+    tool: string,
+    probe: ProbeBackend | undefined,
+    verificationConnection: "same_session" | "independent_session" = "same_session",
+    verificationRequested = false,
+  ): void {
+    const data = envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data)
+      ? envelope.data as Record<string, unknown>
+      : {};
+    const session = probe ? persistentMemorySessionEvidence(probe) : undefined;
+    if (session) data.memorySession = session;
+    if (tool === "write_variable") {
+      const actualConnection = session ? verificationConnection : verificationConnection === "same_session" ? "per_operation_backend" : verificationConnection;
+      data.verificationConnection = actualConnection;
+      data.verificationSource = verificationRequested
+        ? actualConnection === "independent_session" ? "independent_session_readback"
+          : actualConnection === "same_session" ? "same_session_readback"
+            : "per_operation_backend_readback"
+        : "not_requested";
+      data.targetConsumption = "not_observed";
+    }
+    envelope.data = data;
   }
 
   private async transitionArtifact(target: StoredTarget, status: "unverified" | "verified" | "mismatch", source: string, writeIssued: boolean): Promise<StoredTarget> {
@@ -1065,6 +1237,19 @@ export class DirectMcuService {
       throw executionError(code, "artifact_state", message, { writeIssued, stateUnknown: writeIssued });
     }
   }
+}
+
+function queueFailureCode(error: ProbeQueueError): string {
+  return error.code === "OWNER_CHANGED" && error.owner?.kind === "memory" ? "MEMORY_SESSION_ACTIVE" : error.code;
+}
+
+function attachQueueOwner(envelope: OperationEnvelope, error: ProbeQueueError): void {
+  if (!error.owner) return;
+  if (envelope.probe) envelope.probe.owner = error.owner;
+  const before = envelope.before && typeof envelope.before === "object" && !Array.isArray(envelope.before)
+    ? envelope.before as Record<string, unknown>
+    : {};
+  envelope.before = { ...before, owner: error.owner };
 }
 
 async function applyRawMemoryTransaction(
@@ -1661,6 +1846,147 @@ function validateCoreRegister(name: string): void {
   if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
     throw executionError("INVALID_CORE_REGISTER", "validation", "name must identify a supported CPU-core register, not an SVD peripheral register");
   }
+}
+
+function cortexMFaultSnapshot(bytes: Buffer): {
+  raw: Record<string, string>;
+  decoded: Record<string, unknown>;
+} {
+  if (bytes.length < 60) throw executionError("READ_LENGTH_MISMATCH", "fault_register_read", "Cortex-M fault register block is incomplete");
+  const rawValues = {
+    icsr: bytes.readUInt32LE(0),
+    shcsr: bytes.readUInt32LE(32),
+    cfsr: bytes.readUInt32LE(36),
+    hfsr: bytes.readUInt32LE(40),
+    dfsr: bytes.readUInt32LE(44),
+    mmfar: bytes.readUInt32LE(48),
+    bfar: bytes.readUInt32LE(52),
+    afsr: bytes.readUInt32LE(56),
+  };
+  return {
+    raw: Object.fromEntries(Object.entries(rawValues).map(([name, value]) => [name.toUpperCase(), hex32(value)])),
+    decoded: {
+      cfsrHfsr: decodeFaultRegisters(rawValues.cfsr, rawValues.hfsr, rawValues.mmfar, rawValues.bfar),
+      dfsr: namedBits(rawValues.dfsr, {
+        HALTED: 1 << 0,
+        BKPT: 1 << 1,
+        DWTTRAP: 1 << 2,
+        VCATCH: 1 << 3,
+        EXTERNAL: 1 << 4,
+      }),
+      shcsr: namedBits(rawValues.shcsr, {
+        MEMFAULTACT: 1 << 0,
+        BUSFAULTACT: 1 << 1,
+        USGFAULTACT: 1 << 3,
+        SVCALLACT: 1 << 7,
+        MONITORACT: 1 << 8,
+        PENDSVACT: 1 << 10,
+        SYSTICKACT: 1 << 11,
+        USGFAULTENA: 1 << 18,
+        BUSFAULTENA: 1 << 17,
+        MEMFAULTENA: 1 << 16,
+      }),
+      icsr: {
+        vectActive: rawValues.icsr & 0x1ff,
+        vectPending: (rawValues.icsr >>> 12) & 0x1ff,
+        retToBase: (rawValues.icsr & (1 << 11)) !== 0,
+        isrPending: (rawValues.icsr & (1 << 22)) !== 0,
+        pendstSet: (rawValues.icsr & (1 << 26)) !== 0,
+        pendsvSet: (rawValues.icsr & (1 << 28)) !== 0,
+        nmipendSet: (rawValues.icsr & (1 << 31)) !== 0,
+      },
+      afsr: rawValues.afsr === 0 ? [] : ["implementation_defined_auxiliary_fault"],
+    },
+  };
+}
+
+async function cortexMExceptionFrame(
+  probe: ProbeBackend,
+  target: StoredTarget,
+  registers: Record<string, string>,
+): Promise<{
+  status: "verified" | "unverified";
+  excReturn?: string;
+  stackPointer?: { register: "MSP" | "PSP"; value: string };
+  stacked?: Record<string, string>;
+  reason?: string;
+}> {
+  const lr = registerNumber(registers.LR);
+  if (lr === undefined || (lr >>> 8) !== 0x00ffffff || (lr & 1) === 0) {
+    return { status: "unverified", reason: "LR does not provide a provable Cortex-M EXC_RETURN value" };
+  }
+  const register = (lr & 4) === 0 ? "MSP" : "PSP";
+  const stackPointer = registerNumber(registers[register]);
+  if (stackPointer === undefined || stackPointer % 4 !== 0) {
+    return { status: "unverified", excReturn: hex32(lr), reason: `${register} is unavailable or not word aligned` };
+  }
+  const ram = target.memoryRegions.filter((region) => region.kind === "ram");
+  if (!ram.some((region) => stackPointer >= region.start && stackPointer + 32 <= region.start + region.length)) {
+    return {
+      status: "unverified",
+      excReturn: hex32(lr),
+      stackPointer: { register, value: hex32(stackPointer) },
+      reason: "exception frame is outside configured RAM bounds",
+    };
+  }
+  const bytes = await readExact(probe, stackPointer, 32, 4, "exception_frame_read");
+  const stackedValues = ["r0", "r1", "r2", "r3", "r12", "lr", "pc", "xpsr"].map((name, index) => [name, bytes.readUInt32LE(index * 4)] as const);
+  const xpsr = stackedValues[7][1];
+  const stacked = Object.fromEntries(stackedValues.map(([name, value]) => [name, hex32(value)]));
+  if ((xpsr & (1 << 24)) === 0) {
+    return {
+      status: "unverified",
+      excReturn: hex32(lr),
+      stackPointer: { register, value: hex32(stackPointer) },
+      stacked,
+      reason: "stacked xPSR does not prove Thumb-state exception-frame layout",
+    };
+  }
+  return { status: "verified", excReturn: hex32(lr), stackPointer: { register, value: hex32(stackPointer) }, stacked };
+}
+
+function mapArtifactAddresses(target: StoredTarget, addresses: number[]): { status: "mapped" | "unavailable"; addresses: Array<Record<string, unknown>>; reason?: string } {
+  if (!target.artifact) return { status: "unavailable", addresses: [], reason: "no configured Artifact" };
+  try {
+    const ramRanges = target.memoryRegions.filter((region) => region.kind === "ram").map((region) => ({ start: region.start, end: region.start + region.length }));
+    const segments = parseElfFlashSegments(readFileSync(target.artifact.path), ramRanges);
+    return {
+      status: "mapped",
+      addresses: addresses.map((address) => {
+        const normalized = address & 0xffff_fffe;
+        const segment = segments.find((candidate) => normalized >= candidate.start && normalized < candidate.end);
+        return {
+          address: hex32(address),
+          artifactSegment: segment ? { name: segment.name, offset: normalized - segment.start, flags: segment.flags } : null,
+        };
+      }),
+    };
+  } catch (error) {
+    return { status: "unavailable", addresses: addresses.map((address) => ({ address: hex32(address), artifactSegment: null })), reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function registerNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim();
+  const parsed = /^0x[0-9a-f]+$/i.test(normalized)
+    ? Number.parseInt(normalized.slice(2), 16)
+    : /^[0-9a-f]+$/i.test(normalized)
+      ? Number.parseInt(normalized, 16)
+      : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 0xffff_ffff ? parsed >>> 0 : undefined;
+}
+
+function namedBits(value: number, names: Record<string, number>): string[] {
+  return Object.entries(names).filter(([, mask]) => (value & mask) !== 0).map(([name]) => name);
+}
+
+function distinctNumbers(values: Array<number | undefined>): number[] {
+  return [...new Set(values.filter((value): value is number => value !== undefined))];
+}
+
+function hex32(value: number): string {
+  return `0x${(value >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 function parseRegisterValue(result: CommandResult, name: string): number {

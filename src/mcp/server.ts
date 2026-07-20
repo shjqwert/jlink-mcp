@@ -13,9 +13,10 @@ import { ArtifactVariableService, type VariableRefInput, type VariableWriteInput
 import { SvdRegisterService, type RegisterWriteInput } from "./runtime/svd-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./runtime/operation-envelope";
 import { ProbeQueue } from "./runtime/probe-queue";
+import { MemorySessionManager } from "./runtime/memory-session";
 import { SessionOperations } from "./runtime/session-operations";
 import { TargetRuntimeRegistry } from "./runtime/target-runtime";
-import { TargetStore, type TargetConfigureInput } from "./runtime/target-store";
+import { TargetStore, type StoredTarget, type TargetConfigureInput } from "./runtime/target-store";
 import { HssOperations, type HssCaptureInput } from "./runtime/hss-operations";
 
 export interface JLinkMcpServerOptions {
@@ -27,13 +28,14 @@ export interface JLinkMcpServerOptions {
 
 export const AGENT_TOOL_NAMES = [
   "list_devices", "target_configure", "target_status",
-  "artifact_probe", "symbol_search", "symbol_resolve", "hot_variable_add", "hot_variable_list", "hot_variable_refresh", "read_variable", "write_variable",
-  "read_core_register", "read_core_registers", "write_core_register", "read_register", "read_registers", "write_register",
-  "halt", "resume", "reset", "reset_halt", "read_memory", "write_memory", "flash", "erase", "gdb_command", "probe_command",
-  "hss_capability", "hss_plan", "hss_start", "hss_status", "hss_stop", "hss_recover",
-  "capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_index_rebuild", "capture_export_csv",
-  "snapshot", "diagnose_crash", "gdb_server_start", "gdb_server_stop", "gdb_server_status", "gdb_connect", "gdb_wait", "gdb_backtrace", "gdb_disconnect",
-  "rtt_connect", "rtt_disconnect", "rtt_read", "rtt_search", "rtt_clear", "rtt_channel_list", "rtt_channel_read", "analysis_profiles", "analysis_run",
+  "artifact_probe", "symbol_search", "symbol_resolve",
+  "read_variable", "write_variable", "read_memory", "write_memory", "core_register_access", "peripheral_register_access",
+  "target_control", "flash", "erase",
+  "hss_start", "hss_status", "hss_stop", "hss_recover",
+  "capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_export_csv",
+  "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
+  "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close",
+  "diagnose_crash", "probe_command",
 ] as const;
 
 type AgentToolName = typeof AGENT_TOOL_NAMES[number];
@@ -72,29 +74,15 @@ const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   artifact_probe: "Discover and classify bounded Artifact, MAP, and flash-image candidates.",
   symbol_search: "Search the configured Artifact symbol catalog.",
   symbol_resolve: "Resolve one supported typed variable selector.",
-  hot_variable_add: "Persist a logical Hot Variable for the current Artifact generation.",
-  hot_variable_list: "List project Hot Variables and stale state.",
-  hot_variable_refresh: "Refresh only selected stale Hot Variables.",
   read_variable: "Read one typed variable without implicit target-state changes.",
   write_variable: "Write one typed variable with optional old-value, verification, and restore steps.",
-  read_core_register: "Read one CPU-core register without implicit halt.",
-  read_core_registers: "Read available CPU-core registers without implicit halt.",
-  write_core_register: "Write one CPU-core register with optional verification.",
-  read_register: "Read one SVD peripheral register or field.",
-  read_registers: "Read a bounded list of SVD peripheral registers or fields.",
-  write_register: "Write one safe SVD peripheral register or field with optional verification.",
-  halt: "Explicitly halt the configured target.",
-  resume: "Explicitly resume the configured target.",
-  reset: "Explicitly reset the configured target and leave it running.",
-  reset_halt: "Explicitly reset the configured target and leave it halted.",
   read_memory: "Read a bounded explicit target memory range.",
   write_memory: "Write a bounded explicit target memory range with optional verification.",
+  core_register_access: "Read, list, or write bounded CPU-core registers without implicit target control.",
+  peripheral_register_access: "Read or safely write bounded SVD peripheral register selectors.",
+  target_control: "Explicitly halt, resume, reset, or reset-and-halt the configured target.",
   flash: "Program and verify an explicit HEX, SREC, or addressed BIN image.",
   erase: "Erase target flash with optional explicit blank verification.",
-  gdb_command: "Execute one exact raw GDB command and report unknown effects.",
-  probe_command: "Execute exact raw J-Link Commander commands and report unknown effects.",
-  hss_capability: "Report actual J-Link HSS runtime and acquisition limits.",
-  hss_plan: "Validate and calculate an HSS capture without granting execution authority.",
   hss_start: "Start a directly specified J-Link HSS capture.",
   hss_status: "Report an HSS capture lifecycle and quality counters.",
   hss_stop: "Stop an active HSS capture and finalize available data.",
@@ -103,39 +91,26 @@ const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   capture_summary: "Return bounded provenance, lifecycle, variables, quality, and counts for a capture.",
   capture_series: "Return bounded aggregate time-series buckets for selected variables and ticks.",
   capture_event_window: "Return one event and bounded neighboring series data.",
-  capture_index_rebuild: "Atomically rebuild a derived capture DB from authoritative metadata and Raw files.",
   capture_export_csv: "Explicitly export a bounded CSV outside the JCAP package.",
-  snapshot: "Collect available target state without implicit halt or recovery.",
-  diagnose_crash: "Collect available crash evidence without implicit halt or recovery.",
-  gdb_server_start: "Explicitly start J-Link GDB Server as the Probe owner.",
-  gdb_server_stop: "Explicitly stop the owned J-Link GDB Server.",
-  gdb_server_status: "Report J-Link GDB Server ownership and process state.",
-  gdb_connect: "Connect the GDB client to an explicitly started server.",
+  gdb_open: "Start one managed GDB Server and client using the current Artifact as symbols.",
+  gdb_command: "Execute one exact raw GDB command and report unknown effects.",
   gdb_wait: "Wait for an already issued GDB run or step to stop.",
   gdb_backtrace: "Read a backtrace when the target state permits it.",
-  gdb_disconnect: "Disconnect the GDB client without stopping the server.",
-  rtt_connect: "Connect to an existing explicit RTT endpoint.",
-  rtt_disconnect: "Disconnect the RTT client.",
+  gdb_close: "Disconnect the managed GDB client and stop its server without target control.",
+  rtt_open: "Connect to an explicitly available existing RTT endpoint.",
   rtt_read: "Read bounded buffered RTT output.",
   rtt_search: "Search bounded buffered RTT output.",
   rtt_clear: "Clear only the local RTT buffer.",
-  rtt_channel_list: "List channels from a caller-provided RTT control-block snapshot.",
-  rtt_channel_read: "Read one caller-provided RTT up-channel ring snapshot.",
-  analysis_profiles: "List deterministic bounded capture-analysis profiles.",
-  analysis_run: "Run deterministic bounded analysis against one saved capture.",
+  rtt_close: "Close only the managed RTT client.",
+  diagnose_crash: "Collect bounded, no-hidden-side-effect Cortex-M crash evidence from an already halted target.",
+  probe_command: "Execute exact raw J-Link Commander commands and report unknown effects.",
 };
 
 const projectRootInput = { projectRoot: z.string().min(1).describe("Existing absolute project root configured by target_configure") };
 const acceptanceRunId = z.string().refine(isValidAcceptanceRunId, "runId must be a bounded immutable non-reserved directory name");
 const uint32 = z.number().int().min(0).max(0xffff_ffff);
 const accessWidth = z.union([z.literal(8), z.literal(16), z.literal(32)]);
-const scalarType = z.enum(["int8", "uint8", "int16", "uint16", "int32", "uint32", "float32"]);
-const variableRef = z.object({
-  artifactGeneration: z.string().regex(/^[0-9a-f]{64}$/i),
-  qualifiedName: z.string().min(1).max(1024),
-  memberPath: z.string().min(1).max(1024).optional(),
-  layoutHash: z.string().regex(/^[0-9a-f]{64}$/i),
-});
+const variableRef = z.string().min(1).max(1024).describe("Logical typed symbol selector; the server re-resolves it against the current Artifact generation");
 const variableNonObserveComparator = z.union([
   z.object({ mode: z.literal("exact") }),
   z.object({ mode: z.literal("tolerance"), absTolerance: z.number().nonnegative(), relTolerance: z.number().nonnegative() }),
@@ -151,17 +126,6 @@ const variableComparator = z.union([
     comparator: variableNonObserveComparator,
   }),
 ]);
-const channel = z.object({
-  index: z.number().int().min(0),
-  name: z.string().optional(),
-  direction: z.enum(["up", "down"]),
-  size: z.number().int().positive().optional(),
-});
-const channelSnapshot = z.object({
-  controlBlockAddress: z.string().optional(),
-  upChannels: z.array(channel).max(64),
-  downChannels: z.array(channel).max(64),
-});
 
 export class JLinkMcpServer {
   private readonly server: McpServer;
@@ -169,6 +133,7 @@ export class JLinkMcpServer {
   private readonly discoveryProbe: ProbeBackend;
   private readonly targets: TargetStore;
   private readonly queue: ProbeQueue;
+  private readonly memorySessions: MemorySessionManager;
   private readonly runtimes = new TargetRuntimeRegistry();
   private readonly direct: DirectMcuService;
   private readonly artifacts: ArtifactVariableService;
@@ -185,10 +150,11 @@ export class JLinkMcpServer {
     const evidenceRoot = options.evidenceRoot ?? join(cwd, "test-output");
     this.targets = new TargetStore(stateRoot);
     this.queue = new ProbeQueue(options.queueRoot);
-    this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target));
+    this.memorySessions = new MemorySessionManager(this.queue);
+    this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target), undefined, this.memorySessions);
     this.artifacts = new ArtifactVariableService(this.targets, this.direct, stateRoot);
     this.registers = new SvdRegisterService(this.targets, this.direct);
-    this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target));
+    this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target), this.memorySessions);
     this.evidence = new AcceptanceEvidenceStore(evidenceRoot, readRepositoryIdentity(cwd).commit);
     this.hss = new HssOperations(
       this.targets,
@@ -199,6 +165,7 @@ export class JLinkMcpServer {
       stateRoot,
       undefined,
       <T>(runId: string, operation: () => Promise<T>) => this.evidence.guardRunMutation(runId, operation),
+      this.memorySessions,
     );
     this.artifacts.setCaptureWriteDelegate(this.hss);
     this.server = new McpServer({ name: "jlink-mcp", version: "0.3.2" });
@@ -245,39 +212,18 @@ export class JLinkMcpServer {
       (input) => this.artifacts.symbolSearch(String(input.projectRoot), String(input.query), Number(input.limit)));
     this.registerEnvelopeTool("symbol_resolve", { ...projectRootInput, selector: z.string().min(1).max(1024) },
       (input) => this.artifacts.symbolResolve(String(input.projectRoot), String(input.selector)));
-    this.registerEnvelopeTool("hot_variable_add", { ...projectRootInput, ref: variableRef, requestedType: scalarType.optional() },
-      (input) => this.artifacts.hotAdd(String(input.projectRoot), input.ref as VariableRefInput, input.requestedType as never));
-    this.registerEnvelopeTool("hot_variable_list", projectRootInput, (input) => this.artifacts.hotList(String(input.projectRoot)));
-    this.registerEnvelopeTool("hot_variable_refresh", { ...projectRootInput, selectors: z.array(z.string().min(1).max(1024)).min(1).max(128) },
-      (input) => this.artifacts.hotRefresh(String(input.projectRoot), input.selectors as string[]));
     this.registerEnvelopeTool("read_variable", { ...projectRootInput, ref: variableRef },
       (input) => this.artifacts.readVariable(String(input.projectRoot), input.ref as VariableRefInput));
     this.registerEnvelopeTool("write_variable", {
       ...projectRootInput,
       ref: variableRef,
       value: z.number(),
-      captureOld: z.boolean().default(false),
-      verify: z.boolean().default(false),
+      captureOld: z.boolean().default(true),
+      verify: z.boolean().default(true),
       restore: z.boolean().default(false),
+      verificationConnection: z.enum(["same_session", "independent_session"]).default("same_session"),
       comparator: variableComparator.default({ mode: "exact" }),
     }, (input) => this.artifacts.writeVariable(input as unknown as VariableWriteInput));
-    this.registerEnvelopeTool("read_register", { ...projectRootInput, selector: z.string().min(3).max(512) },
-      (input) => this.registers.readRegister(String(input.projectRoot), String(input.selector)));
-    this.registerEnvelopeTool("read_registers", { ...projectRootInput, selectors: z.array(z.string().min(3).max(512)).min(1).max(32) },
-      (input) => this.registers.readRegisters(String(input.projectRoot), input.selectors as string[]));
-    this.registerEnvelopeTool("write_register", {
-      ...projectRootInput,
-      selector: z.string().min(3).max(512),
-      value: uint32,
-      captureOld: z.boolean().default(false),
-      verify: z.boolean().default(false),
-      restore: z.boolean().default(false),
-      comparator: variableComparator.default({ mode: "exact" }),
-    }, (input) => this.registers.writeRegister(input as unknown as RegisterWriteInput));
-
-    for (const tool of ["halt", "resume", "reset", "reset_halt"] as const) {
-      this.registerEnvelopeTool(tool, projectRootInput, (input) => this.direct.control(tool, String(input.projectRoot)));
-    }
     this.registerEnvelopeTool("read_memory", { ...projectRootInput, address: uint32, width: accessWidth, byteCount: z.number().int().min(1).max(4096) },
       (input) => this.direct.readMemory(input as unknown as MemoryReadInput));
     this.registerEnvelopeTool("write_memory", {
@@ -289,11 +235,70 @@ export class JLinkMcpServer {
       captureOld: z.boolean().default(false),
       verify: z.boolean().default(false),
     }, (input) => this.direct.writeMemory(input as unknown as MemoryWriteInput));
-    this.registerEnvelopeTool("read_core_register", { ...projectRootInput, name: z.string().min(1) },
-      (input) => this.direct.readCoreRegister(String(input.projectRoot), String(input.name)));
-    this.registerEnvelopeTool("read_core_registers", projectRootInput, (input) => this.direct.readCoreRegisters(String(input.projectRoot)));
-    this.registerEnvelopeTool("write_core_register", { ...projectRootInput, name: z.string().min(1), value: uint32, verify: z.boolean().default(false) },
-      (input) => this.direct.writeCoreRegister(input as unknown as CoreRegisterWriteInput));
+    this.registerEnvelopeTool("core_register_access", {
+      ...projectRootInput,
+      action: z.enum(["read", "read_all", "write"]),
+      name: z.string().min(1).max(32).optional(),
+      value: uint32.optional(),
+      verify: z.boolean().default(false),
+    }, async (input) => {
+      const projectRoot = String(input.projectRoot);
+      if (input.action === "read") {
+        if (typeof input.name !== "string" || input.value !== undefined || input.verify !== false) {
+          return actionInputFailure("core_register_access", "action=read requires name and accepts no value or verify options");
+        }
+        return relabelEnvelope(await this.direct.readCoreRegister(projectRoot, input.name), "core_register_access");
+      }
+      if (input.action === "read_all") {
+        if (input.name !== undefined || input.value !== undefined || input.verify !== false) return actionInputFailure("core_register_access", "action=read_all accepts no name, value, or verify options");
+        return relabelEnvelope(await this.direct.readCoreRegisters(projectRoot), "core_register_access");
+      }
+      if (typeof input.name !== "string" || typeof input.value !== "number") return actionInputFailure("core_register_access", "action=write requires name and value");
+      return relabelEnvelope(await this.direct.writeCoreRegister({ projectRoot, name: input.name, value: input.value, verify: Boolean(input.verify) } as CoreRegisterWriteInput), "core_register_access");
+    });
+    this.registerEnvelopeTool("peripheral_register_access", {
+      ...projectRootInput,
+      action: z.enum(["read", "read_many", "write"]),
+      selector: z.string().min(3).max(512).optional(),
+      selectors: z.array(z.string().min(3).max(512)).min(1).max(32).optional(),
+      value: uint32.optional(),
+      captureOld: z.boolean().default(false),
+      verify: z.boolean().default(false),
+      restore: z.boolean().default(false),
+      comparator: variableComparator.default({ mode: "exact" }),
+    }, async (input) => {
+      const projectRoot = String(input.projectRoot);
+      if (input.action === "read") {
+        if (
+          typeof input.selector !== "string" || input.selectors !== undefined || input.value !== undefined
+          || input.captureOld !== false || input.verify !== false || input.restore !== false
+        ) return actionInputFailure("peripheral_register_access", "action=read requires selector only");
+        return relabelEnvelope(await this.registers.readRegister(projectRoot, input.selector), "peripheral_register_access");
+      }
+      if (input.action === "read_many") {
+        if (
+          !Array.isArray(input.selectors) || input.selector !== undefined || input.value !== undefined
+          || input.captureOld !== false || input.verify !== false || input.restore !== false
+        ) return actionInputFailure("peripheral_register_access", "action=read_many requires selectors only");
+        return relabelEnvelope(await this.registers.readRegisters(projectRoot, input.selectors as string[]), "peripheral_register_access");
+      }
+      if (typeof input.selector !== "string" || typeof input.value !== "number" || input.selectors !== undefined) return actionInputFailure("peripheral_register_access", "action=write requires selector and value");
+      return relabelEnvelope(await this.registers.writeRegister({
+        projectRoot,
+        selector: input.selector,
+        value: input.value,
+        captureOld: Boolean(input.captureOld),
+        verify: Boolean(input.verify),
+        restore: Boolean(input.restore),
+        comparator: input.comparator as RegisterWriteInput["comparator"],
+      }), "peripheral_register_access");
+    });
+    this.registerEnvelopeTool("target_control", { ...projectRootInput, action: z.enum(["halt", "resume", "reset", "reset_halt"]) }, async (input) => {
+      const action = input.action as "halt" | "resume" | "reset" | "reset_halt";
+      const envelope = relabelEnvelope(await this.direct.control(action, String(input.projectRoot)), "target_control");
+      envelope.data = { action, ...(isRecord(envelope.data) ? envelope.data : { result: envelope.data }) };
+      return envelope;
+    });
     this.registerEnvelopeTool("flash", { ...projectRootInput, path: z.string().min(1), baseAddress: uint32.optional() },
       (input) => this.direct.flash(input as unknown as FlashInput));
     this.registerEnvelopeTool("erase", { ...projectRootInput, verifyBlank: z.boolean().default(false) },
@@ -301,21 +306,16 @@ export class JLinkMcpServer {
     this.registerEnvelopeTool("probe_command", { ...projectRootInput, commands: z.array(z.string().min(1)).min(1).max(100) },
       (input) => this.direct.probeCommand(String(input.projectRoot), input.commands as string[]));
 
-    this.registerEnvelopeTool("gdb_server_start", projectRootInput, (input) => this.sessions.gdbServerStart(String(input.projectRoot)));
-    this.registerEnvelopeTool("gdb_server_stop", projectRootInput, (input) => this.sessions.gdbServerStop(String(input.projectRoot)));
-    this.registerEnvelopeTool("gdb_server_status", projectRootInput, (input) => this.sessions.gdbServerStatus(String(input.projectRoot)));
-    this.registerEnvelopeTool("gdb_connect", { ...projectRootInput, symbolFile: z.string().optional() },
-      (input) => this.sessions.gdbConnect(String(input.projectRoot), input.symbolFile as string | undefined));
+    this.registerEnvelopeTool("gdb_open", projectRootInput, (input) => this.gdbOpen(String(input.projectRoot)));
     this.registerEnvelopeTool("gdb_command", { ...projectRootInput, command: z.string().min(1), timeoutMs: z.number().int().min(1).max(120_000).default(15_000) },
       (input) => this.sessions.gdbCommand(String(input.projectRoot), String(input.command), Number(input.timeoutMs)));
     this.registerEnvelopeTool("gdb_wait", { ...projectRootInput, timeoutMs: z.number().int().min(1).max(120_000).default(30_000) },
       (input) => this.sessions.gdbWait(String(input.projectRoot), Number(input.timeoutMs)));
     this.registerEnvelopeTool("gdb_backtrace", { ...projectRootInput, full: z.boolean().default(false) },
       (input) => this.sessions.gdbBacktrace(String(input.projectRoot), Boolean(input.full)));
-    this.registerEnvelopeTool("gdb_disconnect", projectRootInput, (input) => this.sessions.gdbDisconnect(String(input.projectRoot)));
+    this.registerEnvelopeTool("gdb_close", projectRootInput, async (input) => relabelEnvelope(await this.sessions.gdbServerStop(String(input.projectRoot)), "gdb_close"));
 
-    this.registerEnvelopeTool("rtt_connect", projectRootInput, (input) => this.sessions.rttConnect(String(input.projectRoot)));
-    this.registerEnvelopeTool("rtt_disconnect", projectRootInput, (input) => this.sessions.rttDisconnect(String(input.projectRoot)));
+    this.registerEnvelopeTool("rtt_open", projectRootInput, async (input) => relabelEnvelope(await this.sessions.rttConnect(String(input.projectRoot)), "rtt_open"));
     this.registerEnvelopeTool("rtt_read", { ...projectRootInput, count: z.number().int().min(1).max(1000).default(50) },
       (input) => this.sessions.rttRead(String(input.projectRoot), Number(input.count)));
     this.registerEnvelopeTool("rtt_search", {
@@ -326,27 +326,8 @@ export class JLinkMcpServer {
       count: z.number().int().min(1).max(1000).default(100),
     }, (input) => this.sessions.rttSearch(String(input.projectRoot), input as { level?: string; module?: string; pattern?: string; count?: number }));
     this.registerEnvelopeTool("rtt_clear", projectRootInput, (input) => this.sessions.rttClear(String(input.projectRoot)));
-    this.registerEnvelopeTool("rtt_channel_list", { ...projectRootInput, snapshot: channelSnapshot },
-      (input) => this.sessions.rttChannelList(String(input.projectRoot), input.snapshot as never));
-    this.registerEnvelopeTool("rtt_channel_read", {
-      ...projectRootInput,
-      snapshot: channelSnapshot,
-      selector: z.union([z.string(), z.number().int().min(0)]),
-      ring: z.object({ dataHex: z.string().min(2), rdOff: z.number().int().min(0), wrOff: z.number().int().min(0) }),
-      maxBytes: z.number().int().min(1).max(4096).optional(),
-    }, (input) => this.sessions.rttChannelRead(String(input.projectRoot), input as never));
-
-    this.registerEnvelopeTool("snapshot", projectRootInput, async (input) => {
-      const envelope = await this.direct.readCoreRegisters(String(input.projectRoot));
-      envelope.tool = "snapshot";
-      return envelope;
-    });
-    this.registerEnvelopeTool("diagnose_crash", projectRootInput, async (input) => {
-      const envelope = await this.direct.readCoreRegisters(String(input.projectRoot));
-      envelope.tool = "diagnose_crash";
-      envelope.warnings.push("Fault-register expansion is deferred until typed Artifact/SVD integration; no target state was changed.");
-      return envelope;
-    });
+    this.registerEnvelopeTool("rtt_close", projectRootInput, async (input) => relabelEnvelope(await this.sessions.rttDisconnect(String(input.projectRoot)), "rtt_close"));
+    this.registerEnvelopeTool("diagnose_crash", projectRootInput, (input) => this.diagnoseCrash(String(input.projectRoot)));
 
     const hssVariable = z.object({ ref: variableRef, alias: z.string().min(1).max(128).optional(), unit: z.string().min(1).max(64).optional() }).strict();
     const hssCapture = {
@@ -354,11 +335,15 @@ export class JLinkMcpServer {
       variables: z.array(hssVariable).min(1).max(10),
       rateHz: z.number().int().min(1).max(1_000),
       durationSec: z.number().int().min(1).max(60),
+      qualityOracle: z.object({
+        ref: variableRef,
+        expectedIncrement: z.number().int().min(1).max(0xffff_ffff),
+        tolerance: z.number().int().min(0).max(0xffff_ffff),
+      }).strict().optional(),
+      dryRun: z.boolean().default(false),
       runId: acceptanceRunId.optional(),
     };
     const hssSelector = { ...projectRootInput, captureId: z.string().uuid().optional() };
-    this.registerEnvelopeTool("hss_capability", projectRootInput, (input) => this.hss.capability(String(input.projectRoot)));
-    this.registerEnvelopeTool("hss_plan", hssCapture, (input) => this.hss.plan(input as unknown as HssCaptureInput));
     this.registerEnvelopeTool("hss_start", hssCapture, (input) => this.hss.start(input as unknown as HssCaptureInput));
     this.registerEnvelopeTool("hss_status", hssSelector, (input) => this.hss.status({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
     this.registerEnvelopeTool("hss_stop", hssSelector, (input) => this.hss.stop({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
@@ -381,26 +366,75 @@ export class JLinkMcpServer {
       afterMs: z.number().int().min(0).max(60_000),
       bucketCount: z.number().int().min(1).max(2048),
     }, (input) => this.hss.captureEventWindow(input as { captureId: string; eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }));
-    this.registerEnvelopeTool("capture_index_rebuild", { captureId: z.string().uuid() }, (input) => this.hss.captureRebuild(String(input.captureId)));
     this.registerEnvelopeTool("capture_export_csv", { captureId: z.string().uuid() }, (input) => this.hss.captureExport(String(input.captureId)));
-    this.registerStub("analysis_profiles", {});
-    this.registerStub("analysis_run", { captureId: z.string().uuid(), profile: z.string().min(1) });
 
-    for (const name of AGENT_TOOL_NAMES) {
-      if (this.implemented.has(name)) continue;
-      this.registerStub(name, {});
-    }
+    const missing = AGENT_TOOL_NAMES.filter((name) => !this.implemented.has(name));
+    if (missing.length) throw new Error(`missing concrete MCP tool handlers: ${missing.join(", ")}`);
   }
 
-  private registerStub(name: AgentToolName, inputSchema: Record<string, z.ZodType>): void {
-    this.registerEnvelopeTool(name, inputSchema, () => failEnvelope(createOperationEnvelope(name), {
-      code: "NOT_IMPLEMENTED",
-      stage: "dispatch",
-      message: `${name} is registered but its ordered implementation phase is not complete`,
-      retryable: false,
-      writeIssued: false,
-      stateUnknown: false,
-    }));
+  private async gdbOpen(projectRoot: string): Promise<OperationEnvelope> {
+    let target: StoredTarget;
+    try {
+      target = this.targets.require(projectRoot);
+      if (!target.artifact) return actionInputFailure("gdb_open", "gdb_open requires a configured ELF Artifact for host-side symbols");
+    } catch (error) {
+      return failEnvelope(createOperationEnvelope("gdb_open"), {
+        code: "TARGET_NOT_CONFIGURED",
+        stage: "target_lookup",
+        message: error instanceof Error ? error.message : String(error),
+        retryable: false,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    }
+
+    const server = await this.sessions.gdbServerStart(target.projectRoot);
+    if (!server.ok) return relabelEnvelope(server, "gdb_open");
+    const client = await this.sessions.gdbConnect(target.projectRoot, target.artifact.path);
+    const envelope = relabelEnvelope(client, "gdb_open");
+    envelope.requestedEffects = distinct([...server.requestedEffects, ...client.requestedEffects]);
+    envelope.observedEffects = distinct([...server.observedEffects, ...client.observedEffects]);
+    envelope.before ??= server.before;
+    envelope.data = { server: server.data, client: client.data };
+    if (!client.ok) {
+      envelope.warnings.push("GDB Server remains owned after client startup failed; use gdb_close after reviewing the reported target state.");
+    }
+    return envelope;
+  }
+
+  private async diagnoseCrash(projectRoot: string): Promise<OperationEnvelope> {
+    const managedBacktrace = await this.sessions.managedGdbBacktrace(projectRoot);
+    if (managedBacktrace) {
+      const envelope = relabelEnvelope(managedBacktrace, "diagnose_crash");
+      const targetExecutionState = isRecord(envelope.before) && typeof envelope.before.targetExecutionState === "string"
+        ? envelope.before.targetExecutionState
+        : "unknown";
+      const backtrace = envelope.data;
+      envelope.data = {
+        targetExecutionState,
+        diagnosis: envelope.ok
+          ? {
+            status: "partial",
+            architecture: "cortex_m_unconfirmed",
+            frameStatus: "not_collected",
+            collection: "managed_gdb_session",
+            backtrace: { status: "available", source: "managed_gdb_session", result: backtrace },
+          }
+          : {
+            status: "partial",
+            architecture: "cortex_m_unconfirmed",
+            frameStatus: "not_collected",
+            collection: "managed_gdb_session",
+            backtrace: { status: "unavailable", source: "managed_gdb_session", error: envelope.error ?? null },
+          },
+      };
+      if (envelope.ok) {
+        envelope.warnings.push("Direct Cortex-M register collection was skipped because the managed GDB session owns the Probe.");
+        envelope.verification = { status: "observed", method: "managed_gdb_backtrace" };
+      }
+      return envelope;
+    }
+    return relabelEnvelope(await this.direct.diagnoseCrash(projectRoot), "diagnose_crash");
   }
 
   private registerEnvelopeTool(
@@ -499,6 +533,7 @@ export class JLinkMcpServer {
   }
 
   async dispose(): Promise<void> {
+    await this.memorySessions.dispose();
     for (const runtime of this.runtimes.entries()) {
       if (!this.runtimes.canSafelyDispose(runtime)) {
         log(`Skipping GDB Server shutdown for ${runtime.projectRoot}: target state is not explicitly running`);
@@ -521,4 +556,28 @@ export class JLinkMcpServer {
     this.discoveryProbe.dispose();
     this.discoveryProcesses.killAll();
   }
+}
+
+function relabelEnvelope(envelope: OperationEnvelope, tool: AgentToolName): OperationEnvelope {
+  envelope.tool = tool;
+  return envelope;
+}
+
+function actionInputFailure(tool: AgentToolName, message: string): OperationEnvelope {
+  return failEnvelope(createOperationEnvelope(tool), {
+    code: "ACTION_INPUT_INVALID",
+    stage: "validation",
+    message,
+    retryable: false,
+    writeIssued: false,
+    stateUnknown: false,
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function distinct(values: string[]): string[] {
+  return [...new Set(values)];
 }

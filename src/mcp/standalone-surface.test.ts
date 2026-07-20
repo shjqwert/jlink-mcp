@@ -4,23 +4,19 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { applyEvidenceLogFailure, operationHadIssuedEffects } from "./server";
+import { AGENT_TOOL_NAMES, applyEvidenceLogFailure, operationHadIssuedEffects } from "./server";
 import { createOperationEnvelope, failEnvelope } from "./runtime/operation-envelope";
 
 const EXPECTED_TOOLS = [
-  "analysis_profiles", "analysis_run", "artifact_probe", "capture_event_window",
-  "capture_export_csv", "capture_index_rebuild", "capture_list", "capture_series",
-  "capture_summary", "diagnose_crash", "erase", "flash", "gdb_backtrace",
-  "gdb_command", "gdb_connect", "gdb_disconnect", "gdb_server_start",
-  "gdb_server_status", "gdb_server_stop", "gdb_wait", "halt", "hot_variable_add",
-  "hot_variable_list", "hot_variable_refresh", "hss_capability", "hss_plan",
-  "hss_recover", "hss_start", "hss_status", "hss_stop", "list_devices",
-  "probe_command", "read_core_register", "read_core_registers", "read_memory",
-  "read_register", "read_registers", "read_variable", "reset", "reset_halt",
-  "resume", "rtt_channel_list", "rtt_channel_read", "rtt_clear", "rtt_connect",
-  "rtt_disconnect", "rtt_read", "rtt_search", "snapshot", "symbol_resolve",
-  "symbol_search", "target_configure", "target_status", "write_core_register",
-  "write_memory", "write_register", "write_variable",
+  "list_devices", "target_configure", "target_status",
+  "artifact_probe", "symbol_search", "symbol_resolve",
+  "read_variable", "write_variable", "read_memory", "write_memory", "core_register_access", "peripheral_register_access",
+  "target_control", "flash", "erase",
+  "hss_start", "hss_status", "hss_stop", "hss_recover",
+  "capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_export_csv",
+  "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
+  "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close",
+  "diagnose_crash", "probe_command",
 ].sort();
 
 test("evidence failure classifies every observed explicit side effect as issued", () => {
@@ -61,39 +57,82 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
     for (const tool of tools) assert.ok(tool.inputSchema.properties?.runId, `${tool.name} must accept optional runId evidence routing`);
-    for (const name of ["halt", "resume", "reset", "reset_halt", "read_memory", "write_memory", "flash", "erase", "gdb_command", "probe_command", "hss_start"] as const) {
+    assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 36-tool list");
+    for (const name of ["target_control", "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "flash", "erase", "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close", "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command", "hss_start"] as const) {
       const schema = tools.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
       assert.ok(schema.properties?.projectRoot, `${name} must expose projectRoot`);
       assert.ok(schema.required?.includes("projectRoot"), `${name} must require projectRoot`);
       const removedFields = ["challenge" + "Id", "nonce", "approval" + "Token", "plan" + "Id"];
       for (const removed of removedFields) assert.equal(schema.properties?.[removed], undefined, `${name} must not expose ${removed}`);
     }
-    for (const name of ["write_variable", "write_register"] as const) {
-      const properties = tools.find((tool) => tool.name === name)?.inputSchema.properties as Record<string, { default?: unknown }>;
+    {
+      const properties = tools.find((tool) => tool.name === "write_variable")?.inputSchema.properties as Record<string, { default?: unknown }>;
+      assert.equal(properties.captureOld?.default, true);
+      assert.equal(properties.verify?.default, true);
+      assert.equal(properties.restore?.default, false);
+      assert.equal(properties.verificationConnection?.default, "same_session");
+    }
+    {
+      const properties = tools.find((tool) => tool.name === "peripheral_register_access")?.inputSchema.properties as Record<string, { default?: unknown }>;
       assert.equal(properties.captureOld?.default, false);
       assert.equal(properties.verify?.default, false);
       assert.equal(properties.restore?.default, false);
     }
+    for (const removed of [
+      "hot_variable_add", "hot_variable_list", "hot_variable_refresh", "read_core_register", "read_core_registers", "write_core_register",
+      "read_register", "read_registers", "write_register", "halt", "resume", "reset", "reset_halt", "hss_capability", "hss_plan",
+      "capture_index_rebuild", "snapshot", "gdb_server_start", "gdb_server_stop", "gdb_server_status", "gdb_connect", "gdb_disconnect",
+      "rtt_connect", "rtt_disconnect", "rtt_channel_list", "rtt_channel_read", "analysis_profiles", "analysis_run",
+    ]) {
+      assert.equal(tools.some((tool) => tool.name === removed), false, `${removed} must not be public`);
+    }
+    for (const name of ["write_variable", "peripheral_register_access"] as const) {
+      const properties = tools.find((tool) => tool.name === name)?.inputSchema.properties as Record<string, { default?: unknown }>;
+      assert.ok(properties);
+    }
     const eventWindowVariables = tools.find((tool) => tool.name === "capture_event_window")?.inputSchema.properties?.variables as { minItems?: number; maxItems?: number };
     assert.equal(eventWindowVariables.minItems, undefined);
     assert.equal(eventWindowVariables.maxItems, 16);
-    const ref = { artifactGeneration: "a".repeat(64), qualifiedName: "counter", layoutHash: "b".repeat(64) };
-    const phaseThreeCalls = [
+    const ref = "counter";
+    const publicHandlerCalls = [
+      ["list_devices", {}],
       ["artifact_probe", { projectRoot: root }],
       ["symbol_search", { projectRoot: root, query: "counter" }],
       ["symbol_resolve", { projectRoot: root, selector: "counter" }],
-      ["hot_variable_add", { projectRoot: root, ref }],
-      ["hot_variable_list", { projectRoot: root }],
-      ["hot_variable_refresh", { projectRoot: root, selectors: ["counter"] }],
       ["read_variable", { projectRoot: root, ref }],
       ["write_variable", { projectRoot: root, ref, value: 1 }],
-      ["read_register", { projectRoot: root, selector: "GPIO.CTRL" }],
-      ["read_registers", { projectRoot: root, selectors: ["GPIO.CTRL"] }],
-      ["write_register", { projectRoot: root, selector: "GPIO.CTRL", value: 1 }],
+      ["read_memory", { projectRoot: root, address: 0x2000_0000, width: 32, byteCount: 4 }],
+      ["write_memory", { projectRoot: root, address: 0x2000_0000, width: 32, byteCount: 4, dataHex: "00000000" }],
+      ["core_register_access", { projectRoot: root, action: "read", name: "PC" }],
+      ["peripheral_register_access", { projectRoot: root, action: "read", selector: "GPIO.CTRL" }],
+      ["target_control", { projectRoot: root, action: "halt" }],
+      ["flash", { projectRoot: root, path: "missing.hex" }],
+      ["erase", { projectRoot: root }],
+      ["hss_start", { projectRoot: root, variables: [{ ref }], rateHz: 1, durationSec: 1, dryRun: true }],
+      ["hss_status", { projectRoot: root }],
+      ["hss_stop", { projectRoot: root }],
+      ["hss_recover", { projectRoot: root }],
+      ["capture_list", {}],
+      ["capture_summary", { captureId: "43000000-0000-4000-8000-000000000001" }],
+      ["capture_series", { captureId: "43000000-0000-4000-8000-000000000001", variables: ["counter"], startTick: "0", endTick: "1", bucketCount: 1 }],
+      ["capture_event_window", { captureId: "43000000-0000-4000-8000-000000000001", eventId: "43000000-0000-4000-8000-000000000002", variables: [], beforeMs: 0, afterMs: 0, bucketCount: 1 }],
+      ["capture_export_csv", { captureId: "43000000-0000-4000-8000-000000000001" }],
+      ["gdb_open", { projectRoot: root }],
+      ["gdb_command", { projectRoot: root, command: "info registers" }],
+      ["gdb_wait", { projectRoot: root }],
+      ["gdb_backtrace", { projectRoot: root }],
+      ["gdb_close", { projectRoot: root }],
+      ["rtt_open", { projectRoot: root }],
+      ["rtt_read", { projectRoot: root }],
+      ["rtt_search", { projectRoot: root }],
+      ["rtt_clear", { projectRoot: root }],
+      ["rtt_close", { projectRoot: root }],
+      ["diagnose_crash", { projectRoot: root }],
+      ["probe_command", { projectRoot: root, commands: ["showconf"] }],
     ] as const;
-    for (const [name, argumentsValue] of phaseThreeCalls) {
+    for (const [name, argumentsValue] of publicHandlerCalls) {
       const envelope = parseEnvelope(await client.callTool({ name, arguments: argumentsValue }));
-      assert.notEqual((envelope.error as { code?: string } | undefined)?.code, "NOT_IMPLEMENTED", `${name} must be implemented in Phase 3`);
+      assert.notEqual((envelope.error as { code?: string } | undefined)?.code, "NOT_IMPLEMENTED", `${name} must have a concrete handler`);
     }
     assert.deepEqual(readdirSync(join(root, "evidence")), [], "operations without runId must not create a command log or synthetic run directory");
     const logged = parseEnvelope(await client.callTool({ name: "target_configure", arguments: { projectRoot: root, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, runId: "surface-run" } }));
@@ -115,12 +154,6 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     assert.equal(completedRunRequest.ok, false);
     assert.equal((completedRunRequest.error as { code?: string }).code, "RUN_ID_COMPLETE");
     assert.equal((completedRunRequest.error as { writeIssued?: boolean }).writeIssued, false);
-    const completedCaptureId = "43000000-0000-4000-8000-000000000099";
-    mkdirSync(join(completedRun, "captures", `${completedCaptureId}.jcap`), { recursive: true });
-    const ownerGuarded = parseEnvelope(await client.callTool({ name: "capture_index_rebuild", arguments: { captureId: completedCaptureId } }));
-    assert.equal((ownerGuarded.error as { code?: string }).code, "RUN_ID_COMPLETE");
-    const mismatchedRun = parseEnvelope(await client.callTool({ name: "capture_index_rebuild", arguments: { captureId: completedCaptureId, runId: "surface-run" } }));
-    assert.equal((mismatchedRun.error as { code?: string }).code, "RUN_ID_CAPTURE_MISMATCH");
     const unchanged = parseEnvelope(await client.callTool({ name: "target_status", arguments: { projectRoot: root } }));
     assert.equal(((unchanged.data as { target: { generation: string } }).target.generation), configuredGeneration);
     rmSync(commandsFile);

@@ -11,7 +11,8 @@ import {
   finishEnvelope,
   type OperationEnvelope,
 } from "./operation-envelope";
-import { ProbeQueue, ProbeQueueError, type ProbeOwner, type QueueMetadata } from "./probe-queue";
+import { ProbeQueue, ProbeQueueError, type ProbeOwner, type ProbeOwnerKind, type QueueMetadata } from "./probe-queue";
+import { MemorySessionError, type MemorySessionManager } from "./memory-session";
 import { inspectArtifactFile, TargetStore, TargetStoreError, type StoredTarget } from "./target-store";
 
 export interface SessionGdbClient {
@@ -44,11 +45,28 @@ export class SessionOperations {
     private readonly targets: TargetStore,
     private readonly queue: ProbeQueue,
     private readonly runtimeFor: SessionRuntimeProvider,
+    private readonly memorySessions?: MemorySessionManager,
   ) {}
 
   gdbServerStart(projectRoot: string): Promise<OperationEnvelope> {
-    return this.queued("gdb_server_start", projectRoot, ["start_gdb_server", "acquire_gdb_owner"], [], async (envelope, target, runtime, metadata) => {
+    let target: StoredTarget;
+    try { target = this.targets.require(projectRoot); }
+    catch (error) { return Promise.resolve(this.failure(createOperationEnvelope("gdb_server_start"), error, "target_lookup")); }
+    let localMemoryOwner: ProbeOwner | undefined;
+    try { localMemoryOwner = this.memorySessions?.localOwnerForTarget(target); }
+    catch (error) { return Promise.resolve(this.failure(createOperationEnvelope("gdb_server_start", target), error, "ownership")); }
+    return this.queuedWithTarget("gdb_server_start", target, ["start_gdb_server", "acquire_gdb_owner"], localMemoryOwner ? ["memory"] : [], async (envelope, target, runtime, metadata) => {
+      const memoryClose = await this.memorySessions?.closeForTarget(target);
       const targetState = await runtime.probe.observeTargetState();
+      if (memoryClose) {
+        envelope.data = { memorySessionClose: { targetStateBeforeClose: memoryClose.targetStateBeforeClose, targetStateAfterReconnect: targetState.state } };
+        if (memoryClose.targetStateBeforeClose === "unknown" || targetState.state === "unknown") {
+          throw new SessionError("POST_OPERATION_STATE_UNKNOWN", "memory-session close could not prove the target state before starting the GDB Server", false, false, true);
+        }
+        if (memoryClose.targetStateBeforeClose !== targetState.state) {
+          throw new SessionError("HIDDEN_STATE_CHANGE", `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${targetState.state}`, false, false, false);
+        }
+      }
       envelope.before = { targetExecutionState: targetState.state, source: targetState.source, command: targetState.result };
       if (targetState.state !== "running") throw disconnectStateError(targetState.state, "starting the GDB Server");
       const result = await runtime.probe.startGDBServer();
@@ -102,9 +120,14 @@ export class SessionOperations {
         throw new SessionError("GDB_SERVER_EXITED", "GDB Server exited before ownership could be established", true, false);
       }
       envelope.observedEffects.push("gdb_server_started", "gdb_owner_acquired");
-      envelope.data = { message: result.message, owner, status };
+      envelope.data = {
+        ...(envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {}),
+        message: result.message,
+        owner,
+        status,
+      };
       envelope.verification = { status: "observed", method: "process_manager" };
-    });
+    }, localMemoryOwner);
   }
 
   async gdbServerStop(projectRoot: string): Promise<OperationEnvelope> {
@@ -122,7 +145,7 @@ export class SessionOperations {
       const clientWasConnected = runtime.gdb.isConnected();
       const executionState = clientWasConnected ? runtime.gdb.getTargetExecutionState() : runtime.gdbServerTargetExecutionState ?? "unknown";
       envelope.before = { gdbClientConnected: clientWasConnected, targetExecutionState: executionState, gdbServerRunning: runtime.probe.isGDBServerRunning() };
-      if (executionState !== "running") {
+      if (executionState === "unknown") {
         throw disconnectStateError(executionState, "stopping the GDB Server");
       }
       runtime.gdbServerStopping = true;
@@ -137,11 +160,23 @@ export class SessionOperations {
           this.queue.releaseOwner(target.probeSerial, owner.token);
           runtime.gdbOwnerToken = undefined;
         }
-        runtime.gdbServerTargetExecutionState = "unknown";
         envelope.observedEffects.push(clientWasConnected ? "gdb_client_disconnected" : "gdb_client_already_disconnected", "rtt_disconnected", "gdb_server_stopped", "gdb_owner_released");
-        envelope.after = { gdbClientConnected: runtime.gdb.isConnected(), targetExecutionState: runtime.gdb.getTargetExecutionState(), gdbServerRunning: runtime.probe.isGDBServerRunning() };
-        envelope.data = { message: result.message, status: runtime.probe.getGDBServerStatus(), targetExecutionStateBeforeDisconnect: executionState };
-        envelope.verification = { status: "observed", method: "process_manager" };
+        let finalState: GDBTargetExecutionState;
+        try { finalState = (await runtime.probe.observeTargetState()).state; }
+        catch { finalState = "unknown"; }
+        runtime.gdbServerTargetExecutionState = finalState;
+        envelope.after = { gdbClientConnected: runtime.gdb.isConnected(), targetExecutionState: finalState, gdbServerRunning: runtime.probe.isGDBServerRunning() };
+        envelope.data = {
+          message: result.message,
+          status: runtime.probe.getGDBServerStatus(),
+          targetExecutionStateBeforeDisconnect: executionState,
+          targetExecutionStateAfterClose: finalState,
+        };
+        if (finalState === "unknown") throw new SessionError("POST_OPERATION_STATE_UNKNOWN", "GDB Server stopped, but target state could not be observed afterward", false, true, true);
+        if (finalState !== executionState) {
+          throw new SessionError("HIDDEN_STATE_CHANGE", `GDB Server close changed target state from ${executionState} to ${finalState}`, false, true, false);
+        }
+        envelope.verification = { status: "verified", method: "gdb_state_before_close_and_post_server_probe_observation" };
       } finally {
         runtime.gdbServerStopping = false;
       }
@@ -349,6 +384,15 @@ export class SessionOperations {
     });
   }
 
+  async managedGdbBacktrace(projectRoot: string, full = false): Promise<OperationEnvelope | undefined> {
+    let target: StoredTarget;
+    try { target = this.targets.require(projectRoot); }
+    catch { return undefined; }
+    const owner = this.queue.getOwner(target.probeSerial);
+    if (!owner || owner.kind !== "gdb") return undefined;
+    return this.gdbBacktrace(projectRoot, full);
+  }
+
   gdbDisconnect(projectRoot: string): Promise<OperationEnvelope> {
     return this.withGdbOwner("gdb_disconnect", projectRoot, ["disconnect_gdb_client"], async (envelope, _target, runtime) => {
       const wasConnected = runtime.gdb.isConnected();
@@ -455,7 +499,14 @@ export class SessionOperations {
     if (!owner) return new OperationEnvelopeFailure(failEnvelope(createOperationEnvelope(tool, target), {
       code: "GDB_SERVER_REQUIRED", stage: "prerequisite", message: "gdb_server_start must be called explicitly first", retryable: false, writeIssued: false, stateUnknown: false,
     }));
-    if (owner.kind !== "gdb") return new OperationEnvelopeFailure(this.failure(createOperationEnvelope(tool, target), new ProbeQueueError("CAPTURE_ACTIVE", "HSS capture owns this Probe", owner), "ownership"));
+    if (owner.kind !== "gdb") {
+      const memoryOwner = owner.kind === "memory";
+      return new OperationEnvelopeFailure(this.failure(createOperationEnvelope(tool, target), new ProbeQueueError(
+        memoryOwner ? "MEMORY_SESSION_ACTIVE" : "CAPTURE_ACTIVE",
+        memoryOwner ? "persistent native memory session owns this Probe" : "HSS capture owns this Probe",
+        owner,
+      ), "ownership"));
+    }
     if (owner.projectRoot !== target.projectRoot || owner.targetGeneration !== target.generation) return new OperationEnvelopeFailure(failEnvelope(createOperationEnvelope(tool, target), {
       code: "GDB_SESSION_ACTIVE", stage: "ownership", message: "GDB Server owner belongs to a different Target generation", retryable: false, writeIssued: false, stateUnknown: false,
     }));
@@ -466,7 +517,7 @@ export class SessionOperations {
     tool: string,
     projectRoot: string,
     effects: string[],
-    allowedOwners: Array<"gdb" | "hss">,
+    allowedOwners: ProbeOwnerKind[],
     operation: (envelope: OperationEnvelope, target: StoredTarget, runtime: SessionTargetRuntime, metadata: QueueMetadata) => Promise<void>,
   ): Promise<OperationEnvelope> {
     let target: StoredTarget;
@@ -478,7 +529,7 @@ export class SessionOperations {
     tool: string,
     target: StoredTarget,
     effects: string[],
-    allowedOwners: Array<"gdb" | "hss">,
+    allowedOwners: ProbeOwnerKind[],
     operation: (envelope: OperationEnvelope, target: StoredTarget, runtime: SessionTargetRuntime, metadata: QueueMetadata) => Promise<void>,
     requiredOwner?: ProbeOwner,
   ): Promise<OperationEnvelope> {
@@ -562,7 +613,12 @@ export class SessionOperations {
   private failure(envelope: OperationEnvelope, error: unknown, stage: string): OperationEnvelope {
     if (error instanceof SessionError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: error.writeIssued, stateUnknown: error.stateUnknown });
     if (error instanceof TargetStoreError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: false, writeIssued: false, stateUnknown: false });
-    if (error instanceof ProbeQueueError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.code.endsWith("_ACTIVE"), writeIssued: false, stateUnknown: false });
+    if (error instanceof ProbeQueueError) {
+      attachQueueOwner(envelope, error);
+      const code = queueFailureCode(error);
+      return failEnvelope(envelope, { code, stage, message: error.message, retryable: code.endsWith("_ACTIVE"), writeIssued: false, stateUnknown: false });
+    }
+    if (error instanceof MemorySessionError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
     return failEnvelope(envelope, { code: "INTERNAL_ERROR", stage, message: error instanceof Error ? error.message : String(error), retryable: false, writeIssued: false, stateUnknown: false });
   }
 
@@ -575,6 +631,19 @@ export class SessionOperations {
       evidenceTimestamp: target.liveArtifactMatch.timestamp,
     } : null;
   }
+}
+
+function queueFailureCode(error: ProbeQueueError): string {
+  return error.code === "OWNER_CHANGED" && error.owner?.kind === "memory" ? "MEMORY_SESSION_ACTIVE" : error.code;
+}
+
+function attachQueueOwner(envelope: OperationEnvelope, error: ProbeQueueError): void {
+  if (!error.owner) return;
+  if (envelope.probe) envelope.probe.owner = error.owner;
+  const before = envelope.before && typeof envelope.before === "object" && !Array.isArray(envelope.before)
+    ? envelope.before as Record<string, unknown>
+    : {};
+  envelope.before = { ...before, owner: error.owner };
 }
 
 class SessionError extends Error {
@@ -611,11 +680,13 @@ function validationFailure(tool: string, message: string): OperationEnvelope {
 }
 
 function sessionObservation(runtime: SessionTargetRuntime, owner: ProbeOwner | undefined): Record<string, unknown> {
+  const gdbTargetExecutionState = runtime.gdb.getTargetExecutionState();
   return {
     owner: owner ?? null,
     probe: runtime.probe.getStatus(),
     gdbConnected: runtime.gdb.isConnected(),
-    gdbTargetExecutionState: runtime.gdb.getTargetExecutionState(),
+    gdbTargetExecutionState,
+    targetExecutionState: runtime.gdb.isConnected() ? gdbTargetExecutionState : runtime.gdbServerTargetExecutionState ?? "unknown",
     rtt: runtime.rtt.getStats(),
   };
 }
