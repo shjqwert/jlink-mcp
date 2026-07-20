@@ -12,8 +12,16 @@ Generated JavaScript, declarations, and source maps are written to `out/`; do no
 
 PowerShell may display UTF-8 files incorrectly when it uses the local code page. Read repository text files explicitly as UTF-8, for example `Get-Content -Raw -Encoding UTF8 AGENTS.md`, before editing or quoting content.
 
-## Coding Style & Naming Conventions
+## Code Retrieval Routing
 
-Follow the existing TypeScript style: two-space indentation, double quotes, semicolons, and trailing commas in multiline structures. Keep `strict` TypeScript checks passing. Use `camelCase` for variables and functions, `PascalCase` for classes and interfaces, and kebab-case filenames such as `process-manager.ts`. Extend the existing probe backend interface instead of duplicating backend selection logic.
+- Prefer Serena for symbol definitions, declarations, types, references, and symbol-level operations.
+- Prefer CodeGraph for call chains, dependencies, module structure, architecture analysis, and change-impact analysis.
+- When Serena and CodeGraph overlap, choose only the one that best fits the task to avoid duplicate queries.
+- Use CodeGraph results mainly for relationship navigation and impact-scope assessment; verify key conclusions against the actual source code.
+- Before modifying code, confirm the relevant symbols, references, call relationships, and test scope.
+- If Serena or CodeGraph cannot provide reliable results, supplement them with Codex's available native search tools.
 
+## Review Coordination
 
+- Complex changes require a sub-agent code review. While that review runs, the main session must wait before modifying files in the reviewed scope; do not make concurrent edits that would make the review stale.
+- Small, self-contained changes may skip sub-agent review.

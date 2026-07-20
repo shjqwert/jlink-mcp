@@ -1,25 +1,33 @@
 ---
 name: jlink-mcp-agent
-description: Use J-Link MCP for Artifact and Symbol discovery, high-rate HSS capture, indexed JCAP queries, deterministic offline analysis, and risk-aware target operations. Trigger when debugging embedded targets or analyzing .jcap captures through the J-Link MCP server.
+description: Use J-Link MCP for explicit daily MCU debugging: target configuration, Artifact-backed variables, bounded Probe control, HSS capture, JCAP queries, GDB, RTT, and halted-target crash diagnosis.
 ---
 
 # J-Link MCP Agent
 
-Read `jlink://discovery/catalog` before selecting tools. Treat its facts as guidance while relying on server-side enforcement for policy and safety.
+Begin with `target_configure` for the exact absolute `projectRoot`; do not rely on environment defaults or another project's Target. Use `target_status` and `list_devices` for non-mutating context.
 
-Follow this order:
+Use the smallest direct operation that establishes evidence:
 
-1. Call `artifact_probe`, then `symbol_search` and `symbol_resolve`.
-2. Add or refresh only needed Hot Variables.
-3. Use `hss_capture_plan`, `hss_capture_start`, `hss_capture_status`, and `hss_capture_stop` for high-rate capture. Do not substitute raw GDB polling.
-4. Use `capture_list`, `capture_summary`, `capture_series`, and `capture_event_window` against indexed JCAP data.
-5. Call `analysis_profiles`, then `analysis_run` with one bounded event or tick window.
+1. Use `artifact_probe`, `symbol_search`, and `symbol_resolve` before typed access.
+2. Use `read_variable` or `read_memory` for observation. Use `write_variable` only when a typed RAM write is intended; its default readback is connection evidence, not target-program consumption. Use `write_memory` only for explicit raw-memory work.
+3. Use `core_register_access`, `peripheral_register_access`, and `target_control` as separate bounded operations. Do not substitute raw memory for an unavailable SVD.
+4. Use `hss_start` with `dryRun=true` before capture when capacity is unknown, then `hss_status`, `hss_stop`, or `hss_recover` as needed. Query a completed capture with `capture_list`, `capture_summary`, `capture_series`, `capture_event_window`, and `capture_export_csv`.
+5. Use `gdb_open` only for an explicit managed GDB session, then `gdb_command`, `gdb_wait`, `gdb_backtrace`, and `gdb_close`. Use `rtt_open`, `rtt_read`, `rtt_search`, `rtt_clear`, and `rtt_close` only against the explicitly available RTT endpoint; these sessions do not start one another.
+6. Use `diagnose_crash` only for an already halted Cortex-M target. Use `flash`, `erase`, and `probe_command` only when their explicit effects are intended.
 
-Before proposing a state change, inspect risk, preconditions, reversibility, approval, side effects, and verification metadata:
+## Canonical Tool List
 
-- Execute verified policy-allowlisted RAM writes as R2 through `variable_write_plan` and `variable_write_execute`; do not request R3 planning or user approval.
-- Call `halt`, `resume`, or `reset` once as R3; let the server plan, revalidate, consume, and audit internally. Expect halt/reset to reject active-capture conflicts.
-- For R4, call the action-specific `*_plan`, ask the trusted local host/CLI broker to obtain direct confirmation, then call the retained execute tool with its opaque token. Never mint, infer, expose, or self-assert approval.
-- Reject R5 operations; no execution tool exists.
+```text
+list_devices, target_configure, target_status,
+artifact_probe, symbol_search, symbol_resolve,
+read_variable, write_variable, read_memory, write_memory, core_register_access, peripheral_register_access,
+target_control, flash, erase,
+hss_start, hss_status, hss_stop, hss_recover,
+capture_list, capture_summary, capture_series, capture_event_window, capture_export_csv,
+gdb_open, gdb_command, gdb_wait, gdb_backtrace, gdb_close,
+rtt_open, rtt_read, rtt_search, rtt_clear, rtt_close,
+diagnose_crash, probe_command
+```
 
-Use MCP evidence for diagnosis. Do not claim that server metadata guarantees every third-party Agent reviewed it, and do not seek broker secrets or hardware bypasses through tools, resources, prompts, or offline UI.
+Interpret structured before/after state, requested and observed effects, verification source, warnings, and errors literally. Never claim that a matching J-Link readback proves target-program consumption without a separate observed response.

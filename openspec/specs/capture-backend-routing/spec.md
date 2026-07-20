@@ -1,42 +1,21 @@
 # capture-backend-routing Specification
 
 ## Purpose
-TBD - created by archiving change add-hss-first-multi-backend-runtime-capture. Update Purpose after archive.
+Define explicit HSS backend selection without automatic acquisition fallback.
+
 ## Requirements
-### Requirement: HSS-first backend routing
 
-Jlink-MCP SHALL select runtime capture backends in this priority order:
+### Requirement: HSS backend selection is explicit
 
-1. `jlink-hss`
-2. `direct-rtt-channel`
-3. `memory-poll-rsp`
-4. `external-import`
+The `hss_*` tool family SHALL target only the explicitly configured J-Link HSS backend. Unavailability SHALL be returned with exact capability facts and SHALL NOT trigger RTT, RSP polling, external import, rate reduction, variable reduction, or duration reduction.
 
-#### Scenario: HSS is selected when available
+#### Scenario: HSS unavailable
+- **WHEN** `hss_start` cannot validate or acquire J-Link HSS
+- **THEN** it returns the real unavailable/error reason
+- **AND** no fallback capture starts.
 
-- **GIVEN** HSS SDK configuration is present
-- **AND** the HSS adapter reports available
-- **WHEN** backend routing runs
-- **THEN** Jlink-MCP selects `jlink-hss`.
-
-#### Scenario: RTT is selected when HSS is unavailable
-
+#### Scenario: Agent chooses another observation path
 - **GIVEN** HSS is unavailable
-- **AND** an RTT control block and requested channel exist
-- **WHEN** backend routing runs
-- **THEN** Jlink-MCP selects `direct-rtt-channel`.
-
-#### Scenario: RSP is last realtime fallback
-
-- **GIVEN** HSS and RTT are unavailable
-- **WHEN** backend routing runs for realtime capture
-- **THEN** Jlink-MCP selects `memory-poll-rsp`
-- **AND** the result warns that it is a low-rate fallback.
-
-#### Scenario: unavailable preferred backend is not faked
-
-- **GIVEN** a preferred backend is requested
-- **AND** that backend is unavailable
-- **WHEN** backend routing runs
-- **THEN** Jlink-MCP returns an unavailable reason
-- **AND** does not report fake success.
+- **WHEN** the Agent explicitly invokes RTT, GDB, memory reads, or an offline import/analysis path that exists independently
+- **THEN** that request follows its own tool contract
+- **AND** is not reported as HSS capture.

@@ -2,8 +2,7 @@
   "mcpServers": {
     "jlink": {
       "command": "node",
-      "args": ["out/mcp/standalone.js"],
-      "cwd": "/Users/ivanherrera/projects/thesprkfactory/mcpserver"
+      "args": ["out/mcp/standalone.js"]
     }
   }
 }

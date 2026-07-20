@@ -1,44 +1,32 @@
 # direct-rtt-channel-backend Specification
 
 ## Purpose
-TBD - created by archiving change add-hss-first-multi-backend-runtime-capture. Update Purpose after archive.
+Define explicit, read-only direct RTT channel snapshots and telnet RTT access without hidden target or session changes.
+
 ## Requirements
+
 ### Requirement: Direct RTT channel access uses existing target RTT only
 
-Jlink-MCP SHALL treat RTT as optional and SHALL NOT require MCU source changes to add RTT.
+Jlink-MCP SHALL treat RTT as optional, SHALL NOT require MCU source changes, and SHALL expose only `rtt_channel_list` and `rtt_channel_read` for caller-provided read-only channel snapshots plus explicit telnet RTT lifecycle/read/search/clear tools.
 
-#### Scenario: RTT control block missing
+RTT tools SHALL use the request's Target context, obey GDB Server ownership, return structured availability/errors, and SHALL NOT start GDB Server, halt, reset, resume, write a channel, or fall back to channel 0.
 
-- **GIVEN** no RTT control block is found
-- **WHEN** direct RTT is probed
-- **THEN** the backend returns `unavailable`
-- **AND** the reason is `RTT control block not found`.
+#### Scenario: RTT endpoint missing
+- **WHEN** `rtt_connect` cannot reach the configured existing RTT endpoint
+- **THEN** it returns a structured unavailable/connection result
+- **AND** does not start GDB Server or alter the MCU.
 
 #### Scenario: requested channel missing
+- **WHEN** a caller-provided channel snapshot lacks the requested name or index
+- **THEN** `rtt_channel_read` returns `RTT_CHANNEL_NOT_FOUND`
+- **AND** does not substitute another channel.
 
-- **GIVEN** an RTT control block exists
-- **AND** the requested channel name or index is absent
-- **WHEN** direct RTT is probed
-- **THEN** the backend returns `unavailable`
-- **AND** the reason is `requested RTT channel not found`.
+#### Scenario: ring buffer wraps
+- **WHEN** a read-only up-channel snapshot crosses the end of its ring buffer
+- **THEN** bytes are returned in logical order with the derived next offset modulo buffer size
+- **AND** caller-provided data is not mutated.
 
-#### Scenario: ring buffers handle wrap-around
-
-- **GIVEN** an RTT ring buffer whose read or write operation crosses the end of the buffer
-- **WHEN** Jlink-MCP reads or writes the ring
-- **THEN** bytes are returned or written in order
-- **AND** the next offset is updated modulo the buffer size.
-
-#### Scenario: legacy rtt_send remains compatible
-
-- **GIVEN** `rtt_send` is called without channel or channelName
-- **WHEN** RTT telnet is connected
-- **THEN** Jlink-MCP uses the legacy channel-0 RTT send path.
-
-#### Scenario: channel-specific rtt_send does not fall back to channel 0
-
-- **GIVEN** `rtt_send` is called with channel or channelName
-- **AND** no direct RTT transport is configured
-- **WHEN** the tool runs
-- **THEN** Jlink-MCP returns structured `unavailable`
-- **AND** does not send the data through legacy channel 0.
+#### Scenario: incompatible Probe owner
+- **WHEN** RTT hardware access is requested while HSS owns the Probe
+- **THEN** it returns `CAPTURE_ACTIVE`
+- **AND** does not disturb capture.

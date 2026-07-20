@@ -1,45 +1,73 @@
 # jlink-mcp
 
-Standalone MCP server for Agent-driven MCU debugging through SEGGER J-Link.
+Standalone MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
-The Agent decides which operation to request. The server executes that exact operation, serializes physical Probe access, and reports observed state and side effects. There is no embedded approval broker, risk tier, challenge/token flow, workflow Prompt, or required plan/execute handshake.
+The server serializes physical Probe access and reports observed state and side effects. It does not infer a Target from an environment default: configure each canonical `projectRoot` with `target_configure` before target operations.
 
-## Build and run
+## Windows prerequisites
 
-Requirements: Node.js 18+, SEGGER J-Link Software, and a supported J-Link Probe.
+- Node.js 18 or later and `npm`.
+- CMake and Visual Studio Build Tools with the x64 C++ workload, used to build the native HSS Helper.
+- SEGGER J-Link Software and a connected supported J-Link Probe for hardware operations.
+- A project-local ELF with DWARF for typed variables and crash source mapping; an SVD is required for peripheral register access.
+
+Build a clean standalone package with:
 
 ```powershell
-npm install
+npm ci
 npm run build
-node out/mcp/standalone.js
+npm run test:ci
+npm pack --ignore-scripts
 ```
 
-Configure a Target with `target_configure` before project operations. One canonical `projectRoot` owns one persistent Target configuration; another project must be configured independently.
+`npm run build` rebuilds the ignored x64 HSS Helper at `native/hss-helper/bin/hss_helper.exe`, compiles TypeScript, and bundles the stdio entry at `out/mcp/standalone.js`. Start it from the installed package with `node out/mcp/standalone.js`.
 
-## MCP surface
+## Portable MCP configuration
 
-The standalone server exposes 57 direct tools covering Target configuration, Artifact and symbol resolution, typed variables, SVD peripheral registers, core registers, memory, CPU control, flash/erase, raw GDB/Probe commands, HSS capture, JCAP queries, GDB Server, GDB, RTT, and deterministic analysis.
+Place either example in the repository or installed package root; it deliberately has no machine-specific working directory or Target defaults.
 
-Only these Resources are exposed:
+```json
+{
+  "mcpServers": {
+    "jlink": {
+      "command": "node",
+      "args": ["out/mcp/standalone.js"]
+    }
+  }
+}
+```
 
-- `rtt://output`
-- `probe://gdb-server-log`
-- `probe://status`
+## Canonical Tool List
 
-No MCP Prompts are registered.
+The standalone server registers exactly these 36 direct tools:
 
-## Correctness rules
+```text
+list_devices, target_configure, target_status,
+artifact_probe, symbol_search, symbol_resolve,
+read_variable, write_variable, read_memory, write_memory, core_register_access, peripheral_register_access,
+target_control, flash, erase,
+hss_start, hss_status, hss_stop, hss_recover,
+capture_list, capture_summary, capture_series, capture_event_window, capture_export_csv,
+gdb_open, gdb_command, gdb_wait, gdb_backtrace, gdb_close,
+rtt_open, rtt_read, rtt_search, rtt_clear, rtt_close,
+diagnose_crash, probe_command
+```
 
-- Reads do not implicitly halt or reset the target.
-- Preflight failures do not reset or halt the target.
-- Writes default to no old-value capture, no readback, and no restore. The caller opts into confirmation.
-- All physical operations for one Probe are serialized.
-- SVD register operations require an explicitly configured, validated SVD. Raw memory tools are the fallback when no SVD can be supplied, but do not count as SVD coverage.
-- HSS is capped at 10 synchronized variables, 1 kHz, and 60 seconds for the current hardware capability.
+Only the read-only `rtt://output`, `probe://gdb-server-log`, and `probe://status` Resources are exposed; no MCP Prompts are registered.
+
+## Operating rules
+
+- Reads and preflight do not implicitly halt, reset, resume, recover, flash, erase, or write the target.
+- `target_control` is the explicit CPU-state operation. Core-register and SVD peripheral-register operations are separate bounded actions.
+- `write_variable` defaults to capturing the old value and exact readback verification; `write_memory` defaults to neither. Readback proves bytes observed by its named J-Link connection, not target-program consumption.
+- Typed variable and HSS requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
+- HSS is capped at ten synchronized variables, 1 kHz, and 60 seconds. Call `hss_start` with `dryRun=true` to obtain capability and capacity facts without starting a Helper or creating a capture.
+- Peripheral register access requires a configured, validated SVD. There is no inferred raw-memory substitute.
+- GDB and RTT sessions are explicit and never start each other. Crash diagnosis inspects an already halted target only.
 
 ## Capture package
 
-JCAP v1 uses four durable files:
+JCAP v1 retains exactly four durable files:
 
 ```text
 <captureId>.jcap/
@@ -49,27 +77,13 @@ JCAP v1 uses four durable files:
   capture.db
 ```
 
-AI and local analysis consumers query `capture.db`. If it is damaged, it is rebuilt from `capture.json` and the append-only Raw files. CSV exists only when explicitly exported and is written outside the JCAP package.
+Capture queries use `capture.db`; a verified package can rebuild a missing or damaged index from metadata and Raw files. Explicit CSV exports are written outside the package.
 
-## Offline UI
+## Offline UI and local evidence
 
-The existing local Offline UI source is retained for compatibility. It is intentionally outside the scope of the current Agent-first refactor: this change does not modify, extend, or accept it.
+The existing Offline UI is retained for compatibility and is outside this Agent contract.
 
-## Local evidence
-
-Generated captures, exports, acceptance evidence, environment details, local project paths, Probe serial numbers, and Artifact hashes belong under ignored `test-output/` storage and must not be committed or pushed.
-
-Without `runId`, ordinary operations return only their structured response, HSS packages use `test-output/captures/`, and explicit CSV exports use `test-output/exports/`. Every tool accepts an optional validated `runId`; when present, its exact request and result envelope are appended to `test-output/<runId>/commands.ndjson`.
-
-Run the software and simulated acceptance gate with a new immutable run ID:
-
-```powershell
-npm run acceptance:software -- --run-id <run-id>
-```
-
-Optional local-only arguments are `--project-root <path>`, `--artifact <path>`, `--allow-erase`, and `--svd-available`. The software runner never connects to or mutates hardware. It always emits all T01-T20 entries using only `PASS`, `FAIL`, `BLOCKED`, `SKIPPED_WITH_REASON`, or `NOT_TESTED`, and it does not recommend merge while hardware dependencies remain incomplete.
-
-See [Agent-first acceptance](docs/agent-first-acceptance.md) for the evidence layout, direct-tool rules, hardware ordering, and JCAP validation workflow.
+Generated captures, exports, acceptance evidence, J-Link DLLs, local project paths, Probe serials, and Artifact hashes belong in ignored local storage such as `test-output/`. Do not commit them. See [Agent-first acceptance](docs/agent-first-acceptance.md) for the software and authorized-hardware evidence process.
 
 ## License
 

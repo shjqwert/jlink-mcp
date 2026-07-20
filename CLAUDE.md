@@ -1,29 +1,40 @@
 # J-Link MCP Server
 
-Standalone stdio MCP server for Agent-driven SEGGER J-Link debugging.
+Standalone stdio MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
 ## Build and test
 
+Windows development requires Node.js 18+, CMake, Visual Studio Build Tools with x64 C++, and SEGGER J-Link Software for real hardware.
+
 ```powershell
-npm install
+npm ci
 npm run build
-npm test
+npm run test:ci
 ```
 
-`npm run build` emits only the standalone MCP bundle and the separate local Offline UI bundle. It does not build a VS Code Extension or VSIX.
+`npm run build` compiles the ignored x64 native HSS Helper, TypeScript, and the standalone stdio bundle. Package verification expects `out/mcp/standalone.js` and `native/hss-helper/bin/hss_helper.exe`, while rejecting local evidence, DLLs, target binaries, and machine configuration.
 
 ## Runtime contract
 
-- `src/mcp/standalone.ts` is the only MCP entry.
-- `src/mcp/server.ts` registers exactly 57 direct tools, three read-only Resources, and zero Prompts.
-- A caller must configure each canonical `projectRoot` with `target_configure` before target operations.
-- Physical operations for one Probe serial are serialized.
-- Reads and preflight never implicitly halt, reset, resume, recover, flash, erase, or write.
-- There is no Approval Broker, challenge/token exchange, risk tier, or required plan/execute authorization flow.
-- The existing Offline UI is separate and outside the current refactor's modification and acceptance scope.
+- `src/mcp/standalone.ts` is the stdio entry and `src/mcp/server.ts` registers the direct API.
+- Each canonical `projectRoot` must be explicitly configured with `target_configure` before target operations.
+- One physical Probe is serialized across direct, HSS, GDB, RTT, and memory-session operations.
+- Reads and preflight never implicitly change target execution state.
+- Typed selectors are resolved against the current Artifact; SVD peripheral access requires a configured validated SVD.
+- The Offline UI is separate and outside this contract.
 
-## Local evidence
+## Canonical Tool List
 
-Use ignored `test-output/` for generated captures, exports, logs, issue ledgers, environment details, Probe serials, local project paths, and Artifact hashes. Do not commit or push those values.
+```text
+list_devices, target_configure, target_status,
+artifact_probe, symbol_search, symbol_resolve,
+read_variable, write_variable, read_memory, write_memory, core_register_access, peripheral_register_access,
+target_control, flash, erase,
+hss_start, hss_status, hss_stop, hss_recover,
+capture_list, capture_summary, capture_series, capture_event_window, capture_export_csv,
+gdb_open, gdb_command, gdb_wait, gdb_backtrace, gdb_close,
+rtt_open, rtt_read, rtt_search, rtt_clear, rtt_close,
+diagnose_crash, probe_command
+```
 
-The authoritative requirements are under `openspec/changes/refactor-agent-first-mcp/`.
+Local captures, exports, environment details, local paths, Probe serials, hashes, and issue ledgers stay under ignored `test-output/`; do not commit them. The authoritative Phase 7 requirements are under `openspec/changes/close-agent-hardware-release-loop/`.
