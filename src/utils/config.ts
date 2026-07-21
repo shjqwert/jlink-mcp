@@ -24,39 +24,89 @@ export interface AppConfig {
   jlink: JLinkConfig;
 }
 
-function findJLinkInstallDir(): string {
-  const candidates = [
-    "/opt/SEGGER/JLink",
-    "/usr/local/SEGGER/JLink",
-    "/Applications/SEGGER/JLink",
-    "C:\\Program Files\\SEGGER\\JLink",
-    "C:\\Program Files (x86)\\SEGGER\\JLink",
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(dir)) return dir;
-  }
-  // Also check with version suffix
-  for (const base of ["/opt/SEGGER", "/Applications/SEGGER", "/usr/local/SEGGER", "C:\\Program Files\\SEGGER", "C:\\Program Files (x86)\\SEGGER"]) {
-    if (fs.existsSync(base)) {
-      try {
-        const entries = fs.readdirSync(base).filter((e) => e.startsWith("JLink"));
-        if (entries.length > 0) {
-          return path.join(base, entries.sort().reverse()[0]);
-        }
-      } catch {
-        // ignore
+const VERSIONED_JLINK_DIR = /^JLink_V(\d+)[A-Za-z0-9._-]*$/i;
+
+/** Find a usable J-Link installation without binding callers to a machine-specific path. */
+export function findJLinkInstallDir(device: string, env: NodeJS.ProcessEnv = process.env): string {
+  const configured = configuredJLinkInstallDir(env);
+  if (configured) return configured;
+
+  const candidates: string[] = [];
+  for (const root of jLinkInstallRoots(env)) {
+    candidates.push(path.join(root, "JLink"));
+    try {
+      for (const entry of fs.readdirSync(root)) {
+        if (VERSIONED_JLINK_DIR.test(entry)) candidates.push(path.join(root, entry));
       }
-    }
+    } catch { /* absent or unreadable installation root */ }
   }
-  return "";
+  return selectJLinkInstallDir(candidates, device);
+}
+
+/** Select the best discovered installation for the requested device. */
+export function selectJLinkInstallDir(candidates: readonly string[], device?: string): string {
+  const installations = [...new Set(candidates)].filter(isJLinkInstallation);
+  if (!installations.length) return "";
+  const requestedDevice = device?.trim();
+  const supported = requestedDevice ? installations.filter((candidate) => manifestDeclaresDevice(candidate, requestedDevice)) : [];
+  return rankJLinkInstallations(supported.length ? supported : installations)[0] ?? "";
+}
+
+function configuredJLinkInstallDir(env: NodeJS.ProcessEnv): string {
+  return env.JLINK_INSTALL_DIR?.trim() || env.JLINK_HOME?.trim() || "";
+}
+
+function jLinkInstallRoots(env: NodeJS.ProcessEnv): string[] {
+  const programFiles = [env.ProgramW6432, env.ProgramFiles, env["ProgramFiles(x86)"]]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => path.join(value, "SEGGER"));
+  return [...new Set([
+    "/opt/SEGGER", "/usr/local/SEGGER", "/Applications/SEGGER",
+    ...programFiles,
+  ])];
+}
+
+function isJLinkInstallation(installDir: string): boolean {
+  try {
+    if (!fs.statSync(installDir).isDirectory()) return false;
+    return ["JLink.exe", "JLinkExe", "JLinkGDBServerCL.exe", "JLinkGDBServer", "JLinkGDBServerCLExe"].some((file) => fs.existsSync(path.join(installDir, file)));
+  } catch {
+    return false;
+  }
+}
+
+function manifestDeclaresDevice(installDir: string, device: string): boolean {
+  try {
+    const manifest = fs.readFileSync(path.join(installDir, "JLinkDevices.xml"), "utf8");
+    return new RegExp(`\\bName\\s*=\\s*["']${escapeRegex(device)}["']`, "i").test(manifest);
+  } catch {
+    return false;
+  }
+}
+
+function rankJLinkInstallations(installations: readonly string[]): string[] {
+  return [...installations].sort((left, right) => {
+    const versionDelta = installationVersion(right) - installationVersion(left);
+    return versionDelta || path.basename(right).localeCompare(path.basename(left), undefined, { sensitivity: "base", numeric: true });
+  });
+}
+
+function installationVersion(installDir: string): number {
+  const version = path.basename(installDir).match(VERSIONED_JLINK_DIR)?.[1];
+  return version ? Number.parseInt(version, 10) : -1;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const configuredInterface = env.JLINK_INTERFACE?.toUpperCase();
+  const device = env.JLINK_DEVICE || "Unspecified";
   return {
     jlink: {
-      installDir: env.JLINK_INSTALL_DIR || findJLinkInstallDir(),
-      device: env.JLINK_DEVICE || "Unspecified",
+      installDir: findJLinkInstallDir(device, env),
+      device,
       interface: configuredInterface === "JTAG" ? "JTAG" : "SWD",
       speed: positiveInteger(env.JLINK_SPEED, 4000),
       serialNumber: env.JLINK_SERIAL || undefined,

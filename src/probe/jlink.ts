@@ -4,6 +4,7 @@ import { ProcessManager, terminateChildProcess } from "../utils/process-manager"
 import { log, logError } from "../utils/logger";
 import * as path from "path";
 import * as fs from "fs";
+import { findJLinkInstallDir } from "../utils/config";
 
 export interface JLinkConfig {
   installDir: string;
@@ -47,25 +48,6 @@ function stripBoilerplate(raw: string): string {
     .join("\n").trim();
 }
 
-function findJLinkInstallDir(): string {
-  const candidates = [
-    "/opt/SEGGER/JLink", "/usr/local/SEGGER/JLink", "/Applications/SEGGER/JLink",
-    "C:\\Program Files\\SEGGER\\JLink", "C:\\Program Files (x86)\\SEGGER\\JLink",
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(dir)) return dir;
-  }
-  for (const base of ["/opt/SEGGER", "/Applications/SEGGER", "/usr/local/SEGGER", "C:\\Program Files\\SEGGER", "C:\\Program Files (x86)\\SEGGER"]) {
-    if (fs.existsSync(base)) {
-      try {
-        const entries = fs.readdirSync(base).filter((e) => e.startsWith("JLink"));
-        if (entries.length > 0) return path.join(base, entries.sort().reverse()[0]);
-      } catch { /* ignore */ }
-    }
-  }
-  return "";
-}
-
 export class JLinkBackend extends ProbeBackend {
   readonly type = "jlink" as const;
   readonly displayName = "SEGGER J-Link";
@@ -80,12 +62,13 @@ export class JLinkBackend extends ProbeBackend {
     super();
     this.processManager = processManager;
     this.spawnProcess = spawnProcess;
+    const device = config.device || "Unspecified";
     this.config = {
-      installDir: config.installDir || findJLinkInstallDir(),
+      installDir: config.installDir || findJLinkInstallDir(device),
       jlinkExePath: config.jlinkExePath,
       gdbServerExePath: config.gdbServerExePath,
       memoryHelperPath: config.memoryHelperPath,
-      device: config.device || "Unspecified",
+      device,
       interface: config.interface || "SWD",
       speed: config.speed || 4000,
       serialNumber: config.serialNumber,

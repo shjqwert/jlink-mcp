@@ -1,14 +1,69 @@
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { findJLinkInstallDir, getConfig, selectJLinkInstallDir } from "../utils/config";
 import { ProcessManager } from "../utils/process-manager";
 import { ProbeErrorCode, type CommandResult } from "./backend";
 import { JLinkBackend, type JLinkSpawn } from "./jlink";
+
+test("J-Link installation discovery prefers an installation declaring the requested device", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-discovery-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const legacy = join(root, "JLink");
+  const compatible = join(root, "JLink_V884");
+  for (const installDir of [legacy, compatible]) {
+    mkdirSync(installDir);
+    writeFileSync(join(installDir, "JLink.exe"), "test");
+  }
+  writeFileSync(join(compatible, "JLinkDevices.xml"), '<Database><ChipInfo Name="Z20K146M" /></Database>');
+
+  assert.equal(selectJLinkInstallDir([legacy, compatible], "Z20K146M"), compatible);
+});
+
+test("J-Link installation discovery prefers a versioned candidate when device metadata is unavailable", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-discovery-fallback-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const legacy = join(root, "JLink");
+  const olderVersioned = join(root, "JLink_V884b");
+  const newerVersioned = join(root, "JLink_V884c");
+  for (const installDir of [legacy, olderVersioned, newerVersioned]) {
+    mkdirSync(installDir);
+    writeFileSync(join(installDir, "JLink.exe"), "test");
+  }
+
+  assert.equal(selectJLinkInstallDir([legacy, olderVersioned, newerVersioned], "UnknownDevice"), newerVersioned);
+});
+
+test("J-Link discovery recognizes version directories with release suffixes", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-discovery-suffix-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const programFiles = join(root, "Program Files");
+  const legacy = join(programFiles, "SEGGER", "JLink");
+  const compatible = join(programFiles, "SEGGER", "JLink_V884b_x64");
+  for (const installDir of [legacy, compatible]) {
+    mkdirSync(installDir, { recursive: true });
+    writeFileSync(join(installDir, "JLink.exe"), "test");
+  }
+  writeFileSync(join(compatible, "JLinkDevices.xml"), '<Database><ChipInfo Name="Z20K146M" /></Database>');
+
+  const env = { ProgramFiles: programFiles, JLINK_DEVICE: "Z20K146M" } as NodeJS.ProcessEnv;
+  assert.equal(findJLinkInstallDir("Z20K146M", env), compatible);
+  assert.equal(getConfig(env).jlink.installDir, compatible);
+});
+
+test("J-Link environment install directory is an explicit override", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-discovery-override-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const configured = join(root, "custom-jlink");
+
+  assert.equal(findJLinkInstallDir("Z20K146M", { JLINK_INSTALL_DIR: configured }), configured);
+  assert.equal(getConfig({ JLINK_INSTALL_DIR: configured }).jlink.installDir, configured);
+});
 
 test("JLinkBackend timeout waits for JLinkExe exit before returning", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
