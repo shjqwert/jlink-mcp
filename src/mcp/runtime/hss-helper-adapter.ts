@@ -141,6 +141,14 @@ export function hssTargetStateFromConnectPreflight(observed: Record<string, unkn
   throw new HssAdapterError("HSS_TARGET_STATE_UNKNOWN", "HSS target-state preflight returned no usable execution state", true, true);
 }
 
+export function assertNonIntrusiveConnectPreflight(observed: Record<string, unknown>): void {
+  // The policy avoids the device script, while reset continuity remains a
+  // target-specific hardware fact and is intentionally not inferred here.
+  if (observed.nonIntrusiveAttach !== true || observed.targetWritten !== false || observed.flashIssued !== false || observed.resetIssued !== false || observed.haltIssued !== false) {
+    throw new HssAdapterError("HSS_CONNECT_PREFLIGHT_SIDE_EFFECT", "HSS target-state preflight reported an unsafe attach policy or target side effect", false, true);
+  }
+}
+
 export class NativeHssHelperAdapter implements HssHelperAdapter {
   readonly backend = "jlink-hss" as const;
 
@@ -250,9 +258,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
     if (observed.status !== "ok") {
       throw new HssAdapterError(String(observed.errorCode ?? "HSS_CONNECT_PREFLIGHT_FAILED"), String(observed.reason ?? "target state could not be observed through the HSS helper"), true, true);
     }
-    if (observed.targetReset !== false || observed.targetWritten !== false || observed.flashIssued !== false || observed.resetIssued !== false || observed.haltIssued !== false) {
-      throw new HssAdapterError("HSS_CONNECT_PREFLIGHT_SIDE_EFFECT", "HSS target-state preflight reported an unexpected target side effect", false, true);
-    }
+    assertNonIntrusiveConnectPreflight(observed);
     return hssTargetStateFromConnectPreflight(observed);
   }
 

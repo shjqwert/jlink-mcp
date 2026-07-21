@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  assertNonIntrusiveConnectPreflight,
   HssAdapterError,
   NativeHssHelperAdapter,
   hssTargetStateFromConnectPreflight,
@@ -23,6 +24,28 @@ test("HSS connect preflight accepts only explicit halted-state observations", ()
     assert.throws(
       () => hssTargetStateFromConnectPreflight({ targetWasHalted: false, targetWasHaltedRaw: raw }),
       (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_TARGET_STATE_UNKNOWN" && error.stateUnknown,
+    );
+  }
+});
+
+test("HSS connect preflight requires a non-intrusive attach policy without inferring reset continuity", () => {
+  assert.doesNotThrow(() => assertNonIntrusiveConnectPreflight({
+    nonIntrusiveAttach: true,
+    targetReset: false,
+    targetResetContinuity: "unverified",
+    targetWritten: false,
+    flashIssued: false,
+    resetIssued: false,
+    haltIssued: false,
+  }));
+  for (const observed of [
+    { targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false },
+    { nonIntrusiveAttach: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false },
+    { nonIntrusiveAttach: true, targetWritten: false, flashIssued: false, resetIssued: true, haltIssued: false },
+  ]) {
+    assert.throws(
+      () => assertNonIntrusiveConnectPreflight(observed),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_CONNECT_PREFLIGHT_SIDE_EFFECT" && error.stateUnknown,
     );
   }
 });

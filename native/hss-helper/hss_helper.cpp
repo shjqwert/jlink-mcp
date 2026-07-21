@@ -1985,6 +1985,64 @@ static bool read_bounded_text_file(const std::wstring& path, size_t maximum_byte
   return static_cast<bool>(file.read(bytes->data(), size));
 }
 
+static std::string lowercase_ascii(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+    return static_cast<char>(std::tolower(character));
+  });
+  return value;
+}
+
+static bool resolve_non_intrusive_attach_device_from_catalog(
+    const std::string& requested_device,
+    const std::string& catalog,
+    std::string* attach_device) {
+  if (lowercase_ascii(requested_device) == "cortex-m4") {
+    *attach_device = "Cortex-M4";
+    return true;
+  }
+  static const std::regex name_attribute("\\bName\\s*=\\s*\"([^\"]*)\"");
+  static const std::regex core_attribute("\\bCore\\s*=\\s*\"([^\"]*)\"");
+  size_t offset = 0;
+  while ((offset = catalog.find("<ChipInfo", offset)) != std::string::npos) {
+    const size_t end = catalog.find('>', offset);
+    if (end == std::string::npos) break;
+    const std::string chip = catalog.substr(offset, end - offset + 1U);
+    std::smatch name;
+    std::smatch core;
+    if (std::regex_search(chip, name, name_attribute)
+        && std::regex_search(chip, core, core_attribute)
+        && lowercase_ascii(name[1].str()) == lowercase_ascii(requested_device)
+        && core[1].str() == "JLINK_CORE_CORTEX_M4") {
+      *attach_device = "Cortex-M4";
+      return true;
+    }
+    offset = end + 1U;
+  }
+  return false;
+}
+
+static bool resolve_non_intrusive_attach_device(
+    const std::wstring& dll_path,
+    const std::string& requested_device,
+    std::string* attach_device,
+    std::string* reason) {
+  if (lowercase_ascii(requested_device) == "cortex-m4") {
+    *attach_device = "Cortex-M4";
+    return true;
+  }
+  const std::filesystem::path catalog_path = std::filesystem::path(dll_path).parent_path() / L"JLinkDevices.xml";
+  std::string catalog;
+  if (!read_bounded_text_file(catalog_path.native(), 32U * 1024U * 1024U, &catalog)) {
+    *reason = "JLinkDevices.xml beside the selected J-Link DLL is unavailable or exceeds the 32 MiB safety bound";
+    return false;
+  }
+  if (!resolve_non_intrusive_attach_device_from_catalog(requested_device, catalog, attach_device)) {
+    *reason = "selected device has no verified non-intrusive generic attach profile; refusing to run its device script";
+    return false;
+  }
+  return true;
+}
+
 static std::wstring lower_path(std::wstring path) {
   std::transform(path.begin(), path.end(), path.begin(), [](wchar_t ch) { return std::towlower(ch); });
   return path;
@@ -2228,6 +2286,12 @@ static bool configure_no_restart_on_close(JLINKARM_ExecCommand_Fn arm_exec, bool
   return !*crashed && rc >= 0;
 }
 
+static bool configure_force_attach_target(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed) {
+  char out[512] = {};
+  const int rc = call_exec(arm_exec, "ForceAttachTarget = 1", out, sizeof(out), crashed);
+  return !*crashed && rc >= 0;
+}
+
 static bool verify_exact_jlink_probe(
     JLINKARM_GetSN_Fn arm_get_sn,
     U32 expected_serial,
@@ -2284,6 +2348,13 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   const std::string serial_text = option_utf8(options, L"--serial", "");
   const int speed = std::stoi(option_utf8(options, L"--speed", "4000"));
   const int tif = iface == "JTAG" ? 0 : 1;
+  std::string attach_device;
+  std::string attach_reason;
+  if (!resolve_non_intrusive_attach_device(dll_path, device, &attach_device, &attach_reason)) {
+    FreeLibrary(dll);
+    error_json("JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE", attach_reason, dll_utf8);
+    return 0;
+  }
   bool crashed = false;
   int select_sn_rc = 0;
   U32 expected_serial = 0;
@@ -2319,8 +2390,16 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     return 0;
   }
 
+  if (!configure_force_attach_target(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_ATTACH_POLICY_FAILED", "JLINKARM_ExecCommand(ForceAttachTarget = 1) failed", dll_utf8, true);
+    return 0;
+  }
+
   char exec_out[512] = {};
-  std::string device_cmd = "device = " + device;
+  std::string device_cmd = "device = " + attach_device;
   int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
   if (crashed || device_rc < 0) {
     call_void0(arm_close, &crashed);
@@ -2391,6 +2470,7 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
   std::cout
     << "{\"status\":\"" << (connect_rc >= 0 ? "ok" : "error")
     << "\",\"device\":\"" << escape(device)
+    << "\",\"attachDevice\":\"" << escape(attach_device)
     << "\",\"interface\":\"" << escape(iface)
     << "\",\"speedKhz\":" << speed
     << ",\"serial\":\"" << escape(serial_text)
@@ -2412,7 +2492,8 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     << "\",\"execOutput\":\"" << escape(exec_out)
     << "\",\"targetWasHalted\":" << (halted > 0 ? "true" : "false")
     << ",\"targetWasHaltedRaw\":" << halted
-    << ",\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
+    << ",\"nonIntrusiveAttach\":true"
+    << ",\"targetReset\":false,\"targetResetContinuity\":\"unverified\",\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
     << ",\"baseApiCandidate\":\"AUTHORIZED_UNVERIFIED_BASE_API_CANDIDATE\"}";
   return 0;
 }
@@ -2525,6 +2606,13 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   const std::string iface = option_utf8(options, L"--interface", "SWD");
   const std::string serial_text = option_utf8(options, L"--serial", "");
   const bool resume_before_read = option_utf8(options, L"--resume-before-read", "false") == "true";
+  std::string attach_device;
+  std::string attach_reason;
+  if (!resolve_non_intrusive_attach_device(dll_path, device, &attach_device, &attach_reason)) {
+    FreeLibrary(dll);
+    error_json("JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE", attach_reason, dll_utf8);
+    return 0;
+  }
   int speed = 4000;
   if (!parse_int_text(option_utf8(options, L"--speed", "4000"), &speed) || speed < 1) {
     FreeLibrary(dll);
@@ -2573,8 +2661,16 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     return 0;
   }
 
+  if (!configure_force_attach_target(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_ATTACH_POLICY_FAILED", "JLINKARM_ExecCommand(ForceAttachTarget = 1) failed", dll_utf8, true);
+    return 0;
+  }
+
   char exec_out[512] = {};
-  const std::string device_cmd = "device = " + device;
+  const std::string device_cmd = "device = " + attach_device;
   int device_rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
   if (crashed || device_rc < 0) {
     call_void0(arm_close, &crashed);
@@ -2765,6 +2861,7 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     << "\",\"api\":\"" << (write_mode ? access_size == 1 ? "JLINKARM_WriteU8" : access_size == 2 ? "JLINKARM_WriteU16" : "JLINKARM_WriteU32" : "JLINKARM_ReadMem") << "\""
     << ",\"dll\":\"" << escape(dll_utf8)
     << "\",\"device\":\"" << escape(device)
+    << "\",\"attachDevice\":\"" << escape(attach_device)
     << "\",\"interface\":\"" << escape(iface)
     << "\",\"speedKhz\":" << speed
     << ",\"probeSerial\":" << actual_serial
@@ -2787,6 +2884,7 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
     << ",\"targetWasHaltedAfterResume\":" << (halted_after_resume > 0 ? "true" : "false")
     << ",\"targetWasHaltedAfterResumeRaw\":" << halted_after_resume
+    << ",\"nonIntrusiveAttach\":true"
     << ",\"memoryCacheDisabled\":true"
     << ",\"writeReturnCode\":" << write_rc
     << ",\"writeIssued\":" << (write_elements_issued > 0 ? "true" : "false")
@@ -2898,7 +2996,7 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     << ",\"closeFailed\":" << (close_crashed ? "true" : "false")
     << ",\"stateUnknown\":" << (state_unknown ? "true" : "false")
     << (operation_failed ? std::string(",\"errorCode\":\"") + operation_error_code + "\",\"reason\":\"" + operation_error_reason + "\"" : "")
-    << ",\"targetReset\":false,\"targetWritten\":" << (write_mode && !write_failed ? "true" : "false")
+    << ",\"targetReset\":false,\"targetResetContinuity\":\"unverified\",\"targetWritten\":" << (write_mode && !write_failed ? "true" : "false")
     << ",\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false}";
   std::cout << "{\"status\":\"" << (operation_failed ? "error" : "ok") << "\"," << output.str();
   return 0;
@@ -3008,7 +3106,6 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
       || !parse_int_text(option_utf8(options, L"--speed", ""), &speed) || speed < 1) {
     return startup_error("MEMORY_SESSION_CONFIG_INVALID", "device, interface, serial, and positive speed are required");
   }
-
   std::string activation_code;
   std::string activation_reason;
   if (!wait_for_memory_session_activation(&activation_code, &activation_reason)) {
@@ -3017,6 +3114,12 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
 
   HMODULE dll = LoadLibraryW(dll_path.c_str());
   if (!dll) return startup_error("HSS_DLL_LOAD_FAILED", "LoadLibraryW failed");
+  std::string attach_device;
+  std::string attach_reason;
+  if (!resolve_non_intrusive_attach_device(dll_path, device, &attach_device, &attach_reason)) {
+    FreeLibrary(dll);
+    return startup_error("JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE", attach_reason);
+  }
   auto arm_open = reinterpret_cast<JLINKARM_Open_Fn>(required(dll, "JLINKARM_Open"));
   auto arm_close = reinterpret_cast<JLINKARM_Close_Fn>(required(dll, "JLINKARM_Close"));
   auto arm_exec = reinterpret_cast<JLINKARM_ExecCommand_Fn>(required(dll, "JLINKARM_ExecCommand"));
@@ -3054,7 +3157,11 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
     call_void0(arm_close, &crashed); FreeLibrary(dll);
     return startup_error("JLINK_MEMORY_CACHE_POLICY_FAILED", "JLINKARM_ExecCommand(SetEnableMemCache = 0) failed", true);
   }
-  const std::string device_cmd = "device = " + device;
+  if (!configure_force_attach_target(arm_exec, &crashed)) {
+    call_void0(arm_close, &crashed); FreeLibrary(dll);
+    return startup_error("JLINK_ATTACH_POLICY_FAILED", "JLINKARM_ExecCommand(ForceAttachTarget = 1) failed", true);
+  }
+  const std::string device_cmd = "device = " + attach_device;
   rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
   if (crashed || rc < 0) {
     call_void0(arm_close, &crashed); FreeLibrary(dll);
@@ -3087,8 +3194,9 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
   }
   std::cout << "{\"status\":\"ready\",\"command\":\"memory-session\",\"probeSerial\":" << actual_serial
     << ",\"device\":\"" << escape(device) << "\",\"interface\":\"" << escape(iface)
+    << "\",\"attachDevice\":\"" << escape(attach_device)
     << "\",\"speedKhz\":" << speed << ",\"targetState\":\"" << memory_session_state_name(initial_halted)
-    << "\",\"memoryCacheDisabled\":true,\"targetReset\":false,\"targetWritten\":false,\"haltIssued\":false}\n" << std::flush;
+    << "\",\"memoryCacheDisabled\":true,\"nonIntrusiveAttach\":true,\"targetReset\":false,\"targetResetContinuity\":\"unverified\",\"targetWritten\":false,\"haltIssued\":false}\n" << std::flush;
 
   const auto observe_state = [&]() {
     bool state_crashed = false;
@@ -3264,7 +3372,8 @@ static U32 self_test_get_wrong_serial() {
 }
 
 static int self_test_exec_success(const char* command, char*, int) {
-  return std::string(command) == "SetRestartOnClose = 0" ? 0 : -1;
+  const std::string value(command);
+  return value == "SetRestartOnClose = 0" || value == "ForceAttachTarget = 1" ? 0 : -1;
 }
 
 static int self_test_exec_failure(const char*, char*, int) {
@@ -3288,8 +3397,25 @@ static bool self_test_probe_selection_and_close_policy() {
       || verify_exact_jlink_probe(self_test_get_wrong_serial, expected, &crashed, &error_code, &error_reason)
       || error_code != "JLINK_SERIAL_MISMATCH"
       || !configure_no_restart_on_close(self_test_exec_success, &crashed)
-      || configure_no_restart_on_close(self_test_exec_failure, &crashed)) return false;
+      || !configure_force_attach_target(self_test_exec_success, &crashed)
+      || configure_no_restart_on_close(self_test_exec_failure, &crashed)
+      || configure_force_attach_target(self_test_exec_failure, &crashed)) return false;
   return true;
+}
+
+static bool self_test_non_intrusive_attach_profile() {
+  const std::string catalog =
+    "<ChipInfo Vendor=\"ZhiXin\" Name=\"Z20K146M\" Core=\"JLINK_CORE_CORTEX_M4\" />"
+    "<ChipInfo Vendor=\"Example\" Name=\"Other\" Core=\"JLINK_CORE_CORTEX_M3\" />";
+  std::string attach_device;
+  std::string attach_reason;
+  return resolve_non_intrusive_attach_device_from_catalog("Z20K146M", catalog, &attach_device)
+    && attach_device == "Cortex-M4"
+    && resolve_non_intrusive_attach_device_from_catalog("cortex-m4", "", &attach_device)
+    && attach_device == "Cortex-M4"
+    && resolve_non_intrusive_attach_device(L"C:\\missing\\JLink_x64.dll", "Cortex-M4", &attach_device, &attach_reason)
+    && attach_device == "Cortex-M4"
+    && !resolve_non_intrusive_attach_device_from_catalog("Other", catalog, &attach_device);
 }
 
 static int self_test() {
@@ -3332,6 +3458,10 @@ static int self_test() {
   }
   if (!self_test_probe_selection_and_close_policy()) {
     error_json("HSS_SELF_TEST_PROBE_SELECTION_FAILED", "exact Probe selection or no-restart close policy boundary failed");
+    return 0;
+  }
+  if (!self_test_non_intrusive_attach_profile()) {
+    error_json("HSS_SELF_TEST_NON_INTRUSIVE_ATTACH_FAILED", "generic Cortex-M4 attach profile selection failed closed");
     return 0;
   }
   if (!prepare_jlink_script("none", L"", "", &no_script, &script_error_code, &script_error_reason)
