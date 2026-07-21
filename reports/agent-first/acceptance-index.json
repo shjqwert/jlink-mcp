@@ -1,0 +1,694 @@
+{
+  "schemaVersion": 1,
+  "testedCommit": "3c84401a09011ff05c3fb15e7cabfa41f5eb6199",
+  "generatedAt": "2026-07-21T01:49:02.674Z",
+  "environmentClass": "windows-x64",
+  "ci": {
+    "build": "PASS",
+    "lint": "PASS",
+    "unit": "PASS",
+    "surface": "PASS",
+    "guidance": "PASS",
+    "legacyScan": "PASS",
+    "helper": "PASS",
+    "package": "PASS",
+    "privacy": "PASS",
+    "openspec": "PASS"
+  },
+  "hss": {
+    "capacityStatus": "NOT_TESTED",
+    "qualityStatus": "not_tested",
+    "qualitySource": "not_tested"
+  },
+  "writeVerification": {
+    "status": "NOT_TESTED",
+    "source": "not_tested"
+  },
+  "openCoreIssues": {
+    "P0": 0,
+    "P1": 0
+  },
+  "acceptance": {
+    "schemaVersion": 1,
+    "runId": "published",
+    "createdAt": "2026-07-21T01:45:53.448Z",
+    "completedAt": "2026-07-21T01:49:02.293Z",
+    "codeCommit": "3c84401a09011ff05c3fb15e7cabfa41f5eb6199",
+    "tests": [
+      {
+        "testId": "T01",
+        "status": "PASS",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2",
+          "check-3",
+          "check-4",
+          "check-5",
+          "check-6",
+          "check-7",
+          "check-8",
+          "check-9",
+          "check-10",
+          "check-11",
+          "check-12",
+          "check-13",
+          "check-14",
+          "check-15"
+        ],
+        "hardwarePrerequisites": [],
+        "evidence": [
+          "digest:2221534a1b28934e667905b461a35d117d4b89116c399ae143fd5638c6f9eb26"
+        ],
+        "blockers": [],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:edb227785fe269b304789c6d0d7dfde4be5b88e7151ef3deb7cf72e3ce399ced"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T02",
+        "status": "PASS",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2"
+        ],
+        "hardwarePrerequisites": [],
+        "evidence": [
+          "digest:7c303fc366f494e1a4cbff5f8654ca58aa2bca89114fdec020a45bc40e9a619c"
+        ],
+        "blockers": [],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:c91d19c3b286fbb49c0839420c579f3634bf79d09805707b75a497e8f5225c18"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T03",
+        "status": "PASS",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [],
+        "evidence": [
+          "digest:1217374667191889ec3a1b52de31e3b2bde6acf7444c068dcc9bcbd48dd3b3f0"
+        ],
+        "blockers": [],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:d116c8c103db33e4b2760879ca414217fdedd8fb10b1b46d37f102ae89208fb1"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T04",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:08155d1d7ab87dabdec9e99a6bcc9a98afa105966f68c81ce9fa025e21307a30"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:669ef7be4e4febe5d65ec26bf6f0a89d2b6245a8081d34fe9ed25b610a85e7dd"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T05",
+        "status": "PASS",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [],
+        "evidence": [
+          "digest:984bfd039e8d2ac530fae6d1a38d3ce65d2cdb3df91d9adc527acf1fe8493daa"
+        ],
+        "blockers": [],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:8a3a8e73c2922a3e5b2d94948a4e3c1aec031d20fe40f7c001d71b6140bf9d23"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T06",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:792fc6c6928a2b90acf334ce3c99f9e2fcc10a19dfd7c6c4f52b1035d7af9b5a"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:c87b039831944ff3d83cb89ce580226a9b09ac7519f14b9e06101b6e0a3a3f49"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T07",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:779d3508bfad341442e0c858354221ad1ed0ef90b50ff4586b82fca0f1e86822"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:2d6e6a0a875b7904cac6dd4a669d946d3f74c1a24b039d4e94d6706f1a57e811"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T08",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:201fcfc34f3eb574d7e12c6b7c086af4e00475b31d753eba0b97f912b768275f"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:0ae48f44bac2e575c44514b782646da395ad3d6f6ea47013b8f313ab33166f8a"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T09",
+        "status": "BLOCKED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2",
+          "check-3"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:6df67d32fea7267d9fea232c65ded90561add6ad34ae7318f75f08d4152292c3"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:7e6faebf0fad4bed007c6d24217ba2188af0e13ded1993c491fd449cce45b5f2"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T10",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:b1c4e99dc45ac556c2922378455b80a8ae6651c427fbdac4aabfbcea7859787e"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:75f772d01b6fe4a22ff9308cc0ccb10bc0dc4a977cc2efe49a2a4069d4ff4543"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T11",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:642a3e4e42e46b5915d0bde4305e404574e374deea3360c1dad221108fbef112"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:cb41eab9d9a8220d8e688d78eca51194c2913e9e8041666c3bdc1bfc60dfc60e"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T12",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2",
+          "hardware-prerequisite-3"
+        ],
+        "evidence": [
+          "digest:e5796b5b46734b076ba70b87d591a42ab22ff3664b3709a36416bb7736ef1548"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:22ec87824b69c55a31ed4ca968ee7d93f659fd1eef204ecf360ac1995994d823"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T13",
+        "status": "SKIPPED_WITH_REASON",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:47327981c069d2991c291204e3ba2775ee1d0073e93484048c2bc48bc9577c6f"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:5c4d3a2cc90d63ede7c473ed024748fc90f5244a90e7da1c017bf7237e35c237"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T14",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:7a9f8bd384a20a7fe8121faaf941a7b9dddf14cc3b30e25c5727cb431f7a2591"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:bc16047ed0a08ba99b6280135a27986e1e2162592fa3442e64cf2ea9fc6178fb"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T15",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1",
+          "check-2"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:a35ad2ca2bde2ee088079faacb97ac1ec9f5d8e09512d301016c827f391cb24e"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:8bd2689d3acf9e72e12d5b61f79953f33cd9a49ec40fd4dd5656e7679191c22c"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T16",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:54811ce2dbb5ecdcfe82ce4ebe3c91d5cca59fd2c56a09060125f070a101bc09"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:e70129f04f6f4490e6b82eb37c8405ff9c566009c1a85ccbcd4f47fd03ccf46b"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T17",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:e46028a0107a6563d55ed5f9b860d7e02c64e88650ad54437982ac4ec5367505"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:8db57683ff918e42586992da59b85b7b685c74d31f5c2b146879d636329bc480"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T18",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:5925dfa5823e58ad0dfc481e5c55e3b4b85fbe3b91362573b4d4f92781379f3a"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:f63de613028754cf6bab6d7377db4a74f998dc3018b2d4b9caf861bce50f3f04"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T19",
+        "status": "NOT_TESTED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [
+          "check-1"
+        ],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1",
+          "hardware-prerequisite-2"
+        ],
+        "evidence": [
+          "digest:2ae53e71ed5167f11cc29642d9c09d048b7f792f88ee327391d307ca264310d7"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "PASS",
+            "summary": "status-recorded",
+            "evidence": [
+              "digest:432bcabf640d222fccfd7eb2972def87533d21fe06db6965358ba3b5658e3bd8"
+            ],
+            "blockers": []
+          }
+        ]
+      },
+      {
+        "testId": "T20",
+        "status": "BLOCKED",
+        "requirements": [
+          "requirement-1"
+        ],
+        "automatedChecks": [],
+        "hardwarePrerequisites": [
+          "hardware-prerequisite-1"
+        ],
+        "evidence": [
+          "digest:20d37b6e3829d395d52b2aaa27699c66ec8a8a431b4cf17f76661e2e6283716a"
+        ],
+        "blockers": [
+          "details-retained-in-private-evidence"
+        ],
+        "subcases": [
+          {
+            "id": "subcase-1",
+            "status": "BLOCKED",
+            "summary": "details-retained-in-private-evidence",
+            "evidence": [
+              "digest:3636e4460f2851008d893d090e4e71011fd3ce0d6cf242506238a3aec927911a"
+            ],
+            "blockers": [
+              "details-retained-in-private-evidence"
+            ]
+          }
+        ]
+      }
+    ],
+    "mergeRecommendation": "DO_NOT_RECOMMEND",
+    "summary": {
+      "PASS": 4,
+      "FAIL": 0,
+      "BLOCKED": 2,
+      "SKIPPED_WITH_REASON": 1,
+      "NOT_TESTED": 13,
+      "openP0": 0
+    }
+  },
+  "publication": {
+    "destinationMetadata": "not_supplied"
+  },
+  "blockers": [
+    "T04 is NOT_TESTED",
+    "T06 is NOT_TESTED",
+    "T07 is NOT_TESTED",
+    "T08 is NOT_TESTED",
+    "T09 is BLOCKED",
+    "T10 is NOT_TESTED",
+    "T11 is NOT_TESTED",
+    "T12 is NOT_TESTED",
+    "T14 is NOT_TESTED",
+    "T15 is NOT_TESTED",
+    "T16 is NOT_TESTED",
+    "T17 is NOT_TESTED",
+    "T18 is NOT_TESTED",
+    "T19 is NOT_TESTED",
+    "T20 is BLOCKED",
+    "destination metadata is not supplied"
+  ],
+  "mergeRecommendation": "DO_NOT_RECOMMEND"
+}

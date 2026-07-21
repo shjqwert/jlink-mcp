@@ -58,8 +58,8 @@
 
 - [x] 8.1 Add a non-echoing tracked-content privacy scanner and package filename/content gates.
 - [x] 8.2 Remove or sanitize tracked machine paths, Probe identifiers, private Artifact hashes, approval-era active guidance, and hardware evidence while preserving unrelated user evidence recoverably.
-- [ ] 8.3 Generate schema-tested `reports/agent-first/acceptance-summary.md` and `acceptance-index.json` bound to the exact tested commit without local evidence paths.
-- [ ] 8.4 Record every implementation/test problem in the ignored Phase 7 Markdown issue ledger with reproduction, impact, fix, and regression status.
+- [x] 8.3 Generate schema-tested `reports/agent-first/acceptance-summary.md` and `acceptance-index.json` bound to the exact tested commit without local evidence paths.
+- [x] 8.4 Record every implementation/test problem in the ignored Phase 7 Markdown issue ledger with reproduction, impact, fix, and regression status.
 
 ## 9. Review and final verification
 
