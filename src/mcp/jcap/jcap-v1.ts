@@ -1485,7 +1485,8 @@ function assertSampleLossFacts(raw: JcapV1Raw): void {
   if (raw.metadata.state === "completed") {
     const expected = raw.metadata.requestedRateHz * raw.metadata.durationSec;
     if (raw.samples.length * 100 < expected * 95) throw new JcapIntegrityError("JCAP_SAMPLE_BUDGET_SHORT", `completed capture has ${raw.samples.length} of ${expected} planned samples; at least 95% are required`);
-    if (raw.metadata.quality.missingSamples === null || raw.metadata.quality.missingSamples < Math.max(0, expected - raw.samples.length)) {
+    const plannedDeficit = Math.max(0, expected - raw.samples.length);
+    if (plannedDeficit > 0 && (raw.metadata.quality.missingSamples === null || raw.metadata.quality.missingSamples < plannedDeficit)) {
       throw new JcapIntegrityError("JCAP_SAMPLE_BUDGET_UNREPORTED", "completed capture does not explicitly account for its planned sample deficit");
     }
   }

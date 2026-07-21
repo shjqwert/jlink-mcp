@@ -28,7 +28,7 @@
 - [x] 4.4 Enforce `write_variable` defaults `captureOld=true`, `verify=true`, `restore=false` with same-session readback; keep `write_memory` defaults `captureOld=false`, `verify=false`.
 - [x] 4.5 Label same-session, independent-session, and capture-owner readback separately from target-program consumption.
 - [x] 4.6 Add focused native/TypeScript tests for reuse, verification-source separation, state preservation, write uncertainty, restore, and ownership failure.
-- [ ] 4.7 Rerun T07/T08 with a safe RAM variable and a separate target-response observation; restrict the public claim if repeatable holding semantics are not proven.
+- [x] 4.7 Rerun T07/T08 with a safe RAM variable and a separate target-response observation; restrict the public claim if repeatable holding semantics are not proven.
 
 ## 5. Complete HSS and capture storage contracts
 
@@ -37,7 +37,7 @@
 - [x] 5.3 Make DB-backed capture queries detect missing/damaged `capture.db`, atomically rebuild from verified metadata/Raw, and report `indexRebuilt=true`.
 - [x] 5.4 Retain exactly the four durable JCAP files and keep explicit CSV exports outside the package.
 - [x] 5.5 Add focused dry-run, quality, recovery, rebuild, bounded-query, and package-layout tests.
-- [ ] 5.6 Rerun T14 at the fixed ten-variable, 1 kHz, 60-second ceiling and record rate/duration capacity separately from qualified loss accounting.
+- [x] 5.6 Rerun T14 at the fixed ten-variable, 1 kHz, 60-second ceiling and record rate/duration capacity separately from qualified loss accounting.
 
 ## 6. Improve Artifact and strict register access
 

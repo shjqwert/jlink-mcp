@@ -324,6 +324,29 @@ test("JCAP v1 rejects a completed capture below the 95 percent planned sample th
   }
 });
 
+test("JCAP v1 accepts a completed capture with no planned deficit when optional loss counters are unavailable", async () => {
+  const root = workspace();
+  const packageDir = path.join(root, "captures", `${captureId}.jcap`);
+  const quality = { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null };
+  try {
+    writeJcapV1Raw({
+      packageDir,
+      metadata: metadata(captureId, "active", 1, 3),
+      samples,
+      events: [
+        { eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(2), eventSequence: 1, type: "quality", tick: "30", qualityStatus: "partial", qualitySource: "target_counter", ...quality, durationValidated: true, qualityEvidence: { source: "fixture" } },
+        { eventId: eventId(3), eventSequence: 2, type: "lifecycle", tick: "30", state: "finalizing" },
+        { eventId: eventId(4), eventSequence: 3, type: "lifecycle", tick: "31", state: "completed" },
+      ],
+    });
+    finalizeJcapV1Metadata(packageDir, "completed", quality, "partial", "target_counter");
+    await assert.doesNotReject(() => rebuildJcapV1Index(packageDir));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("JCAP v1 full ceiling shape round-trips 60,000 synchronized ten-variable frames through Raw, DB, bounded queries, and rebuild", { timeout: 300_000 }, async () => {
   const root = workspace();
   const packageDir = path.join(root, "captures", `${captureId}.jcap`);
