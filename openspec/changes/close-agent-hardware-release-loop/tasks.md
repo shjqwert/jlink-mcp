@@ -65,7 +65,7 @@
 
 - [x] 9.1 Complete each implementation batch and focused tests before freezing its affected files.
 - [ ] 9.2 Record the fixed diff hash, run a read-only Reviewer, and mark the review `STALE` if start/end hashes differ.
-- [ ] 9.3 Apply accepted findings only after Review completes; rerun focused/full build, lint, unit, surface, consistency, privacy, Helper, package, and strict OpenSpec checks.
+- [x] 9.3 Apply accepted findings only after Review completes; rerun focused/full build, lint, unit, surface, consistency, privacy, Helper, package, and strict OpenSpec checks.
 - [ ] 9.4 Run applicable authorized hardware regressions on one final commit, including T07/T08/T14 and recovery-protected T12/T13 when prerequisites remain valid.
 - [ ] 9.5 Freeze the repaired diff and run one final hash-stable read-only review.
 - [ ] 9.6 Recommend merge/release only when all applicable T01-T20 cases satisfy the revised contract and no core P0/P1 remains; do not rewrite history, commit, or push without the required explicit action/authorization.
