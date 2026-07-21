@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +12,14 @@ function successfulExecution(): CommandExecution {
   return { exitCode: 0, signal: null, stdout: "ok\n", stderr: "", startedAt: now, endedAt: now };
 }
 
+function initializeRepository(repository: string): void {
+  execFileSync("git", ["init"], { cwd: repository, stdio: "ignore" });
+  writeFileSync(path.join(repository, ".gitignore"), "test-output/\n");
+  writeFileSync(path.join(repository, "README.md"), "fixture\n");
+  execFileSync("git", ["add", "."], { cwd: repository, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=JLink Test", "-c", "user.email=jlink-test@example.invalid", "commit", "-m", "fixture"], { cwd: repository, stdio: "ignore" });
+}
+
 test("software acceptance writes the complete ignored run layout and all T01-T20 statuses", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "jlink-software-acceptance-"));
   const repository = path.join(root, "repository");
@@ -18,6 +27,7 @@ test("software acceptance writes the complete ignored run layout and all T01-T20
   const output = path.join(repository, "test-output");
   mkdirSync(repository, { recursive: true });
   mkdirSync(project, { recursive: true });
+  initializeRepository(repository);
   writeFileSync(path.join(project, "firmware.c"), "int main(void) { return 0; }\n");
   const executed: string[] = [];
   const execute: CommandExecutor = (check) => { executed.push(check.id); return successfulExecution(); };
@@ -33,7 +43,7 @@ test("software acceptance writes the complete ignored run layout and all T01-T20
     assert.equal(result.index.mergeRecommendation, "DO_NOT_RECOMMEND");
     assert.deepEqual(executed, [
       "ignored-output", "install", "build", "lint", "unit-foundation", "unit-acceptance", "unit-artifact", "unit-direct", "unit-svd", "unit-hss-jcap",
-      "surface", "legacy-scan", "hss-helper", "openspec",
+      "surface", "guidance", "legacy-scan", "hss-helper", "package", "privacy", "openspec",
     ]);
     assert.deepEqual(readdirSync(result.runDirectory).sort(), [
       "acceptance-index.json", "captures", "commands.ndjson", "environment.json", "hashes.json", "issue-ledger.json", "issue-ledger.md",
@@ -41,7 +51,8 @@ test("software acceptance writes the complete ignored run layout and all T01-T20
     ]);
     assert.equal(readdirSync(path.join(result.runDirectory, "tests")).length, 20);
     assert.deepEqual(readdirSync(path.join(result.runDirectory, "manifests")).sort(), ["project-after.json", "project-before.json"]);
-    assert.equal(readFileSync(path.join(result.runDirectory, "commands.ndjson"), "utf8").trim().split(/\r?\n/).length, 14);
+    assert.equal(readFileSync(path.join(result.runDirectory, "commands.ndjson"), "utf8").trim().split(/\r?\n/).length, 17);
+    assert.equal(result.checks.privacy, "PASS");
     assert.equal(acceptanceIndexSchema.parse(JSON.parse(readFileSync(path.join(result.runDirectory, "acceptance-index.json"), "utf8"))).tests.length, 20);
     assert.match(readFileSync(path.join(result.runDirectory, "issue-ledger.md"), "utf8"), /No issues recorded/);
   } finally {
@@ -55,6 +66,7 @@ test("software failures and project mutation remain visible and block T20", asyn
   const project = path.join(root, "project");
   mkdirSync(repository, { recursive: true });
   mkdirSync(project, { recursive: true });
+  initializeRepository(repository);
   writeFileSync(path.join(project, "firmware.c"), "before\n");
   const execute: CommandExecutor = (check) => {
     if (check.id === "unit-artifact") return { ...successfulExecution(), exitCode: 1, stderr: "simulated Artifact unit failure\n" };
@@ -89,6 +101,7 @@ test("maximum-length run IDs still produce bounded automatic issue IDs", async (
   const repository = path.join(root, "repository");
   const runId = "r".repeat(96);
   mkdirSync(repository, { recursive: true });
+  initializeRepository(repository);
   const execute: CommandExecutor = (check) => check.id === "unit-svd"
     ? { ...successfulExecution(), exitCode: 1, stderr: "simulated SVD unit failure\n" }
     : successfulExecution();
@@ -99,6 +112,25 @@ test("maximum-length run IDs still produce bounded automatic issue IDs", async (
     assert.equal(issues[0].issueId, `AUTO-${runId}-unit-svd`);
     assert.equal(issues[0].issueId.length <= 128, true);
     await assert.rejects(runSoftwareAcceptance({ runId: "r".repeat(97), repositoryRoot: repository, execute }), /invalid acceptance runId/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("software acceptance rejects a dirty start or a repository changed during the run", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "jlink-software-acceptance-"));
+  const repository = path.join(root, "repository");
+  mkdirSync(repository, { recursive: true });
+  initializeRepository(repository);
+  const execute: CommandExecutor = (check) => {
+    if (check.id === "build") writeFileSync(path.join(repository, "changed-during-run.txt"), "changed\n");
+    return successfulExecution();
+  };
+  try {
+    await assert.rejects(runSoftwareAcceptance({ runId: "repository-change", repositoryRoot: repository, execute }), /repository changed during the run/);
+    rmSync(path.join(repository, "changed-during-run.txt"), { force: true });
+    writeFileSync(path.join(repository, "dirty-before-run.txt"), "dirty\n");
+    await assert.rejects(runSoftwareAcceptance({ runId: "repository-dirty", repositoryRoot: repository, execute: () => successfulExecution() }), /clean repository at HEAD/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

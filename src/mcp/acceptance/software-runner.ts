@@ -17,6 +17,7 @@ import {
   type IssueRecord,
   type TestResult,
 } from "./evidence";
+import { publishAcceptanceSummary } from "./published-summary";
 import { isValidAcceptanceRunId } from "./run-id";
 
 interface CheckDefinition {
@@ -51,6 +52,8 @@ export interface SoftwareAcceptanceOptions {
 export interface SoftwareAcceptanceResult {
   runDirectory: string;
   index: AcceptanceIndex;
+  checks: Record<string, AcceptanceStatus>;
+  issues: IssueRecord[];
 }
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -71,7 +74,7 @@ const CHECKS: CheckDefinition[] = [
     "out/mcp/runtime/target-store.test.js", "out/mcp/runtime/artifact-operations.test.js",
   ]),
   nodeTests("unit-direct", [
-    "out/mcp/runtime/probe-queue.test.js", "out/mcp/runtime/direct-operations.test.js", "out/mcp/runtime/file-lease.test.js", "out/mcp/runtime/session-operations.test.js",
+    "out/mcp/runtime/probe-queue.test.js", "out/mcp/runtime/memory-session.test.js", "out/mcp/runtime/direct-operations.test.js", "out/mcp/runtime/file-lease.test.js", "out/mcp/runtime/session-operations.test.js",
   ]),
   nodeTests("unit-svd", ["out/mcp/runtime/svd-operations.test.js", "out/mcp/svd/svd-catalog.test.js"]),
   nodeTests("unit-hss-jcap", [
@@ -79,9 +82,12 @@ const CHECKS: CheckDefinition[] = [
     "out/mcp/runtime/hss-helper-adapter.test.js", "out/mcp/runtime/hss-operations.test.js", "out/mcp/sqlite-runtime.test.js", "out/utils/atomic-file.test.js",
   ]),
   { id: "surface", command: npm, args: ["run", "test:surface"] },
+  { id: "guidance", command: npm, args: ["run", "test:guidance"] },
   { id: "legacy-scan", command: npm, args: ["run", "test:legacy-scan"] },
   { id: "hss-helper", command: npm, args: ["run", "test:hss-helper"] },
-  { id: "openspec", command: openspec, args: ["validate", "refactor-agent-first-mcp", "--strict"] },
+  { id: "package", command: npm, args: ["run", "test:package"] },
+  { id: "privacy", command: npm, args: ["run", "test:privacy"] },
+  { id: "openspec", command: openspec, args: ["validate", "close-agent-hardware-release-loop", "--strict"] },
 ];
 
 const REQUIREMENTS: Record<string, string[]> = {
@@ -108,7 +114,7 @@ const REQUIREMENTS: Record<string, string[]> = {
 };
 
 const CHECKS_BY_TEST: Record<string, string[]> = Object.fromEntries(ACCEPTANCE_TEST_IDS.map((id) => [id, []]));
-CHECKS_BY_TEST.T01 = ["ignored-output", "install", "build", "lint", ...UNIT_CHECKS, "surface", "openspec"];
+CHECKS_BY_TEST.T01 = ["ignored-output", "install", "build", "lint", ...UNIT_CHECKS, "surface", "guidance", "package", "privacy", "openspec"];
 CHECKS_BY_TEST.T02 = ["legacy-scan", "surface"];
 for (const id of ["T03", "T04", "T05"]) CHECKS_BY_TEST[id] = ["unit-artifact"];
 for (const id of ["T06", "T07", "T08"]) CHECKS_BY_TEST[id] = ["unit-artifact", "unit-direct"];
@@ -133,6 +139,7 @@ export async function runSoftwareAcceptance(options: SoftwareAcceptanceOptions):
   const repositoryRoot = path.resolve(options.repositoryRoot);
   const evidenceRoot = path.resolve(options.evidenceRoot ?? path.join(repositoryRoot, "test-output"));
   const identity = readRepositoryIdentity(repositoryRoot);
+  if (!identity.commit || identity.dirty) throw new Error("software acceptance requires a clean repository at HEAD");
   const store = new AcceptanceEvidenceStore(evidenceRoot, identity.commit);
   const runDirectory = store.createRun(options.runId);
   const createdAt = new Date().toISOString();
@@ -211,6 +218,11 @@ export async function runSoftwareAcceptance(options: SoftwareAcceptanceOptions):
       artifact: artifact ?? null,
       outputHashes: [log.stdout, log.stderr],
     });
+  }
+
+  const completedIdentity = readRepositoryIdentity(repositoryRoot);
+  if (!completedIdentity.commit || completedIdentity.commit !== identity.commit || completedIdentity.dirty) {
+    throw new Error("software acceptance repository changed during the run");
   }
 
   let projectAfter: ReturnType<typeof captureManifest> | undefined;
@@ -296,7 +308,7 @@ export async function runSoftwareAcceptance(options: SoftwareAcceptanceOptions):
     summary: summarizeAcceptance(tests, issues.filter((issue) => issue.severity === "P0" && issue.fixCommit === null).length),
   });
   await store.writeAcceptanceIndex(index);
-  return { runDirectory, index };
+  return { runDirectory, index, checks: Object.fromEntries([...checkResults.entries()].map(([id, result]) => [id, result.status])), issues };
 }
 
 function primaryTestForCheck(checkId: string): string {
@@ -406,7 +418,7 @@ function argument(name: string): string | undefined {
 if (require.main === module) {
   const runId = argument("--run-id");
   if (!runId) {
-    process.stderr.write("Usage: software-runner --run-id <id> [--project-root <path>] [--artifact <path>] [--allow-erase] [--svd-available]\n");
+    process.stderr.write("Usage: software-runner --run-id <id> [--project-root <path>] [--artifact <path>] [--allow-erase] [--svd-available] [--publish-summary] [--publish-directory <path>]\n");
     process.exitCode = 2;
   } else {
     void runSoftwareAcceptance({
@@ -417,7 +429,10 @@ if (require.main === module) {
       allowErase: process.argv.includes("--allow-erase"),
       svdAvailable: process.argv.includes("--svd-available"),
     }).then((result) => {
-      process.stdout.write(`${JSON.stringify({ runDirectory: result.runDirectory, summary: result.index.summary, mergeRecommendation: result.index.mergeRecommendation }, null, 2)}\n`);
+      const published = process.argv.includes("--publish-summary")
+        ? publishAcceptanceSummary({ repositoryRoot: process.cwd(), outputDirectory: argument("--publish-directory") ?? "reports/agent-first", index: result.index, checks: result.checks, issues: result.issues })
+        : undefined;
+      process.stdout.write(`${JSON.stringify({ runDirectory: result.runDirectory, summary: result.index.summary, mergeRecommendation: result.index.mergeRecommendation, ...(published ? { published: { indexPath: published.indexPath, summaryPath: published.summaryPath } } : {}) }, null, 2)}\n`);
       if (result.index.summary.FAIL > 0) process.exitCode = 1;
     }).catch((error) => {
       process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
