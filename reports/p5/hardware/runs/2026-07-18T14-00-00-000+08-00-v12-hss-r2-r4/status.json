@@ -1,8 +1,0 @@
-{
-  "schema": "p5-hardware-status-v1",
-  "state": "failed",
-  "updatedAt": "2026-07-18T05:13:56.940Z",
-  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T14-00-00-000+08-00-v12-hss-r2-r4",
-  "message": "hss_capture_start failed: ARTIFACT_MATCH_MISMATCH\n\nfalse !== true\n",
-  "stack": "AssertionError [ERR_ASSERTION]: hss_capture_start failed: ARTIFACT_MATCH_MISMATCH\n\nfalse !== true\n\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:240:10"
-}

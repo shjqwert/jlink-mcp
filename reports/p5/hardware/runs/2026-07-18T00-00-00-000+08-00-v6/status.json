@@ -1,8 +1,0 @@
-{
-  "schema": "p5-hardware-status-v1",
-  "state": "failed",
-  "updatedAt": "2026-07-18T03:52:36.203Z",
-  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-18T00-00-00-000+08-00-v6",
-  "message": "Expected values to be strictly equal:\n\u001b[32m+ actual\u001b[39m \u001b[31m- expected\u001b[39m\n\n\u001b[32m+\u001b[39m {\n\u001b[32m+\u001b[39m   level: 'R2',\n\u001b[32m+\u001b[39m   requiresUserApproval: false\n\u001b[32m+\u001b[39m }\n\u001b[31m-\u001b[39m 'R2'\n",
-  "stack": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\u001b[32m+ actual\u001b[39m \u001b[31m- expected\u001b[39m\n\n\u001b[32m+\u001b[39m {\n\u001b[32m+\u001b[39m   level: 'R2',\n\u001b[32m+\u001b[39m   requiresUserApproval: false\n\u001b[32m+\u001b[39m }\n\u001b[31m-\u001b[39m 'R2'\n\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:189:10"
-}

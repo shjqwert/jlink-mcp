@@ -1,8 +1,0 @@
-{
-  "schema": "p5-hardware-status-v1",
-  "state": "failed",
-  "updatedAt": "2026-07-17T14:09:36.691Z",
-  "runRoot": "D:\\AI_Project\\Trunk\\Jlink_mcp\\reports\\p5\\hardware\\runs\\2026-07-17T22-09-27-780+08-00",
-  "message": "Expected values to be strictly equal:\n\u001b[32mactual\u001b[39m \u001b[31mexpected\u001b[39m\n\n\u001b[39m'\u001b[39m\u001b[32mu\u001b[39m\u001b[32mn\u001b[39m\u001b[32md\u001b[39m\u001b[32me\u001b[39m\u001b[32mf\u001b[39m\u001b[31ms\u001b[39m\u001b[31mt\u001b[39m\u001b[31mr\u001b[39m\u001b[39mi\u001b[39m\u001b[39mn\u001b[39m\u001b[32me\u001b[39m\u001b[32md\u001b[39m\u001b[31mg\u001b[39m\u001b[39m'\u001b[39m\n",
-  "stack": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\u001b[32mactual\u001b[39m \u001b[31mexpected\u001b[39m\n\n\u001b[39m'\u001b[39m\u001b[32mu\u001b[39m\u001b[32mn\u001b[39m\u001b[32md\u001b[39m\u001b[32me\u001b[39m\u001b[32mf\u001b[39m\u001b[31ms\u001b[39m\u001b[31mt\u001b[39m\u001b[31mr\u001b[39m\u001b[39mi\u001b[39m\u001b[39mn\u001b[39m\u001b[32me\u001b[39m\u001b[32md\u001b[39m\u001b[31mg\u001b[39m\u001b[39m'\u001b[39m\n\n    at file:///D:/AI_Project/Trunk/Jlink_mcp/scripts/p5-hardware/run.mjs:157:10"
-}
