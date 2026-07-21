@@ -96,13 +96,7 @@ export class ProbeQueue {
   getOwner(probeSerial: string): ProbeOwner | undefined {
     const probeDir = this.probeDirectory(requireSerial(probeSerial));
     mkdirSync(probeDir, { recursive: true });
-    const ownerLock = join(probeDir, "owner-update.lock");
-    const lockToken = acquireDirectoryLock(ownerLock, 5_000);
-    try {
-      return readLiveOwnerLocked(probeDir);
-    } finally {
-      releaseDirectoryLock(ownerLock, lockToken);
-    }
+    return readVisibleOwner(probeDir);
   }
 
   claimOwner(
@@ -247,7 +241,7 @@ export class ProbeQueue {
       const lease = readLease(leaseDir);
       if (!lease || lease.token !== ticket.token) throw new ProbeQueueError("LEASE_TOKEN_MISMATCH", "Probe queue lease changed before execution");
       const startedAt = lease.startedAt;
-      const owner = this.getOwner(probeSerial);
+      const owner = readLiveOwnerForExecution(probeDir);
       if (options.requiredOwner && !sameOwner(owner, options.requiredOwner)) {
         throw new ProbeQueueError("OWNER_CHANGED", "required Probe owner changed while the request waited in the queue", owner);
       }
@@ -362,6 +356,33 @@ function readLiveOwnerLocked(probeDir: string): ProbeOwner | undefined {
   }
 }
 
+function readLiveOwnerForExecution(probeDir: string): ProbeOwner | undefined {
+  const ownerLock = join(probeDir, "owner-update.lock");
+  const lockToken = acquireDirectoryLock(ownerLock, 5_000);
+  try {
+    return readLiveOwnerLocked(probeDir);
+  } finally {
+    releaseDirectoryLock(ownerLock, lockToken);
+  }
+}
+
+/**
+ * Status reads deliberately do not take or clean up the owner-update lock.
+ * Writer paths replace owner.json atomically and retain the lock while they
+ * validate or remove stale state, so an observer must never race that cleanup.
+ */
+function readVisibleOwner(probeDir: string): ProbeOwner | undefined {
+  const ownerPath = join(probeDir, "owner.json");
+  try {
+    const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as ProbeOwner;
+    if (!validIdentityRecord(owner) || !owner.kind || !owner.token || !validOptionalPid(owner.resourcePid)) throw new Error("invalid owner");
+    return ownerRecordLive(owner) ? owner : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new ProbeQueueError("QUEUE_STATE_INVALID", "Probe owner state is malformed and was not removed automatically");
+  }
+}
+
 function ownerRecordLive(owner: ProbeOwner): boolean {
   if (identityRecordLive(owner)) return true;
   // A GDB Server or capture helper can survive an MCP crash/forced exit. Its
@@ -431,6 +452,7 @@ function acquireDirectoryLock(lockPath: string, timeoutMs: number): string {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       recoverStaleLease(lockPath);
+      if (!existsSync(lockPath)) continue;
       if (Date.now() >= deadline) throw new ProbeQueueError("QUEUE_METADATA_BUSY", "timed out acquiring Probe queue metadata lock");
       synchronousDelay(10);
     }
@@ -447,6 +469,7 @@ async function acquireDirectoryLockAsync(lockPath: string, timeoutMs: number): P
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       recoverStaleLease(lockPath);
+      if (!existsSync(lockPath)) continue;
       if (Date.now() >= deadline) throw new ProbeQueueError("QUEUE_METADATA_BUSY", "timed out acquiring Probe queue metadata lock");
       await delay(10);
     }

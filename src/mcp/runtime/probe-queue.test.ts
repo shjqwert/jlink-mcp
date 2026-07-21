@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { ProbeQueue, ProbeQueueError } from "./probe-queue";
@@ -81,6 +82,72 @@ test("ProbeQueue recovers a lease left by a crashed process", async (context) =>
   assert.equal(await runChild(script, [modulePath, root]), "held");
   const result = await new ProbeQueue(root).runExclusive("1004", async () => "recovered", { queueTimeoutMs: 5_000 });
   assert.equal(result.value, "recovered");
+});
+
+test("ProbeQueue status reads an owner without waiting for a live metadata lock", async (context) => {
+  const root = testDirectory(context, "queue-status-with-metadata-lock");
+  const serial = "10045";
+  const probeDir = join(root, createHash("sha256").update(serial).digest("hex"));
+  const ownerPath = join(probeDir, "owner.json");
+  const lockPath = join(probeDir, "owner-update.lock");
+  const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { windowsHide: true, stdio: "ignore" });
+  assert.ok(child.pid);
+  const now = new Date().toISOString();
+  const owner = {
+    kind: "gdb" as const,
+    token: randomUUID(),
+    pid: 1,
+    processInstanceId: "stale-controller-instance",
+    processStartedAt: now,
+    heartbeatAt: now,
+    projectRoot: "P",
+    targetGeneration: "G",
+    acquiredAt: now,
+    resourcePid: process.pid,
+  };
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+    sequence: 0,
+    pid: child.pid,
+    processInstanceId: "different-live-process",
+    processStartedAt: now,
+    token: randomUUID(),
+    queuedAt: now,
+    heartbeatAt: now,
+  }));
+  writeFileSync(ownerPath, JSON.stringify(owner));
+  try {
+    assert.deepEqual(new ProbeQueue(root).getOwner(serial), owner);
+    assert.equal(existsSync(lockPath), true);
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+  }
+});
+
+test("ProbeQueue status leaves dead owner cleanup to the locked writer path", async (context) => {
+  const root = testDirectory(context, "queue-status-dead-owner");
+  const serial = "10046";
+  const probeDir = join(root, createHash("sha256").update(serial).digest("hex"));
+  const ownerPath = join(probeDir, "owner.json");
+  const now = new Date().toISOString();
+  mkdirSync(probeDir, { recursive: true });
+  writeFileSync(ownerPath, JSON.stringify({
+    kind: "memory",
+    token: randomUUID(),
+    pid: process.pid,
+    processInstanceId: "dead-controller-instance",
+    processStartedAt: now,
+    heartbeatAt: now,
+    projectRoot: "P",
+    targetGeneration: "G",
+    acquiredAt: now,
+  }));
+  const queue = new ProbeQueue(root);
+  assert.equal(queue.getOwner(serial), undefined);
+  assert.equal(existsSync(ownerPath), true);
+  await queue.runExclusive(serial, async () => undefined);
+  assert.equal(existsSync(ownerPath), false);
 });
 
 test("ProbeQueue never steals a stale-heartbeat lease from a live process", async (context) => {
