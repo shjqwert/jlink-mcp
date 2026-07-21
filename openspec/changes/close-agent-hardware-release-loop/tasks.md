@@ -57,7 +57,7 @@
 ## 8. Sanitize release engineering
 
 - [x] 8.1 Add a non-echoing tracked-content privacy scanner and package filename/content gates.
-- [ ] 8.2 Remove or sanitize tracked machine paths, Probe identifiers, private Artifact hashes, approval-era active guidance, and hardware evidence while preserving unrelated user evidence recoverably.
+- [x] 8.2 Remove or sanitize tracked machine paths, Probe identifiers, private Artifact hashes, approval-era active guidance, and hardware evidence while preserving unrelated user evidence recoverably.
 - [ ] 8.3 Generate schema-tested `reports/agent-first/acceptance-summary.md` and `acceptance-index.json` bound to the exact tested commit without local evidence paths.
 - [ ] 8.4 Record every implementation/test problem in the ignored Phase 7 Markdown issue ledger with reproduction, impact, fix, and regression status.
 

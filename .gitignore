@@ -12,3 +12,5 @@ native/hss-helper/bin/
 .vscode-test/
 .agent/runtime/
 .agent/REGISTRY.md
+.agent/archive/orchestrator-registry-20260714T/registry.json
+reports/p5/hardware/
