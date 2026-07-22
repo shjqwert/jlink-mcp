@@ -108,6 +108,60 @@ test("JLinkBackend disables close-time resume and uses noreset flash and erase f
   ]);
 });
 
+test("JLinkBackend fails a zero-exit erase when J-Link reports a fatal RAMCode diagnostic", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, [
+      "****** Error: Verification of RAMCode failed @ address 0x20000F80.",
+      "Failed to prepare for programming.",
+      "Failed to download RAMCode!",
+      "Erasing done.",
+      "O.K.",
+    ].join("\n")),
+  );
+
+  const result = await backend.erase();
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, "JLINK_COMMAND_FAILED");
+  assert.equal(result.stateUnknown, true);
+  assert.match(result.error ?? "", /RAMCode/i);
+});
+
+test("JLinkBackend fails a zero-exit erase when J-Link reports a fatal RAMCode diagnostic on stderr", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, "", "Failed to download RAMCode!"),
+  );
+
+  const result = await backend.erase();
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.stateUnknown, true);
+});
+
+test("JLinkBackend permits a zero-exit flash with the nonfatal target-RAM PC diagnostic", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, [
+      "****** Error: PC of target system has unexpected value after checking target RAM. (PC = 0x00000000, expected 0x20000000)",
+      "O.K.",
+    ].join("\n")),
+  );
+
+  const result = await backend.flash("C:\\firmware\\app.hex");
+
+  assert.equal(result.success, true);
+  assert.notEqual(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+});
+
 test("JLinkBackend GDB Server arguments disable implicit reset, halt, and single-run exit", () => {
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
@@ -320,7 +374,7 @@ function fakeProcess(signals: Array<NodeJS.Signals | number | undefined>, emitKi
   return child as unknown as ChildProcess;
 }
 
-function successfulProcess(scripts: string[]): ChildProcess {
+function successfulProcess(scripts: string[], stdout = "", stderr = ""): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
     stderr: PassThrough;
@@ -342,6 +396,10 @@ function successfulProcess(scripts: string[]): ChildProcess {
   child.stdin.on("end", () => {
     scripts.push(script);
     setImmediate(() => {
+      if (stdout) child.stdout.write(stdout);
+      child.stdout.end();
+      if (stderr) child.stderr.write(stderr);
+      child.stderr.end();
       child.exitCode = 0;
       child.emit("exit", 0, null);
       child.emit("close", 0, null);

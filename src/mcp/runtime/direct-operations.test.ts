@@ -639,6 +639,27 @@ test("erase with unsupported blank verification is rejected before erase", async
   assert.deepEqual(probe.actions, ["erase"]);
 });
 
+test("erase reports a fatal J-Link programming diagnostic as issued with unknown state", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "erase-fatal-programming-diagnostic");
+  probe.eraseResult = {
+    success: false,
+    rawOutput: "Verification of RAMCode failed",
+    output: "Verification of RAMCode failed",
+    error: "J-Link reported a fatal programming diagnostic: Verification of RAMCode failed",
+    errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+    stateUnknown: true,
+  };
+
+  const result = await service.erase(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.error?.stage, "erase");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.deepEqual(probe.actions, ["erase"]);
+});
+
 test("erase reports unknown and known vendor target-state changes without auto-recovery", async (context) => {
   const unknown = await fixture(context, "erase-before-unknown");
   unknown.probe.observations.push({ state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } });
@@ -1279,6 +1300,7 @@ class FakeProbe extends ProbeBackend {
   writeMemoryResults: CommandResult[] = [];
   writeRegisterReject?: Error;
   rawResult: CommandResult = ok();
+  eraseResult?: CommandResult;
   flashPaths: string[] = [];
   readResult?: CommandResult;
   readMemoryReject?: Error;
@@ -1348,7 +1370,7 @@ class FakeProbe extends ProbeBackend {
     return ok();
   }
   async flash(filePath: string, baseAddress?: number): Promise<CommandResult> { this.flashPaths.push(filePath); this.actions.push(`flash:${filePath}:${baseAddress ?? "embedded"}`); return ok(); }
-  async erase(): Promise<CommandResult> { this.actions.push("erase"); return ok(); }
+  async erase(): Promise<CommandResult> { this.actions.push("erase"); return this.eraseResult ?? ok(); }
   async setBreakpoint(): Promise<CommandResult> { return ok(); }
   async clearBreakpoints(): Promise<CommandResult> { return ok(); }
   async startGDBServer(): Promise<{ success: boolean; message: string }> { return { success: true, message: "ok" }; }

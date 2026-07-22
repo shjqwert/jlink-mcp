@@ -48,6 +48,13 @@ function stripBoilerplate(raw: string): string {
     .join("\n").trim();
 }
 
+function fatalJLinkCommandDiagnostic(raw: string): string | undefined {
+  return raw.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => /^(?:\*+\s*error:\s*)?verification of ramcode failed\b/i.test(line)
+      || /^failed to (?:prepare for programming|download ramcode)\b/i.test(line));
+}
+
 export class JLinkBackend extends ProbeBackend {
   readonly type = "jlink" as const;
   readonly displayName = "SEGGER J-Link";
@@ -143,10 +150,28 @@ export class JLinkBackend extends ProbeBackend {
           return;
         }
         if (code !== 0) logError(`J-Link exited with code ${code}`);
-        const result: CommandResult = { success: code === 0 && !processError, rawOutput: stdout, output: stripBoilerplate(stdout), stderr, error: processError ? `Failed to spawn JLinkExe: ${processError.message}` : stderr || undefined, exitCode: code, exitSignal: signal };
+        const fatalDiagnostic = fatalJLinkCommandDiagnostic(`${stdout}\n${stderr}`);
+        const result: CommandResult = {
+          success: code === 0 && !processError && !fatalDiagnostic,
+          rawOutput: stdout,
+          output: stripBoilerplate(stdout),
+          stderr,
+          error: processError
+            ? `Failed to spawn JLinkExe: ${processError.message}`
+            : fatalDiagnostic
+              ? `J-Link reported a fatal programming diagnostic: ${fatalDiagnostic}`
+              : stderr || undefined,
+          exitCode: code,
+          exitSignal: signal,
+        };
         if (processError) result.errorCode = ProbeErrorCode.PROBE_NOT_FOUND;
+        if (fatalDiagnostic) {
+          result.errorCode = ProbeErrorCode.JLINK_COMMAND_FAILED;
+          result.stateUnknown = true;
+          result.suggestedAction = "Treat the requested J-Link programming operation as failed; recover with an explicit verified image before further target use.";
+        }
         // Classify errors from output
-        if (!result.success) {
+        if (!result.success && !fatalDiagnostic) {
           const raw = stdout.toLowerCase();
           if (raw.includes("inittarget() returned error") || raw.includes("could not connect") || raw.includes("cannot connect")) {
             result.errorCode = ProbeErrorCode.TARGET_UNREACHABLE;
