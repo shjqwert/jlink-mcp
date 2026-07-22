@@ -9,12 +9,10 @@ const { AGENT_TOOL_NAMES } = await import(pathToFileURL(runtimePath).href);
 
 const guidanceFiles = [
   "README.md",
-  "CLAUDE.md",
   ".mcp.json",
   "mcp-config.json",
-  ".codex/skills/jlink-mcp-agent/SKILL.md",
 ];
-const requiredToolLists = ["README.md", "CLAUDE.md", ".codex/skills/jlink-mcp-agent/SKILL.md"];
+const requiredToolLists = ["README.md"];
 const forbiddenNames = [
   "hot_variable_add", "hot_variable_list", "hot_variable_refresh",
   "read_core_register", "read_core_registers", "write_core_register",
@@ -50,6 +48,9 @@ for (const relativePath of requiredToolLists) {
     if (!new RegExp(`\\b${escapeRegExp(name)}\\b`).test(text)) findings.push(`${relativePath}: missing documented tool ${name}`);
   }
 }
+
+const readme = texts.get("README.md") ?? "";
+if (!/userConfirmed/i.test(readme)) findings.push("README.md: missing explicit user-confirmation guidance for high-risk operations");
 
 for (const relativePath of [".mcp.json", "mcp-config.json"]) {
   const text = texts.get(relativePath) ?? "";

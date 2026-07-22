@@ -8,7 +8,7 @@ import { log } from "../utils/logger";
 import { ProcessManager } from "../utils/process-manager";
 import { AcceptanceEvidenceStore, readRepositoryIdentity } from "./acceptance/evidence";
 import { isValidAcceptanceRunId } from "./acceptance/run-id";
-import { DirectMcuService, type CoreRegisterWriteInput, type FlashInput, type MemoryReadInput, type MemoryWriteInput } from "./runtime/direct-operations";
+import { DirectMcuService, type CoreRegisterWriteInput, type EraseInput, type FlashInput, type MemoryReadInput, type MemoryWriteInput, type ProbeCommandInput } from "./runtime/direct-operations";
 import { ArtifactVariableService, type VariableRefInput, type VariableWriteInput } from "./runtime/artifact-operations";
 import { SvdRegisterService, type RegisterWriteInput } from "./runtime/svd-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./runtime/operation-envelope";
@@ -233,7 +233,7 @@ export class JLinkMcpServer {
       byteCount: z.number().int().min(1).max(4096),
       dataHex: z.string().min(2),
       captureOld: z.boolean().default(false),
-      verify: z.boolean().default(false),
+      verify: z.boolean().default(true),
     }, (input) => this.direct.writeMemory(input as unknown as MemoryWriteInput));
     this.registerEnvelopeTool("core_register_access", {
       ...projectRootInput,
@@ -263,7 +263,7 @@ export class JLinkMcpServer {
       selectors: z.array(z.string().min(3).max(512)).min(1).max(32).optional(),
       value: uint32.optional(),
       captureOld: z.boolean().default(false),
-      verify: z.boolean().default(false),
+      verify: z.boolean().default(true),
       restore: z.boolean().default(false),
       comparator: variableComparator.default({ mode: "exact" }),
     }, async (input) => {
@@ -271,14 +271,14 @@ export class JLinkMcpServer {
       if (input.action === "read") {
         if (
           typeof input.selector !== "string" || input.selectors !== undefined || input.value !== undefined
-          || input.captureOld !== false || input.verify !== false || input.restore !== false
+          || input.captureOld !== false || input.restore !== false
         ) return actionInputFailure("peripheral_register_access", "action=read requires selector only");
         return relabelEnvelope(await this.registers.readRegister(projectRoot, input.selector), "peripheral_register_access");
       }
       if (input.action === "read_many") {
         if (
           !Array.isArray(input.selectors) || input.selector !== undefined || input.value !== undefined
-          || input.captureOld !== false || input.verify !== false || input.restore !== false
+          || input.captureOld !== false || input.restore !== false
         ) return actionInputFailure("peripheral_register_access", "action=read_many requires selectors only");
         return relabelEnvelope(await this.registers.readRegisters(projectRoot, input.selectors as string[]), "peripheral_register_access");
       }
@@ -299,16 +299,17 @@ export class JLinkMcpServer {
       envelope.data = { action, ...(isRecord(envelope.data) ? envelope.data : { result: envelope.data }) };
       return envelope;
     });
-    this.registerEnvelopeTool("flash", { ...projectRootInput, path: z.string().min(1), baseAddress: uint32.optional() },
+    const userConfirmation = z.boolean().default(false).describe("Set true only after the user explicitly confirms this exact operation and its effects.");
+    this.registerEnvelopeTool("flash", { ...projectRootInput, path: z.string().min(1), baseAddress: uint32.optional(), userConfirmed: userConfirmation },
       (input) => this.direct.flash(input as unknown as FlashInput));
-    this.registerEnvelopeTool("erase", { ...projectRootInput, verifyBlank: z.boolean().default(false) },
-      (input) => this.direct.erase(String(input.projectRoot), Boolean(input.verifyBlank)));
-    this.registerEnvelopeTool("probe_command", { ...projectRootInput, commands: z.array(z.string().min(1)).min(1).max(100) },
-      (input) => this.direct.probeCommand(String(input.projectRoot), input.commands as string[]));
+    this.registerEnvelopeTool("erase", { ...projectRootInput, verifyBlank: z.boolean().default(false), userConfirmed: userConfirmation },
+      (input) => this.direct.erase(input as unknown as EraseInput));
+    this.registerEnvelopeTool("probe_command", { ...projectRootInput, commands: z.array(z.string().min(1)).min(1).max(100), userConfirmed: userConfirmation },
+      (input) => this.direct.probeCommand(input as unknown as ProbeCommandInput));
 
     this.registerEnvelopeTool("gdb_open", projectRootInput, (input) => this.gdbOpen(String(input.projectRoot)));
-    this.registerEnvelopeTool("gdb_command", { ...projectRootInput, command: z.string().min(1), timeoutMs: z.number().int().min(1).max(120_000).default(15_000) },
-      (input) => this.sessions.gdbCommand(String(input.projectRoot), String(input.command), Number(input.timeoutMs)));
+    this.registerEnvelopeTool("gdb_command", { ...projectRootInput, command: z.string().min(1), timeoutMs: z.number().int().min(1).max(120_000).default(15_000), userConfirmed: userConfirmation },
+      (input) => this.sessions.gdbCommand(String(input.projectRoot), String(input.command), Number(input.timeoutMs), Boolean(input.userConfirmed)));
     this.registerEnvelopeTool("gdb_wait", { ...projectRootInput, timeoutMs: z.number().int().min(1).max(120_000).default(30_000) },
       (input) => this.sessions.gdbWait(String(input.projectRoot), Number(input.timeoutMs)));
     this.registerEnvelopeTool("gdb_backtrace", { ...projectRootInput, full: z.boolean().default(false) },

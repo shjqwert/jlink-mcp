@@ -33,8 +33,8 @@ test("whole-register and field writes obey reserved-bit and RMW semantics", asyn
   const whole = await createFixture(context, "whole", true);
   const written = await whole.service.writeRegister({ projectRoot: whole.projectRoot, selector: "GPIO.CTRL", value: 5 });
   assert.equal(written.ok, true);
-  assert.equal(written.verification.status, "executed_unverified");
-  assert.deepEqual(whole.probe.actions, ["write:40000000:4"]);
+  assert.equal(written.verification.status, "verified");
+  assert.deepEqual(whole.probe.actions, ["write:40000000:4", "read:40000000:4"]);
   assert.match(written.warnings.join("\n"), /system-level effects remain unknown/);
   const reserved = await whole.service.writeRegister({ projectRoot: whole.projectRoot, selector: "GPIO.CTRL", value: 0x80000000 });
   assert.equal(reserved.error?.code, "SVD_RESERVED_BITS_UNSAFE");
@@ -44,7 +44,7 @@ test("whole-register and field writes obey reserved-bit and RMW semantics", asyn
   const changed = await field.service.writeRegister({ projectRoot: field.projectRoot, selector: "GPIO.CTRL.MODE", value: 3 });
   assert.equal(changed.ok, true);
   assert.equal((changed.data as { requestedRegisterValue: number }).requestedRegisterValue, 7);
-  assert.deepEqual(field.probe.actions, ["read:40000000:4", "write:40000000:4"]);
+  assert.deepEqual(field.probe.actions, ["read:40000000:4", "write:40000000:4", "read:40000000:4"]);
 });
 
 test("SVD readAction and W1C semantics are blocked before hardware access", async (context) => {
@@ -78,7 +78,7 @@ test("a readable field cannot override a write-only containing register", async 
 
 test("write-only registers allow unverified writes but reject read-dependent options", async (context) => {
   const fixture = await createFixture(context, "write-only", true);
-  const written = await fixture.service.writeRegister({ projectRoot: fixture.projectRoot, selector: "GPIO.COMMAND", value: 1 });
+  const written = await fixture.service.writeRegister({ projectRoot: fixture.projectRoot, selector: "GPIO.COMMAND", value: 1, verify: false });
   assert.equal(written.ok, true);
   assert.equal(written.verification.status, "executed_unverified");
   for (const option of [{ captureOld: true }, { verify: true }, { restore: true }]) {

@@ -59,7 +59,8 @@ Only the read-only `rtt://output`, `probe://gdb-server-log`, and `probe://status
 
 - Reads and preflight do not implicitly halt, reset, resume, recover, flash, erase, or write the target.
 - `target_control` is the explicit CPU-state operation. Core-register and SVD peripheral-register operations are separate bounded actions.
-- `write_variable` defaults to capturing the old value and exact readback verification; `write_memory` defaults to neither. Readback proves bytes observed by its named J-Link connection, not target-program consumption.
+- RAM (`write_memory`) and typed-variable writes default to exact readback verification. SVD peripheral-register writes also default to verification. Readback proves bytes observed by its named J-Link connection, not target-program consumption.
+- Before `flash`, `erase`, `probe_command`, or `gdb_command`, the AI must explain the exact intended effects and obtain the user's explicit approval. It then retries the same call with `userConfirmed: true`; otherwise the server rejects the operation before accessing the target.
 - Typed variable and HSS requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
 - HSS is capped at ten synchronized variables, 1 kHz, and 60 seconds. Call `hss_start` with `dryRun=true` to obtain capability and capacity facts without starting a Helper or creating a capture.
 - Peripheral register access requires a configured, validated SVD. There is no inferred raw-memory substitute.
@@ -83,7 +84,7 @@ Capture queries use `capture.db`; a verified package can rebuild a missing or da
 
 The existing Offline UI is retained for compatibility and is outside this Agent contract.
 
-Generated captures, exports, acceptance evidence, J-Link DLLs, local project paths, Probe serials, and Artifact hashes belong in ignored local storage such as `test-output/`. Do not commit them. See [Agent-first acceptance](docs/agent-first-acceptance.md) for the software and authorized-hardware evidence process.
+Generated captures, exports, acceptance evidence, J-Link DLLs, local project paths, Probe serials, and Artifact hashes belong in ignored local storage such as `test-output/`. Do not commit them.
 
 ## License
 

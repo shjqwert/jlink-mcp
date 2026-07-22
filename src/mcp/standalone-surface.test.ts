@@ -73,10 +73,18 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       assert.equal(properties.verificationConnection?.default, "same_session");
     }
     {
+      const properties = tools.find((tool) => tool.name === "write_memory")?.inputSchema.properties as Record<string, { default?: unknown }>;
+      assert.equal(properties.verify?.default, true);
+    }
+    {
       const properties = tools.find((tool) => tool.name === "peripheral_register_access")?.inputSchema.properties as Record<string, { default?: unknown }>;
       assert.equal(properties.captureOld?.default, false);
-      assert.equal(properties.verify?.default, false);
+      assert.equal(properties.verify?.default, true);
       assert.equal(properties.restore?.default, false);
+    }
+    for (const name of ["flash", "erase", "probe_command", "gdb_command"] as const) {
+      const properties = tools.find((tool) => tool.name === name)?.inputSchema.properties as Record<string, { default?: unknown }>;
+      assert.ok(properties.userConfirmed, `${name} must expose explicit user confirmation`);
     }
     for (const removed of [
       "hot_variable_add", "hot_variable_list", "hot_variable_refresh", "read_core_register", "read_core_registers", "write_core_register",
@@ -133,6 +141,15 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     for (const [name, argumentsValue] of publicHandlerCalls) {
       const envelope = parseEnvelope(await client.callTool({ name, arguments: argumentsValue }));
       assert.notEqual((envelope.error as { code?: string } | undefined)?.code, "NOT_IMPLEMENTED", `${name} must have a concrete handler`);
+    }
+    for (const [name, argumentsValue] of [
+      ["flash", { projectRoot: root, path: "missing.hex" }],
+      ["erase", { projectRoot: root }],
+      ["probe_command", { projectRoot: root, commands: ["showconf"] }],
+      ["gdb_command", { projectRoot: root, command: "info registers" }],
+    ] as const) {
+      const envelope = parseEnvelope(await client.callTool({ name, arguments: argumentsValue }));
+      assert.equal((envelope.error as { code?: string } | undefined)?.code, "USER_CONFIRMATION_REQUIRED", `${name} must not execute without user confirmation`);
     }
     assert.deepEqual(readdirSync(join(root, "evidence")), [], "operations without runId must not create a command log or synthetic run directory");
     const logged = parseEnvelope(await client.callTool({ name: "target_configure", arguments: { projectRoot: root, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, runId: "surface-run" } }));

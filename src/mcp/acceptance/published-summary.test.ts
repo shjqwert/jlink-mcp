@@ -81,7 +81,6 @@ const checks: Record<string, AcceptanceStatus> = {
   "hss-helper": "PASS",
   package: "PASS",
   privacy: "PASS",
-  openspec: "PASS",
 };
 
 test("published acceptance summary is bound to a clean current commit and strips local evidence", () => {

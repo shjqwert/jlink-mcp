@@ -46,6 +46,7 @@ export class SessionOperations {
     private readonly queue: ProbeQueue,
     private readonly runtimeFor: SessionRuntimeProvider,
     private readonly memorySessions?: MemorySessionManager,
+    private readonly requireUserConfirmation = true,
   ) {}
 
   gdbServerStart(projectRoot: string): Promise<OperationEnvelope> {
@@ -290,7 +291,8 @@ export class SessionOperations {
     });
   }
 
-  gdbCommand(projectRoot: string, command: string, timeoutMs = 15_000): Promise<OperationEnvelope> {
+  gdbCommand(projectRoot: string, command: string, timeoutMs = 15_000, userConfirmed = false): Promise<OperationEnvelope> {
+    if (this.requireUserConfirmation && !userConfirmed) return userConfirmationRequired();
     if (!command || /[\0\r\n]/.test(command)) return Promise.resolve(validationFailure("gdb_command", "command must be one exact single-line GDB command"));
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return Promise.resolve(validationFailure("gdb_command", "timeoutMs must be 1..120000"));
     return this.withGdbOwner("gdb_command", projectRoot, ["raw_gdb_command", "unknown_side_effects"], async (envelope, target, runtime) => {
@@ -631,6 +633,17 @@ export class SessionOperations {
       evidenceTimestamp: target.liveArtifactMatch.timestamp,
     } : null;
   }
+}
+
+function userConfirmationRequired(): Promise<OperationEnvelope> {
+  return Promise.resolve(failEnvelope(createOperationEnvelope("gdb_command"), {
+    code: "USER_CONFIRMATION_REQUIRED",
+    stage: "confirmation",
+    message: "gdb_command can have destructive or unknown side effects. Obtain explicit user approval for this exact command, then retry with userConfirmed=true.",
+    retryable: true,
+    writeIssued: false,
+    stateUnknown: false,
+  }));
 }
 
 function queueFailureCode(error: ProbeQueueError): string {

@@ -106,7 +106,7 @@ export class SvdRegisterService {
       dataHex,
       knownRegion: "peripheral",
       captureOld: input.captureOld ?? false,
-      verify: input.verify ?? false,
+      verify: input.verify ?? true,
       restore: input.restore ?? false,
       comparator,
       rmw,

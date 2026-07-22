@@ -57,7 +57,6 @@ export interface SoftwareAcceptanceResult {
 }
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const openspec = process.platform === "win32" ? "openspec.cmd" : "openspec";
 const nodeTests = (id: string, files: string[]): CheckDefinition => ({ id, command: process.execPath, args: ["scripts/run-tests.mjs", ...files] });
 const UNIT_CHECKS = ["unit-foundation", "unit-acceptance", "unit-artifact", "unit-direct", "unit-svd", "unit-hss-jcap"];
 const CHECKS: CheckDefinition[] = [
@@ -87,7 +86,6 @@ const CHECKS: CheckDefinition[] = [
   { id: "hss-helper", command: npm, args: ["run", "test:hss-helper"] },
   { id: "package", command: npm, args: ["run", "test:package"] },
   { id: "privacy", command: npm, args: ["run", "test:privacy"] },
-  { id: "openspec", command: openspec, args: ["validate", "close-agent-hardware-release-loop", "--strict"] },
 ];
 
 const REQUIREMENTS: Record<string, string[]> = {
@@ -114,7 +112,7 @@ const REQUIREMENTS: Record<string, string[]> = {
 };
 
 const CHECKS_BY_TEST: Record<string, string[]> = Object.fromEntries(ACCEPTANCE_TEST_IDS.map((id) => [id, []]));
-CHECKS_BY_TEST.T01 = ["ignored-output", "install", "build", "lint", ...UNIT_CHECKS, "surface", "guidance", "package", "privacy", "openspec"];
+CHECKS_BY_TEST.T01 = ["ignored-output", "install", "build", "lint", ...UNIT_CHECKS, "surface", "guidance", "package", "privacy"];
 CHECKS_BY_TEST.T02 = ["legacy-scan", "surface"];
 for (const id of ["T03", "T04", "T05"]) CHECKS_BY_TEST[id] = ["unit-artifact"];
 for (const id of ["T06", "T07", "T08"]) CHECKS_BY_TEST[id] = ["unit-artifact", "unit-direct"];
@@ -430,7 +428,7 @@ if (require.main === module) {
       svdAvailable: process.argv.includes("--svd-available"),
     }).then((result) => {
       const published = process.argv.includes("--publish-summary")
-        ? publishAcceptanceSummary({ repositoryRoot: process.cwd(), outputDirectory: argument("--publish-directory") ?? "reports/agent-first", index: result.index, checks: result.checks, issues: result.issues })
+        ? publishAcceptanceSummary({ repositoryRoot: process.cwd(), outputDirectory: argument("--publish-directory") ?? "test-output/published", index: result.index, checks: result.checks, issues: result.issues })
         : undefined;
       process.stdout.write(`${JSON.stringify({ runDirectory: result.runDirectory, summary: result.index.summary, mergeRecommendation: result.index.mergeRecommendation, ...(published ? { published: { indexPath: published.indexPath, summaryPath: published.summaryPath } } : {}) }, null, 2)}\n`);
       if (result.index.summary.FAIL > 0) process.exitCode = 1;

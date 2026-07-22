@@ -31,9 +31,8 @@ const ciSchema = z.object({
   helper: releaseStatus,
   package: releaseStatus,
   privacy: releaseStatus,
-  openspec: releaseStatus,
 }).strict();
-const publicBlocker = z.string().regex(/^(?:T(?:0[1-9]|1[0-9]|20) is (?:FAIL|BLOCKED|NOT_TESTED)|[1-9]\d* open P[01] issues?|T14 HSS quality is (?:partial|not_tested)|T07 write verification source is not_tested|acceptance index does not recommend merge|CI (?:build|lint|unit|surface|guidance|legacyScan|helper|package|privacy|openspec) is (?:FAIL|BLOCKED|SKIPPED_WITH_REASON|NOT_TESTED)|destination metadata is not supplied)$/);
+const publicBlocker = z.string().regex(/^(?:T(?:0[1-9]|1[0-9]|20) is (?:FAIL|BLOCKED|NOT_TESTED)|[1-9]\d* open P[01] issues?|T14 HSS quality is (?:partial|not_tested)|T07 write verification source is not_tested|acceptance index does not recommend merge|CI (?:build|lint|unit|surface|guidance|legacyScan|helper|package|privacy) is (?:FAIL|BLOCKED|SKIPPED_WITH_REASON|NOT_TESTED)|destination metadata is not supplied)$/);
 
 const PUBLIC_CONTENT_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ["local machine path", /(?:[A-Za-z]:[\\/][^\s"'`<>]*|\\\\[^\\/\r\n]+[\\/][^\s"'`<>]*|\/(?:Users|home|tmp|var|opt|mnt|private)(?:\/|$))/i],
@@ -304,7 +303,6 @@ export function publishAcceptanceSummary(input: PublishAcceptanceSummaryInput): 
     helper: checkStatus(input.checks, "hss-helper"),
     package: checkStatus(input.checks, "package"),
     privacy: checkStatus(input.checks, "privacy"),
-    openspec: checkStatus(input.checks, "openspec"),
   } as const;
   const destinationMetadata = input.destinationMetadataSupplied ? "supplied" : "not_supplied";
   const mergeRecommendation = hasReleaseBlocker({ acceptance, ci, openP0, openP1, hssQuality: hss.qualityStatus, writeStatus, writeSource: writeVerification.source, destinationMetadata })

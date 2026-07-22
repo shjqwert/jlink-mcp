@@ -3,12 +3,13 @@
   "description": "MCP server for SEGGER J-Link debug probes — LLM-driven embedded debugging with RTT, GDB, HSS, and JCAP",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Klievan/jlink-mcp"
+    "url": "https://github.com/shjqwert/jlink-mcp.git"
   },
-  "homepage": "https://github.com/Klievan/jlink-mcp#readme",
+  "homepage": "https://github.com/shjqwert/jlink-mcp#readme",
   "bugs": {
-    "url": "https://github.com/Klievan/jlink-mcp/issues"
+    "url": "https://github.com/shjqwert/jlink-mcp/issues"
   },
+  "author": "shjqwert",
   "version": "0.3.2",
   "license": "MIT",
   "engines": {

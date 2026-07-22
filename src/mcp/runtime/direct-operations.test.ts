@@ -1278,7 +1278,7 @@ async function fixture(context: TestContext, name: string, cleanupFlashSnapshot?
   await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
   const probe = new FakeProbe();
   const queue = new ProbeQueue(join(root, "queue"));
-  const service = new DirectMcuService(targets, queue, async () => ({ probe }), cleanupFlashSnapshot);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), cleanupFlashSnapshot, undefined, false);
   return { service, probe, targets, queue, projectRoot };
 }
 

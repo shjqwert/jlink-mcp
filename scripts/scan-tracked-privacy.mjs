@@ -6,7 +6,7 @@ const workspace = resolve(process.cwd());
 const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: workspace }).toString("utf8").split("\0").filter(Boolean);
 const textExtensions = new Set([".c", ".cc", ".cpp", ".h", ".json", ".md", ".mjs", ".js", ".ts", ".txt", ".xml", ".yaml", ".yml"]);
 const sensitivePatterns = [
-  ["machine_path", /(?:[A-Za-z]:[\\/](?:Users|Documents and Settings|FOC_Project|AI_Project)[\\/]|\/(?:Users|home)\/[A-Za-z0-9_.-]+)/i],
+  ["machine_path", /(?:[A-Za-z]:[\\/]+(?:Users|Documents and Settings|FOC_Project|AI_Project)[\\/]+|\/(?:Users|home)\/[A-Za-z0-9_.-]+)/i],
   ["credential", /(?:api[_-]?key|password|secret|token)\s*[:=]\s*["'][^"']{8,}/i],
   ["private_artifact_hash", /(?:artifact(?:sha(?:256)?|hash)?|runtimeIdentitySha256|flash image|map)\b[^\r\n]{0,160}\b[0-9a-f]{64}\b/i],
   ["probe_identifier", /(?:probe(?:Serial|_serial)|serial(?:Number)?)[\s`"':=]*\d{7,}/i],

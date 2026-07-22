@@ -43,7 +43,7 @@ test("software acceptance writes the complete ignored run layout and all T01-T20
     assert.equal(result.index.mergeRecommendation, "DO_NOT_RECOMMEND");
     assert.deepEqual(executed, [
       "ignored-output", "install", "build", "lint", "unit-foundation", "unit-acceptance", "unit-artifact", "unit-direct", "unit-svd", "unit-hss-jcap",
-      "surface", "guidance", "legacy-scan", "hss-helper", "package", "privacy", "openspec",
+      "surface", "guidance", "legacy-scan", "hss-helper", "package", "privacy",
     ]);
     assert.deepEqual(readdirSync(result.runDirectory).sort(), [
       "acceptance-index.json", "captures", "commands.ndjson", "environment.json", "hashes.json", "issue-ledger.json", "issue-ledger.md",
@@ -51,7 +51,7 @@ test("software acceptance writes the complete ignored run layout and all T01-T20
     ]);
     assert.equal(readdirSync(path.join(result.runDirectory, "tests")).length, 20);
     assert.deepEqual(readdirSync(path.join(result.runDirectory, "manifests")).sort(), ["project-after.json", "project-before.json"]);
-    assert.equal(readFileSync(path.join(result.runDirectory, "commands.ndjson"), "utf8").trim().split(/\r?\n/).length, 17);
+    assert.equal(readFileSync(path.join(result.runDirectory, "commands.ndjson"), "utf8").trim().split(/\r?\n/).length, 16);
     assert.equal(result.checks.privacy, "PASS");
     assert.equal(acceptanceIndexSchema.parse(JSON.parse(readFileSync(path.join(result.runDirectory, "acceptance-index.json"), "utf8"))).tests.length, 20);
     assert.match(readFileSync(path.join(result.runDirectory, "issue-ledger.md"), "utf8"), /No issues recorded/);

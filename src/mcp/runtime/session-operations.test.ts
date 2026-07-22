@@ -385,7 +385,7 @@ test("HSS owner returns CAPTURE_ACTIVE without disturbing the owner", async (con
 
 test("memory owner blocks every GDB operation with MEMORY_SESSION_ACTIVE and owner facts", async (context) => {
   const fixtureValue = await fixture(context, "memory-owner");
-  const sessions = new SessionOperations(fixtureValue.targets, fixtureValue.queue, async () => fixtureValue.runtime, new MemorySessionManager(fixtureValue.queue));
+  const sessions = new SessionOperations(fixtureValue.targets, fixtureValue.queue, async () => fixtureValue.runtime, new MemorySessionManager(fixtureValue.queue), false);
   let owner!: ReturnType<ProbeQueue["claimOwner"]>;
   await fixtureValue.queue.runExclusive(fixtureValue.target.probeSerial, async (metadata) => {
     owner = fixtureValue.queue.claimOwner(fixtureValue.target.probeSerial, {
@@ -457,7 +457,7 @@ async function fixture(context: TestContext, name: string, withArtifact = false)
       return () => { if (gdbServerExitListener === listener) gdbServerExitListener = undefined; };
     },
   };
-  const sessions = new SessionOperations(targets, queue, async () => runtime);
+  const sessions = new SessionOperations(targets, queue, async () => runtime, undefined, false);
   const direct = new DirectMcuService(targets, queue, async () => runtime);
   return { targets, target, queue, probe, gdb, rtt, runtime, sessions, direct, projectRoot, triggerGdbServerExit: () => gdbServerExitListener?.() };
 }
