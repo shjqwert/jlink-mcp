@@ -1,0 +1,70 @@
+name: Build HSS Helper
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-hss-helper.yml"
+      - "native/hss-helper/**"
+      - "scripts/test-hss-helper.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  build-hss-helper:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure HSS Helper
+        shell: pwsh
+        run: |
+          cmake `
+            -S native/hss-helper `
+            -B native/hss-helper/build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build HSS Helper
+        shell: pwsh
+        run: |
+          cmake `
+            --build native/hss-helper/build `
+            --config Release
+
+      - name: Verify HSS Helper
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "native/hss-helper/bin/hss_helper.exe"
+
+          & $exe.Path version
+          if ($LASTEXITCODE -ne 0) {
+            throw "HSS Helper version check failed"
+          }
+
+          & $exe.Path self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "HSS Helper self-test failed"
+          }
+
+          $hash = (Get-FileHash $exe.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content `
+            -Path "native/hss-helper/bin/hss_helper.exe.sha256" `
+            -Value "$hash  hss_helper.exe" `
+            -Encoding ascii
+
+      - name: Upload HSS Helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: hss-helper-windows-x64
+          path: |
+            native/hss-helper/bin/hss_helper.exe
+            native/hss-helper/bin/hss_helper.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
