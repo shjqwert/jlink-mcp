@@ -2,6 +2,7 @@ out/
 node_modules/
 .tmp/
 test-output/
+release/
 .jlink-mcp/
 *.log
 native/capture-helper/build/

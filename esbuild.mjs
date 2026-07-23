@@ -28,5 +28,12 @@ const uiBuild = esbuild.build({
   external: ["sqlite3"],
 });
 
-await Promise.all([standaloneBuild, uiBuild]);
+const doctorBuild = esbuild.build({
+  ...common,
+  entryPoints: ["src/mcp/doctor.ts"],
+  outfile: "out/mcp/doctor.js",
+  external: ["sqlite3"],
+});
+
+await Promise.all([standaloneBuild, uiBuild, doctorBuild]);
 console.log("Build complete");

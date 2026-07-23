@@ -1,32 +1,134 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 
-function findCmake() {
-  const probe = spawnSync("cmake", ["--version"], { stdio: "ignore" });
-  if (!probe.error && probe.status === 0) return "cmake";
-
-  const vswhere = `${process.env["ProgramFiles(x86)"]}\\Microsoft Visual Studio\\Installer\\vswhere.exe`;
-  if (existsSync(vswhere)) {
-    const found = spawnSync(vswhere, ["-latest", "-products", "*", "-find", "**\\cmake.exe"], { encoding: "utf8" });
-    const candidate = found.stdout?.split(/\r?\n/).find(Boolean);
-    if (found.status === 0 && candidate && existsSync(candidate)) return candidate;
-  }
-  throw new Error("CMake is required. Install it or add cmake.exe to PATH.");
+if (process.platform !== "win32" || process.arch !== "x64") {
+  throw new Error("HSS release builds require Windows x64.");
 }
 
-const cmake = findCmake();
-const tempDir = join(process.cwd(), ".tmp", "jlink-mcp", "hss-native-build-temp");
+const workspace = resolve(process.cwd());
+const sourceDir = resolve(workspace, "native", "hss-helper");
+const buildDir = resolve(workspace, ".tmp", "jlink-mcp", "hss-release-build");
+const tempDir = resolve(workspace, ".tmp", "jlink-mcp", "hss-release-temp");
+const outputDir = resolve(sourceDir, "bin");
+const output = resolve(outputDir, "hss_helper.exe");
+const hashFile = `${output}.sha256`;
+const packageJson = JSON.parse(readFileSync(resolve(workspace, "package.json"), "utf8"));
+const productVersion = String(packageJson.version ?? "");
+
+if (!/^\d+\.\d+\.\d+$/.test(productVersion)) {
+  throw new Error(`package.json contains an invalid release version: ${productVersion}`);
+}
+
+const visualStudio = findVisualStudio();
+const cmake = findCmake(visualStudio.installationPath);
+const generator = generatorForVersion(visualStudio.installationVersion);
+const cmakeHelp = run(cmake, ["--help"], { capture: true }).stdout;
+if (!cmakeHelp.includes(generator)) {
+  throw new Error(`CMake does not support the required generator: ${generator}`);
+}
+
+removeControlledBuildDirectory(buildDir);
+mkdirSync(buildDir, { recursive: true });
 mkdirSync(tempDir, { recursive: true });
-const env = { ...process.env, TEMP: tempDir, TMP: tempDir, TMPDIR: tempDir };
+mkdirSync(outputDir, { recursive: true });
 
-for (const args of [
-  ["-S", "native/hss-helper", "-B", "native/hss-helper/build", "-A", "x64"],
-  ["--build", "native/hss-helper/build", "--config", "Release"],
-]) {
-  const result = spawnSync(cmake, args, { stdio: "inherit", env });
-  if (result.error) throw result.error;
-  if (result.status !== 0) process.exit(result.status ?? 1);
+const env = { ...process.env, TEMP: tempDir, TMP: tempDir, TMPDIR: tempDir };
+run(cmake, [
+  "--fresh",
+  "-S", sourceDir,
+  "-B", buildDir,
+  "-G", generator,
+  "-A", "x64",
+  `-DHSS_HELPER_VERSION=${productVersion}`,
+  "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+], { env });
+run(cmake, ["--build", buildDir, "--config", "Release"], { env });
+
+const built = resolve(buildDir, "Release", "hss_helper.exe");
+if (!existsSync(built) || !statSync(built).isFile()) {
+  throw new Error(`HSS build did not produce ${built}`);
 }
-mkdirSync("native/hss-helper/bin", { recursive: true });
-copyFileSync("native/hss-helper/build/Release/hss_helper.exe", "native/hss-helper/bin/hss_helper.exe");
+copyFileSync(built, output);
+
+const digest = createHash("sha256").update(readFileSync(output)).digest("hex");
+writeFileSync(hashFile, `${digest}  hss_helper.exe\r\n`, "utf8");
+process.stdout.write(`HSS Helper ${productVersion} built with ${generator}\n${output}\nSHA-256 ${digest}\n`);
+
+function findVisualStudio() {
+  const vswhere = resolve(
+    process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
+    "Microsoft Visual Studio",
+    "Installer",
+    "vswhere.exe",
+  );
+  if (!existsSync(vswhere)) {
+    throw new Error("Visual Studio Installer vswhere.exe was not found.");
+  }
+  const result = run(vswhere, [
+    "-latest",
+    "-products", "*",
+    "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+    "-format", "json",
+  ], { capture: true });
+  const instances = JSON.parse(result.stdout);
+  const instance = instances?.[0];
+  if (!instance?.installationPath || !instance?.installationVersion) {
+    throw new Error("No Visual Studio installation with the x64 C++ toolchain was found.");
+  }
+  return {
+    installationPath: String(instance.installationPath),
+    installationVersion: String(instance.installationVersion),
+  };
+}
+
+function findCmake(installationPath) {
+  const candidates = [
+    resolve(installationPath, "Common7", "IDE", "CommonExtensions", "Microsoft", "CMake", "CMake", "bin", "cmake.exe"),
+    resolve(installationPath, "Common7", "IDE", "CommonExtensions", "Microsoft", "CMake", "Ninja", "cmake.exe"),
+  ];
+  const candidate = candidates.find((path) => existsSync(path));
+  if (!candidate) {
+    throw new Error("The selected Visual Studio installation does not include CMake.");
+  }
+  return candidate;
+}
+
+function generatorForVersion(version) {
+  const major = Number(version.split(".")[0]);
+  if (major === 18) return "Visual Studio 18 2026";
+  if (major === 17) return "Visual Studio 17 2022";
+  if (major === 16) return "Visual Studio 16 2019";
+  throw new Error(`Unsupported Visual Studio major version: ${String(major)}`);
+}
+
+function removeControlledBuildDirectory(target) {
+  const expectedParent = resolve(workspace, ".tmp", "jlink-mcp");
+  if (dirname(target) !== expectedParent || basename(target) !== "hss-release-build") {
+    throw new Error(`refusing to remove unexpected HSS build directory: ${target}`);
+  }
+  rmSync(target, { recursive: true, force: true });
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    env: options.env,
+    windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${command} exited ${String(result.status)}${result.stderr ? `: ${result.stderr}` : ""}`);
+  }
+  return result;
+}

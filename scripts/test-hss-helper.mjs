@@ -1,7 +1,24 @@
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const executable = resolve("native", "hss-helper", "bin", "hss_helper.exe");
+const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+
+const version = spawnSync(executable, ["version"], { encoding: "utf8", windowsHide: true });
+if (version.stdout) process.stdout.write(version.stdout);
+if (version.stderr) process.stderr.write(version.stderr);
+if (version.error) throw version.error;
+if (version.status !== 0) process.exit(version.status ?? 1);
+
+const versionResponse = parseJson(version.stdout, "HSS Helper version");
+if (versionResponse.status !== "ok"
+  || versionResponse.helperProtocolVersion !== 1
+  || versionResponse.architecture !== "x64"
+  || versionResponse.helperVersion !== packageJson.version) {
+  throw new Error(`HSS Helper version mismatch: ${JSON.stringify(versionResponse)}`);
+}
+
 const result = spawnSync(executable, ["self-test"], { encoding: "utf8", windowsHide: true });
 
 if (result.stdout) process.stdout.write(result.stdout);
@@ -13,6 +30,8 @@ const response = parseJson(result.stdout, "HSS Helper self-test");
 if (response.status !== "ok" || response.command !== "self-test") {
   throw new Error(`HSS Helper self-test failed: ${String(response.errorCode ?? response.reason ?? response.status)}`);
 }
+
+verifyStaticRuntime();
 
 const memorySessionArgs = [
   "memory-session",
@@ -78,4 +97,31 @@ function parseJson(output, label) {
   } catch (error) {
     throw new Error(`${label} returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function verifyStaticRuntime() {
+  const vswhere = resolve(
+    process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
+    "Microsoft Visual Studio",
+    "Installer",
+    "vswhere.exe",
+  );
+  if (!existsSync(vswhere)) throw new Error("vswhere.exe is required to inspect HSS Helper dependencies");
+  const found = spawnSync(vswhere, [
+    "-latest",
+    "-products", "*",
+    "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+    "-find", "**\\Hostx64\\x64\\dumpbin.exe",
+  ], { encoding: "utf8", windowsHide: true });
+  const dumpbin = found.stdout?.split(/\r?\n/).find(Boolean);
+  if (found.status !== 0 || !dumpbin || !existsSync(dumpbin)) {
+    throw new Error("dumpbin.exe was not found in the selected Visual Studio installation");
+  }
+  const dependencies = spawnSync(dumpbin, ["/DEPENDENTS", executable], { encoding: "utf8", windowsHide: true });
+  if (dependencies.error) throw dependencies.error;
+  if (dependencies.status !== 0) throw new Error(`dumpbin exited ${String(dependencies.status)}`);
+  if (/\b(?:MSVCP|VCRUNTIME|UCRTBASED)\d*[^ \r\n]*\.dll\b/i.test(dependencies.stdout)) {
+    throw new Error(`HSS Helper still depends on a dynamic Visual C++ runtime:\n${dependencies.stdout}`);
+  }
+  process.stdout.write("HSS Helper static runtime dependency gate passed\n");
 }

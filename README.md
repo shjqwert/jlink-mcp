@@ -4,27 +4,66 @@ Standalone MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
 The server serializes physical Probe access and reports observed state and side effects. It does not infer a Target from an environment default: configure each canonical `projectRoot` with `target_configure` before target operations.
 
-## Windows prerequisites
+## Install the v1.0.0 release
 
-- Node.js 18 or later and `npm`.
-- CMake and Visual Studio Build Tools with the x64 C++ workload, used to build the native HSS Helper.
+- Windows x64 with Node.js 22 or 24.
 - SEGGER J-Link Software and a connected supported J-Link Probe for hardware operations.
 - A project-local ELF with DWARF for typed variables and crash source mapping; an SVD is required for peripheral register access.
 
-Build a clean standalone package with:
+Ordinary users do not need Visual Studio, CMake, Python, or a database server. Download
+`jlink-mcp-v1.0.0-windows-x64.zip` and `SHA256SUMS.txt` from the
+[v1.0.0 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v1.0.0),
+verify the checksum, and extract the ZIP. Then run:
+
+```powershell
+.\doctor.cmd
+codex mcp add jlink -- D:\Tools\jlink-mcp-v1.0.0-windows-x64\jlink-mcp.cmd
+```
+
+The portable ZIP includes production npm dependencies, the SQLite native binding, and the
+prebuilt `hss_helper.exe`. The only vendor runtime installed separately is SEGGER J-Link Software.
+
+The Release also provides `jlink-mcp-1.0.0.tgz` for an online npm installation:
+
+```powershell
+npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v1.0.0/jlink-mcp-1.0.0.tgz
+jlink-mcp-doctor
+codex mcp add jlink -- jlink-mcp
+```
+
+The portable ZIP is the supported zero-build-tools path. The `.tgz` installer downloads the
+prebuilt SQLite native binding; if that download is unavailable, npm may fall back to a local
+native build. Use the portable ZIP when Visual Studio and CMake must never be required.
+
+## Development and release builds
+
+The ordinary Node build does not compile native code:
 
 ```powershell
 npm ci
 npm run build
-npm run test:ci
-npm pack --ignore-scripts
+npm test
 ```
 
-`npm run build` rebuilds the ignored x64 HSS Helper at `native/hss-helper/bin/hss_helper.exe`, compiles TypeScript, and bundles the stdio entry at `out/mcp/standalone.js`. Start it from the installed package with `node out/mcp/standalone.js`.
+Only the release maintainer needs Visual Studio with the x64 C++ workload and CMake:
+
+```powershell
+npm run test:release
+npm run pack:release
+$env:JLINK_MCP_TEST_ROOT = "D:\User\Jlink_MCP_TEST"
+npm run test:release-install
+```
+
+`build:release` produces a statically linked Windows x64 HSS Helper, verifies its product and
+protocol versions, runs its self-test, and builds the Node entry points. `pack:release` runs the
+complete release gate, then creates the installable npm archive, portable ZIP, and SHA-256 manifest
+under `release/v1.0.0/`. The package is marked private to prevent accidental npm Registry
+publication; release artifacts are distributed only through GitHub Releases.
 
 ## Portable MCP configuration
 
-Place either example in the repository or installed package root; it deliberately has no machine-specific working directory or Target defaults.
+For a source checkout, place this example in the repository root. It deliberately has no
+machine-specific working directory or Target defaults.
 
 ```json
 {

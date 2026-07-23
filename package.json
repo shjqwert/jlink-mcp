@@ -10,11 +10,18 @@
     "url": "https://github.com/shjqwert/jlink-mcp/issues"
   },
   "author": "shjqwert",
-  "version": "0.3.2",
+  "version": "1.0.0",
+  "private": true,
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": ">=22 <25"
   },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "keywords": [
     "j-link",
     "segger",
@@ -29,12 +36,18 @@
     "firmware"
   ],
   "bin": {
-    "jlink-mcp": "./out/mcp/standalone.js"
+    "jlink-mcp": "./out/mcp/standalone.js",
+    "jlink-mcp-doctor": "./out/mcp/doctor.js"
   },
   "files": [
-    "out/**/*.js",
-    "out/**/*.d.ts",
+    "out/mcp/standalone.js",
+    "out/mcp/standalone.js.map",
+    "out/mcp/ui.js",
+    "out/mcp/ui.js.map",
+    "out/mcp/doctor.js",
+    "out/mcp/doctor.js.map",
     "native/hss-helper/bin/hss_helper.exe",
+    "native/hss-helper/bin/hss_helper.exe.sha256",
     "README.md",
     "LICENSE"
   ],
@@ -45,9 +58,10 @@
     "ui": "node out/mcp/ui.js",
     "build:hss": "node scripts/build-hss-helper.mjs",
     "watch": "tsc -watch -p ./",
-    "build": "npm run clean && npm run build:hss && npm run compile && npm run bundle",
-    "prepack": "npm run build",
-    "prepublishOnly": "npm run build",
+    "build": "npm run build:node",
+    "build:node": "npm run clean && npm run compile && npm run bundle",
+    "build:release": "npm run build:hss && npm run test:hss-helper && npm run build:node",
+    "prepack": "npm run verify:release-files",
     "lint": "tsc --noEmit",
     "test": "npm run clean && npm run compile && npm run test:unit && npm run test:surface && npm run test:guidance && npm run test:legacy-scan && npm run test:acceptance-schema",
     "test:unit": "node scripts/run-tests.mjs out/probe/backend.test.js out/probe/jlink.test.js out/gdb/gdb-client.test.js out/gdb/elf-resolver.test.js out/mcp/acceptance/evidence.test.js out/mcp/acceptance/software-runner.test.js out/mcp/acceptance/published-summary.test.js out/mcp/artifact/artifact-catalog.test.js out/mcp/artifact/hot-variables.test.js out/mcp/artifact/symbol-catalog.test.js out/mcp/hss/hss-typed-value.test.js out/mcp/hss-dll/hss-api-candidate.test.js out/mcp/jcap/analysis-v0.test.js out/mcp/jcap/jcap-v0.test.js out/mcp/jcap/jcap-v1.test.js out/mcp/preflight/temp-preflight.test.js out/mcp/rtt-channel/rtt-channel.test.js out/mcp/runtime/target-store.test.js out/mcp/runtime/probe-queue.test.js out/mcp/runtime/memory-session.test.js out/mcp/runtime/direct-operations.test.js out/mcp/runtime/artifact-operations.test.js out/mcp/runtime/file-lease.test.js out/mcp/runtime/hss-helper-adapter.test.js out/mcp/runtime/hss-operations.test.js out/mcp/runtime/svd-operations.test.js out/mcp/runtime/session-operations.test.js out/mcp/svd/svd-catalog.test.js out/mcp/sqlite-runtime.test.js out/utils/atomic-file.test.js",
@@ -55,24 +69,29 @@
     "test:guidance": "node scripts/check-agent-guidance.mjs",
     "test:legacy-scan": "node scripts/scan-legacy-control-plane.mjs",
     "test:privacy": "node scripts/scan-tracked-privacy.mjs",
-    "test:package": "node scripts/check-package-contents.mjs",
-    "test:ci": "npm run build && npm run lint && npm run test:unit && npm run test:surface && npm run test:guidance && npm run test:legacy-scan && npm run test:hss-helper && npm run test:package && npm run test:privacy",
+    "verify:release-files": "node scripts/check-package-contents.mjs",
+    "test:package": "npm run verify:release-files",
+    "test:ci": "npm run build:release && npm run lint && npm run test:unit && npm run test:surface && npm run test:guidance && npm run test:legacy-scan && npm run test:package && npm run test:privacy",
+    "audit:runtime": "npm audit --omit=dev",
+    "test:release": "npm run test:ci && node scripts/test-doctor.mjs && npm run audit:runtime",
+    "pack:release": "npm run test:release && node scripts/create-release-package.mjs",
+    "test:release-install": "node scripts/test-release-install.mjs",
     "test:acceptance-schema": "node scripts/run-tests.mjs out/mcp/acceptance/evidence.test.js out/mcp/acceptance/software-runner.test.js out/mcp/acceptance/published-summary.test.js",
     "acceptance:software": "npm run compile && node out/mcp/acceptance/software-runner.js",
     "test:elf": "npm run compile && node scripts/test-elf.mjs",
     "test:rtt-channel": "npm run compile && node --test out/mcp/rtt-channel/rtt-channel.test.js",
     "test:hss-contract": "npm run compile && node scripts/run-tests.mjs out/mcp/hss-dll/hss-api-candidate.test.js",
-    "test:hss-helper": "npm run build:hss && node scripts/test-hss-helper.mjs",
-    "test:jcap": "npm run build && node --test out/mcp/sqlite-runtime.test.js out/mcp/jcap/jcap-v0.test.js out/mcp/jcap/jcap-v1.test.js"
+    "test:hss-helper": "node scripts/test-hss-helper.mjs",
+    "test:jcap": "npm run build:node && node --test out/mcp/sqlite-runtime.test.js out/mcp/jcap/jcap-v0.test.js out/mcp/jcap/jcap-v1.test.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "sqlite3": "5.1.7",
-    "zod": "^4.3.6"
+    "sqlite3": "^6.0.1"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.5.2",
     "esbuild": "^0.28.0",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "zod": "^4.4.3"
   }
 }

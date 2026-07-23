@@ -45,6 +45,13 @@ function buildProbeConfig(): ProbeFactoryConfig {
 }
 
 async function main() {
+  if (process.argv[2] === "doctor") {
+    const { runDoctor } = await import("./doctor");
+    const report = await runDoctor();
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    if (report.status !== "ok") process.exitCode = 1;
+    return;
+  }
   const probeConfig = buildProbeConfig();
   process.stderr.write(`Starting MCP server with probe: ${probeConfig.type}\n`);
 
