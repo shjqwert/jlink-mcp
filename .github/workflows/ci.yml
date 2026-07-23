@@ -17,3 +17,23 @@ jobs:
 
       - run: npm ci
       - run: npm run test:ci
+
+      - name: Create HSS Helper checksum
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "native/hss-helper/bin/hss_helper.exe"
+          $hash = (Get-FileHash $exe.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content `
+            -Path "native/hss-helper/bin/hss_helper.exe.sha256" `
+            -Value "$hash  hss_helper.exe" `
+            -Encoding ascii
+
+      - name: Upload HSS Helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: hss-helper-windows-x64
+          path: |
+            native/hss-helper/bin/hss_helper.exe
+            native/hss-helper/bin/hss_helper.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
