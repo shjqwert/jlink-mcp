@@ -255,6 +255,93 @@ test("TargetStore downgrades a legacy verified record without a Flash identity s
   assert.equal(reloaded.liveArtifactMatch.source, "legacy_flash_identity_missing");
 });
 
+test("TargetStore migrates legacy Flash identity after a new verified hardware result", async (context) => {
+  const root = testDirectory(context, "target-store-legacy-flash-identity-migration");
+  const projectRoot = join(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "firmware.elf"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1]));
+  writeFileSync(join(projectRoot, "firmware.bin"), Buffer.from([1, 2, 3, 4]));
+  const stateRoot = join(root, "state");
+  const store = new TargetStore(stateRoot);
+  const first = await store.configure({
+    projectRoot,
+    device: "T",
+    probeSerial: "4",
+    interface: "SWD",
+    speed: 1000,
+    artifactPath: "firmware.elf",
+    artifactFlashImages: [{ path: "firmware.bin", baseAddress: 0x1000 }],
+  });
+  const document = JSON.parse(readFileSync(store.filePath, "utf8")) as {
+    targets: Record<string, { flashIdentityVersion?: number; flashIdentity?: string }>;
+  };
+  const record = Object.values(document.targets)[0];
+  delete record.flashIdentityVersion;
+  delete record.flashIdentity;
+  writeFileSync(store.filePath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+
+  const legacy = new TargetStore(stateRoot);
+  assert.equal(legacy.require(projectRoot).liveArtifactMatch.status, "unverified");
+  const migrated = await legacy.setArtifactMatch(projectRoot, "verified", "associated_flash_vendor_verify", {
+    targetGeneration: first.generation,
+    probeSerial: first.probeSerial,
+    artifactGeneration: first.artifact?.generation,
+    migrateFlashIdentityOnVerified: true,
+  });
+
+  assert.equal(migrated.flashIdentityVersion, 1);
+  assert.ok(migrated.flashIdentity);
+  assert.equal(migrated.liveArtifactMatch.status, "verified");
+  assert.equal(migrated.liveArtifactMatch.binding?.flashIdentity, migrated.flashIdentity);
+  const reloaded = new TargetStore(stateRoot).require(projectRoot);
+  assert.equal(reloaded.liveArtifactMatch.status, "verified");
+  assert.equal(reloaded.flashIdentityVersion, 1);
+  assert.equal(reloaded.flashIdentity, migrated.flashIdentity);
+});
+
+test("TargetStore keeps legacy Flash verification fail-closed when identity migration cannot be persisted", async (context) => {
+  const root = testDirectory(context, "target-store-legacy-flash-identity-migration-failure");
+  const projectRoot = join(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "firmware.elf"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1]));
+  writeFileSync(join(projectRoot, "firmware.bin"), Buffer.from([1, 2, 3, 4]));
+  const stateRoot = join(root, "state");
+  const store = new TargetStore(stateRoot);
+  const first = await store.configure({
+    projectRoot,
+    device: "T",
+    probeSerial: "4",
+    interface: "SWD",
+    speed: 1000,
+    artifactPath: "firmware.elf",
+    artifactFlashImages: [{ path: "firmware.bin", baseAddress: 0x1000 }],
+  });
+  const document = JSON.parse(readFileSync(store.filePath, "utf8")) as {
+    targets: Record<string, { flashIdentityVersion?: number; flashIdentity?: string }>;
+  };
+  const record = Object.values(document.targets)[0];
+  delete record.flashIdentityVersion;
+  delete record.flashIdentity;
+  writeFileSync(store.filePath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+
+  const legacy = new TargetStore(stateRoot);
+  const writable = legacy as unknown as { writeDocument(document: unknown): void };
+  writable.writeDocument = () => { throw new Error("simulated identity migration persistence failure"); };
+  await assert.rejects(
+    legacy.setArtifactMatch(projectRoot, "verified", "associated_flash_vendor_verify", {
+      targetGeneration: first.generation,
+      probeSerial: first.probeSerial,
+      artifactGeneration: first.artifact?.generation,
+      migrateFlashIdentityOnVerified: true,
+    }),
+    /simulated identity migration persistence failure/,
+  );
+
+  const reloaded = new TargetStore(stateRoot).require(projectRoot);
+  assert.equal(reloaded.liveArtifactMatch.status, "unverified");
+  assert.equal(reloaded.liveArtifactMatch.source, "artifact_state_persistence_incomplete");
+});
+
 test("TargetStore rejects ELF content renamed as raw BIN", async (context) => {
   const root = testDirectory(context, "target-store-renamed-elf");
   const projectRoot = join(root, "project");

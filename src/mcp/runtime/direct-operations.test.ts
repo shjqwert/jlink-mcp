@@ -582,7 +582,7 @@ test("flash cleanup failure cannot replace a verified hardware result", async (c
   assert.equal(probe.flashPaths.length, 1);
 });
 
-test("flash reports unknown and known vendor target-state changes without auto-recovery", async (context) => {
+test("flash reports vendor target-state changes without resuming a previously running target", async (context) => {
   const unknown = await fixture(context, "flash-before-unknown");
   writeFileSync(join(unknown.projectRoot, "image.bin"), Buffer.from([1, 2, 3, 4]));
   unknown.probe.observations.push({ state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } });
@@ -602,6 +602,141 @@ test("flash reports unknown and known vendor target-state changes without auto-r
   assert.ok(result.observedEffects.includes("vendor_target_state_change:running->halted"));
   assert.equal(result.verification.status, "verified");
   assert.equal((result.data as { command: { success: boolean } }).command.success, true);
+});
+
+test("flash restores a previously halted target after the vendor tool resumes it", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "flash-restore-halted");
+  writeFileSync(join(projectRoot, "image.bin"), Buffer.from([1, 2, 3, 4]));
+  probe.observations.push(
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.flash({ projectRoot, path: "image.bin", baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(probe.actions.filter((action) => action === "halt"), ["halt"]);
+  assert.equal((result.after as { targetState: string }).targetState, "halted");
+  assert.ok(result.observedEffects.includes("vendor_target_state_change:halted->running"));
+  assert.ok(result.observedEffects.includes("post_flash_halt_restored"));
+});
+
+test("flash attempts halt after a post-Flash observation failure and reports the recovered final state", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "flash-observation-failure-restore");
+  writeFileSync(join(projectRoot, "image.bin"), Buffer.from([1, 2, 3, 4]));
+  probe.targetState = "halted";
+  probe.observationRejectOnCall = 2;
+
+  const result = await service.flash({ projectRoot, path: "image.bin", baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_FLASH_STATE_OBSERVATION_FAILED");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.deepEqual(probe.actions.filter((action) => action === "halt"), ["halt"]);
+  assert.equal((result.after as { targetState: string }).targetState, "halted");
+});
+
+test("flash restores a previously halted target when the first post-Flash state is unknown", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "flash-unknown-state-restore");
+  writeFileSync(join(projectRoot, "image.bin"), Buffer.from([1, 2, 3, 4]));
+  probe.observations.push(
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } },
+    { state: "halted", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.flash({ projectRoot, path: "image.bin", baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, true);
+  assert.equal((result.after as { targetState: string }).targetState, "halted");
+  assert.ok(result.observedEffects.includes("vendor_target_state_change:halted->unknown"));
+  assert.ok(result.observedEffects.includes("post_flash_halt_restored"));
+});
+
+test("flash reports a failed halt restoration without discarding vendor verification", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "flash-halt-restore-failed");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "image.bin");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, Buffer.from([1, 2, 3, 4]));
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath, baseAddress: 0x08000000 }],
+  });
+  probe.haltResult = { success: false, rawOutput: "halt failed", output: "halt failed", error: "halt failed" };
+  probe.observations.push(
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.flash({ projectRoot, path: imagePath, baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_FLASH_HALT_FAILED");
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal((result.after as { targetState: string }).targetState, "running");
+  assert.equal(targets.require(projectRoot).liveArtifactMatch.status, "verified");
+});
+
+test("flash observes the final state after a post-Flash halt throws", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "flash-halt-throws");
+  writeFileSync(join(projectRoot, "image.bin"), Buffer.from([1, 2, 3, 4]));
+  probe.haltReject = new Error("halt transport rejected");
+  probe.observations.push(
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } },
+  );
+
+  const result = await service.flash({ projectRoot, path: "image.bin", baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_FLASH_HALT_FAILED");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(probe.observationCalls, 3);
+  assert.equal((result.after as { targetState: string }).targetState, "unknown");
+});
+
+test("flash marks state unknown when final observation throws after a successful halt", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "flash-final-observation-throws");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "image.bin");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, Buffer.from([1, 2, 3, 4]));
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath, baseAddress: 0x08000000 }],
+  });
+  probe.targetState = "halted";
+  probe.observationRejectOnCall = 3;
+  probe.observations.push(
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.flash({ projectRoot, path: imagePath, baseAddress: 0x08000000 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_FLASH_FINAL_STATE_UNCONFIRMED");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal((result.after as { targetState: string }).targetState, "unknown");
+  assert.equal(targets.require(projectRoot).liveArtifactMatch.status, "verified");
 });
 
 test("flash revalidates its input inside the Probe lease", async (context) => {
@@ -1308,6 +1443,8 @@ class FakeProbe extends ProbeBackend {
   observations: TargetStateObservation[] = [];
   observationCalls = 0;
   observationRejectOnCall?: number;
+  haltResult?: CommandResult;
+  haltReject?: Error;
   transactionInput?: ProbeMemoryTransactionInput;
   transactionResult?: ProbeMemoryTransactionResult;
 
@@ -1319,7 +1456,13 @@ class FakeProbe extends ProbeBackend {
     return { state: this.targetState, source: "dhcsr", result: ok() };
   }
   async getDeviceInfo(): Promise<CommandResult> { return ok(); }
-  async halt(): Promise<CommandResult> { this.actions.push("halt"); this.targetState = "halted"; return ok(); }
+  async halt(): Promise<CommandResult> {
+    this.actions.push("halt");
+    if (this.haltReject) throw this.haltReject;
+    const result = this.haltResult ?? ok();
+    if (result.success) this.targetState = "halted";
+    return result;
+  }
   async resume(): Promise<CommandResult> { this.actions.push("resume"); this.targetState = "running"; return ok(); }
   async reset(halt = false): Promise<CommandResult> { this.actions.push(halt ? "reset_halt" : "reset"); this.targetState = halt ? "halted" : "running"; return ok(); }
   async step(): Promise<CommandResult> { this.actions.push("step"); return ok(); }

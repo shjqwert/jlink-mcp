@@ -942,7 +942,7 @@ export class DirectMcuService {
     } catch (error) {
       return Promise.resolve(this.failure(createOperationEnvelope("flash"), error, "validation"));
     }
-    return this.queuedWithTarget("flash", target, ["program_flash", "vendor_verify"], async (envelope, current, runtime) => {
+    return this.queuedWithTarget("flash", target, ["program_flash", "vendor_verify", "preserve_pre_flash_halt_state"], async (envelope, current, runtime) => {
       const liveFlashFile = inspectFlashFile(current.projectRoot, flashFile.path, flashFile.baseAddress);
       if (!sameFlashBinding(liveFlashFile, flashFile)) {
         throw new TargetStoreError("FLASH_INPUT_CHANGED", "flash input changed while the request waited for the Probe queue; no hardware command was issued");
@@ -990,19 +990,103 @@ export class DirectMcuService {
           throw commandError(result, "flash_verify", issued, issued);
         }
         envelope.observedEffects.push("flash_program_issued", "vendor_verification_succeeded");
-        const after = await observeAfterMutation(runtime.probe, "flash");
-        envelope.after = observationData(after);
+        let vendorAfter: TargetStateObservation | undefined;
+        let vendorObservationError: unknown;
+        try {
+          vendorAfter = await observeAfterMutation(runtime.probe, "flash");
+          envelope.after = observationData(vendorAfter);
+        } catch (error) {
+          vendorObservationError = error;
+        }
+        if (vendorAfter && before.state !== vendorAfter.state) {
+          envelope.observedEffects.push(`vendor_target_state_change:${before.state}->${vendorAfter.state}`);
+        } else if (!vendorAfter) {
+          envelope.observedEffects.push("vendor_target_state_unobserved");
+        }
+        let finalAfter = vendorAfter;
+        let haltResult: CommandResult | undefined;
+        let haltError: unknown;
+        let finalObservationError: unknown;
+        const haltRestoreAttempted = before.state === "halted" && vendorAfter?.state !== "halted";
+        if (haltRestoreAttempted) {
+          try {
+            haltResult = await runtime.probe.halt();
+            if (haltResult.success) envelope.observedEffects.push("post_flash_halt_issued");
+          } catch (error) {
+            haltError = error;
+          }
+          try {
+            finalAfter = await observe(runtime.probe);
+            envelope.after = observationData(finalAfter);
+            if (haltResult?.success && finalAfter.state === "halted") {
+              envelope.observedEffects.push("post_flash_halt_restored");
+            }
+          } catch (error) {
+            finalObservationError = error;
+            finalAfter = undefined;
+            envelope.after = {
+              targetState: "unknown",
+              source: "post_flash_state_restore",
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
         const associated = current.artifactFlashImages.some((item) => item.sha256 === liveFlashFile.sha256 && item.baseAddress === liveFlashFile.baseAddress);
-        const updated = await this.transitionArtifact(current, associated ? "verified" : "unverified", associated ? "associated_flash_vendor_verify" : "unassociated_flash_vendor_verify", true);
+        const updated = await this.transitionArtifact(
+          current,
+          associated ? "verified" : "unverified",
+          associated ? "associated_flash_vendor_verify" : "unassociated_flash_vendor_verify",
+          true,
+          associated,
+        );
         refreshArtifact(envelope, updated);
-        envelope.data = { file: liveFlashFile, executionSnapshot: { sha256: snapshot.sha256, size: snapshot.size }, associatedWithArtifact: associated, command: commandData(result) };
+        envelope.data = {
+          file: liveFlashFile,
+          executionSnapshot: { sha256: snapshot.sha256, size: snapshot.size },
+          associatedWithArtifact: associated,
+          command: commandData(result),
+          vendorTargetStateAfter: vendorAfter?.state ?? "unobserved",
+          haltRestore: haltRestoreAttempted ? {
+            attempted: true,
+            command: haltResult ? commandData(haltResult) : null,
+            dispatchError: haltError instanceof Error ? haltError.message : haltError ? String(haltError) : null,
+            finalObservationError: finalObservationError instanceof Error ? finalObservationError.message : finalObservationError ? String(finalObservationError) : null,
+            finalState: finalAfter?.state ?? "unknown",
+          } : { attempted: false },
+        };
         envelope.verification = { status: "verified", method: "immutable_snapshot_and_vendor_flash_verify" };
         if (!associated) envelope.warnings.push("Flash verified by the vendor, but its hash is not associated with the configured Artifact.");
-        if (after.state === "unknown") {
+        if (before.state === "halted" && haltRestoreAttempted) {
+          if (vendorObservationError) {
+            throw executionError(
+              "POST_FLASH_STATE_OBSERVATION_FAILED",
+              "post_flash_state_restore",
+              "target state could not be observed immediately after flash; a halt was attempted and the final state was recorded",
+              { writeIssued: true, stateUnknown: finalAfter?.state === "unknown" || finalAfter === undefined },
+            );
+          }
+          if (haltError || (haltResult && !haltResult.success)) {
+            throw executionError(
+              "POST_FLASH_HALT_FAILED",
+              "post_flash_state_restore",
+              haltError instanceof Error ? haltError.message : haltResult?.error || haltResult?.output || "post-Flash halt failed",
+              { writeIssued: true, stateUnknown: finalAfter?.state === "unknown" || finalAfter === undefined },
+            );
+          }
+          if (finalObservationError || !finalAfter || finalAfter.state !== "halted") {
+            throw executionError(
+              "POST_FLASH_FINAL_STATE_UNCONFIRMED",
+              "post_flash_state_restore",
+              finalObservationError instanceof Error
+                ? finalObservationError.message
+                : `post-Flash halt did not produce a verified halted state; observed ${finalAfter?.state ?? "unknown"}`,
+              { writeIssued: true, stateUnknown: finalAfter?.state === "unknown" || finalAfter === undefined },
+            );
+          }
+        } else if (vendorObservationError) {
+          throw vendorObservationError;
+        } else if (vendorAfter?.state === "unknown") {
           throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after flash", { writeIssued: true, stateUnknown: true });
-        }
-        if (before.state !== after.state) {
-          envelope.observedEffects.push(`vendor_target_state_change:${before.state}->${after.state}`);
         }
       } finally {
         try { chmodSync(snapshotPath, 0o600); } catch { /* snapshot may not have been created */ }
@@ -1255,12 +1339,19 @@ export class DirectMcuService {
     envelope.data = data;
   }
 
-  private async transitionArtifact(target: StoredTarget, status: "unverified" | "verified" | "mismatch", source: string, writeIssued: boolean): Promise<StoredTarget> {
+  private async transitionArtifact(
+    target: StoredTarget,
+    status: "unverified" | "verified" | "mismatch",
+    source: string,
+    writeIssued: boolean,
+    migrateFlashIdentityOnVerified = false,
+  ): Promise<StoredTarget> {
     try {
       return await this.targets.setArtifactMatch(target.projectRoot, status, source, {
         targetGeneration: target.generation,
         probeSerial: target.probeSerial,
         artifactGeneration: target.artifact?.generation,
+        migrateFlashIdentityOnVerified,
       });
     } catch (error) {
       const code = error instanceof TargetStoreError ? error.code : "ARTIFACT_STATE_PERSIST_FAILED";

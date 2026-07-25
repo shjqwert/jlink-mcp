@@ -61,6 +61,7 @@ export interface ArtifactMatchBindingExpectation {
   targetGeneration: string;
   probeSerial: string;
   artifactGeneration?: string;
+  migrateFlashIdentityOnVerified?: boolean;
 }
 
 export interface StoredTarget {
@@ -291,6 +292,13 @@ export class TargetStore {
         || (expected.artifactGeneration !== undefined && target.artifact?.generation !== expected.artifactGeneration)
       )) {
         throw new TargetStoreError("TARGET_GENERATION_CHANGED", "Target or Artifact generation changed while the operation was executing");
+      }
+      if (status === "verified" && expected?.migrateFlashIdentityOnVerified === true) {
+        const flashIdentity = computeFlashIdentity(target.device, target.probeSerial, target.artifactFlashImages);
+        if (flashIdentity) {
+          target.flashIdentityVersion = 1;
+          target.flashIdentity = flashIdentity;
+        }
       }
       const timestamp = new Date().toISOString();
       const dirtyPath = this.persistArtifactDirtyMarker(target, status, source, timestamp);
