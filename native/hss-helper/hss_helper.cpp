@@ -951,22 +951,6 @@ struct HssBlockPlan {
   U32 bytesPerSample = 0;
 };
 
-static std::vector<PlanSymbol> json_symbols(const std::string& text) {
-  std::vector<PlanSymbol> symbols;
-  std::regex pattern("\\{[^{}]*\"name\"\\s*:\\s*\"([^\"]+)\"[^{}]*\"address\"\\s*:\\s*\"0x([0-9a-fA-F]+)\"[^{}]*\"size\"\\s*:\\s*(\\d+)[^{}]*\"type\"\\s*:\\s*\"([^\"]+)\"[^{}]*\\}");
-  try {
-    for (std::sregex_iterator it(text.begin(), text.end(), pattern), end; it != end; ++it) {
-      const auto address = std::stoull((*it)[2].str(), nullptr, 16);
-      const auto size = std::stoull((*it)[3].str());
-      if (address > (std::numeric_limits<U32>::max)() || size > (std::numeric_limits<U32>::max)()) return {};
-      symbols.push_back({(*it)[1].str(), static_cast<U32>(address), static_cast<U32>(size), (*it)[4].str()});
-    }
-  } catch (...) {
-    return {};
-  }
-  return symbols;
-}
-
 static bool json_symbol_array(const std::string& text, const char* field, std::vector<PlanSymbol>* symbols) {
   StrictJson root;
   std::string reason;
@@ -997,22 +981,28 @@ static bool json_symbol_array(const std::string& text, const char* field, std::v
   return true;
 }
 
+static bool valid_scalar_symbol(const PlanSymbol& symbol, std::set<std::string>* names) {
+  std::wstring wide_name;
+  return !symbol.name.empty()
+    && symbol.name.size() <= 256
+    && widen_utf8(symbol.name, &wide_name)
+    && names->insert(symbol.name).second
+    && (symbol.size == 1U || symbol.size == 2U || symbol.size == 4U)
+    && ((symbol.size == 1U && (symbol.type == "uint8" || symbol.type == "int8"))
+      || (symbol.size == 2U && (symbol.type == "uint16" || symbol.type == "int16"))
+      || (symbol.size == 4U && (symbol.type == "uint32" || symbol.type == "int32" || symbol.type == "float32")))
+    && symbol.address <= (std::numeric_limits<U32>::max)() - symbol.size;
+}
+
 static bool valid_jcap_symbols(const std::vector<PlanSymbol>& symbols) {
+  if (symbols.empty() || symbols.size() > 10U) return false;
   std::set<std::string> names;
   U32 total_bytes = 0;
   for (const auto& symbol : symbols) {
-    std::wstring wide_name;
-    if (symbol.name.empty() || symbol.name.size() > 256 || !widen_utf8(symbol.name, &wide_name)
-        || !names.insert(symbol.name).second
-        || (symbol.size != 1U && symbol.size != 2U && symbol.size != 4U)
-        || !((symbol.size == 1U && (symbol.type == "uint8" || symbol.type == "int8"))
-          || (symbol.size == 2U && (symbol.type == "uint16" || symbol.type == "int16"))
-          || (symbol.size == 4U && (symbol.type == "uint32" || symbol.type == "int32" || symbol.type == "float32")))
-        || symbol.address > (std::numeric_limits<U32>::max)() - symbol.size
-        || total_bytes > 40U - symbol.size) return false;
+    if (!valid_scalar_symbol(symbol, &names) || total_bytes > 40U - symbol.size) return false;
     total_bytes += symbol.size;
   }
-  return !symbols.empty();
+  return true;
 }
 
 static bool valid_write_symbols(const std::vector<PlanSymbol>& symbols, const std::vector<PlanSymbol>& capture_symbols) {
@@ -1020,14 +1010,7 @@ static bool valid_write_symbols(const std::vector<PlanSymbol>& symbols, const st
   std::set<std::string> names;
   for (const auto& symbol : capture_symbols) names.insert(symbol.name);
   for (const auto& symbol : symbols) {
-    std::wstring wide_name;
-    if (symbol.name.empty() || symbol.name.size() > 256 || !widen_utf8(symbol.name, &wide_name)
-        || !names.insert(symbol.name).second
-        || (symbol.size != 1U && symbol.size != 2U && symbol.size != 4U)
-        || !((symbol.size == 1U && (symbol.type == "uint8" || symbol.type == "int8"))
-          || (symbol.size == 2U && (symbol.type == "uint16" || symbol.type == "int16"))
-          || (symbol.size == 4U && (symbol.type == "uint32" || symbol.type == "int32" || symbol.type == "float32")))
-        || symbol.address > (std::numeric_limits<U32>::max)() - symbol.size) return false;
+    if (!valid_scalar_symbol(symbol, &names)) return false;
   }
   return true;
 }
@@ -3966,15 +3949,15 @@ static int self_test() {
     error_json("HSS_SELF_TEST_JCAP_BYTES_FAILED", "JCAP bytes or final close were not deterministic");
     return 0;
   }
-  const auto typed_symbols = json_symbols(
+  const std::string typed_plan =
     "{\"symbols\":[{\"name\":\"u8\",\"address\":\"0x20000000\",\"size\":1,\"type\":\"uint8\"},"
     "{\"name\":\"i8\",\"address\":\"0x20000001\",\"size\":1,\"type\":\"int8\"},"
     "{\"name\":\"u16\",\"address\":\"0x20000002\",\"size\":2,\"type\":\"uint16\"},"
     "{\"name\":\"i16\",\"address\":\"0x20000004\",\"size\":2,\"type\":\"int16\"},"
     "{\"name\":\"u32\",\"address\":\"0x20000008\",\"size\":4,\"type\":\"uint32\"},"
     "{\"name\":\"i32\",\"address\":\"0x2000000c\",\"size\":4,\"type\":\"int32\"},"
-    "{\"name\":\"f32\",\"address\":\"0x20000010\",\"size\":4,\"type\":\"float32\"}]}"
-  );
+    "{\"name\":\"f32\",\"address\":\"0x20000010\",\"size\":4,\"type\":\"float32\"}]}";
+  std::vector<PlanSymbol> typed_symbols;
   const std::string independent_write_plan =
     "{\"symbols\":[{\"name\":\"sample\",\"address\":\"0x20000000\",\"size\":4,\"type\":\"uint32\"}],"
     "\"writeSymbols\":[{\"name\":\"control\",\"address\":\"0x20000020\",\"size\":4,\"type\":\"uint32\"}]}";
@@ -3990,12 +3973,28 @@ static int self_test() {
   const auto independent_block_plan = build_hss_block_plan(parsed_capture_symbols);
   std::vector<PlanSymbol> independent_access_symbols = parsed_capture_symbols;
   independent_access_symbols.insert(independent_access_symbols.end(), parsed_write_symbols.begin(), parsed_write_symbols.end());
-  std::vector<PlanSymbol> excessive_write_symbols(33U, {"write", 0x20000020U, 4U, "uint32"});
+  std::vector<PlanSymbol> maximum_capture_symbols;
+  std::vector<PlanSymbol> excessive_capture_symbols;
+  std::vector<PlanSymbol> maximum_write_symbols;
+  std::vector<PlanSymbol> excessive_write_symbols;
+  for (U32 index = 0; index < 11U; index += 1U) {
+    PlanSymbol symbol{"capture_" + std::to_string(index), 0x20000100U + index * 4U, 4U, "uint32"};
+    excessive_capture_symbols.push_back(symbol);
+    if (index < 10U) maximum_capture_symbols.push_back(symbol);
+  }
+  for (U32 index = 0; index < 33U; index += 1U) {
+    PlanSymbol symbol{"write_" + std::to_string(index), 0x20000200U + index * 4U, 4U, "uint32"};
+    excessive_write_symbols.push_back(symbol);
+    if (index < 32U) maximum_write_symbols.push_back(symbol);
+  }
   if (independent_block_plan.bytesPerSample != 4U || independent_block_plan.blocks.size() != 1U
       || !declared_scalar_access_allowed(&independent_access_symbols, 0x20000000U, 4)
       || !declared_scalar_access_allowed(&independent_access_symbols, 0x20000020U, 4)
       || declared_scalar_access_allowed(&independent_access_symbols, 0x20000020U, 2)
       || declared_scalar_access_allowed(&independent_access_symbols, 0x20000024U, 4)
+      || !valid_jcap_symbols(maximum_capture_symbols)
+      || valid_jcap_symbols(excessive_capture_symbols)
+      || !valid_write_symbols(maximum_write_symbols, parsed_capture_symbols)
       || valid_write_symbols(excessive_write_symbols, parsed_capture_symbols)
       || json_symbol_array("{\"symbols\":[],\"writeSymbols\":[{\"name\":\"bad\"}]}", "writeSymbols", &parsed_write_symbols)) {
     error_json("HSS_SELF_TEST_MEMORY_DESCRIPTOR_FAILED", "independent write symbol allowlist boundary failed");
@@ -4005,7 +4004,9 @@ static int self_test() {
   DeleteFileA(typedFile.c_str());
   std::wstring typedPath;
   std::string typed_frame;
-  if (!widen_utf8(typedFile, &typedPath) || !valid_jcap_symbols(typed_symbols)) {
+  if (!widen_utf8(typedFile, &typedPath)
+      || !json_symbol_array(typed_plan, "symbols", &typed_symbols)
+      || !valid_jcap_symbols(typed_symbols)) {
     error_json("HSS_SELF_TEST_TYPED_JCAP_FAILED", "typed symbol plan validation failed");
     return 0;
   }
@@ -4838,7 +4839,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}");
   if (dll_utf8.empty() || output_file.empty() || pid_file.empty() || ready_file.empty() || write_request_file.empty() || write_claim_file.empty() || write_response_file.empty()
       || !std::regex_match(capture_id, uuid) || !std::regex_match(helper_instance_nonce, uuid)
-      || plan_format_version != 2 || !symbol_arrays_valid || symbols.size() > 10
+      || plan_format_version != 2 || !symbol_arrays_valid
       || !valid_jcap_symbols(symbols) || !valid_write_symbols(write_symbols, symbols)
       || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
       || !valid_jcap_samples_path(output_file, capture_id, &output_path)

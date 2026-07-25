@@ -128,25 +128,12 @@ test("stale variable references and same-path Artifact changes issue no hardware
   assert.deepEqual(fixture.probe.actions, []);
 });
 
-test("Hot Variables persist logical references across service restart", async (context) => {
-  const fixture = await createFixture(context, "hot-persist");
-  const ref = (await fixture.resolver.resolve(fixture.target, "counter")).ref;
-  assert.equal((await fixture.service.hotAdd(fixture.projectRoot, ref)).ok, true);
-  const restarted = new ArtifactVariableService(fixture.targets, fixture.direct, fixture.stateRoot, fixture.resolver);
-  const listed = await restarted.hotList(fixture.projectRoot);
-  assert.equal(listed.ok, true);
-  const variables = (listed.data as { variables: Array<Record<string, unknown>> }).variables;
-  assert.equal(variables.length, 1);
-  assert.equal(variables[0].logicalIdentity, "counter");
-  assert.equal("address" in variables[0], false);
-});
-
-test("logical selectors refresh the internal cache after Artifact generation changes", async (context) => {
+test("logical selectors resolve directly without persistent cache state", async (context) => {
   const fixture = await createFixture(context, "logical-selector-refresh");
   fixture.probe.memory.set(0x20000000, Buffer.from("78563412", "hex"));
   const resolved = await fixture.service.symbolResolve(fixture.projectRoot, "counter");
   assert.equal(resolved.ok, true);
-  assert.equal((resolved.data as { cacheRefreshed: boolean }).cacheRefreshed, true);
+  assert.equal((resolved.data as { cacheRefreshed: boolean }).cacheRefreshed, false);
 
   const currentRead = await fixture.service.readVariable(fixture.projectRoot, "counter");
   assert.equal(currentRead.ok, true);
@@ -163,7 +150,7 @@ test("logical selectors refresh the internal cache after Artifact generation cha
   });
   const refreshedRead = await fixture.service.readVariable(fixture.projectRoot, "counter");
   assert.equal(refreshedRead.ok, true, JSON.stringify(refreshedRead.error));
-  assert.equal((refreshedRead.data as { cacheRefreshed: boolean }).cacheRefreshed, true);
+  assert.equal((refreshedRead.data as { cacheRefreshed: boolean }).cacheRefreshed, false);
   assert.deepEqual(fixture.probe.actions, ["read:20000000:4", "read:20000000:4"]);
 });
 

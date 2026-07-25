@@ -69,7 +69,7 @@ const CHECKS: CheckDefinition[] = [
   ]),
   nodeTests("unit-acceptance", ["out/mcp/acceptance/evidence.test.js", "out/mcp/acceptance/software-runner.test.js"]),
   nodeTests("unit-artifact", [
-    "out/mcp/artifact/artifact-catalog.test.js", "out/mcp/artifact/hot-variables.test.js", "out/mcp/artifact/symbol-catalog.test.js",
+    "out/mcp/artifact/artifact-catalog.test.js", "out/mcp/artifact/symbol-catalog.test.js",
     "out/mcp/runtime/target-store.test.js", "out/mcp/runtime/artifact-operations.test.js",
   ]),
   nodeTests("unit-direct", [

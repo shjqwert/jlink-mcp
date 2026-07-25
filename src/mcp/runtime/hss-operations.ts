@@ -32,11 +32,9 @@ import {
   type JcapV1CaptureState,
   type JcapV1Event,
   type JcapV1Metadata,
-  type AnalysisV0RunRequest,
   type JcapV1VariableDescriptor,
   type JcapRunMutationGuard,
 } from "../jcap/jcap-v1";
-import { ANALYSIS_V0_MAX_POINTS } from "../jcap/analysis-v0";
 import type {
   CaptureVariableAccessDelegate,
   ArtifactVariableService,
@@ -450,14 +448,27 @@ export class HssOperations implements CaptureVariableAccessDelegate {
   private async dryRun(prepared: PreparedCapture): Promise<OperationEnvelope> {
     const envelope = createOperationEnvelope("hss_start", prepared.target);
     try {
-      const runtime = await this.adapter.inspectRuntime(prepared.target);
-      if (!runtime.available) throw new HssOperationError(runtime.errorCode ?? "HSS_UNAVAILABLE", runtime.reason ?? "HSS runtime is unavailable");
-      const execution = await this.queue.runExclusive(prepared.target.probeSerial, async () => this.preflightStart(prepared, runtime));
+      const localMemoryOwner = this.memorySessions?.localOwnerForTarget(prepared.target);
+      const execution = await this.queue.runExclusive(prepared.target.probeSerial, async () => {
+        const current = this.targets.requireCurrent(prepared.target);
+        const runtime = await this.adapter.inspectRuntime(current);
+        if (!runtime.available) throw new HssOperationError(runtime.errorCode ?? "HSS_UNAVAILABLE", runtime.reason ?? "HSS runtime is unavailable");
+        const memorySessionClose = await this.releaseLocalMemorySessionForHss(current, runtime);
+        const preflight = await this.preflightStart({ ...prepared, target: current }, runtime);
+        return { ...preflight, runtime, memorySessionClose };
+      }, localMemoryOwner ? {
+        allowedOwnerKinds: ["memory"],
+        ownerTarget: { projectRoot: prepared.target.projectRoot, targetGeneration: prepared.target.generation },
+        requiredOwner: localMemoryOwner,
+      } : {});
       const layout = frameLayout(prepared);
       applyQueue(envelope, execution);
-      envelope.before = { targetGeneration: execution.value.target.generation, artifactGeneration: execution.value.target.artifact!.generation, owner: this.queue.getOwner(execution.value.target.probeSerial) ?? null, targetState: execution.value.targetStateBefore };
-      envelope.after = envelope.before;
+      const ownerAfter = this.queue.getOwner(execution.value.target.probeSerial) ?? null;
+      envelope.before = { targetGeneration: execution.value.target.generation, artifactGeneration: execution.value.target.artifact!.generation, owner: localMemoryOwner ?? ownerAfter, targetState: execution.value.targetStateBefore };
+      envelope.after = { ...envelope.before, owner: ownerAfter, targetState: execution.value.targetStateAfter };
+      if (execution.value.memorySessionClose) envelope.observedEffects.push("local_memory_session_closed");
       envelope.data = {
+        ...(execution.value.memorySessionClose ? { memorySessionClose: execution.value.memorySessionClose } : {}),
         dryRun: true,
         backend: this.adapter.backend,
         variables: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed } as Record<string, unknown>)),
@@ -473,7 +484,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         blockCount: prepared.blockCount,
         qualityOracle: prepared.qualityOracle ?? null,
         limits: HSS_EFFECTIVE_LIMITS,
-        runtime,
+        runtime: execution.value.runtime,
         capability: execution.value.capability,
       };
       envelope.verification = { status: "verified", method: "typed_resolution_runtime_capability_current_artifact_and_static_layout" };
@@ -500,19 +511,12 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         const currentBeforeClose = this.targets.requireCurrent(prepared.target);
         const runtime = await this.adapter.inspectRuntime(currentBeforeClose);
         if (!runtime.available) throw new HssOperationError(runtime.errorCode ?? "HSS_UNAVAILABLE", runtime.reason ?? "HSS runtime is unavailable");
-        const memoryClose = await this.memorySessions?.closeForTarget(currentBeforeClose);
-        if (memoryClose) {
-          const targetStateAfterReconnect = await this.adapter.observeTargetState(currentBeforeClose, runtime);
+        const memorySessionClose = await this.releaseLocalMemorySessionForHss(currentBeforeClose, runtime);
+        if (memorySessionClose) {
           envelope.data = {
             ...(envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {}),
-            memorySessionClose: { targetStateBeforeClose: memoryClose.targetStateBeforeClose, targetStateAfterReconnect },
+            memorySessionClose,
           };
-          if (memoryClose.targetStateBeforeClose === "unknown" || targetStateAfterReconnect === "unknown") {
-            throw new HssOperationError("POST_OPERATION_STATE_UNKNOWN", "memory-session close could not prove the target state before HSS start", false, false, true);
-          }
-          if (memoryClose.targetStateBeforeClose !== targetStateAfterReconnect) {
-            throw new HssOperationError("HIDDEN_STATE_CHANGE", `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${targetStateAfterReconnect}`);
-          }
         }
         const preflight = await this.preflightStart(prepared, runtime);
         const current = preflight.target;
@@ -727,6 +731,22 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       }
       return this.failure(envelope, error, "start");
     }
+  }
+
+  private async releaseLocalMemorySessionForHss(
+    target: StoredTarget,
+    runtime: HssRuntimeFacts,
+  ): Promise<{ targetStateBeforeClose: Exclude<HssTargetState, "unknown">; targetStateAfterReconnect: Exclude<HssTargetState, "unknown"> } | undefined> {
+    const memoryClose = await this.memorySessions?.closeForTarget(target);
+    if (!memoryClose) return undefined;
+    const targetStateAfterReconnect = await this.adapter.observeTargetState(target, runtime);
+    if (memoryClose.targetStateBeforeClose === "unknown" || targetStateAfterReconnect === "unknown") {
+      throw new HssOperationError("POST_OPERATION_STATE_UNKNOWN", "memory-session close could not prove the target state before HSS start", false, false, true);
+    }
+    if (memoryClose.targetStateBeforeClose !== targetStateAfterReconnect) {
+      throw new HssOperationError("HIDDEN_STATE_CHANGE", `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${targetStateAfterReconnect}`);
+    }
+    return { targetStateBeforeClose: memoryClose.targetStateBeforeClose, targetStateAfterReconnect };
   }
 
   async status(input: HssCaptureSelector): Promise<OperationEnvelope> {
@@ -1288,24 +1308,6 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     return this.queryEnvelope("capture_export_csv", () => this.query.exportCsv({ captureId }));
   }
 
-  analysisProfiles(): OperationEnvelope {
-    const envelope = createOperationEnvelope("analysis_profiles");
-    envelope.data = {
-      analyzerVersion: "analysis-v0",
-      maxPoints: ANALYSIS_V0_MAX_POINTS,
-      profiles: [
-        { name: "generic_control", version: 0, roles: ["command", "feedback"], findings: ["write_window_comparison", "control_response"] },
-        { name: "generic_state_machine", version: 0, roles: ["state"], findings: ["state_transition", "state_duration"] },
-      ],
-    };
-    envelope.verification = { status: "verified", method: "implemented_profile_registry" };
-    return finishEnvelope(envelope, true);
-  }
-
-  async analysisRun(input: AnalysisV0RunRequest): Promise<OperationEnvelope> {
-    return this.queryEnvelope("analysis_run", () => this.query.analysisRun(input));
-  }
-
   private async prepare(input: HssCaptureInput): Promise<PreparedCapture> {
     if (!Number.isSafeInteger(input.rateHz) || input.rateHz < 1 || input.rateHz > HSS_EFFECTIVE_LIMITS.maxRateHz) throw new HssOperationError("HSS_RATE_BOUNDS", `rateHz must be 1..${HSS_EFFECTIVE_LIMITS.maxRateHz}`);
     if (!Number.isSafeInteger(input.durationSec) || input.durationSec < 1 || input.durationSec > HSS_EFFECTIVE_LIMITS.maxDurationSec) throw new HssOperationError("HSS_DURATION_BOUNDS", `durationSec must be 1..${HSS_EFFECTIVE_LIMITS.maxDurationSec}`);
@@ -1319,14 +1321,8 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     const logical = new Set<string>();
     const aliases = new Set<string>();
     for (const variable of input.variables) {
-      const current = await this.artifacts.resolveCaptureVariable(target.projectRoot, variable.ref);
-      if (current.target.generation !== target.generation) throw new HssOperationError("TARGET_GENERATION_CHANGED", "Target generation changed during HSS variable resolution", true);
-      const resolved = current.resolved;
-      if (!resolved.hssEligible || resolved.region !== "ram" || resolved.source !== "elf-dwarf" || resolved.confidence !== "dwarf") throw new HssOperationError("HSS_VARIABLE_INELIGIBLE", `${symbolLogicalIdentity(resolved.ref)} is not a verified typed DWARF RAM scalar`);
-      if (resolved.endian !== "little") throw new HssOperationError("HSS_ENDIAN_UNSUPPORTED", `${symbolLogicalIdentity(resolved.ref)} uses unsupported ${resolved.endian}-endian encoding`);
-      const identity = symbolLogicalIdentity(resolved.ref);
-      if (!NATIVE_HSS_SCALAR_TYPES.has(resolved.type) || resolved.size !== hssTypedByteSize(resolved.type)) throw new HssOperationError("HSS_SCALAR_UNSUPPORTED", `${identity} is not one of the native JCAP scalar layouts`);
-      if (Buffer.byteLength(identity, "utf8") > 256) throw new HssOperationError("HSS_VARIABLE_NAME_TOO_LONG", "capture logical identities must be at most 256 UTF-8 bytes");
+      const current = await this.prepareScalarVariable(target, variable, "capture");
+      const identity = current.descriptor.logicalIdentity;
       if (logical.has(identity)) throw new HssOperationError("HSS_VARIABLE_DUPLICATE", `duplicate capture variable: ${identity}`);
       logical.add(identity);
       if (variable.alias) {
@@ -1334,49 +1330,17 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         aliases.add(variable.alias);
       }
       if (variable.unit && Buffer.byteLength(variable.unit, "utf8") > 64) throw new HssOperationError("HSS_UNIT_INVALID", "capture units must be at most 64 UTF-8 bytes");
-      prepared.push({
-        requested: variable,
-        resolved,
-        cacheRefreshed: current.cacheRefreshed,
-        descriptor: {
-          logicalIdentity: identity,
-          type: resolved.type,
-          address: hexAddress(resolved.address),
-          size: resolved.size,
-          artifactGeneration: resolved.ref.artifactGeneration,
-          layoutHash: resolved.ref.layoutHash,
-          ...(variable.alias ? { alias: variable.alias } : {}),
-          ...(variable.unit ? { unit: variable.unit } : {}),
-        },
-      });
+      prepared.push(current);
     }
     const writeVariables: PreparedVariable[] = [];
     const writeLogical = new Set<string>();
     for (const ref of input.writeVariables ?? []) {
-      const current = await this.artifacts.resolveCaptureVariable(target.projectRoot, ref);
-      if (current.target.generation !== target.generation) throw new HssOperationError("TARGET_GENERATION_CHANGED", "Target generation changed during HSS write-variable resolution", true);
-      const resolved = current.resolved;
-      if (!resolved.hssEligible || resolved.region !== "ram" || resolved.source !== "elf-dwarf" || resolved.confidence !== "dwarf") throw new HssOperationError("HSS_WRITE_VARIABLE_INELIGIBLE", `${symbolLogicalIdentity(resolved.ref)} is not a verified typed DWARF RAM scalar`);
-      if (resolved.endian !== "little") throw new HssOperationError("HSS_ENDIAN_UNSUPPORTED", `${symbolLogicalIdentity(resolved.ref)} uses unsupported ${resolved.endian}-endian encoding`);
-      const identity = symbolLogicalIdentity(resolved.ref);
-      if (!NATIVE_HSS_SCALAR_TYPES.has(resolved.type) || resolved.size !== hssTypedByteSize(resolved.type)) throw new HssOperationError("HSS_SCALAR_UNSUPPORTED", `${identity} is not one of the native JCAP scalar layouts`);
-      if (Buffer.byteLength(identity, "utf8") > 256) throw new HssOperationError("HSS_VARIABLE_NAME_TOO_LONG", "write-variable logical identities must be at most 256 UTF-8 bytes");
+      const current = await this.prepareScalarVariable(target, { ref }, "write");
+      const identity = current.descriptor.logicalIdentity;
       if (logical.has(identity)) continue;
       if (writeLogical.has(identity)) throw new HssOperationError("HSS_WRITE_VARIABLE_DUPLICATE", `duplicate HSS write variable: ${identity}`);
       writeLogical.add(identity);
-      writeVariables.push({
-        requested: { ref },
-        resolved,
-        cacheRefreshed: current.cacheRefreshed,
-        descriptor: {
-          logicalIdentity: identity,
-          type: resolved.type,
-          address: hexAddress(resolved.address),
-          size: resolved.size,
-          artifactGeneration: resolved.ref.artifactGeneration,
-          layoutHash: resolved.ref.layoutHash,
-        },
-      });
+      writeVariables.push(current);
     }
     let qualityOracle: PreparedQualityOracle | undefined;
     if (input.qualityOracle) {
@@ -1410,6 +1374,47 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       ...(qualityOracle ? { qualityOracle } : {}),
       ...(input.runId ? { runId: input.runId } : {}),
       blockCount: blockCount(prepared.map(({ resolved }) => resolved)),
+    };
+  }
+
+  private async prepareScalarVariable(
+    target: StoredTarget,
+    requested: HssVariableInput,
+    role: "capture" | "write",
+  ): Promise<PreparedVariable> {
+    const current = await this.artifacts.resolveCaptureVariable(target.projectRoot, requested.ref);
+    if (current.target.generation !== target.generation) {
+      const label = role === "capture" ? "variable" : "write-variable";
+      throw new HssOperationError("TARGET_GENERATION_CHANGED", `Target generation changed during HSS ${label} resolution`, true);
+    }
+    const resolved = current.resolved;
+    const identity = symbolLogicalIdentity(resolved.ref);
+    if (!resolved.hssEligible || resolved.region !== "ram" || resolved.source !== "elf-dwarf" || resolved.confidence !== "dwarf") {
+      const code = role === "capture" ? "HSS_VARIABLE_INELIGIBLE" : "HSS_WRITE_VARIABLE_INELIGIBLE";
+      throw new HssOperationError(code, `${identity} is not a verified typed DWARF RAM scalar`);
+    }
+    if (resolved.endian !== "little") throw new HssOperationError("HSS_ENDIAN_UNSUPPORTED", `${identity} uses unsupported ${resolved.endian}-endian encoding`);
+    if (!NATIVE_HSS_SCALAR_TYPES.has(resolved.type) || resolved.size !== hssTypedByteSize(resolved.type)) {
+      throw new HssOperationError("HSS_SCALAR_UNSUPPORTED", `${identity} is not one of the native JCAP scalar layouts`);
+    }
+    if (Buffer.byteLength(identity, "utf8") > 256) {
+      const label = role === "capture" ? "capture" : "write-variable";
+      throw new HssOperationError("HSS_VARIABLE_NAME_TOO_LONG", `${label} logical identities must be at most 256 UTF-8 bytes`);
+    }
+    return {
+      requested,
+      resolved,
+      cacheRefreshed: current.cacheRefreshed,
+      descriptor: {
+        logicalIdentity: identity,
+        type: resolved.type,
+        address: hexAddress(resolved.address),
+        size: resolved.size,
+        artifactGeneration: resolved.ref.artifactGeneration,
+        layoutHash: resolved.ref.layoutHash,
+        ...(requested.alias ? { alias: requested.alias } : {}),
+        ...(requested.unit ? { unit: requested.unit } : {}),
+      },
     };
   }
 
@@ -2059,8 +2064,6 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       ? ["read_authoritative_capture", "build_temporary_capture_index", "atomically_publish_capture_db"]
       : tool === "capture_export_csv"
         ? ["read_bounded_capture_rows", "create_external_csv"]
-        : tool === "analysis_run"
-          ? ["read_bounded_capture_index", "persist_derived_analysis"]
         : ["read_bounded_capture_index"];
     try {
       envelope.data = await operation();
@@ -2074,9 +2077,6 @@ export class HssOperations implements CaptureVariableAccessDelegate {
           envelope.observedEffects.push("external_csv_created");
         }
         envelope.verification = { status: typeof data.exportFile === "string" ? "verified" : "observed", method: "bounded_external_csv_export" };
-      } else if (tool === "analysis_run") {
-        if (typeof data.analysisRunId === "string") envelope.observedEffects.push("derived_analysis_persisted");
-        envelope.verification = { status: typeof data.analysisRunId === "string" ? "verified" : "observed", method: "deterministic_bounded_jcap_analysis" };
       } else {
         envelope.verification = { status: "verified", method: "bounded_jcap_v1_query" };
       }

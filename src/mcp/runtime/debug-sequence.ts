@@ -94,9 +94,9 @@ export class DebugSequenceExecutor {
     let setupDurationMs = 0;
     let previousCompletedAt = executionStartedAt;
     const steps: StepResult[] = [];
-    const cleanup: Array<{ action: DebugSequenceCleanup["action"]; ok: boolean; result: Record<string, unknown> }> = [];
+    const cleanup: Array<{ action: DebugSequenceCleanup["action"]; automatic?: boolean; ok: boolean; result: Record<string, unknown> }> = [];
     const captures: SequenceCaptureState = { createdIds: [] };
-    const attemptedWriteRefs = new Set<string>();
+    const possiblyWrittenRefs = new Set<string>();
     let failure: { code: string; message: string; state: "failed" | "timed_out" | "cancelled" } | undefined;
     let failedStepStateUnknown = false;
 
@@ -123,10 +123,16 @@ export class DebugSequenceExecutor {
       const dispatchedAt = this.scheduler.now();
       let result: OperationEnvelope;
       try {
-        if (step.action === "write_variable") attemptedWriteRefs.add(refKey(step.ref));
         result = await this.executeStep(input.projectRoot, step, captures);
       } catch (error) {
         result = failEnvelope(createOperationEnvelope(step.action), sequenceError("DEBUG_SEQUENCE_STEP_FAILED", "dispatch", error));
+      }
+      if (step.action === "write_variable" && (
+        result.ok
+        || result.error?.writeIssued === true
+        || result.error?.stateUnknown === true
+      )) {
+        possiblyWrittenRefs.add(refKey(step.ref));
       }
       const completedAt = this.scheduler.now();
       const stepTimelineEpoch = timelineEpoch;
@@ -165,8 +171,12 @@ export class DebugSequenceExecutor {
 
     if (failure) {
       for (const action of input.cleanup ?? []) {
-        const result = await this.executeCleanup(input.projectRoot, action, captures, attemptedWriteRefs);
+        const result = await this.executeCleanup(input.projectRoot, action, captures, possiblyWrittenRefs);
         cleanup.push({ action: action.action, ok: result.ok, result: boundedResult(result) });
+      }
+      if (captures.activeId) {
+        const result = await this.executeCleanup(input.projectRoot, { action: "hss_stop" }, captures, possiblyWrittenRefs);
+        cleanup.push({ action: "hss_stop", automatic: true, ok: result.ok, result: boundedResult(result) });
       }
     }
 
@@ -262,7 +272,8 @@ export class DebugSequenceExecutor {
     }
     const plannedDurationMs = input.steps.at(-1)!.atMs;
     if (plannedDurationMs < 1_000 || plannedDurationMs > 30_000) throw new Error("the planned sequence duration must be 1000..30000 ms");
-    const timeoutMs = input.timeoutMs ?? Math.min(60_000, plannedDurationMs + 10_000);
+    const leadingHssBootstrap = input.steps[0]?.action === "hss_start" && input.steps[0].atMs === 0;
+    const timeoutMs = input.timeoutMs ?? Math.min(60_000, plannedDurationMs + (leadingHssBootstrap ? 30_000 : 10_000));
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < plannedDurationMs || timeoutMs > 60_000) throw new Error("timeoutMs must cover the planned duration and be at most 60000 ms");
     return { plannedDurationMs, timeoutMs };
   }
@@ -304,13 +315,13 @@ export class DebugSequenceExecutor {
     projectRoot: string,
     action: DebugSequenceCleanup,
     captures: SequenceCaptureState,
-    attemptedWriteRefs: ReadonlySet<string>,
+    possiblyWrittenRefs: ReadonlySet<string>,
   ): Promise<OperationEnvelope> {
     try {
       if (action.action === "restore_variable") {
-        if (!attemptedWriteRefs.has(refKey(action.ref))) {
+        if (!possiblyWrittenRefs.has(refKey(action.ref))) {
           const skipped = createOperationEnvelope("restore_variable");
-          skipped.data = { skipped: true, reason: "matching_sequence_write_not_dispatched" };
+          skipped.data = { skipped: true, reason: "matching_sequence_write_not_issued" };
           return finishEnvelope(skipped, true);
         }
         return await this.artifacts.writeVariable({
