@@ -5500,7 +5500,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
       << ",\"qualityStatus\":\"" << (timeline_quality_reported ? "reported" : "partial")
       << "\",\"qualitySource\":\"jlink\",\"qualityCountersValidated\":" << (timeline_quality_reported ? "true" : "false")
-      << "\",\"timeouts\":0,\"overflows\":" << (timeline_quality_reported ? "0" : "null")
+      << ",\"timeouts\":0,\"overflows\":" << (timeline_quality_reported ? "0" : "null")
       << ",\"droppedSamples\":" << (timeline_quality_reported ? "0" : "null")
       << ",\"timelineSlotDeficit\":" << timeline_slot_deficit
       << ",\"timelineToleranceSlots\":" << timeline_tolerance_slots
