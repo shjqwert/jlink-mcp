@@ -123,6 +123,75 @@ test("TargetStore refuses stale Artifact-match evidence after reconfiguration", 
   );
 });
 
+test("TargetStore preserves verified Flash identity across symbol and transport-only reconfiguration", async (context) => {
+  const root = testDirectory(context, "target-store-flash-identity-preserved");
+  const projectRoot = join(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "firmware.elf"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1]));
+  writeFileSync(join(projectRoot, "firmware.map"), "first map", "utf8");
+  writeFileSync(join(projectRoot, "firmware.bin"), Buffer.from([1, 2, 3, 4]));
+  const store = new TargetStore(join(root, "state"));
+  const base = {
+    projectRoot,
+    device: "T",
+    probeSerial: "4",
+    interface: "SWD" as const,
+    speed: 1000,
+    artifactPath: "firmware.elf",
+    mapPath: "firmware.map",
+    artifactFlashImages: [{ path: "firmware.bin", baseAddress: 0x1000 }],
+  };
+  const first = await store.configure(base);
+  await store.setArtifactMatch(projectRoot, "verified", "fixture", {
+    targetGeneration: first.generation,
+    probeSerial: first.probeSerial,
+    artifactGeneration: first.artifact?.generation,
+  });
+
+  writeFileSync(join(projectRoot, "firmware.map"), "changed map", "utf8");
+  const second = await store.configure({
+    ...base,
+    speed: 4000,
+    memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "ram", writable: true }],
+  });
+
+  assert.equal(second.liveArtifactMatch.status, "verified");
+  assert.equal(second.liveArtifactMatch.source, "target_configure_flash_identity_preserved");
+  assert.equal(second.liveArtifactMatch.binding?.targetGeneration, second.generation);
+  assert.equal(second.liveArtifactMatch.binding?.artifactGeneration, second.artifact?.generation);
+  assert.notEqual(second.artifact?.generation, first.artifact?.generation);
+});
+
+test("TargetStore invalidates verified Flash identity when image content changes", async (context) => {
+  const root = testDirectory(context, "target-store-flash-identity-changed");
+  const projectRoot = join(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  writeFileSync(join(projectRoot, "firmware.elf"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1]));
+  writeFileSync(join(projectRoot, "firmware.bin"), Buffer.from([1, 2, 3, 4]));
+  const store = new TargetStore(join(root, "state"));
+  const input = {
+    projectRoot,
+    device: "T",
+    probeSerial: "4",
+    interface: "SWD" as const,
+    speed: 1000,
+    artifactPath: "firmware.elf",
+    artifactFlashImages: [{ path: "firmware.bin", baseAddress: 0x1000 }],
+  };
+  const first = await store.configure(input);
+  await store.setArtifactMatch(projectRoot, "verified", "fixture", {
+    targetGeneration: first.generation,
+    probeSerial: first.probeSerial,
+    artifactGeneration: first.artifact?.generation,
+  });
+
+  writeFileSync(join(projectRoot, "firmware.bin"), Buffer.from([4, 3, 2, 1]));
+  const second = await store.configure(input);
+
+  assert.equal(second.liveArtifactMatch.status, "unverified");
+  assert.equal(second.liveArtifactMatch.source, "target_configure");
+});
+
 test("TargetStore rejects ELF content renamed as raw BIN", async (context) => {
   const root = testDirectory(context, "target-store-renamed-elf");
   const projectRoot = join(root, "project");

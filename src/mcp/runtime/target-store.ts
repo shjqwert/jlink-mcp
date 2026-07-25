@@ -53,6 +53,7 @@ export interface LiveArtifactMatch {
     targetGeneration: string;
     probeSerial: string;
     artifactGeneration: string;
+    flashIdentity?: string;
   };
 }
 
@@ -67,6 +68,7 @@ export interface StoredTarget {
   generation: string;
   configuredAt: string;
   configurationHash: string;
+  flashIdentity?: string;
   device: string;
   probeSerial: string;
   interface: TargetInterface;
@@ -202,6 +204,7 @@ export class TargetStore {
     const probeSerial = canonicalProbeSerial(input.probeSerial);
     const configuredAt = new Date().toISOString();
     const generation = randomUUID();
+    const flashIdentity = computeFlashIdentity(input.device, probeSerial, artifact, artifactFlashImages);
     const hashMaterial = {
       projectRoot,
       device: input.device,
@@ -222,6 +225,7 @@ export class TargetStore {
       ...hashMaterial,
       generation,
       configuredAt,
+      flashIdentity,
       configurationHash: sha256Json(hashMaterial),
       missingOptionalInputs: [
         !artifact && "artifact",
@@ -236,9 +240,30 @@ export class TargetStore {
     await this.withLock(async () => {
       const document = this.readDocument();
       const key = targetKey(projectRoot);
-      const currentGeneration = document.targets[key]?.generation ?? null;
+      const storedCurrent = document.targets[key];
+      const current = storedCurrent ? this.applyDirtyArtifactOverlay(storedCurrent) : undefined;
+      const currentGeneration = current?.generation ?? null;
       if (expectedGeneration !== undefined && currentGeneration !== expectedGeneration) {
         throw new TargetStoreError("TARGET_GENERATION_CHANGED", "Target configuration changed before target_configure could be committed; retry against the current generation");
+      }
+      if (
+        current?.liveArtifactMatch.status === "verified"
+        && current.flashIdentity !== undefined
+        && current.flashIdentity === flashIdentity
+        && artifact
+      ) {
+        target.liveArtifactMatch = {
+          status: "verified",
+          source: "target_configure_flash_identity_preserved",
+          timestamp: configuredAt,
+          binding: {
+            projectRoot,
+            targetGeneration: generation,
+            probeSerial,
+            artifactGeneration: artifact.generation,
+            flashIdentity,
+          },
+        };
       }
       document.targets[key] = target;
       this.writeDocument(document);
@@ -276,6 +301,7 @@ export class TargetStore {
           targetGeneration: target.generation,
           probeSerial: target.probeSerial,
           artifactGeneration: target.artifact.generation,
+          flashIdentity: target.flashIdentity,
         } : undefined,
       };
       this.writeDocument(document);
@@ -318,7 +344,19 @@ export class TargetStore {
 
   private applyDirtyArtifactOverlay(target: StoredTarget): StoredTarget {
     const markerPath = this.artifactDirtyPath(target);
-    if (!this.inMemoryDirty.has(markerPath) && !existsSync(markerPath)) return target;
+    if (!this.inMemoryDirty.has(markerPath) && !existsSync(markerPath)) {
+      if (target.liveArtifactMatch.status === "verified" && target.flashIdentity === undefined) {
+        return {
+          ...target,
+          liveArtifactMatch: {
+            status: "unverified",
+            source: "legacy_flash_identity_missing",
+            timestamp: target.liveArtifactMatch.timestamp,
+          },
+        };
+      }
+      return target;
+    }
     let timestamp = target.liveArtifactMatch.timestamp;
     try { timestamp = statSync(markerPath).mtime.toISOString(); } catch { /* in-memory poison remains authoritative */ }
     return {
@@ -611,6 +649,26 @@ function sha256File(filePath: string): string {
     closeSync(handle);
   }
   return hash.digest("hex");
+}
+
+function computeFlashIdentity(
+  device: string,
+  probeSerial: string,
+  artifact: ArtifactBinding | undefined,
+  flashImages: FlashImageBinding[],
+): string {
+  return sha256Json({
+    device,
+    probeSerial,
+    artifactSha256: artifact?.sha256 ?? null,
+    flashImages: flashImages
+      .map((image) => ({
+        sha256: image.sha256,
+        format: image.format,
+        baseAddress: image.baseAddress ?? null,
+      }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  });
 }
 
 function sha256Json(value: unknown): string {

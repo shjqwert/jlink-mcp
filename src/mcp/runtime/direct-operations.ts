@@ -169,8 +169,15 @@ export class DirectMcuService {
         configured.timestamps.startedAt = serialized.startedAt;
         configured.timestamps.endedAt = serialized.endedAt;
       }
-      configured.requestedEffects = ["persist_target_configuration", "invalidate_live_artifact_verification"];
-      configured.observedEffects = ["target_generation_created", "live_artifact_verification_unverified"];
+      const preservedFlashVerification = target.liveArtifactMatch.status === "verified";
+      configured.requestedEffects = [
+        "persist_target_configuration",
+        preservedFlashVerification ? "preserve_live_artifact_verification" : "invalidate_live_artifact_verification",
+      ];
+      configured.observedEffects = [
+        "target_generation_created",
+        preservedFlashVerification ? "live_artifact_verification_preserved" : "live_artifact_verification_unverified",
+      ];
       configured.data = { target, persistedAt: this.targets.filePath };
       configured.verification = { status: "verified", method: "atomic_persistence_and_content_hashes" };
       return finishEnvelope(configured, true);
