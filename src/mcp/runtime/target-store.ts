@@ -68,6 +68,7 @@ export interface StoredTarget {
   generation: string;
   configuredAt: string;
   configurationHash: string;
+  flashIdentityVersion?: 1;
   flashIdentity?: string;
   device: string;
   probeSerial: string;
@@ -204,7 +205,7 @@ export class TargetStore {
     const probeSerial = canonicalProbeSerial(input.probeSerial);
     const configuredAt = new Date().toISOString();
     const generation = randomUUID();
-    const flashIdentity = computeFlashIdentity(input.device, probeSerial, artifact, artifactFlashImages);
+    const flashIdentity = computeFlashIdentity(input.device, probeSerial, artifactFlashImages);
     const hashMaterial = {
       projectRoot,
       device: input.device,
@@ -225,6 +226,7 @@ export class TargetStore {
       ...hashMaterial,
       generation,
       configuredAt,
+      flashIdentityVersion: 1,
       flashIdentity,
       configurationHash: sha256Json(hashMaterial),
       missingOptionalInputs: [
@@ -345,7 +347,7 @@ export class TargetStore {
   private applyDirtyArtifactOverlay(target: StoredTarget): StoredTarget {
     const markerPath = this.artifactDirtyPath(target);
     if (!this.inMemoryDirty.has(markerPath) && !existsSync(markerPath)) {
-      if (target.liveArtifactMatch.status === "verified" && target.flashIdentity === undefined) {
+      if (target.liveArtifactMatch.status === "verified" && target.flashIdentityVersion !== 1) {
         return {
           ...target,
           liveArtifactMatch: {
@@ -654,13 +656,12 @@ function sha256File(filePath: string): string {
 function computeFlashIdentity(
   device: string,
   probeSerial: string,
-  artifact: ArtifactBinding | undefined,
   flashImages: FlashImageBinding[],
-): string {
+): string | undefined {
+  if (flashImages.length === 0) return undefined;
   return sha256Json({
     device,
     probeSerial,
-    artifactSha256: artifact?.sha256 ?? null,
     flashImages: flashImages
       .map((image) => ({
         sha256: image.sha256,

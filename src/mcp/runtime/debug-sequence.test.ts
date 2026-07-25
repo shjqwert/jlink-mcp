@@ -93,7 +93,95 @@ test("debug sequence cancellation before dispatch does not perform unnecessary c
   assert.deepEqual(fixture.actions, ["plan"]);
 });
 
-function sequenceFixture(options: { failWrite?: boolean } = {}): {
+test("debug sequence rejects an active-capture variable omitted from immutable descriptors", async () => {
+  const fixture = sequenceFixture();
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], rateHz: 100, durationSec: 10 },
+      { atMs: 1_000, action: "write_variable", ref: "control", value: 1 },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "DEBUG_SEQUENCE_INVALID");
+  assert.match(result.error?.message ?? "", /immutable HSS descriptor/i);
+  assert.deepEqual(fixture.actions, ["plan"]);
+});
+
+test("debug sequence rejects an unencodable write value during preflight", async () => {
+  const fixture = sequenceFixture();
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], writeVariables: ["control"], rateHz: 100, durationSec: 10 },
+      { atMs: 1_000, action: "write_variable", ref: "control", value: 0x1_0000_0000 },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "DEBUG_SEQUENCE_INVALID");
+  assert.match(result.error?.message ?? "", /uint32/i);
+  assert.deepEqual(fixture.actions, ["plan"]);
+});
+
+test("debug sequence rejects cleanup that can run under an incompatible later HSS capture", async () => {
+  const fixture = sequenceFixture();
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "write_variable", ref: "control", value: 1 },
+      { atMs: 1_000, action: "hss_start", variables: [{ ref: "sample" }], rateHz: 100, durationSec: 10 },
+      { atMs: 2_000, action: "read_variable", ref: "sample" },
+    ],
+    cleanup: [
+      { action: "restore_variable", ref: "control", value: 0 },
+      { action: "hss_stop" },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "DEBUG_SEQUENCE_INVALID");
+  assert.match(result.error?.message ?? "", /cleanup restore.*immutable HSS descriptor/i);
+  assert.deepEqual(fixture.actions, ["plan"]);
+});
+
+test("debug sequence preserves a failed step stateUnknown after successful cleanup", async () => {
+  const fixture = sequenceFixture({ failWrite: true, failedWriteStateUnknown: true });
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], writeVariables: ["control"], rateHz: 100, durationSec: 10 },
+      { atMs: 1_000, action: "write_variable", ref: "control", value: 1 },
+    ],
+    cleanup: [
+      { action: "restore_variable", ref: "control", value: 0 },
+      { action: "hss_stop" },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.deepEqual(fixture.actions, ["plan", "start", "write:1", "write:0", "stop:capture-1"]);
+});
+
+test("debug sequence cleanup does not stop an already stopped capture", async () => {
+  const fixture = sequenceFixture({ failRead: true });
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], rateHz: 100, durationSec: 10 },
+      { atMs: 1_000, action: "hss_stop" },
+      { atMs: 2_000, action: "read_variable", ref: "control" },
+    ],
+    cleanup: [{ action: "hss_stop" }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(fixture.actions, ["plan", "start", "stop:capture-1", "read"]);
+});
+
+function sequenceFixture(options: { failWrite?: boolean; failedWriteStateUnknown?: boolean; failRead?: boolean } = {}): {
   executor: DebugSequenceExecutor;
   actions: string[];
 } {
@@ -108,9 +196,30 @@ function sequenceFixture(options: { failWrite?: boolean } = {}): {
     },
   };
   const artifacts: DebugSequenceArtifactOperations = {
-    resolveCaptureVariable: async () => ({ resolved: { region: "ram" } }),
+    resolveCaptureVariable: async (_projectRoot, ref) => ({
+      resolved: {
+        ref: {
+          artifactGeneration: "fixture",
+          qualifiedName: typeof ref === "string" ? ref : ref.qualifiedName,
+          layoutHash: "fixture-layout",
+        },
+        region: "ram",
+        type: "uint32",
+        endian: "little",
+      },
+    }),
     readVariable: async () => {
       actions.push("read");
+      if (options.failRead) {
+        return failEnvelope(createOperationEnvelope("read_variable"), {
+          code: "FIXTURE_READ_FAILED",
+          stage: "read",
+          message: "fixture read failed",
+          retryable: false,
+          writeIssued: false,
+          stateUnknown: false,
+        });
+      }
       return operation("read_variable", { typedValue: 1 });
     },
     writeVariable: async (input) => {
@@ -123,16 +232,19 @@ function sequenceFixture(options: { failWrite?: boolean } = {}): {
           message: "fixture write failed",
           retryable: false,
           writeIssued: false,
-          stateUnknown: false,
+          stateUnknown: options.failedWriteStateUnknown ?? false,
         });
       }
       return operation("write_variable", { requestedValue: input.value });
     },
   };
   const hss: DebugSequenceHssOperations = {
-    plan: async () => {
+    plan: async (input) => {
       actions.push("plan");
-      return operation("hss_plan", {});
+      return operation("hss_plan", {
+        variables: input.variables.map((variable) => ({ logicalIdentity: typeof variable.ref === "string" ? variable.ref : variable.ref.qualifiedName })),
+        writeVariables: (input.writeVariables ?? []).map((ref) => ({ logicalIdentity: typeof ref === "string" ? ref : ref.qualifiedName })),
+      });
     },
     start: async () => {
       actions.push("start");

@@ -19,6 +19,7 @@ import { TargetRuntimeRegistry } from "./runtime/target-runtime";
 import { TargetStore, type StoredTarget, type TargetConfigureInput } from "./runtime/target-store";
 import { HssOperations, type HssCaptureInput } from "./runtime/hss-operations";
 import { DebugSequenceExecutor, type DebugSequenceInput } from "./runtime/debug-sequence";
+import { JLINK_MCP_VERSION } from "./version";
 
 export interface JLinkMcpServerOptions {
   cwd?: string;
@@ -173,7 +174,7 @@ export class JLinkMcpServer {
     );
     this.artifacts.setCaptureWriteDelegate(this.hss);
     this.sequence = new DebugSequenceExecutor(this.artifacts, this.hss);
-    this.server = new McpServer({ name: "jlink-mcp", version: "0.3.2" });
+    this.server = new McpServer({ name: "jlink-mcp", version: JLINK_MCP_VERSION });
     this.registerTools();
     this.registerResources();
   }

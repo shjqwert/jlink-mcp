@@ -1,4 +1,6 @@
 import { performance } from "node:perf_hooks";
+import { symbolLogicalIdentity, type ResolvedSymbol } from "../artifact/symbol-catalog";
+import { encodeHssValue } from "../hss/hss-typed-value";
 import type { VariableRefInput, VariableWriteInput } from "./artifact-operations";
 import type { HssCaptureInput } from "./hss-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
@@ -21,7 +23,9 @@ export interface DebugSequenceInput {
 }
 
 export interface DebugSequenceArtifactOperations {
-  resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{ resolved: { region: string } }>;
+  resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{
+    resolved: Pick<ResolvedSymbol, "ref" | "region" | "type" | "endian">;
+  }>;
   readVariable(projectRoot: string, ref: VariableRefInput): Promise<OperationEnvelope>;
   writeVariable(input: VariableWriteInput): Promise<OperationEnvelope>;
 }
@@ -47,6 +51,17 @@ interface StepResult {
   durationMs: number;
   ok: boolean;
   result: Record<string, unknown>;
+}
+
+interface SequenceCaptureState {
+  activeId?: string;
+  createdIds: string[];
+}
+
+interface PlannedCaptureInterval {
+  descriptors: Set<string>;
+  startIndex: number;
+  stopIndex?: number;
 }
 
 const defaultScheduler: DebugSequenceScheduler = {
@@ -76,9 +91,10 @@ export class DebugSequenceExecutor {
     const deadline = sequenceStartedAt + timeoutMs;
     const steps: StepResult[] = [];
     const cleanup: Array<{ action: DebugSequenceCleanup["action"]; ok: boolean; result: Record<string, unknown> }> = [];
-    const createdCaptures: string[] = [];
+    const captures: SequenceCaptureState = { createdIds: [] };
     const attemptedWriteRefs = new Set<string>();
     let failure: { code: string; message: string; state: "failed" | "timed_out" | "cancelled" } | undefined;
+    let failedStepStateUnknown = false;
 
     for (let index = 0; index < input.steps.length; index += 1) {
       const step = input.steps[index];
@@ -97,7 +113,7 @@ export class DebugSequenceExecutor {
       let result: OperationEnvelope;
       try {
         if (step.action === "write_variable") attemptedWriteRefs.add(refKey(step.ref));
-        result = await this.executeStep(input.projectRoot, step, createdCaptures);
+        result = await this.executeStep(input.projectRoot, step, captures);
       } catch (error) {
         result = failEnvelope(createOperationEnvelope(step.action), sequenceError("DEBUG_SEQUENCE_STEP_FAILED", "dispatch", error));
       }
@@ -114,6 +130,7 @@ export class DebugSequenceExecutor {
         result: boundedResult(result),
       });
       if (!result.ok) {
+        failedStepStateUnknown = result.error?.stateUnknown === true;
         failure = {
           code: "DEBUG_SEQUENCE_STEP_FAILED",
           message: `${step.action} failed: ${result.error?.code ?? "UNKNOWN_ERROR"} ${result.error?.message ?? ""}`.trim(),
@@ -131,7 +148,7 @@ export class DebugSequenceExecutor {
 
     if (failure) {
       for (const action of input.cleanup ?? []) {
-        const result = await this.executeCleanup(input.projectRoot, action, createdCaptures, attemptedWriteRefs);
+        const result = await this.executeCleanup(input.projectRoot, action, captures, attemptedWriteRefs);
         cleanup.push({ action: action.action, ok: result.ok, result: boundedResult(result) });
       }
     }
@@ -144,7 +161,7 @@ export class DebugSequenceExecutor {
       timeoutMs,
       steps,
       cleanup,
-      createdCaptureIds: createdCaptures,
+      createdCaptureIds: captures.createdIds,
     };
     envelope.observedEffects = steps.filter(({ ok }) => ok).map(({ action }) => `sequence_${action}_completed`);
     if (cleanup.length > 0) envelope.observedEffects.push("sequence_cleanup_executed");
@@ -160,7 +177,7 @@ export class DebugSequenceExecutor {
         retryable: false,
         writeIssued: steps.some(({ result }) => result.error && (result.error as { writeIssued?: unknown }).writeIssued === true)
           || envelope.observedEffects.some((effect) => effect.includes("write_variable")),
-        stateUnknown: cleanup.some(({ ok }) => !ok),
+        stateUnknown: failedStepStateUnknown || cleanup.some(({ ok }) => !ok),
       });
     }
     return finishEnvelope(envelope, true);
@@ -172,7 +189,12 @@ export class DebugSequenceExecutor {
     if (!Array.isArray(input.cleanup ?? []) || (input.cleanup?.length ?? 0) > 4) throw new Error("cleanup must contain at most 4 actions");
     let previousAt = -1;
     let activeCapturePlanned = false;
-    for (const step of input.steps) {
+    let activeCaptureDescriptors: Set<string> | undefined;
+    let activeCaptureInterval: PlannedCaptureInterval | undefined;
+    const captureIntervals: PlannedCaptureInterval[] = [];
+    const firstWriteIndex = new Map<string, number>();
+    for (let index = 0; index < input.steps.length; index += 1) {
+      const step = input.steps[index];
       if (!Number.isSafeInteger(step.atMs) || step.atMs < 0 || step.atMs > 30_000 || step.atMs < previousAt) throw new Error("step atMs values must be monotonic safe integers within 0..30000");
       previousAt = step.atMs;
       if (step.action === "hss_start") {
@@ -180,17 +202,43 @@ export class DebugSequenceExecutor {
         const planned = await this.hss.plan({ projectRoot: input.projectRoot, ...captureInput(step) });
         if (!planned.ok) throw new Error(`hss_start preflight failed: ${planned.error?.code ?? "UNKNOWN_ERROR"} ${planned.error?.message ?? ""}`.trim());
         activeCapturePlanned = true;
+        activeCaptureDescriptors = plannedDescriptorIdentities(planned);
+        activeCaptureInterval = { descriptors: activeCaptureDescriptors, startIndex: index };
+        captureIntervals.push(activeCaptureInterval);
       } else if (step.action === "hss_stop") {
         if (!activeCapturePlanned) throw new Error("hss_stop requires a preceding sequence hss_start");
+        if (activeCaptureInterval) activeCaptureInterval.stopIndex = index;
         activeCapturePlanned = false;
+        activeCaptureDescriptors = undefined;
+        activeCaptureInterval = undefined;
       } else {
-        await this.artifacts.resolveCaptureVariable(input.projectRoot, step.ref);
+        const { resolved } = await this.artifacts.resolveCaptureVariable(input.projectRoot, step.ref);
+        const identity = symbolLogicalIdentity(resolved.ref);
+        if (activeCaptureDescriptors && !activeCaptureDescriptors.has(identity)) {
+          throw new Error(`${identity} is not declared by the active immutable HSS descriptor set`);
+        }
+        if (step.action === "write_variable") {
+          if (resolved.region !== "ram") throw new Error("write_variable requires a typed RAM variable");
+          encodeHssValue(resolved.type, step.value, resolved.endian);
+          if (!firstWriteIndex.has(refKey(step.ref))) firstWriteIndex.set(refKey(step.ref), index);
+        }
       }
     }
     for (const action of input.cleanup ?? []) {
       if (action.action === "restore_variable") {
         const resolved = await this.artifacts.resolveCaptureVariable(input.projectRoot, action.ref);
         if (resolved.resolved.region !== "ram") throw new Error("cleanup restore_variable requires a typed RAM variable");
+        encodeHssValue(resolved.resolved.type, action.value, resolved.resolved.endian);
+        const earliestWrite = firstWriteIndex.get(refKey(action.ref));
+        if (earliestWrite !== undefined) {
+          const identity = symbolLogicalIdentity(resolved.resolved.ref);
+          for (const interval of captureIntervals) {
+            if ((interval.stopIndex ?? Number.POSITIVE_INFINITY) < earliestWrite) continue;
+            if (!interval.descriptors.has(identity)) {
+              throw new Error(`cleanup restore ${identity} is incompatible with a reachable immutable HSS descriptor set`);
+            }
+          }
+        }
       }
     }
     const plannedDurationMs = input.steps.at(-1)!.atMs;
@@ -200,13 +248,16 @@ export class DebugSequenceExecutor {
     return { plannedDurationMs, timeoutMs };
   }
 
-  private async executeStep(projectRoot: string, step: DebugSequenceStep, createdCaptures: string[]): Promise<OperationEnvelope> {
+  private async executeStep(projectRoot: string, step: DebugSequenceStep, captures: SequenceCaptureState): Promise<OperationEnvelope> {
     switch (step.action) {
       case "hss_start": {
         const result = await this.hss.start({ projectRoot, ...captureInput(step) });
         const captureId = isRecord(result.data) && typeof result.data.captureId === "string" ? result.data.captureId : undefined;
         if (result.ok && !captureId) return failEnvelope(result, sequenceError("DEBUG_SEQUENCE_CAPTURE_ID_MISSING", "hss_start", new Error("hss_start returned no captureId")));
-        if (captureId) createdCaptures.push(captureId);
+        if (captureId) {
+          captures.createdIds.push(captureId);
+          captures.activeId = captureId;
+        }
         return result;
       }
       case "write_variable":
@@ -221,9 +272,11 @@ export class DebugSequenceExecutor {
       case "read_variable":
         return this.artifacts.readVariable(projectRoot, step.ref);
       case "hss_stop": {
-        const captureId = createdCaptures.at(-1);
+        const captureId = captures.activeId;
         if (!captureId) return failEnvelope(createOperationEnvelope("hss_stop"), sequenceError("DEBUG_SEQUENCE_CAPTURE_MISSING", "hss_stop", new Error("no sequence-created HSS capture is available")));
-        return this.hss.stop({ projectRoot, captureId });
+        const result = await this.hss.stop({ projectRoot, captureId });
+        if (result.ok) captures.activeId = undefined;
+        return result;
       }
     }
   }
@@ -231,7 +284,7 @@ export class DebugSequenceExecutor {
   private async executeCleanup(
     projectRoot: string,
     action: DebugSequenceCleanup,
-    createdCaptures: string[],
+    captures: SequenceCaptureState,
     attemptedWriteRefs: ReadonlySet<string>,
   ): Promise<OperationEnvelope> {
     try {
@@ -250,9 +303,11 @@ export class DebugSequenceExecutor {
           restore: false,
         });
       }
-      const captureId = createdCaptures.at(-1);
+      const captureId = captures.activeId;
       if (!captureId) return finishEnvelope(createOperationEnvelope("hss_stop"), true);
-      return await this.hss.stop({ projectRoot, captureId });
+      const result = await this.hss.stop({ projectRoot, captureId });
+      if (result.ok) captures.activeId = undefined;
+      return result;
     } catch (error) {
       return failEnvelope(createOperationEnvelope(action.action), sequenceError("DEBUG_SEQUENCE_CLEANUP_FAILED", "cleanup", error));
     }
@@ -341,6 +396,18 @@ function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function plannedDescriptorIdentities(envelope: OperationEnvelope): Set<string> {
+  if (!isRecord(envelope.data)) throw new Error("hss_start preflight returned no descriptor data");
+  const descriptors = [...descriptorArray(envelope.data.variables), ...descriptorArray(envelope.data.writeVariables)];
+  if (descriptors.length === 0) throw new Error("hss_start preflight returned an empty descriptor set");
+  return new Set(descriptors.map(({ logicalIdentity }) => logicalIdentity));
+}
+
+function descriptorArray(value: unknown): Array<{ logicalIdentity: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is { logicalIdentity: string } => isRecord(entry) && typeof entry.logicalIdentity === "string");
 }
 
 function refKey(ref: VariableRefInput): string {

@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import sqlite3 from "sqlite3";
+import { JLINK_MCP_VERSION } from "./version";
 
 export interface DoctorCheck {
   id: string;
@@ -35,7 +36,7 @@ export async function runDoctor(): Promise<DoctorReport> {
   return {
     status: checks.some((entry) => entry.status === "fail") ? "error" : "ok",
     product: "jlink-mcp",
-    version: "1.0.0",
+    version: JLINK_MCP_VERSION,
     platform: process.platform,
     architecture: process.arch,
     node: process.version,
@@ -70,7 +71,7 @@ function checkHelper(packageRoot: string): DoctorCheck {
     const response = JSON.parse(result.stdout.trim());
     const valid = response.status === "ok"
       && response.helperProtocolVersion === 1
-      && response.helperVersion === "1.0.0"
+      && response.helperVersion === JLINK_MCP_VERSION
       && response.architecture === "x64";
     return {
       id: "hss-helper",
