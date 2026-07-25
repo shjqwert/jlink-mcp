@@ -55,9 +55,13 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
   try {
     await client.connect(transport);
     assert.equal(client.getServerVersion()?.name, "jlink-mcp");
-    assert.equal(client.getServerVersion()?.version, "1.1.0");
+    assert.equal(client.getServerVersion()?.version, "1.1.1");
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
+    const sequenceDescription = tools.find((tool) => tool.name === "debug_sequence_execute")?.description ?? "";
+    assert.match(sequenceDescription, /multiple.*at least one second/i);
+    assert.match(sequenceDescription, /wait until completion/i);
+    assert.match(sequenceDescription, /not.*single variable read or write/i);
     for (const tool of tools) assert.ok(tool.inputSchema.properties?.runId, `${tool.name} must accept optional runId evidence routing`);
     assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 37-tool list");
     for (const name of ["target_control", "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "flash", "erase", "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close", "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command", "hss_start"] as const) {

@@ -1,6 +1,4 @@
-import { join } from "node:path";
 import { discoverArtifacts, ArtifactCatalogError } from "../artifact/artifact-catalog";
-import { HotVariables, type HotVariableContext } from "../artifact/hot-variables";
 import {
   parseSymbolSelector,
   SymbolCatalog,
@@ -11,7 +9,6 @@ import {
 } from "../artifact/symbol-catalog";
 import { parseIarMap } from "../hss/iar-map-parser";
 import { decodeHssValue, encodeHssValue } from "../hss/hss-typed-value";
-import type { HssScalarType } from "../hss/hss-contract";
 import { resolveElfSymbols, searchElfVariableNames, validateSelector, type ElfResolvedSymbol } from "../../gdb/elf-resolver";
 import {
   createOperationEnvelope,
@@ -85,17 +82,14 @@ interface ResolvedReference {
 }
 
 export class ArtifactVariableService {
-  private readonly hot: HotVariables;
   private captureAccessDelegate?: CaptureVariableAccessDelegate;
 
   constructor(
     private readonly targets: TargetStore,
     private readonly direct: DirectMcuService,
-    storageRoot: string,
+    _storageRoot: string,
     private readonly symbols: TypedSymbolResolver = new GdbTypedSymbolResolver(),
-  ) {
-    this.hot = new HotVariables(join(storageRoot, "hot-variables.json"));
-  }
+  ) {}
 
   setCaptureWriteDelegate(delegate: CaptureVariableAccessDelegate): void {
     this.captureAccessDelegate = delegate;
@@ -159,33 +153,6 @@ export class ArtifactVariableService {
       const resolved = await this.resolveReference(target, selector);
       envelope.data = { ...resolved.resolved, cacheRefreshed: resolved.cacheRefreshed };
       envelope.verification = { status: "verified", method: "elf_dwarf_layout" };
-    });
-  }
-
-  async hotAdd(projectRoot: string, ref: VariableRefInput, requestedType?: HssScalarType): Promise<OperationEnvelope> {
-    return this.offline("hot_variable_add", projectRoot, async (envelope, target) => {
-      const resolved = (await this.resolveReference(target, ref)).resolved;
-      envelope.data = this.hot.add(resolved, hotContext(target), requestedType ?? resolved.type);
-      envelope.verification = { status: "verified", method: "logical_reference_persisted" };
-    });
-  }
-
-  async hotList(projectRoot: string): Promise<OperationEnvelope> {
-    return this.offline("hot_variable_list", projectRoot, async (envelope, target) => {
-      this.requireCurrentArtifact(target);
-      envelope.data = { variables: this.hot.list(hotContext(target)) };
-      envelope.verification = { status: "observed", method: "persistent_logical_catalog" };
-    });
-  }
-
-  async hotRefresh(projectRoot: string, selectors: string[]): Promise<OperationEnvelope> {
-    return this.offline("hot_variable_refresh", projectRoot, async (envelope, target) => {
-      this.requireCurrentArtifact(target);
-      const refs = selectors.map((selector) => parseSymbolSelector(selector));
-      envelope.data = {
-        results: await this.hot.refresh(refs, hotContext(target), async (ref) => this.resolveCurrent(target, symbolLogicalIdentity(ref))),
-      };
-      envelope.verification = { status: "observed", method: "targeted_refresh" };
     });
   }
 
@@ -290,20 +257,12 @@ export class ArtifactVariableService {
     assertArtifactBindingsCurrent(target);
   }
 
-  private async resolveCurrent(target: StoredTarget, selector: string): Promise<ResolvedSymbol> {
-    this.requireCurrentArtifact(target);
-    return this.symbols.resolve(target, selector);
-  }
-
   private async resolveReference(target: StoredTarget, ref: VariableRefInput): Promise<ResolvedReference> {
     this.requireCurrentArtifact(target);
     if (typeof ref !== "string" && target.artifact!.generation !== ref.artifactGeneration) throw new TypedAccessError("STALE_ARTIFACT_REFERENCE", "legacy variable reference belongs to a stale Artifact generation");
     const resolved = await this.symbols.resolve(target, typeof ref === "string" ? ref : symbolLogicalIdentity(ref));
     if (typeof ref !== "string" && resolved.ref.layoutHash !== ref.layoutHash) throw new TypedAccessError("STALE_ARTIFACT_REFERENCE", "legacy variable layout hash changed; resolve the selector again");
-    const context = hotContext(target);
-    const cached = this.hot.get(resolved.ref, context);
-    if (!cached.ok) this.hot.add(resolved, context);
-    return { resolved, cacheRefreshed: !cached.ok };
+    return { resolved, cacheRefreshed: false };
   }
 
   private async offline(
@@ -411,15 +370,6 @@ export function assertMapAgreement(target: StoredTarget, selector: string, symbo
     || exactEntries.some((entry) => entry.address !== symbol.address || entry.size !== symbol.size)) {
     throw new TypedAccessError("SYMBOL_ADDRESS_CONFLICT", `DWARF and MAP evidence conflict for ${logical}`);
   }
-}
-
-function hotContext(target: StoredTarget): HotVariableContext {
-  return {
-    projectRoot: target.projectRoot,
-    targetGeneration: target.generation,
-    artifactGeneration: target.artifact!.generation,
-    ...(target.map ? { mapSha256: target.map.sha256 } : {}),
-  };
 }
 
 function variableComparator(input: VariableComparatorInput, resolved: ResolvedSymbol, requestedValue: number): ScalarComparator {

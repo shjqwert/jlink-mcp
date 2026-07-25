@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import type { ProbeBackend } from "../../probe/backend";
 import type { ResolvedSymbol } from "../artifact/symbol-catalog";
 import { HSS_STATUS_FLAGS } from "../hss/hss-status-flags";
 import { appendJcapV1Sample, readJcapV1Raw } from "../jcap/jcap-v1";
@@ -23,7 +24,12 @@ import {
   type HssTimebase,
 } from "./hss-helper-adapter";
 import { HssOperations, type HssCaptureInput } from "./hss-operations";
-import { MemorySessionManager } from "./memory-session";
+import {
+  MemorySessionManager,
+  type MemorySessionLauncher,
+  type MemorySessionRuntimeFacts,
+  type PersistentMemorySession,
+} from "./memory-session";
 import { ProbeQueue, ProbeQueueError } from "./probe-queue";
 import { TargetStore, type StoredTarget } from "./target-store";
 
@@ -35,6 +41,9 @@ interface Fixture {
   artifacts: ArtifactVariableService;
   hss: HssOperations;
   adapter: FakeHssAdapter;
+  memorySessions?: MemorySessionManager;
+  memoryLauncher?: FixtureMemorySessionLauncher;
+  resolver: FixtureResolver;
   target: StoredTarget;
   ref(index: number): VariableRefInput;
 }
@@ -108,6 +117,9 @@ test("a foreign memory owner blocks HSS before runtime inspection or Helper laun
         targetGeneration: fixture.target.generation,
       }, metadata.leaseToken);
     });
+    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
+    assert.equal(dryRun.ok, false);
+    assert.equal(dryRun.error?.code, "MEMORY_SESSION_ACTIVE");
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
     assert.equal(started.ok, false);
     assert.equal(started.error?.code, "MEMORY_SESSION_ACTIVE");
@@ -115,6 +127,34 @@ test("a foreign memory owner blocks HSS before runtime inspection or Helper laun
     assert.equal(fixture.adapter.inspectCount, 0);
     assert.equal(fixture.adapter.launchCount, 0);
     fixture.queue.releaseOwner(fixture.target.probeSerial, owner.token);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS dry-run releases the current process memory session without changing target state", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.targetState = "halted";
+    await fixture.queue.runExclusive(fixture.target.probeSerial, async (metadata) => {
+      await fixture.memorySessions!.probeFor(fixture.target, metadata);
+    });
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.kind, "memory");
+
+    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
+
+    assert.equal(dryRun.ok, true, JSON.stringify(dryRun.error));
+    assert.equal(fixture.memoryLauncher!.sessions[0].closeCalls, 1);
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+    assert.deepEqual((dryRun.data as { memorySessionClose: unknown }).memorySessionClose, {
+      targetStateBeforeClose: "halted",
+      targetStateAfterReconnect: "halted",
+    });
+    assert.equal((dryRun.before?.owner as { kind: string }).kind, "memory");
+    assert.equal(dryRun.after?.owner, null);
+    assert.equal(dryRun.observedEffects.includes("local_memory_session_closed"), true);
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.launchCount, 0);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -227,6 +267,39 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal(String((exported.data as { exportFile: string }).exportFile).startsWith(join(fixture.root, "output", "acceptance-run", "exports")), true);
     const notInterrupted = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(notInterrupted.error?.code, "CAPTURE_NOT_INTERRUPTED");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS scalar preparation preserves capture and write role errors", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.resolver.overrides.set(0, { hssEligible: false });
+    assert.equal((await fixture.hss.plan(captureInput(fixture, 1, 100, 1))).error?.code, "HSS_VARIABLE_INELIGIBLE");
+
+    fixture.resolver.overrides.set(0, { endian: "big" });
+    assert.equal((await fixture.hss.plan(captureInput(fixture, 1, 100, 1))).error?.code, "HSS_ENDIAN_UNSUPPORTED");
+
+    fixture.resolver.overrides.set(0, { type: "float64" as never, size: 8 });
+    assert.equal((await fixture.hss.plan(captureInput(fixture, 1, 100, 1))).error?.code, "HSS_SCALAR_UNSUPPORTED");
+
+    fixture.resolver.overrides.set(0, {
+      ref: {
+        artifactGeneration: fixture.target.artifact!.generation,
+        qualifiedName: "x".repeat(257),
+        layoutHash: layoutHash(0),
+      },
+    });
+    assert.equal((await fixture.hss.plan(captureInput(fixture, 1, 100, 1))).error?.code, "HSS_VARIABLE_NAME_TOO_LONG");
+
+    fixture.resolver.overrides.clear();
+    fixture.resolver.overrides.set(1, { hssEligible: false });
+    const writeRole = await fixture.hss.plan({
+      ...captureInput(fixture, 1, 100, 1),
+      writeVariables: [fixture.ref(1)],
+    });
+    assert.equal(writeRole.error?.code, "HSS_WRITE_VARIABLE_INELIGIBLE");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -808,9 +881,11 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
   const current = store.require(projectRoot);
   const queue = new ProbeQueue(join(root, "queue"));
   const direct = new DirectMcuService(store, queue, async () => { throw new Error("direct backend must not be used by capture-aware tests"); });
-  const artifacts = new ArtifactVariableService(store, direct, stateRoot, new FixtureResolver(counterType));
+  const resolver = new FixtureResolver(counterType);
+  const artifacts = new ArtifactVariableService(store, direct, stateRoot, resolver);
   const adapter = new FakeHssAdapter();
-  const memorySessions = withMemorySessions ? new MemorySessionManager(queue) : undefined;
+  const memoryLauncher = withMemorySessions ? new FixtureMemorySessionLauncher() : undefined;
+  const memorySessions = memoryLauncher ? new MemorySessionManager(queue, memoryLauncher, 10_000) : undefined;
   const hss = new HssOperations(store, queue, artifacts, adapter, outputRoot, stateRoot, join(root, "session-work"), undefined, memorySessions);
   artifacts.setCaptureWriteDelegate(hss);
   return {
@@ -821,6 +896,9 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
     artifacts,
     hss,
     adapter,
+    memorySessions,
+    memoryLauncher,
+    resolver,
     target: current,
     ref(index: number) { return { artifactGeneration: current.artifact!.generation, qualifiedName: `var${index}`, layoutHash: layoutHash(index) }; },
   };
@@ -828,6 +906,51 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
 
 function captureInput(fixture: Fixture, count: number, rateHz: number, durationSec: number, runId?: string): HssCaptureInput {
   return { projectRoot: fixture.projectRoot, rateHz, durationSec, variables: Array.from({ length: count }, (_, index) => ({ ref: fixture.ref(index) })), ...(runId ? { runId } : {}) };
+}
+
+class FixtureMemorySessionLauncher implements MemorySessionLauncher {
+  readonly sessions: FixtureMemorySession[] = [];
+
+  async open(_target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    const session = new FixtureMemorySession(70_000 + this.sessions.length);
+    this.sessions.push(session);
+    onStarted?.(session.pid, session.runtime);
+    return session;
+  }
+}
+
+class FixtureMemorySession implements PersistentMemorySession {
+  readonly runtime: MemorySessionRuntimeFacts = {
+    helperPath: "helper.exe",
+    runtimePath: "JLink_x64.dll",
+    helperSha256: "a".repeat(64),
+    runtimeSha256: "b".repeat(64),
+  };
+  readonly probe = {
+    observeTargetState: async () => ({
+      state: "halted" as const,
+      source: "dhcsr" as const,
+      result: { success: true, rawOutput: "", output: "halted" },
+    }),
+  } as ProbeBackend;
+  closeCalls = 0;
+  private alive = true;
+  private readonly listeners = new Set<() => void>();
+
+  constructor(readonly pid: number) {}
+
+  isAlive(): boolean { return this.alive; }
+  isReusable(): boolean { return this.alive; }
+  onExit(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+    this.alive = false;
+    for (const listener of this.listeners) listener();
+    this.listeners.clear();
+  }
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -839,6 +962,8 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 }
 
 class FixtureResolver implements TypedSymbolResolver {
+  readonly overrides = new Map<number, Partial<ResolvedSymbol>>();
+
   constructor(private readonly counterType: "uint8" | "uint32") {}
 
   async resolve(target: StoredTarget, selector: string): Promise<ResolvedSymbol> {
@@ -861,6 +986,7 @@ class FixtureResolver implements TypedSymbolResolver {
       source: "elf-dwarf",
       confidence: "dwarf",
       endian: "little",
+      ...this.overrides.get(index),
     };
   }
 
