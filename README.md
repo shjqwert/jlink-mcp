@@ -4,7 +4,7 @@ Standalone MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
 The server serializes physical Probe access and reports observed state and side effects. It does not infer a Target from an environment default: configure each canonical `projectRoot` with `target_configure` before target operations.
 
-## Install the v1.0.0 release
+## Install the current stable v1.0.0 release
 
 - Windows x64 with Node.js 22 or 24.
 - SEGGER J-Link Software and a connected supported J-Link Probe for hardware operations.
@@ -57,7 +57,7 @@ npm run test:release-install
 `build:release` produces a statically linked Windows x64 HSS Helper, verifies its product and
 protocol versions, runs its self-test, and builds the Node entry points. `pack:release` runs the
 complete release gate, then creates the installable npm archive, portable ZIP, and SHA-256 manifest
-under `release/v1.0.0/`. The package is marked private to prevent accidental npm Registry
+under `release/v1.1.0/`. The package is marked private to prevent accidental npm Registry
 publication; release artifacts are distributed only through GitHub Releases.
 
 ## Portable MCP configuration
@@ -78,7 +78,7 @@ machine-specific working directory or Target defaults.
 
 ## Canonical Tool List
 
-The standalone server registers exactly these 36 direct tools:
+The standalone server registers exactly these 37 direct tools:
 
 ```text
 list_devices, target_configure, target_status,
@@ -86,6 +86,7 @@ artifact_probe, symbol_search, symbol_resolve,
 read_variable, write_variable, read_memory, write_memory, core_register_access, peripheral_register_access,
 target_control, flash, erase,
 hss_start, hss_status, hss_stop, hss_recover,
+debug_sequence_execute,
 capture_list, capture_summary, capture_series, capture_event_window, capture_export_csv,
 gdb_open, gdb_command, gdb_wait, gdb_backtrace, gdb_close,
 rtt_open, rtt_read, rtt_search, rtt_clear, rtt_close,
@@ -101,7 +102,9 @@ Only the read-only `rtt://output`, `probe://gdb-server-log`, and `probe://status
 - RAM (`write_memory`) and typed-variable writes default to exact readback verification. SVD peripheral-register writes also default to verification. Readback proves bytes observed by its named J-Link connection, not target-program consumption.
 - Before `flash`, `erase`, `probe_command`, or `gdb_command`, the AI must explain the exact intended effects and obtain the user's explicit approval. It then retries the same call with `userConfirmed: true`; otherwise the server rejects the operation before accessing the target.
 - Typed variable and HSS requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
-- HSS is capped at ten synchronized variables, 1 kHz, and 60 seconds. Call `hss_start` with `dryRun=true` to obtain capability and capacity facts without starting a Helper or creating a capture.
+- HSS is capped at ten synchronized capture variables, 1 kHz, and 60 seconds. Optional `writeVariables` are resolved before start and do not consume capture slots; sampled variables remain writable for compatibility.
+- Call `hss_start` with `dryRun=true` to obtain capability, configured link speed, and capacity diagnostics without starting a Helper or creating a capture. The server reports requested and effective rates without automatically changing SWD speed or sample rate; falling below 95% is diagnostic, not by itself a corrupt-capture verdict.
+- `debug_sequence_execute` synchronously runs a prevalidated 1–30 second sequence of 2–32 HSS and typed-variable operations. It uses absolute monotonic timing and only executes declared RAM restore/HSS stop cleanup actions after failure, cancellation, or timeout.
 - Peripheral register access requires a configured, validated SVD. There is no inferred raw-memory substitute.
 - GDB and RTT sessions are explicit and never start each other. Crash diagnosis inspects an already halted target only.
 

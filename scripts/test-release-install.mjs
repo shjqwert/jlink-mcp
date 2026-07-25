@@ -20,7 +20,7 @@ if (!regularFile(portableZip)) throw new Error(`portable release archive not fou
 mkdirSync(installRoot, { recursive: false });
 writeFileSync(resolve(installRoot, "package.json"), JSON.stringify({
   name: "jlink-mcp-release-install-test",
-  version: "1.0.0",
+  version,
   private: true,
 }, null, 2));
 
@@ -151,7 +151,7 @@ async function assertMcpSurface(standalone, cwd, label) {
       throw new Error(`${label} MCP server identity mismatch`);
     }
     const tools = (await client.listTools()).tools;
-    if (tools.length !== 36) throw new Error(`${label} MCP exposed ${tools.length} tools instead of 36`);
+    if (tools.length !== 37) throw new Error(`${label} MCP exposed ${tools.length} tools instead of 37`);
   } finally {
     await client.close();
   }
