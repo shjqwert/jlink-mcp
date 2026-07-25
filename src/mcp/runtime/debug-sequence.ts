@@ -87,8 +87,12 @@ export class DebugSequenceExecutor {
     }
 
     envelope.requestedEffects = ["execute_timed_debug_sequence"];
-    const sequenceStartedAt = this.scheduler.now();
-    const deadline = sequenceStartedAt + timeoutMs;
+    const executionStartedAt = this.scheduler.now();
+    const deadline = executionStartedAt + timeoutMs;
+    const leadingHssBootstrap = input.steps[0]?.action === "hss_start" && input.steps[0].atMs === 0;
+    let timelineEpoch = executionStartedAt;
+    let setupDurationMs = 0;
+    let previousCompletedAt = executionStartedAt;
     const steps: StepResult[] = [];
     const cleanup: Array<{ action: DebugSequenceCleanup["action"]; ok: boolean; result: Record<string, unknown> }> = [];
     const captures: SequenceCaptureState = { createdIds: [] };
@@ -100,8 +104,15 @@ export class DebugSequenceExecutor {
       const step = input.steps[index];
       try {
         this.assertCanContinue(signal, deadline);
-        const targetAt = sequenceStartedAt + step.atMs;
+        const targetAt = timelineEpoch + step.atMs;
         if (targetAt > deadline) throw new DebugSequenceError("DEBUG_SEQUENCE_TIMEOUT", "sequence deadline occurs before the next planned step");
+        const previousStep = input.steps[index - 1];
+        if (previousStep && step.atMs > previousStep.atMs && previousCompletedAt > targetAt) {
+          throw new DebugSequenceError(
+            "DEBUG_SEQUENCE_SCHEDULE_OVERRUN",
+            `the previous operation completed after the ${step.atMs} ms schedule point`,
+          );
+        }
         await this.scheduler.wait(Math.max(0, targetAt - this.scheduler.now()), signal);
         this.assertCanContinue(signal, deadline);
       } catch (error) {
@@ -118,12 +129,13 @@ export class DebugSequenceExecutor {
         result = failEnvelope(createOperationEnvelope(step.action), sequenceError("DEBUG_SEQUENCE_STEP_FAILED", "dispatch", error));
       }
       const completedAt = this.scheduler.now();
+      const stepTimelineEpoch = timelineEpoch;
       steps.push({
         index,
         action: step.action,
         plannedAtMs: step.atMs,
-        actualAtMs: Math.max(0, Math.round(dispatchedAt - sequenceStartedAt)),
-        delayMs: Math.max(0, Math.round(dispatchedAt - sequenceStartedAt - step.atMs)),
+        actualAtMs: Math.max(0, Math.round(dispatchedAt - stepTimelineEpoch)),
+        delayMs: Math.max(0, Math.round(dispatchedAt - stepTimelineEpoch - step.atMs)),
         queueDelayMs: queueDelayMs(result),
         durationMs: Math.max(0, Math.round(completedAt - dispatchedAt)),
         ok: result.ok,
@@ -138,6 +150,11 @@ export class DebugSequenceExecutor {
         };
         break;
       }
+      if (leadingHssBootstrap && index === 0) {
+        timelineEpoch = completedAt;
+        setupDurationMs = Math.max(0, Math.round(completedAt - executionStartedAt));
+      }
+      previousCompletedAt = completedAt;
       try {
         this.assertCanContinue(signal, deadline);
       } catch (error) {
@@ -153,11 +170,13 @@ export class DebugSequenceExecutor {
       }
     }
 
-    const actualDurationMs = Math.max(0, Math.round(this.scheduler.now() - sequenceStartedAt));
+    const actualDurationMs = Math.max(0, Math.round(this.scheduler.now() - executionStartedAt));
     envelope.data = {
       state: failure?.state ?? "completed",
       plannedDurationMs,
       actualDurationMs,
+      setupDurationMs,
+      timelineAnchor: leadingHssBootstrap ? "hss_ready" : "sequence_start",
       timeoutMs,
       steps,
       cleanup,
@@ -338,6 +357,7 @@ function captureInput(step: Extract<DebugSequenceStep, { action: "hss_start" }>)
 function classifySequenceFailure(error: unknown): { code: string; message: string; state: "failed" | "timed_out" | "cancelled" } {
   if (error instanceof DebugSequenceError && error.code === "DEBUG_SEQUENCE_CANCELLED") return { code: error.code, message: error.message, state: "cancelled" };
   if (error instanceof DebugSequenceError && error.code === "DEBUG_SEQUENCE_TIMEOUT") return { code: error.code, message: error.message, state: "timed_out" };
+  if (error instanceof DebugSequenceError && error.code === "DEBUG_SEQUENCE_SCHEDULE_OVERRUN") return { code: error.code, message: error.message, state: "failed" };
   return { code: "DEBUG_SEQUENCE_STEP_FAILED", message: error instanceof Error ? error.message : String(error), state: "failed" };
 }
 

@@ -16,8 +16,8 @@ import {
 import { dirname, extname, join, resolve } from "node:path";
 import type { StoredTarget } from "./target-store";
 
-export const HSS_HELPER_PROTOCOL_VERSION = 1;
-export const HSS_EFFECTIVE_LIMITS = { maxVariables: 10, maxRateHz: 1_000, maxDurationSec: 60 } as const;
+export const HSS_HELPER_PROTOCOL_VERSION = 2;
+export const HSS_EFFECTIVE_LIMITS = { maxVariables: 10, maxWriteVariables: 32, maxRateHz: 1_000, maxDurationSec: 60 } as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface HssRuntimeFacts {

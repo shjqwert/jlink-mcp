@@ -70,7 +70,7 @@ function checkHelper(packageRoot: string): DoctorCheck {
   try {
     const response = JSON.parse(result.stdout.trim());
     const valid = response.status === "ok"
-      && response.helperProtocolVersion === 1
+      && response.helperProtocolVersion === 2
       && response.helperVersion === JLINK_MCP_VERSION
       && response.architecture === "x64";
     return {

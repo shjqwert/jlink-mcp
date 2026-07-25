@@ -428,7 +428,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     const nonvolatileRanges = target.memoryRegions.filter((region) => region.kind === "flash" || region.kind === "rom").map((region) => ({ start: region.start, end: region.start + region.length }));
     const ramRanges = target.memoryRegions.filter((region) => region.kind === "ram").map((region) => ({ start: region.start, end: region.start + region.length }));
     if (!nonvolatileRanges.length || !ramRanges.length) throw new HssOperationError("ARTIFACT_REGION_UNKNOWN", "HSS start requires explicit nonvolatile and RAM memoryRegions in target_configure");
-    for (const variable of prepared.variables) {
+    for (const variable of [...prepared.variables, ...prepared.writeVariables]) {
       if (!ramRanges.some((range) => variable.resolved.address >= range.start && variable.resolved.address + variable.resolved.size <= range.end)) {
         throw new HssOperationError("HSS_VARIABLE_REGION_UNVERIFIED", `${variable.descriptor.logicalIdentity} is outside explicit RAM memoryRegions`);
       }
@@ -1310,6 +1310,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     if (!Number.isSafeInteger(input.rateHz) || input.rateHz < 1 || input.rateHz > HSS_EFFECTIVE_LIMITS.maxRateHz) throw new HssOperationError("HSS_RATE_BOUNDS", `rateHz must be 1..${HSS_EFFECTIVE_LIMITS.maxRateHz}`);
     if (!Number.isSafeInteger(input.durationSec) || input.durationSec < 1 || input.durationSec > HSS_EFFECTIVE_LIMITS.maxDurationSec) throw new HssOperationError("HSS_DURATION_BOUNDS", `durationSec must be 1..${HSS_EFFECTIVE_LIMITS.maxDurationSec}`);
     if (!Array.isArray(input.variables) || input.variables.length < 1 || input.variables.length > HSS_EFFECTIVE_LIMITS.maxVariables) throw new HssOperationError("HSS_VARIABLE_BOUNDS", `variables must contain 1..${HSS_EFFECTIVE_LIMITS.maxVariables} entries`);
+    if (input.writeVariables !== undefined && (!Array.isArray(input.writeVariables) || input.writeVariables.length > HSS_EFFECTIVE_LIMITS.maxWriteVariables)) throw new HssOperationError("HSS_WRITE_VARIABLE_BOUNDS", `writeVariables must contain at most ${HSS_EFFECTIVE_LIMITS.maxWriteVariables} entries`);
     if (input.runId !== undefined && !isValidHssRunId(input.runId)) throw new HssOperationError("RUN_ID_INVALID", "runId must be a bounded immutable non-reserved directory name");
     const target = this.targets.require(input.projectRoot);
     if (!target.artifact) throw new HssOperationError("ARTIFACT_NOT_CONFIGURED", "HSS requires a configured typed ELF Artifact");
@@ -1497,6 +1498,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       throw error;
     }
     const plan = {
+      planFormatVersion: 2,
       dllPath: runtime.runtimePath,
       dllSha256: runtime.runtimeSha256,
       runtimeIdentityValidated: true,
@@ -1529,6 +1531,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       postConnectStabilityRequired: false,
       qualityOracle: prepared.qualityOracle ?? null,
       symbols: prepared.variables.map(({ descriptor, resolved }) => ({ name: descriptor.logicalIdentity, address: hexAddress(resolved.address), size: resolved.size, type: descriptor.type })),
+      writeSymbols: prepared.writeVariables.map(({ descriptor, resolved }) => ({ name: descriptor.logicalIdentity, address: hexAddress(resolved.address), size: resolved.size, type: descriptor.type })),
     };
     writeFileSync(control.planPath, JSON.stringify(plan), { encoding: "utf8", flag: "wx" });
     return { captureId, createdAt, packageDir, sessionDir, control, helperNonce, qpcEpochCounter: timebase.qpcCounter, qpcFrequency: timebase.qpcFrequency };

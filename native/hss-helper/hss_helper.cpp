@@ -30,7 +30,7 @@
 #endif
 
 #ifndef HSS_HELPER_PROTOCOL_VERSION
-#define HSS_HELPER_PROTOCOL_VERSION 1
+#define HSS_HELPER_PROTOCOL_VERSION 2
 #endif
 
 using U8 = std::uint8_t;
@@ -967,6 +967,36 @@ static std::vector<PlanSymbol> json_symbols(const std::string& text) {
   return symbols;
 }
 
+static bool json_symbol_array(const std::string& text, const char* field, std::vector<PlanSymbol>* symbols) {
+  StrictJson root;
+  std::string reason;
+  if (!StrictJsonParser(text).parse(&root, &reason) || root.type != StrictJson::Type::object) return false;
+  const StrictJson* array = json_member(root, field);
+  if (!array || array->type != StrictJson::Type::array) return false;
+  symbols->clear();
+  try {
+    for (const auto& entry : array->arrayValue) {
+      std::string name;
+      std::string address_text;
+      std::string type;
+      uint64_t size = 0;
+      if (!json_exact_keys(entry, { "name", "address", "size", "type" })
+          || !json_text(json_member(entry, "name"), &name)
+          || !json_text(json_member(entry, "address"), &address_text)
+          || !json_text(json_member(entry, "type"), &type)
+          || !json_u64(json_member(entry, "size"), &size)
+          || !std::regex_match(address_text, std::regex("0x[0-9a-fA-F]{1,8}"))
+          || size > (std::numeric_limits<U32>::max)()) return false;
+      const auto address = std::stoull(address_text.substr(2), nullptr, 16);
+      if (address > (std::numeric_limits<U32>::max)()) return false;
+      symbols->push_back({name, static_cast<U32>(address), static_cast<U32>(size), type});
+    }
+  } catch (...) {
+    return false;
+  }
+  return true;
+}
+
 static bool valid_jcap_symbols(const std::vector<PlanSymbol>& symbols) {
   std::set<std::string> names;
   U32 total_bytes = 0;
@@ -983,6 +1013,23 @@ static bool valid_jcap_symbols(const std::vector<PlanSymbol>& symbols) {
     total_bytes += symbol.size;
   }
   return !symbols.empty();
+}
+
+static bool valid_write_symbols(const std::vector<PlanSymbol>& symbols, const std::vector<PlanSymbol>& capture_symbols) {
+  if (symbols.size() > 32U) return false;
+  std::set<std::string> names;
+  for (const auto& symbol : capture_symbols) names.insert(symbol.name);
+  for (const auto& symbol : symbols) {
+    std::wstring wide_name;
+    if (symbol.name.empty() || symbol.name.size() > 256 || !widen_utf8(symbol.name, &wide_name)
+        || !names.insert(symbol.name).second
+        || (symbol.size != 1U && symbol.size != 2U && symbol.size != 4U)
+        || !((symbol.size == 1U && (symbol.type == "uint8" || symbol.type == "int8"))
+          || (symbol.size == 2U && (symbol.type == "uint16" || symbol.type == "int16"))
+          || (symbol.size == 4U && (symbol.type == "uint32" || symbol.type == "int32" || symbol.type == "float32")))
+        || symbol.address > (std::numeric_limits<U32>::max)() - symbol.size) return false;
+  }
+  return true;
 }
 
 static bool capture_sample_budget(int requested_rate, int duration_sec, uint64_t* requested_samples) {
@@ -3928,6 +3975,32 @@ static int self_test() {
     "{\"name\":\"i32\",\"address\":\"0x2000000c\",\"size\":4,\"type\":\"int32\"},"
     "{\"name\":\"f32\",\"address\":\"0x20000010\",\"size\":4,\"type\":\"float32\"}]}"
   );
+  const std::string independent_write_plan =
+    "{\"symbols\":[{\"name\":\"sample\",\"address\":\"0x20000000\",\"size\":4,\"type\":\"uint32\"}],"
+    "\"writeSymbols\":[{\"name\":\"control\",\"address\":\"0x20000020\",\"size\":4,\"type\":\"uint32\"}]}";
+  std::vector<PlanSymbol> parsed_capture_symbols;
+  std::vector<PlanSymbol> parsed_write_symbols;
+  if (!json_symbol_array(independent_write_plan, "symbols", &parsed_capture_symbols)
+      || !json_symbol_array(independent_write_plan, "writeSymbols", &parsed_write_symbols)
+      || !valid_jcap_symbols(parsed_capture_symbols)
+      || !valid_write_symbols(parsed_write_symbols, parsed_capture_symbols)) {
+    error_json("HSS_SELF_TEST_MEMORY_DESCRIPTOR_FAILED", "independent write symbol plan parsing failed");
+    return 0;
+  }
+  const auto independent_block_plan = build_hss_block_plan(parsed_capture_symbols);
+  std::vector<PlanSymbol> independent_access_symbols = parsed_capture_symbols;
+  independent_access_symbols.insert(independent_access_symbols.end(), parsed_write_symbols.begin(), parsed_write_symbols.end());
+  std::vector<PlanSymbol> excessive_write_symbols(33U, {"write", 0x20000020U, 4U, "uint32"});
+  if (independent_block_plan.bytesPerSample != 4U || independent_block_plan.blocks.size() != 1U
+      || !declared_scalar_access_allowed(&independent_access_symbols, 0x20000000U, 4)
+      || !declared_scalar_access_allowed(&independent_access_symbols, 0x20000020U, 4)
+      || declared_scalar_access_allowed(&independent_access_symbols, 0x20000020U, 2)
+      || declared_scalar_access_allowed(&independent_access_symbols, 0x20000024U, 4)
+      || valid_write_symbols(excessive_write_symbols, parsed_capture_symbols)
+      || json_symbol_array("{\"symbols\":[],\"writeSymbols\":[{\"name\":\"bad\"}]}", "writeSymbols", &parsed_write_symbols)) {
+    error_json("HSS_SELF_TEST_MEMORY_DESCRIPTOR_FAILED", "independent write symbol allowlist boundary failed");
+    return 0;
+  }
   const std::string typedFile = "hss_selftest_typed_" + std::to_string(GetCurrentProcessId()) + ".bin";
   DeleteFileA(typedFile.c_str());
   std::wstring typedPath;
@@ -4752,16 +4825,22 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const int post_connect_poll_interval_ms = json_int(plan, "postConnectPollIntervalMs", -1);
   const int post_connect_required_checks = json_int(plan, "postConnectRequiredConsecutiveRunningChecks", -1);
   const bool post_connect_stability_required = json_bool(plan, "postConnectStabilityRequired", false);
+  const int plan_format_version = json_int(plan, "planFormatVersion", 0);
   U32 post_connect_counter_address = 0;
-  const auto symbols = json_symbols(plan);
+  std::vector<PlanSymbol> symbols;
+  std::vector<PlanSymbol> write_symbols;
+  const bool symbol_arrays_valid = json_symbol_array(plan, "symbols", &symbols)
+    && json_symbol_array(plan, "writeSymbols", &write_symbols);
   uint64_t requested_samples = 0;
   int64_t qpc_epoch = 0;
   int64_t planned_qpc_frequency = 0;
   std::wstring output_path;
   const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}");
   if (dll_utf8.empty() || output_file.empty() || pid_file.empty() || ready_file.empty() || write_request_file.empty() || write_claim_file.empty() || write_response_file.empty()
-      || !std::regex_match(capture_id, uuid) || !std::regex_match(helper_instance_nonce, uuid) || symbols.size() > 10
-      || !valid_jcap_symbols(symbols) || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
+      || !std::regex_match(capture_id, uuid) || !std::regex_match(helper_instance_nonce, uuid)
+      || plan_format_version != 2 || !symbol_arrays_valid || symbols.size() > 10
+      || !valid_jcap_symbols(symbols) || !valid_write_symbols(write_symbols, symbols)
+      || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
       || !valid_jcap_samples_path(output_file, capture_id, &output_path)
       || (expected_target_state != "halted" && expected_target_state != "running")
       || (resume_before_start && expected_target_state == "halted")) {
@@ -5243,7 +5322,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     }
   }
   HssRecordSequence record_sequence;
-  const HssMemoryIpc memory_ipc{write_request_file, write_claim_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32, arm_halted, arm_go, artifact_match_write_allowed(artifact_match_result), &symbols};
+  std::vector<PlanSymbol> access_symbols = symbols;
+  access_symbols.insert(access_symbols.end(), write_symbols.begin(), write_symbols.end());
+  const HssMemoryIpc memory_ipc{write_request_file, write_claim_file, write_response_file, capture_id, arm_read_mem, arm_write_mem, arm_read_u8, arm_read_u16, arm_read_u32, arm_write_u8, arm_write_u16, arm_write_u32, arm_halted, arm_go, artifact_match_write_allowed(artifact_match_result), &access_symbols};
   for (uint64_t attempt = 0; attempt < requested_samples && (read_mode == "drain" || now_ns() < capture_deadline_ns)
       && !record_sequence.invalid && !budget_exhausted && !raw_write_failed && !ipc_response_write_failed && !ready_journal_write_failed; ++attempt) {
     if (!stop_file.empty() && GetFileAttributesA(stop_file.c_str()) != INVALID_FILE_ATTRIBUTES) {

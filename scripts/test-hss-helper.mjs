@@ -13,7 +13,7 @@ if (version.status !== 0) process.exit(version.status ?? 1);
 
 const versionResponse = parseJson(version.stdout, "HSS Helper version");
 if (versionResponse.status !== "ok"
-  || versionResponse.helperProtocolVersion !== 1
+  || versionResponse.helperProtocolVersion !== 2
   || versionResponse.architecture !== "x64"
   || versionResponse.helperVersion !== packageJson.version) {
   throw new Error(`HSS Helper version mismatch: ${JSON.stringify(versionResponse)}`);

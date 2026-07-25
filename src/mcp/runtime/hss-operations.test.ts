@@ -414,6 +414,9 @@ test("HSS writeVariables permit immutable capture-owner writes without consuming
       variables: Array<{ logicalIdentity: string }>;
     };
     assert.deepEqual(metadata.variables.map(({ logicalIdentity }) => logicalIdentity), ["var0"]);
+    assert.equal(fixture.adapter.lastPlan?.planFormatVersion, 2);
+    assert.deepEqual(fixture.adapter.lastPlan?.symbols.map(({ name }) => name), ["var0"]);
+    assert.deepEqual(fixture.adapter.lastPlan?.writeSymbols.map(({ name }) => name), ["var2"]);
 
     const readWriteOnly = await fixture.artifacts.readVariable(fixture.projectRoot, fixture.ref(2));
     assert.equal(readWriteOnly.ok, true, JSON.stringify(readWriteOnly.error));
@@ -442,6 +445,20 @@ test("HSS writeVariables permit immutable capture-owner writes without consuming
     assert.equal(stopped.ok, true, JSON.stringify(stopped));
     const raw = readJcapV1Raw(packageDir);
     assert.equal(raw.events.filter((event) => event.type === "variable_write").length, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS writeVariables enforce the direct runtime bound before symbol resolution", async () => {
+  const fixture = await createFixture();
+  try {
+    const planned = await fixture.hss.plan({
+      ...captureInput(fixture, 1, 100, 1),
+      writeVariables: Array.from({ length: 33 }, () => fixture.ref(2)),
+    });
+    assert.equal(planned.ok, false);
+    assert.equal(planned.error?.code, "HSS_WRITE_VARIABLE_BOUNDS");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -858,13 +875,18 @@ class FakeHssAdapter implements HssHelperAdapter {
   private readonly alive = new Set<number>();
   private readonly pidForControl = new Map<string, number>();
   private readonly records = new Map<string, Array<Record<string, unknown>>>();
-  private readonly captureForControl = new Map<string, { packageDir: string; symbols: string[]; nextSampleIndex: number; lastTick: bigint }>();
+  private readonly captureForControl = new Map<string, { packageDir: string; symbols: string[]; declared: Array<{ address: number; size: number }>; nextSampleIndex: number; lastTick: bigint }>();
   private readonly sampleTimers = new Map<number, NodeJS.Timeout>();
   private readonly memory = new Map<number, Buffer>([[0x20000000, u32(7)]]);
   private readonly memoryTransactions = new Map<string, HssMemoryTransaction[]>();
   private nextRequestId = 1;
   writeCount = 0;
   launchCount = 0;
+  lastPlan?: {
+    planFormatVersion: number;
+    symbols: Array<{ name: string; address: string; size: number; type: string }>;
+    writeSymbols: Array<{ name: string; address: string; size: number; type: string }>;
+  };
   inspectCount = 0;
   maxFreq = 1_000;
   failNextWriteBeforeIssue = false;
@@ -890,7 +912,7 @@ class FakeHssAdapter implements HssHelperAdapter {
 
   async inspectRuntime(): Promise<HssRuntimeFacts> {
     this.inspectCount += 1;
-    return { backend: this.backend, available: true, helperPath: "fake-helper", runtimePath: "fake-runtime", helperSha256: "2".repeat(64), runtimeSha256: "1".repeat(64), helperVersion: "1", helperProtocolVersion: 1, architecture: process.arch, abi: { fake: true } };
+    return { backend: this.backend, available: true, helperPath: "fake-helper", runtimePath: "fake-runtime", helperSha256: "2".repeat(64), runtimeSha256: "1".repeat(64), helperVersion: "1", helperProtocolVersion: 2, architecture: process.arch, abi: { fake: true } };
   }
 
   async capability(_target: StoredTarget, runtime?: HssRuntimeFacts): Promise<HssCapabilityFacts> {
@@ -914,7 +936,17 @@ class FakeHssAdapter implements HssHelperAdapter {
 
   async launchCapture(_runtime: HssRuntimeFacts, control: HssCaptureControlFiles): Promise<HssCaptureLaunch> {
     this.launchCount += 1;
-    const plan = JSON.parse(readFileSync(control.planPath, "utf8")) as { captureId: string; helperInstanceNonce: string; outputFile: string; expectedTargetState: "running" | "halted"; symbols: Array<{ name: string }> };
+    const plan = JSON.parse(readFileSync(control.planPath, "utf8")) as {
+      planFormatVersion: number;
+      captureId: string;
+      helperInstanceNonce: string;
+      outputFile: string;
+      expectedTargetState: "running" | "halted";
+      symbols: Array<{ name: string; address: string; size: number; type: string }>;
+      writeSymbols: Array<{ name: string; address: string; size: number; type: string }>;
+    };
+    if (plan.planFormatVersion !== 2 || !Array.isArray(plan.symbols) || !Array.isArray(plan.writeSymbols)) throw new Error("fake Helper plan contract mismatch");
+    this.lastPlan = structuredClone(plan);
     const packageDir = join(plan.outputFile, "..", "..");
     for (let sampleIndex = 0; sampleIndex < 12; sampleIndex += 1) {
       appendJcapV1Sample(packageDir, {
@@ -930,7 +962,16 @@ class FakeHssAdapter implements HssHelperAdapter {
     this.alive.add(pid);
     this.pidForControl.set(control.planPath, pid);
     this.records.set(control.planPath, []);
-    this.captureForControl.set(control.planPath, { packageDir, symbols: plan.symbols.map((symbol) => symbol.name), nextSampleIndex: 12, lastTick: 11n * this.initialSampleTickStep });
+    this.captureForControl.set(control.planPath, {
+      packageDir,
+      symbols: plan.symbols.map((symbol) => symbol.name),
+      declared: [...plan.symbols, ...plan.writeSymbols].map((symbol) => ({
+        address: Number.parseInt(symbol.address, 16),
+        size: symbol.size,
+      })),
+      nextSampleIndex: 12,
+      lastTick: 11n * this.initialSampleTickStep,
+    });
     const timer = setInterval(() => {
       if (!this.alive.has(pid)) { clearInterval(timer); return; }
       try { this.appendCaptureSample(control, 10_000_000n); }
@@ -966,6 +1007,10 @@ class FakeHssAdapter implements HssHelperAdapter {
     if (request.op === "resume") return { requestId, status: "ok" };
     const address = Number.parseInt(request.address ?? "", 16);
     const length = request.length ?? 0;
+    const declared = this.captureForControl.get(control.planPath)?.declared ?? [];
+    if (!declared.some((descriptor) => descriptor.address === address && descriptor.size === length)) {
+      return { requestId, status: "error", errorCode: "VARIABLE_NOT_IN_CAPTURE", reason: "memory request does not exactly match an immutable capture-session descriptor", writeIssued: false };
+    }
     if (request.op === "read") {
       const bytes = this.memory.get(address) ?? Buffer.alloc(length);
       return { requestId, status: "ok", bytesHex: bytes.subarray(0, length).toString("hex") };

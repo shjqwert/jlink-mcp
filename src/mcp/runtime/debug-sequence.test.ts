@@ -40,6 +40,100 @@ test("debug sequence executes absolute steps synchronously and reports timing", 
   assert.deepEqual(fixture.actions, ["plan", "start", "write:1", "read", "write:0", "stop:capture-1"]);
 });
 
+test("debug sequence anchors timed HSS steps after a slow leading capture startup", async () => {
+  const fixture = sequenceFixture({ startDurationMs: 7_000 });
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], writeVariables: ["control"], rateHz: 100, durationSec: 10 },
+      { atMs: 1_000, action: "write_variable", ref: "control", value: 1 },
+      { atMs: 2_000, action: "read_variable", ref: "control" },
+      { atMs: 3_000, action: "write_variable", ref: "control", value: 0 },
+      { atMs: 4_000, action: "hss_stop" },
+    ],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  const data = result.data as {
+    actualDurationMs: number;
+    setupDurationMs: number;
+    timelineAnchor: string;
+    steps: Array<{ actualAtMs: number; durationMs: number }>;
+  };
+  assert.equal(data.actualDurationMs, 11_000);
+  assert.equal(data.setupDurationMs, 7_000);
+  assert.equal(data.timelineAnchor, "hss_ready");
+  assert.deepEqual(data.steps.map(({ actualAtMs }) => actualAtMs), [0, 1_000, 2_000, 3_000, 4_000]);
+  assert.equal(data.steps[0].durationMs, 7_000);
+  assert.deepEqual(fixture.dispatches, [
+    { action: "start", at: 0 },
+    { action: "write:1", at: 8_000 },
+    { action: "read", at: 9_000 },
+    { action: "write:0", at: 10_000 },
+    { action: "stop:capture-1", at: 11_000 },
+  ]);
+});
+
+test("debug sequence keeps the end-to-end deadline when HSS startup rebases the timeline", async () => {
+  const fixture = sequenceFixture({ startDurationMs: 7_000 });
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    timeoutMs: 7_500,
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], writeVariables: ["control"], rateHz: 100, durationSec: 10 },
+      { atMs: 1_000, action: "write_variable", ref: "control", value: 1 },
+      { atMs: 2_000, action: "read_variable", ref: "control" },
+      { atMs: 4_000, action: "hss_stop" },
+    ],
+    cleanup: [{ action: "hss_stop" }],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "DEBUG_SEQUENCE_TIMEOUT");
+  assert.deepEqual(fixture.actions, ["plan", "start", "stop:capture-1"]);
+});
+
+test("debug sequence rejects catch-up dispatch after a step overruns the next schedule point", async () => {
+  const fixture = sequenceFixture({ writeDurationMs: 1_500 });
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], writeVariables: ["control"], rateHz: 100, durationSec: 10 },
+      { atMs: 1_000, action: "write_variable", ref: "control", value: 1 },
+      { atMs: 2_000, action: "read_variable", ref: "control" },
+    ],
+    cleanup: [
+      { action: "restore_variable", ref: "control", value: 0 },
+      { action: "hss_stop" },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "DEBUG_SEQUENCE_SCHEDULE_OVERRUN");
+  assert.deepEqual(fixture.actions, ["plan", "start", "write:1", "write:0", "stop:capture-1"]);
+  assert.equal(fixture.actions.includes("read"), false);
+});
+
+test("debug sequence without leading HSS keeps the original absolute timeline", async () => {
+  const fixture = sequenceFixture();
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "write_variable", ref: "control", value: 1 },
+      { atMs: 1_000, action: "read_variable", ref: "control" },
+    ],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  const data = result.data as { timelineAnchor: string; steps: Array<{ actualAtMs: number }> };
+  assert.equal(data.timelineAnchor, "sequence_start");
+  assert.deepEqual(data.steps.map(({ actualAtMs }) => actualAtMs), [0, 1_000]);
+  assert.deepEqual(fixture.dispatches, [
+    { action: "write:1", at: 0 },
+    { action: "read", at: 1_000 },
+  ]);
+});
+
 test("debug sequence stops normal steps on failure and executes bounded cleanup", async () => {
   const fixture = sequenceFixture({ failWrite: true });
   const result = await fixture.executor.execute({
@@ -181,11 +275,19 @@ test("debug sequence cleanup does not stop an already stopped capture", async ()
   assert.deepEqual(fixture.actions, ["plan", "start", "stop:capture-1", "read"]);
 });
 
-function sequenceFixture(options: { failWrite?: boolean; failedWriteStateUnknown?: boolean; failRead?: boolean } = {}): {
+function sequenceFixture(options: {
+  failWrite?: boolean;
+  failedWriteStateUnknown?: boolean;
+  failRead?: boolean;
+  startDurationMs?: number;
+  writeDurationMs?: number;
+} = {}): {
   executor: DebugSequenceExecutor;
   actions: string[];
+  dispatches: Array<{ action: string; at: number }>;
 } {
   const actions: string[] = [];
+  const dispatches: Array<{ action: string; at: number }> = [];
   let now = 0;
   let failed = false;
   const scheduler: DebugSequenceScheduler = {
@@ -210,6 +312,7 @@ function sequenceFixture(options: { failWrite?: boolean; failedWriteStateUnknown
     }),
     readVariable: async () => {
       actions.push("read");
+      dispatches.push({ action: "read", at: now });
       if (options.failRead) {
         return failEnvelope(createOperationEnvelope("read_variable"), {
           code: "FIXTURE_READ_FAILED",
@@ -224,6 +327,8 @@ function sequenceFixture(options: { failWrite?: boolean; failedWriteStateUnknown
     },
     writeVariable: async (input) => {
       actions.push(`write:${input.value}`);
+      dispatches.push({ action: `write:${input.value}`, at: now });
+      now += options.writeDurationMs ?? 0;
       if (options.failWrite && !failed && input.value === 1) {
         failed = true;
         return failEnvelope(createOperationEnvelope("write_variable"), {
@@ -248,14 +353,17 @@ function sequenceFixture(options: { failWrite?: boolean; failedWriteStateUnknown
     },
     start: async () => {
       actions.push("start");
+      dispatches.push({ action: "start", at: now });
+      now += options.startDurationMs ?? 0;
       return operation("hss_start", { captureId: "capture-1" });
     },
     stop: async ({ captureId }) => {
       actions.push(`stop:${captureId}`);
+      dispatches.push({ action: `stop:${captureId}`, at: now });
       return operation("hss_stop", { captureId });
     },
   };
-  return { executor: new DebugSequenceExecutor(artifacts, hss, scheduler), actions };
+  return { executor: new DebugSequenceExecutor(artifacts, hss, scheduler), actions, dispatches };
 }
 
 function operation(tool: string, data: Record<string, unknown>): OperationEnvelope {
