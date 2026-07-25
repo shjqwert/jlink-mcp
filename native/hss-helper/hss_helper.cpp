@@ -5056,6 +5056,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   uint64_t decoded_samples = 0;
   uint64_t empty_reads = 0;
   uint64_t short_reads = 0;
+  uint64_t raw_write_time_ns_total = 0;
+  uint64_t raw_write_time_ns_max = 0;
   uint64_t unchanged_reads = 0;
   uint64_t changed_reads = 0;
   uint64_t sample_prefix_changed_reads = 0;
@@ -5183,7 +5185,11 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
         break;
       }
       const uint64_t sample_tick = started_tick + static_cast<uint64_t>(hss_sample_index) * 1000000ULL;
+      const int64_t raw_write_started_ns = now_ns();
       const JcapAppendResult append_result = raw_writer.append(normalized_sample_index, sample_tick, status_flags, symbols, values);
+      const uint64_t raw_write_elapsed_ns = static_cast<uint64_t>((std::max<int64_t>)(0, now_ns() - raw_write_started_ns));
+      raw_write_time_ns_total += raw_write_elapsed_ns;
+      raw_write_time_ns_max = (std::max)(raw_write_time_ns_max, raw_write_elapsed_ns);
       if (append_result == JcapAppendResult::budgetExhausted) {
         budget_exhausted = true;
         break;
@@ -5229,6 +5235,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (!raw_hashed) stream_fault(capture_id, "HSS_RAW_HASH_FAILED", "closed raw/samples.bin could not be hashed", qpc_counter());
   const int64_t elapsed_ns = std::max<int64_t>(1, now_ns() - started_ns);
   const double actual_rate = static_cast<double>(record_sequence.emittedSamples) * 1000000000.0 / static_cast<double>(elapsed_ns);
+  const double sample_ratio = requested_samples > 0 ? static_cast<double>(record_sequence.emittedSamples) / static_cast<double>(requested_samples) : 0.0;
+  const double raw_write_time_ns_average = valid_samples > 0 ? static_cast<double>(raw_write_time_ns_total) / static_cast<double>(valid_samples) : 0.0;
   const uint64_t sample_count = record_sequence.emittedSamples;
   const double header_changed_ratio = read_attempts > 0 ? static_cast<double>(header_changed_reads) / static_cast<double>(read_attempts) : 0.0;
   const double payload_changed_ratio = read_attempts > 0 ? static_cast<double>(payload_changed_reads) / static_cast<double>(read_attempts) : 0.0;
@@ -5242,7 +5250,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     && !read_crashed && !stop_crashed && !close_crashed && raw_closed && raw_hashed
     && hss_capture_sample_evidence_validated(stop_requested, read_attempts, decoded_samples);
   const bool decoder_semantics_validated = hss_terminal_sequence_validated(stop_requested, record_sequence, decoded_samples)
-    && (stop_requested || budget_exhausted || (duration_validated && sample_threshold_met))
+    && (stop_requested || budget_exhausted || duration_validated)
     && read_errors == 0 && !raw_write_failed;
   const bool timeline_quality_reported = hss_timeline_quality_reportable(
     duration_validated,
@@ -5269,6 +5277,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << "\",\"qpcEpochCounter\":\"" << qpc_epoch << "\""
     << ",\"qpcFrequency\":\"" << actual_qpc_frequency << "\""
     << ",\"backend\":\"jlink-hss\",\"requestedRateHz\":" << requested_rate
+     << ",\"configuredInterface\":\"" << escape(iface) << "\""
+     << ",\"configuredSpeedKHz\":" << speed
      << ",\"readMode\":\"" << read_mode << "\""
      << ",\"resetBeforeCapture\":" << (require_first_sample_index_zero ? "true" : "false")
     << ",\"resumeBeforeStart\":" << (resume_before_start ? "true" : "false")
@@ -5278,6 +5288,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"targetWasHaltedAfterResume\":" << (halted_after_resume > 0 ? "true" : "false")
     << ",\"targetHaltedAfterResumeRaw\":" << halted_after_resume
     << ",\"actualRateHz\":" << actual_rate
+    << ",\"sampleRatio\":" << sample_ratio
     << ",\"durationSec\":" << (static_cast<double>(elapsed_ns) / 1000000000.0)
      << ",\"sampleCount\":" << sample_count
      << ",\"requestedSamples\":" << requested_samples
@@ -5297,6 +5308,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"hssSampleHeaderBytes\":" << hss_sample_header_bytes
     << ",\"hssSampleStrideBytes\":" << hss_sample_stride_bytes
     << ",\"readAttempts\":" << read_attempts
+    << ",\"rawWriteTimeNsTotal\":" << raw_write_time_ns_total
+    << ",\"rawWriteTimeNsMax\":" << raw_write_time_ns_max
+    << ",\"rawWriteTimeNsAverage\":" << raw_write_time_ns_average
     << ",\"decodedSamples\":" << decoded_samples
     << ",\"startReturnCode\":" << start_rc
     << ",\"lifecycleValidated\":" << (lifecycle_validated ? "true" : "false")
@@ -5337,6 +5351,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     << ",\"payloadFirstChangedOffset\":" << payload_first_changed_offset
     << ",\"payloadFirstChangedBytes\":\"" << payload_first_changed_bytes << "\"}"
       << ",\"qualityStatus\":\"" << (timeline_quality_reported ? "reported" : "partial")
+      << "\",\"qualitySource\":\"jlink\",\"qualityCountersValidated\":" << (timeline_quality_reported ? "true" : "false")
       << "\",\"timeouts\":0,\"overflows\":" << (timeline_quality_reported ? "0" : "null")
       << ",\"droppedSamples\":" << (timeline_quality_reported ? "0" : "null")
       << ",\"timelineSlotDeficit\":" << timeline_slot_deficit

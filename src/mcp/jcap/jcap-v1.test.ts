@@ -298,15 +298,21 @@ test("JCAP v1 metadata enforces the 60 second capture bound and exports into the
   }
 });
 
-test("JCAP v1 rejects a completed capture below the 95 percent planned sample threshold", async () => {
+test("JCAP v1 indexes a 560/1000 completed capture when the planned deficit is explicitly reported", async () => {
   const root = workspace();
   const packageDir = path.join(root, "captures", `${captureId}.jcap`);
-  const quality = { missingSamples: 59_997, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0 };
+  const partialSamples = Array.from({ length: 560 }, (_, sampleIndex): JcapV1Sample => ({
+    sampleIndex,
+    tick: String(sampleIndex * 1_000_000),
+    statusFlags: 1,
+    values: { counter: sampleIndex, feedback: sampleIndex + 1 },
+  }));
+  const quality = { missingSamples: 440, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0 };
   try {
     writeJcapV1Raw({
       packageDir,
-      metadata: metadata(captureId, "active", 60, 1_000),
-      samples,
+      metadata: metadata(captureId, "active", 1, 1_000),
+      samples: partialSamples,
       events: [
         { eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
         { eventId: eventId(2), eventSequence: 1, type: "quality", tick: "30", qualityStatus: "reported", qualitySource: "jlink", ...quality, durationValidated: true, qualityEvidence: { source: "fixture" } },
@@ -315,9 +321,33 @@ test("JCAP v1 rejects a completed capture below the 95 percent planned sample th
       ],
     });
     finalizeJcapV1Metadata(packageDir, "completed", quality, "reported");
+    await assert.doesNotReject(() => rebuildJcapV1Index(packageDir));
+    assert.equal((await jcapCaptureSummary(packageDir)).sampleCount, 560);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("JCAP v1 rejects a completed capture whose planned deficit is not reported", async () => {
+  const root = workspace();
+  const packageDir = path.join(root, "captures", `${captureId}.jcap`);
+  const quality = { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null };
+  try {
+    writeJcapV1Raw({
+      packageDir,
+      metadata: metadata(captureId, "active", 1, 3),
+      samples: samples.slice(0, 2),
+      events: [
+        { eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(2), eventSequence: 1, type: "quality", tick: "20", qualityStatus: "partial", qualitySource: "none", ...quality, durationValidated: true, qualityEvidence: { source: "fixture" } },
+        { eventId: eventId(3), eventSequence: 2, type: "lifecycle", tick: "20", state: "finalizing" },
+        { eventId: eventId(4), eventSequence: 3, type: "lifecycle", tick: "21", state: "completed" },
+      ],
+    });
+    finalizeJcapV1Metadata(packageDir, "completed", quality, "partial", "none");
     await assert.rejects(
       () => rebuildJcapV1Index(packageDir),
-      (error: unknown) => (error as { code?: string }).code === "JCAP_SAMPLE_BUDGET_SHORT",
+      (error: unknown) => (error as { code?: string }).code === "JCAP_SAMPLE_BUDGET_UNREPORTED",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

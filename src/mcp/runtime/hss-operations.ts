@@ -153,6 +153,8 @@ interface HssSessionRecord {
   ownerToken: string;
   qpcEpochCounter: string;
   qpcFrequency: string;
+  configuredInterface?: StoredTarget["interface"];
+  configuredSpeedKHz?: number;
   rateHz: number;
   durationSec: number;
   descriptors: JcapV1VariableDescriptor[];
@@ -234,6 +236,9 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         rateHz: prepared.rateHz,
         durationSec: prepared.durationSec,
         requestedSamples: prepared.rateHz * prepared.durationSec,
+        configuredInterface: prepared.target.interface,
+        configuredSpeedKHz: prepared.target.speed,
+        linkRate: linkRateDiagnostic(prepared),
         blockCount: prepared.blockCount,
         qualityOracle: prepared.qualityOracle ?? null,
         limits: HSS_EFFECTIVE_LIMITS,
@@ -245,6 +250,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       planned.after = planned.before;
       planned.verification = { status: "verified", method: "typed_artifact_resolution_and_static_bounds" };
       if (!runtime.available) planned.warnings.push("The plan is structurally valid, but the configured HSS runtime is unavailable; hss_start will revalidate and reject without fallback.");
+      if (linkRateDiagnostic(prepared).warning) planned.warnings.push("LINK_SPEED_MAY_LIMIT_RATE: the configured debug-link speed may limit the requested HSS rate and variable count.");
       return finishEnvelope(planned, true);
     } catch (error) {
       return this.failure(envelope, error, "planning");
@@ -309,6 +315,9 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         rateHz: prepared.rateHz,
         durationSec: prepared.durationSec,
         requestedSamples: prepared.rateHz * prepared.durationSec,
+        configuredInterface: prepared.target.interface,
+        configuredSpeedKHz: prepared.target.speed,
+        linkRate: linkRateDiagnostic(prepared),
         frameLayout: layout,
         estimatedDataBytes: layout.hssSampleStrideBytes * prepared.rateHz * prepared.durationSec,
         blockCount: prepared.blockCount,
@@ -318,6 +327,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         capability: execution.value.capability,
       };
       envelope.verification = { status: "verified", method: "typed_resolution_runtime_capability_current_artifact_and_static_layout" };
+      if (linkRateDiagnostic(prepared).warning) envelope.warnings.push("LINK_SPEED_MAY_LIMIT_RATE: the configured debug-link speed may limit the requested HSS rate and variable count.");
       return finishEnvelope(envelope, true);
     } catch (error) {
       return this.failure(envelope, error, "dry_run");
@@ -378,6 +388,8 @@ export class HssOperations implements CaptureVariableAccessDelegate {
           ownerToken: "pending",
           qpcEpochCounter: created.qpcEpochCounter,
           qpcFrequency: created.qpcFrequency,
+          configuredInterface: current.interface,
+          configuredSpeedKHz: current.speed,
           rateHz: prepared.rateHz,
           durationSec: prepared.durationSec,
           descriptors: prepared.variables.map(({ descriptor }) => descriptor),
@@ -490,6 +502,9 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         state: execution.value.state,
         packageDir: execution.value.packageDir,
         limits: HSS_EFFECTIVE_LIMITS,
+        configuredInterface: prepared.target.interface,
+        configuredSpeedKHz: prepared.target.speed,
+        linkRate: linkRateDiagnostic(prepared),
         variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
         writeVariableResolution: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
       };
@@ -515,6 +530,9 @@ export class HssOperations implements CaptureVariableAccessDelegate {
           state: settled.state,
           packageDir: settled.packageDir,
           limits: HSS_EFFECTIVE_LIMITS,
+          configuredInterface: prepared.target.interface,
+          configuredSpeedKHz: prepared.target.speed,
+          linkRate: linkRateDiagnostic(prepared),
           variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
           writeVariableResolution: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
         };
@@ -1352,6 +1370,8 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         ownerToken: "pending",
         qpcEpochCounter: "0",
         qpcFrequency: "1",
+        configuredInterface: target.interface,
+        configuredSpeedKHz: target.speed,
         rateHz: prepared.rateHz,
         durationSec: prepared.durationSec,
         descriptors: prepared.variables.map(({ descriptor }) => descriptor),
@@ -1941,14 +1961,60 @@ function applyQueue<T>(envelope: OperationEnvelope, execution: { queueSequence: 
 }
 
 function captureSummary(session: HssSessionRecord): Record<string, unknown> {
+  const result = session.result ?? {};
+  const requestedSamples = Number.isSafeInteger(result.requestedSamples)
+    ? Number(result.requestedSamples)
+    : session.rateHz * session.durationSec;
+  const sampleCount = Number.isSafeInteger(result.sampleCount) ? Number(result.sampleCount) : null;
+  const sampleRatio = typeof result.sampleRatio === "number" && Number.isFinite(result.sampleRatio)
+    ? result.sampleRatio
+    : sampleCount !== null && requestedSamples > 0
+      ? sampleCount / requestedSamples
+      : null;
   return {
     captureId: session.captureId,
     state: session.state,
     packageDir: session.packageDir,
     requestedRateHz: session.rateHz,
+    configuredInterface: session.configuredInterface ?? null,
+    configuredSpeedKHz: session.configuredSpeedKHz ?? null,
+    actualRateHz: typeof result.actualRateHz === "number" ? result.actualRateHz : null,
+    requestedSamples,
+    sampleCount,
+    sampleRatio,
+    sampleThresholdMet: typeof result.sampleThresholdMet === "boolean" ? result.sampleThresholdMet : null,
+    readStatistics: {
+      attempts: Number.isSafeInteger(result.readAttempts) ? result.readAttempts : null,
+      emptyReads: Number.isSafeInteger(result.emptyReads) ? result.emptyReads : null,
+      shortReads: Number.isSafeInteger(result.shortReads) ? result.shortReads : null,
+      readErrors: Number.isSafeInteger(result.readErrors) ? result.readErrors : null,
+      rawWriteTimeNsTotal: Number.isSafeInteger(result.rawWriteTimeNsTotal) ? result.rawWriteTimeNsTotal : null,
+      rawWriteTimeNsMax: Number.isSafeInteger(result.rawWriteTimeNsMax) ? result.rawWriteTimeNsMax : null,
+      rawWriteTimeNsAverage: typeof result.rawWriteTimeNsAverage === "number" ? result.rawWriteTimeNsAverage : null,
+    },
     durationSec: session.durationSec,
     variables: session.descriptors.length,
     qualityOracle: session.qualityOracle ?? null,
+  };
+}
+
+function linkRateDiagnostic(prepared: PreparedCapture): Record<string, unknown> {
+  const payloadBytes = prepared.variables.reduce((sum, variable) => sum + variable.resolved.size, 0);
+  const estimatedTransferBitsPerSample = 32 + prepared.variables.reduce((sum, variable) => sum + variable.resolved.size * 8 + 64, 0);
+  const configuredBitsPerSecond = prepared.target.speed * 1_000;
+  const estimatedUtilization = configuredBitsPerSecond > 0
+    ? estimatedTransferBitsPerSample * prepared.rateHz / configuredBitsPerSecond
+    : null;
+  return {
+    configuredInterface: prepared.target.interface,
+    configuredSpeedKHz: prepared.target.speed,
+    requestedRateHz: prepared.rateHz,
+    variableCount: prepared.variables.length,
+    payloadBytesPerSample: payloadBytes,
+    estimatedTransferBitsPerSample,
+    estimatedUtilization,
+    estimateOnly: true,
+    warning: estimatedUtilization !== null && estimatedUtilization > 0.5,
   };
 }
 
@@ -1982,17 +2048,44 @@ function qualityEvidenceFrom(
   const provenance = result?.qualityEvidence && typeof result.qualityEvidence === "object" && !Array.isArray(result.qualityEvidence)
     ? sanitizeResult(result.qualityEvidence as Record<string, unknown>)
     : {};
+  const rateDiagnostics = Object.fromEntries([
+    "configuredInterface",
+    "configuredSpeedKHz",
+    "requestedRateHz",
+    "actualRateHz",
+    "sampleCount",
+    "requestedSamples",
+    "sampleRatio",
+    "sampleThresholdMet",
+    "readAttempts",
+    "emptyReads",
+    "shortReads",
+    "readErrors",
+    "rawWriteTimeNsTotal",
+    "rawWriteTimeNsMax",
+    "rawWriteTimeNsAverage",
+  ].filter((name) => result?.[name] !== undefined).map((name) => [name, result![name]]));
   if (result?.qualitySource === "jlink" && result.qualityCountersValidated === true && names.every((name) => counters[name] !== null)) {
     return {
       status: "reported",
       source: "jlink",
       counters,
       durationValidated,
-      provenance: { source: "jlink", countersValidated: true, ...provenance },
+      provenance: { source: "jlink", countersValidated: true, ...rateDiagnostics, ...provenance },
       inferredDroppedBeforeSampleIndexes: [],
     };
   }
   if (oracle) return targetCounterQualityEvidence(raw, oracle, durationValidated, rateHz);
+  if (names.some((name) => counters[name] !== null)) {
+    return {
+      status: "partial",
+      source: "jlink",
+      counters,
+      durationValidated,
+      provenance: { source: "jlink", countersValidated: false, ...rateDiagnostics, ...provenance },
+      inferredDroppedBeforeSampleIndexes: [],
+    };
+  }
   return {
     status: "partial",
     source: "none",

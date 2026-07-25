@@ -46,6 +46,8 @@ test("HSS planning enforces ten variables, 1 kHz, and 60 seconds without creatin
     assert.equal(planned.ok, true);
     assert.deepEqual((planned.data as { limits: unknown }).limits, HSS_EFFECTIVE_LIMITS);
     assert.equal((planned.data as { requestedSamples: number }).requestedSamples, 60_000);
+    assert.equal((planned.data as { configuredInterface: string }).configuredInterface, "SWD");
+    assert.equal((planned.data as { configuredSpeedKHz: number }).configuredSpeedKHz, 4_000);
     assert.equal(readdirSync(join(fixture.root, "output")).length, 0);
 
     const dryRun = await fixture.hss.start({ ...captureInput(fixture, 2, 100, 1), dryRun: true });
@@ -174,8 +176,12 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal(fixture.adapter.writeCount, 3);
 
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
-    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+    assert.equal(stopped.ok, true, JSON.stringify(stopped));
     assert.equal((stopped.capture as { state: string }).state, "stopped");
+    assert.equal((stopped.capture as { actualRateHz: number }).actualRateHz, 56);
+    assert.equal((stopped.capture as { sampleRatio: number }).sampleRatio, 0.56);
+    assert.equal((stopped.capture as { sampleThresholdMet: boolean }).sampleThresholdMet, false);
+    assert.equal((stopped.capture as { readStatistics: { emptyReads: number } }).readStatistics.emptyReads, 44);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
     assert.deepEqual(readdirSync(packageDir).sort(), ["capture.db", "capture.json", "raw"]);
     assert.deepEqual(readdirSync(join(packageDir, "raw")).sort(), ["events.bin", "samples.bin"]);
@@ -225,6 +231,20 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
   }
 });
 
+test("HSS planning warns about a high estimated load without rejecting or changing the requested rate", async () => {
+  const fixture = await createFixture("uint32", false, 1_000);
+  try {
+    const planned = await fixture.hss.plan(captureInput(fixture, 10, 1_000, 10));
+    assert.equal(planned.ok, true, JSON.stringify(planned.error));
+    assert.equal((planned.data as { rateHz: number }).rateHz, 1_000);
+    assert.equal((planned.data as { configuredSpeedKHz: number }).configuredSpeedKHz, 1_000);
+    assert.equal((planned.data as { linkRate: { warning: boolean } }).linkRate.warning, true);
+    assert.equal(planned.warnings.some((warning) => warning.startsWith("LINK_SPEED_MAY_LIMIT_RATE")), true);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("HSS writeVariables permit immutable capture-owner writes without consuming sample slots", async () => {
   const fixture = await createFixture();
   try {
@@ -264,7 +284,7 @@ test("HSS writeVariables permit immutable capture-owner writes without consuming
     assert.equal(undeclared.error?.code, "VARIABLE_NOT_IN_CAPTURE");
 
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
-    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+    assert.equal(stopped.ok, true, JSON.stringify(stopped));
     const raw = readJcapV1Raw(packageDir);
     assert.equal(raw.events.filter((event) => event.type === "variable_write").length, 1);
   } finally {
@@ -279,11 +299,11 @@ test("HSS quality reports no-source captures as partial and indexes target-count
     assert.equal(withoutOracle.ok, true, JSON.stringify(withoutOracle.error));
     const noSourceId = String((withoutOracle.data as { captureId: string }).captureId);
     const noSourceStop = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId: noSourceId });
-    assert.equal(noSourceStop.ok, true, JSON.stringify(noSourceStop.error));
+    assert.equal(noSourceStop.ok, true, JSON.stringify(noSourceStop));
     const noSourceMetadata = readJcapV1Raw(String((withoutOracle.data as { packageDir: string }).packageDir)).metadata;
     assert.equal(noSourceMetadata.qualityStatus, "partial");
-    assert.equal(noSourceMetadata.qualitySource, "none");
-    assert.deepEqual(noSourceMetadata.quality, { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null });
+    assert.equal(noSourceMetadata.qualitySource, "jlink");
+    assert.deepEqual(noSourceMetadata.quality, { missingSamples: 44, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0 });
 
     fixture.adapter.counterGapAt = 5;
     fixture.adapter.counterGapFrames = 2;
@@ -588,7 +608,7 @@ test("failed startup cleanup never terminates a live PID whose capture identity 
   }
 });
 
-async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMemorySessions = false): Promise<Fixture> {
+async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMemorySessions = false, speed = 4_000): Promise<Fixture> {
   const testsRoot = join(process.cwd(), "test-output");
   mkdirSync(testsRoot, { recursive: true });
   const root = mkdtempSync(join(testsRoot, "hss-operations-"));
@@ -605,7 +625,7 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
     device: "TEST_DEVICE",
     probeSerial: "12345678",
     interface: "SWD",
-    speed: 4_000,
+    speed,
     artifactPath,
     memoryRegions: [
       { start: 0x08000000, length: 0x20000, kind: "flash", writable: false },
@@ -813,7 +833,29 @@ class FakeHssAdapter implements HssHelperAdapter {
     const pid = this.pidForControl.get(control.planPath)!;
     this.alive.delete(pid);
     this.stopSampling(pid);
-    this.records.set(control.planPath, [{ record: "result", status: "stopped", missingSamples: 0, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0 }]);
+    this.records.set(control.planPath, [{
+      record: "result",
+      status: "stopped",
+      configuredInterface: "SWD",
+      configuredSpeedKHz: 4_000,
+      requestedRateHz: 100,
+      actualRateHz: 56,
+      sampleCount: 56,
+      requestedSamples: 100,
+      sampleRatio: 0.56,
+      sampleThresholdMet: false,
+      readAttempts: 100,
+      emptyReads: 44,
+      shortReads: 0,
+      missingSamples: 44,
+      droppedSamples: 0,
+      overflows: 0,
+      readErrors: 0,
+      timeouts: 0,
+      rawWriteTimeNsTotal: 56_000,
+      rawWriteTimeNsMax: 2_000,
+      rawWriteTimeNsAverage: 1_000,
+    }]);
   }
 
   terminate(pid: number): void { this.terminateCount += 1; this.alive.delete(pid); this.stopSampling(pid); }

@@ -1340,7 +1340,9 @@ function qualityEvidenceIsConsistent(
   const observed = keys.filter((key) => quality[key] !== null);
   if (status === "unknown") return source === "none" && observed.length === 0;
   if (source === "none") return status === "partial" && quality.droppedSamples === null && quality.overflows === null;
-  if (source === "jlink") return status === "reported" && observed.length === keys.length;
+  if (source === "jlink") return status === "reported"
+    ? observed.length === keys.length
+    : status === "partial" && observed.length > 0;
   return quality.droppedSamples === null && quality.overflows === null
     && (status === "partial" || status === "reported" && quality.missingSamples !== null);
 }
@@ -1505,7 +1507,6 @@ function assertSampleLossFacts(raw: JcapV1Raw): void {
   if (gaps > reported) throw new JcapIntegrityError("JCAP_SAMPLE_LOSS_UNREPORTED", `Raw sample-index gaps (${gaps}) exceed explicit loss/overflow counters (${reported})`);
   if (raw.metadata.state === "completed") {
     const expected = raw.metadata.requestedRateHz * raw.metadata.durationSec;
-    if (raw.samples.length * 100 < expected * 95) throw new JcapIntegrityError("JCAP_SAMPLE_BUDGET_SHORT", `completed capture has ${raw.samples.length} of ${expected} planned samples; at least 95% are required`);
     const plannedDeficit = Math.max(0, expected - raw.samples.length);
     if (plannedDeficit > 0 && (raw.metadata.quality.missingSamples === null || raw.metadata.quality.missingSamples < plannedDeficit)) {
       throw new JcapIntegrityError("JCAP_SAMPLE_BUDGET_UNREPORTED", "completed capture does not explicitly account for its planned sample deficit");
