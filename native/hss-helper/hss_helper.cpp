@@ -281,6 +281,62 @@ static void call_void0(void (*fn)(), bool* crashed) {
   }
 }
 
+struct TargetStateGuardEvidence {
+  int observedRaw = -1;
+  int finalRaw = -1;
+  bool haltIssued = false;
+  bool restored = false;
+  bool stateUnknown = false;
+};
+
+static bool enforce_expected_target_state(
+    JLINKARM_IsHalted_Fn arm_halted,
+    JLINKARM_Halt_Fn arm_halt,
+    const std::string& expected_state,
+    TargetStateGuardEvidence* evidence) {
+  bool crashed = false;
+  evidence->observedRaw = call_int0(arm_halted, &crashed);
+  evidence->finalRaw = evidence->observedRaw;
+  if (crashed || evidence->observedRaw < 0) {
+    evidence->stateUnknown = true;
+    return false;
+  }
+  const bool matches = expected_state == "halted" ? evidence->observedRaw > 0 : evidence->observedRaw == 0;
+  if (matches) return true;
+  if (expected_state != "halted" || !arm_halt) return false;
+  evidence->haltIssued = true;
+  call_void0(arm_halt, &crashed);
+  if (crashed) {
+    evidence->stateUnknown = true;
+    return false;
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  evidence->finalRaw = call_int0(arm_halted, &crashed);
+  evidence->restored = !crashed && evidence->finalRaw > 0;
+  evidence->stateUnknown = crashed || evidence->finalRaw < 0 || !evidence->restored;
+  return false;
+}
+
+static void target_state_guard_error_json(
+    const std::string& reason,
+    const std::string& expected_state,
+    const TargetStateGuardEvidence& evidence,
+    bool close_crashed = false) {
+  const bool unknown = evidence.stateUnknown || close_crashed;
+  std::cout
+    << "{\"status\":\"error\",\"errorCode\":\""
+    << (unknown ? "HSS_TARGET_STATE_RESTORE_FAILED" : "HSS_TARGET_STATE_CHANGED")
+    << "\",\"reason\":\"" << escape(reason) << "\""
+    << ",\"expectedTargetState\":\"" << expected_state << "\""
+    << ",\"observedTargetStateRaw\":" << evidence.observedRaw
+    << ",\"finalTargetStateRaw\":" << evidence.finalRaw
+    << ",\"restorationAttempted\":" << (evidence.haltIssued ? "true" : "false")
+    << ",\"restored\":" << (evidence.restored ? "true" : "false")
+    << ",\"haltIssued\":" << (evidence.haltIssued ? "true" : "false")
+    << ",\"stateUnknown\":" << (unknown ? "true" : "false")
+    << ",\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false}";
+}
+
 static int call_int1(int (*fn)(int), int arg, bool* crashed) {
   int return_code = 0;
   *crashed = false;
@@ -1592,9 +1648,11 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
   auto arm_connect = reinterpret_cast<JLINKARM_Connect_Fn>(required(dll, "JLINKARM_Connect"));
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
   auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
+  auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
+  auto arm_halt = reinterpret_cast<JLINKARM_Halt_Fn>(required(dll, "JLINKARM_Halt"));
   auto arm_version = reinterpret_cast<JLINKARM_GetDLLVersion_Fn>(required(dll, "JLINKARM_GetDLLVersion"));
   auto fn = reinterpret_cast<JLINK_HSS_GetCaps_Fn>(required(dll, "JLINK_HSS_GetCaps"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_version || !fn) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted || !arm_halt || !arm_version || !fn) {
     FreeLibrary(dll);
     error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS_GetCaps exports missing", dll_utf8);
     return 0;
@@ -1602,6 +1660,12 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
 
   const std::string iface = option_utf8(options, L"--interface", "SWD");
   const std::string serial_text = option_utf8(options, L"--serial", "");
+  const std::string expected_target_state = option_utf8(options, L"--expected-target-state", "");
+  if (expected_target_state != "halted" && expected_target_state != "running") {
+    FreeLibrary(dll);
+    error_json("HSS_EXPECTED_TARGET_STATE_REQUIRED", "getcaps requires --expected-target-state halted|running", dll_utf8);
+    return 0;
+  }
   const int speed = std::stoi(option_utf8(options, L"--speed", "4000"));
   const int tif = iface == "JTAG" ? 0 : 1;
   JLINK_HSS_CAPS caps{};
@@ -1687,11 +1751,28 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     return 0;
   }
 
+  TargetStateGuardEvidence before_caps;
+  if (!enforce_expected_target_state(arm_halted, arm_halt, expected_target_state, &before_caps)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    target_state_guard_error_json("target state changed before HSS capability discovery", expected_target_state, before_caps, close_crashed);
+    return 0;
+  }
+
   int return_code = call_getcaps(fn, &caps, &crashed);
   if (crashed) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
     error_json("HSS_GETCAPS_EXCEPTION", "JLINK_HSS_GetCaps raised a structured exception", dll_utf8);
+    return 0;
+  }
+  TargetStateGuardEvidence after_caps;
+  if (!enforce_expected_target_state(arm_halted, arm_halt, expected_target_state, &after_caps)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    target_state_guard_error_json("HSS capability discovery changed target state", expected_target_state, after_caps, close_crashed);
     return 0;
   }
   bool close_crashed = false;
@@ -1727,6 +1808,10 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     << ",\"jlinkScriptSha256\":\"" << escape(script_selection.sha256) << "\""
     << ",\"jlinkScriptReturnCode\":" << script_rc
     << ",\"jlinkScriptExecOutput\":\"" << escape(script_exec_out) << "\""
+    << ",\"expectedTargetState\":\"" << expected_target_state << "\""
+    << ",\"targetStateBefore\":\"" << (before_caps.observedRaw > 0 ? "halted" : "running") << "\""
+    << ",\"targetStateAfter\":\"" << (after_caps.finalRaw > 0 ? "halted" : "running") << "\""
+    << ",\"statePreserved\":true"
     << ",\"caps\":{\"maxBlocks\":" << caps.MaxBlocks
     << ",\"maxFreq\":" << caps.MaxFreq
     << ",\"caps\":" << caps.Caps
@@ -3380,6 +3465,36 @@ static int self_test_exec_failure(const char*, char*, int) {
   return -1;
 }
 
+static int self_test_target_state_raw = 0;
+
+static int self_test_is_halted() {
+  return self_test_target_state_raw;
+}
+
+static void self_test_halt() {
+  self_test_target_state_raw = 1;
+}
+
+static bool self_test_target_state_guard() {
+  TargetStateGuardEvidence evidence;
+  self_test_target_state_raw = 1;
+  if (!enforce_expected_target_state(self_test_is_halted, self_test_halt, "halted", &evidence)
+      || evidence.haltIssued || evidence.finalRaw != 1) return false;
+  evidence = {};
+  self_test_target_state_raw = 0;
+  if (!enforce_expected_target_state(self_test_is_halted, self_test_halt, "running", &evidence)
+      || evidence.haltIssued || evidence.finalRaw != 0) return false;
+  evidence = {};
+  self_test_target_state_raw = 0;
+  if (enforce_expected_target_state(self_test_is_halted, self_test_halt, "halted", &evidence)
+      || !evidence.haltIssued || !evidence.restored || evidence.finalRaw != 1 || evidence.stateUnknown) return false;
+  evidence = {};
+  self_test_target_state_raw = 1;
+  if (enforce_expected_target_state(self_test_is_halted, self_test_halt, "running", &evidence)
+      || evidence.haltIssued || evidence.restored || evidence.finalRaw != 1 || evidence.stateUnknown) return false;
+  return true;
+}
+
 static bool self_test_probe_selection_and_close_policy() {
   U32 expected = 0;
   bool crashed = false;
@@ -3458,6 +3573,10 @@ static int self_test() {
   }
   if (!self_test_probe_selection_and_close_policy()) {
     error_json("HSS_SELF_TEST_PROBE_SELECTION_FAILED", "exact Probe selection or no-restart close policy boundary failed");
+    return 0;
+  }
+  if (!self_test_target_state_guard()) {
+    error_json("HSS_SELF_TEST_TARGET_STATE_GUARD_FAILED", "HSS target-state preservation guard failed");
     return 0;
   }
   if (!self_test_non_intrusive_attach_profile()) {
@@ -3881,7 +4000,7 @@ static int self_test() {
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v1-sha256-crc32-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
+    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
@@ -4618,6 +4737,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string serial_text = json_string(plan, "serial");
   const std::string read_mode = json_string(plan, "readMode", "periodic");
   const bool resume_before_start = json_bool(plan, "resumeBeforeStart", false);
+  const std::string expected_target_state = json_string(plan, "expectedTargetState");
   const bool require_first_sample_index_zero = json_bool(plan, "requireFirstSampleIndexZero", false);
   const int speed = json_int(plan, "speedKhz", 4000);
   const int requested_rate = json_int(plan, "requestedRateHz", 1000);
@@ -4642,7 +4762,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   if (dll_utf8.empty() || output_file.empty() || pid_file.empty() || ready_file.empty() || write_request_file.empty() || write_claim_file.empty() || write_response_file.empty()
       || !std::regex_match(capture_id, uuid) || !std::regex_match(helper_instance_nonce, uuid) || symbols.size() > 10
       || !valid_jcap_symbols(symbols) || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
-      || !valid_jcap_samples_path(output_file, capture_id, &output_path)) {
+      || !valid_jcap_samples_path(output_file, capture_id, &output_path)
+      || (expected_target_state != "halted" && expected_target_state != "running")
+      || (resume_before_start && expected_target_state == "halted")) {
     error_json("HSS_PLAN_INVALID", "plan is missing required fields");
     return 0;
   }
@@ -4774,6 +4896,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
   auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
+  auto arm_halt = reinterpret_cast<JLINKARM_Halt_Fn>(required(dll, "JLINKARM_Halt"));
   auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
   auto arm_read_mem = reinterpret_cast<JLINKARM_ReadMem_Fn>(required(dll, "JLINKARM_ReadMem"));
   auto arm_write_mem = reinterpret_cast<JLINKARM_WriteMem_Fn>(required(dll, "JLINKARM_WriteMem"));
@@ -4787,7 +4910,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   auto hss_start = reinterpret_cast<JLINK_HSS_Start_Fn>(required(dll, "JLINK_HSS_Start"));
   auto hss_read = reinterpret_cast<JLINK_HSS_Read_Fn>(required(dll, "JLINK_HSS_Read"));
   auto hss_stop = reinterpret_cast<JLINK_HSS_Stop_Fn>(required(dll, "JLINK_HSS_Stop"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted || !arm_read_mem || !arm_read_u32 || !arm_version || !hss_start || !hss_read || !hss_stop) {
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted || !arm_halt || !arm_read_mem || !arm_read_u32 || !arm_version || !hss_start || !hss_read || !hss_stop) {
     FreeLibrary(dll);
     error_json("HSS_EXPORT_MISSING", "required JLINKARM/JLINK_HSS exports missing", dll_utf8);
     return 0;
@@ -4874,6 +4997,14 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
     error_json(selection_error_code, selection_error_reason, dll_utf8, true);
+    return 0;
+  }
+  TargetStateGuardEvidence before_capture;
+  if (!enforce_expected_target_state(arm_halted, arm_halt, expected_target_state, &before_capture)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    target_state_guard_error_json("target state changed before HSS capture start", expected_target_state, before_capture, close_crashed);
     return 0;
   }
   const uint64_t connect_ordinal = artifact_match_connection.connected();
@@ -5010,6 +5141,21 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     std::cout << "}";
     return 0;
   }
+  TargetStateGuardEvidence after_start;
+  if (!enforce_expected_target_state(arm_halted, arm_halt, expected_target_state, &after_start)) {
+    bool stop_crashed = false;
+    (void)call_hss_stop(hss_stop, &stop_crashed);
+    const bool raw_closed = raw_writer.finalize();
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    target_state_guard_error_json(
+      raw_closed && !stop_crashed ? "HSS start changed target state; capture was stopped" : "HSS start changed target state and cleanup was incomplete",
+      expected_target_state,
+      after_start,
+      close_crashed || stop_crashed || !raw_closed);
+    return 0;
+  }
   uint64_t started_tick = 0;
   if (!qpc_delta_ns(hss_start_qpc, qpc_epoch, actual_qpc_frequency, &started_tick)) {
     const bool raw_closed = raw_writer.finalize();
@@ -5028,7 +5174,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const auto publish_ready_heartbeat = [&](int64_t counter) {
     const bool published = counter >= 0 && write_text_file_a(ready_file, "{\"status\":\"ready\",\"captureId\":\"" + escape(capture_id)
       + "\",\"helperNonce\":\"" + escape(helper_instance_nonce) + "\",\"pid\":" + std::to_string(GetCurrentProcessId())
-      + ",\"qpcCounter\":\"" + std::to_string(counter) + "\",\"heartbeatSequence\":" + std::to_string(heartbeat_sequence++) + "}");
+      + ",\"qpcCounter\":\"" + std::to_string(counter) + "\",\"heartbeatSequence\":" + std::to_string(heartbeat_sequence++)
+      + ",\"expectedTargetState\":\"" + expected_target_state + "\",\"targetState\":\""
+      + (after_start.finalRaw > 0 ? "halted" : "running") + "\",\"statePreserved\":true}");
     if (!published) ready_journal_write_failed = true;
     else last_heartbeat_ns = now_ns();
     return published;

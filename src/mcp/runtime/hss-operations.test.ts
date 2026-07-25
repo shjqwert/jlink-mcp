@@ -19,6 +19,7 @@ import {
   type HssMemoryResponse,
   type HssMemoryTransaction,
   type HssRuntimeFacts,
+  type HssTargetState,
   type HssTimebase,
 } from "./hss-helper-adapter";
 import { HssOperations, type HssCaptureInput } from "./hss-operations";
@@ -226,6 +227,160 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal(String((exported.data as { exportFile: string }).exportFile).startsWith(join(fixture.root, "output", "acceptance-run", "exports")), true);
     const notInterrupted = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(notInterrupted.error?.code, "CAPTURE_NOT_INTERRUPTED");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS capability, dry-run, and start restore an unexpected halted-to-running transition and fail closed", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.capabilityStateAfter = "running";
+
+    const capability = await fixture.hss.capability(fixture.projectRoot);
+    assert.equal(capability.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.restoreCount, 1);
+
+    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
+    assert.equal(dryRun.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.restoreCount, 2);
+
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.restoreCount, 3);
+    assert.equal(fixture.adapter.launchCount, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS stop restores an unexpected halted-to-running transition and reports failure", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "halted";
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    fixture.adapter.stopStateAfter = "running";
+
+    const stopped = await fixture.hss.stop({
+      projectRoot: fixture.projectRoot,
+      captureId: String((started.data as { captureId: string }).captureId),
+    });
+    assert.equal(stopped.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.restoreCount, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS startup failure restores halted state after the helper exits", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.restoreCount, 1);
+    assert.equal(fixture.adapter.launchCount, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS startup failure retains the owner until halted state restoration succeeds", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    fixture.adapter.failRestore = true;
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.error?.code, "HSS_TARGET_STATE_RESTORE_FAILED");
+    const captureId = String((started.data as { captureId: string }).captureId);
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.details?.captureId, captureId);
+    const pending = JSON.parse(readFileSync(join(fixture.root, "state", "hss-sessions", `${captureId}.json`), "utf8")) as {
+      statePreservationPending?: boolean;
+    };
+    assert.equal(pending.statePreservationPending, true);
+
+    fixture.adapter.failRestore = false;
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true, JSON.stringify(status.error));
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+    assert.equal((status.data as { session: { statePreservationPending?: boolean } }).session.statePreservationPending, false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS constructor resumes terminal target-state settlement after a process restart", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "halted";
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    const captureId = String((started.data as { captureId: string }).captureId);
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+    const sessionFile = join(fixture.root, "state", "hss-sessions", `${captureId}.json`);
+    const terminal = JSON.parse(readFileSync(sessionFile, "utf8")) as Record<string, unknown>;
+    writeFileSync(sessionFile, JSON.stringify({ ...terminal, statePreservationPending: true }));
+
+    new HssOperations(
+      fixture.store,
+      fixture.queue,
+      fixture.artifacts,
+      fixture.adapter,
+      join(fixture.root, "output"),
+      join(fixture.root, "state"),
+      join(fixture.root, "session-work"),
+    );
+    await waitFor(() => {
+      const recovered = JSON.parse(readFileSync(sessionFile, "utf8")) as { statePreservationPending?: boolean };
+      return recovered.statePreservationPending === false;
+    });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS terminal settlement restores halted state after an already-exited helper", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "halted";
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    fixture.adapter.targetState = "running";
+    fixture.adapter.crashLatest();
+
+    const stopped = await fixture.hss.stop({
+      projectRoot: fixture.projectRoot,
+      captureId: String((started.data as { captureId: string }).captureId),
+    });
+    assert.equal(stopped.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.restoreCount, 1);
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS never resumes an initially running target to repair a state mismatch", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "running";
+    fixture.adapter.capabilityStateAfter = "halted";
+    const capability = await fixture.hss.capability(fixture.projectRoot);
+    assert.equal(capability.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(fixture.adapter.restoreCount, 0);
+    assert.equal(fixture.adapter.targetState, "halted");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -658,6 +813,14 @@ function captureInput(fixture: Fixture, count: number, rateHz: number, durationS
   return { projectRoot: fixture.projectRoot, rateHz, durationSec, variables: Array.from({ length: count }, (_, index) => ({ ref: fixture.ref(index) })), ...(runId ? { runId } : {}) };
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for fixture condition");
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 class FixtureResolver implements TypedSymbolResolver {
   constructor(private readonly counterType: "uint8" | "uint32") {}
 
@@ -710,7 +873,13 @@ class FakeHssAdapter implements HssHelperAdapter {
   failNextMemoryAcknowledge = false;
   failMemoryReceiptInspection = false;
   failReadyWithReusedPid = false;
+  failReadyAndExitStateAfter?: HssTargetState;
   terminateCount = 0;
+  targetState: HssTargetState = "running";
+  capabilityStateAfter?: HssTargetState;
+  stopStateAfter?: HssTargetState;
+  restoreCount = 0;
+  failRestore = false;
   counterGapAt?: number;
   counterGapFrames = 0;
   counterStart = 0;
@@ -725,10 +894,18 @@ class FakeHssAdapter implements HssHelperAdapter {
   }
 
   async capability(_target: StoredTarget, runtime?: HssRuntimeFacts): Promise<HssCapabilityFacts> {
+    if (this.capabilityStateAfter) this.targetState = this.capabilityStateAfter;
     return { ...(runtime ?? await this.inspectRuntime()), available: true, hardware: { maxBlocks: 10, maxFreq: this.maxFreq, flags: 0, raw: [10, this.maxFreq, 0] }, effective: HSS_EFFECTIVE_LIMITS, observed: { fake: true } };
   }
 
-  async observeTargetState(): Promise<"running"> { return "running"; }
+  async observeTargetState(): Promise<HssTargetState> { return this.targetState; }
+
+  async restoreHaltedState(): Promise<"halted"> {
+    this.restoreCount += 1;
+    if (this.failRestore) throw new Error("fixture halted-state restoration failed");
+    this.targetState = "halted";
+    return "halted";
+  }
 
   async qpcTimebase(): Promise<HssTimebase> {
     this.qpcEpochMs = Date.now();
@@ -737,7 +914,7 @@ class FakeHssAdapter implements HssHelperAdapter {
 
   async launchCapture(_runtime: HssRuntimeFacts, control: HssCaptureControlFiles): Promise<HssCaptureLaunch> {
     this.launchCount += 1;
-    const plan = JSON.parse(readFileSync(control.planPath, "utf8")) as { captureId: string; helperInstanceNonce: string; outputFile: string; symbols: Array<{ name: string }> };
+    const plan = JSON.parse(readFileSync(control.planPath, "utf8")) as { captureId: string; helperInstanceNonce: string; outputFile: string; expectedTargetState: "running" | "halted"; symbols: Array<{ name: string }> };
     const packageDir = join(plan.outputFile, "..", "..");
     for (let sampleIndex = 0; sampleIndex < 12; sampleIndex += 1) {
       appendJcapV1Sample(packageDir, {
@@ -749,7 +926,7 @@ class FakeHssAdapter implements HssHelperAdapter {
     }
     const pid = this.nextPid++;
     writeFileSync(control.pidFile, JSON.stringify({ captureId: plan.captureId, helperNonce: plan.helperInstanceNonce, pid }), { encoding: "utf8", flag: "wx" });
-    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId: plan.captureId, helperNonce: plan.helperInstanceNonce, pid, qpcCounter: this.qpc.toString(), heartbeatSequence: 0 }), { encoding: "utf8", flag: "wx" });
+    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId: plan.captureId, helperNonce: plan.helperInstanceNonce, pid, qpcCounter: this.qpc.toString(), heartbeatSequence: 0, expectedTargetState: plan.expectedTargetState, targetState: plan.expectedTargetState, statePreserved: true }), { encoding: "utf8", flag: "wx" });
     this.alive.add(pid);
     this.pidForControl.set(control.planPath, pid);
     this.records.set(control.planPath, []);
@@ -761,11 +938,18 @@ class FakeHssAdapter implements HssHelperAdapter {
     }, 10);
     timer.unref();
     this.sampleTimers.set(pid, timer);
-    return { pid, launchedAt: new Date().toISOString(), captureId: plan.captureId, helperNonce: plan.helperInstanceNonce };
+    return { pid, launchedAt: new Date().toISOString(), captureId: plan.captureId, helperNonce: plan.helperInstanceNonce, expectedTargetState: plan.expectedTargetState };
   }
 
   async waitUntilReady(control: HssCaptureControlFiles, launch: HssCaptureLaunch): Promise<void> {
     const ready = JSON.parse(readFileSync(control.readyFile, "utf8")) as { status?: string; captureId?: string; helperNonce?: string; pid?: number };
+    if (this.failReadyAndExitStateAfter) {
+      this.targetState = this.failReadyAndExitStateAfter;
+      this.failReadyAndExitStateAfter = undefined;
+      this.alive.delete(launch.pid);
+      this.stopSampling(launch.pid);
+      throw new HssAdapterError("HSS_HELPER_EXITED_BEFORE_READY", "fixture helper exited before readiness", false, true);
+    }
     if (this.failReadyWithReusedPid) {
       this.failReadyWithReusedPid = false;
       this.ignoreNextStopRequest = true;
@@ -832,6 +1016,7 @@ class FakeHssAdapter implements HssHelperAdapter {
     }
     const pid = this.pidForControl.get(control.planPath)!;
     this.alive.delete(pid);
+    if (this.stopStateAfter) this.targetState = this.stopStateAfter;
     this.stopSampling(pid);
     this.records.set(control.planPath, [{
       record: "result",

@@ -56,6 +56,7 @@ import {
   type HssMemoryResponse,
   type HssMemoryTransaction,
   type HssRuntimeFacts,
+  type HssTargetState,
 } from "./hss-helper-adapter";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
 import { ProbeQueue, ProbeQueueError, type ProbeOwner } from "./probe-queue";
@@ -124,6 +125,8 @@ interface PreparedQualityOracle {
 interface HssStartPreflight {
   target: StoredTarget;
   capability: HssCapabilityFacts;
+  targetStateBefore: Exclude<HssTargetState, "unknown">;
+  targetStateAfter: Exclude<HssTargetState, "unknown">;
   artifact: ArtifactGeneration;
   nonvolatileRanges: Array<{ start: number; end: number }>;
   ramRanges: Array<{ start: number; end: number }>;
@@ -155,6 +158,8 @@ interface HssSessionRecord {
   qpcFrequency: string;
   configuredInterface?: StoredTarget["interface"];
   configuredSpeedKHz?: number;
+  expectedTargetState?: Exclude<HssTargetState, "unknown">;
+  statePreservationPending?: boolean;
   rateHz: number;
   durationSec: number;
   descriptors: JcapV1VariableDescriptor[];
@@ -193,7 +198,9 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     mkdirSync(this.sessionWorkRoot, { recursive: true });
     this.query = new JcapV1QueryService(this.outputRoot, captureMutationGuard);
     try {
-      for (const session of this.sessions()) if (ACTIVE_SESSION_STATES.has(session.state)) this.scheduleMonitor(session.captureId);
+      for (const session of this.sessions()) {
+        if (ACTIVE_SESSION_STATES.has(session.state) || session.statePreservationPending) this.scheduleMonitor(session.captureId);
+      }
     } catch { /* explicit hss_status surfaces malformed durable session records */ }
   }
 
@@ -208,14 +215,15 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       const execution = await this.queue.runExclusive(target.probeSerial, async () => {
         const current = this.targets.requireCurrent(target);
         const runtime = await this.adapter.inspectRuntime(current);
-        return this.adapter.capability(current, runtime);
+        return this.capabilityPreservingTargetState(current, runtime);
       });
       applyQueue(envelope, execution);
-      envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null };
-      envelope.data = execution.value;
-      envelope.observedEffects = execution.value.available ? ["probe_connected", "hss_capability_observed"] : [];
+      envelope.before = { ...envelope.before, targetState: execution.value.targetStateBefore };
+      envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, targetState: execution.value.targetStateAfter };
+      envelope.data = execution.value.capability;
+      envelope.observedEffects = execution.value.capability.available ? ["probe_connected", "hss_capability_observed"] : [];
       envelope.verification = { status: "observed", method: "helper_abi_and_JLINK_HSS_GetCaps" };
-      if (!execution.value.available) envelope.warnings.push("HSS is unavailable; no fallback backend was selected.");
+      if (!execution.value.capability.available) envelope.warnings.push("HSS is unavailable; no fallback backend was selected.");
       return finishEnvelope(envelope, true);
     } catch (error) {
       return this.failure(envelope, error, "capability");
@@ -261,12 +269,154 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     const target = this.targets.requireCurrent(prepared.target);
     if (this.activeSession(target.projectRoot)) throw new HssOperationError("CAPTURE_ACTIVE", "an active capture owns this Target; no second Helper was started", true);
     if (target.liveArtifactMatch.status !== "verified") throw new HssOperationError("ARTIFACT_NOT_VERIFIED", "symbol HSS requires a verified live Artifact match");
-    const capability = await this.adapter.capability(target, runtime);
+    const preserved = await this.capabilityPreservingTargetState(target, runtime);
+    const capability = preserved.capability;
     if (!capability.available) throw new HssOperationError(capability.errorCode ?? "HSS_UNAVAILABLE", capability.reason ?? "HSS capability is unavailable", true);
     if (prepared.rateHz > Math.floor(capability.hardware?.maxFreq ?? 0)) throw new HssOperationError("HSS_RATE_UNSUPPORTED", `rateHz ${prepared.rateHz} exceeds hardware maxFreq ${capability.hardware?.maxFreq ?? 0}`);
     if (prepared.blockCount > (capability.hardware?.maxBlocks ?? 0)) throw new HssOperationError("HSS_BLOCK_LIMIT", `capture needs ${prepared.blockCount} blocks but hardware reports ${capability.hardware?.maxBlocks ?? 0}`);
     const capture = await this.validateCapturePrerequisites({ ...prepared, target }, runtime);
-    return { target, capability, ...capture };
+    return { target, capability, targetStateBefore: preserved.targetStateBefore, targetStateAfter: preserved.targetStateAfter, ...capture };
+  }
+
+  private async capabilityPreservingTargetState(
+    target: StoredTarget,
+    runtime: HssRuntimeFacts,
+  ): Promise<{
+    capability: HssCapabilityFacts;
+    targetStateBefore: Exclude<HssTargetState, "unknown">;
+    targetStateAfter: Exclude<HssTargetState, "unknown">;
+  }> {
+    const before = await this.adapter.observeTargetState(target, runtime);
+    if (before === "unknown") {
+      throw new HssOperationError("HSS_TARGET_STATE_OBSERVE_FAILED", "HSS capability requires a known pre-operation target state", true, false, true);
+    }
+    let capability: HssCapabilityFacts | undefined;
+    let capabilityError: unknown;
+    try {
+      capability = await this.adapter.capability(target, runtime, before);
+    } catch (error) {
+      capabilityError = error;
+    }
+    let after: HssTargetState = "unknown";
+    let observationError: unknown;
+    try {
+      after = await this.adapter.observeTargetState(target, runtime);
+    } catch (error) {
+      observationError = error;
+    }
+    if (after !== before || observationError) {
+      if (before === "halted") {
+        try {
+          const restored = await this.adapter.restoreHaltedState(target, runtime);
+          if (restored !== "halted") throw new Error(`restoration returned ${restored}`);
+        } catch (error) {
+          throw new HssOperationError(
+            "HSS_TARGET_STATE_RESTORE_FAILED",
+            `HSS capability changed or obscured the halted target state and restoration failed: ${error instanceof Error ? error.message : String(error)}`,
+            false,
+            false,
+            true,
+          );
+        }
+      }
+      throw new HssOperationError(
+        observationError ? "HSS_TARGET_STATE_OBSERVE_FAILED" : "HSS_TARGET_STATE_CHANGED",
+        observationError
+          ? "HSS capability completed without a trustworthy post-operation target-state observation"
+          : `HSS capability changed target state from ${before} to ${after}; halted state was restored when authorized`,
+        false,
+        false,
+        Boolean(observationError) || before !== "halted",
+      );
+    }
+    if (capabilityError) throw capabilityError;
+    if (!capability?.available && capability?.errorCode && (
+      capability.errorCode === "HSS_TARGET_STATE_CHANGED"
+      || capability.errorCode === "HSS_TARGET_STATE_RESTORE_FAILED"
+      || capability.errorCode === "HSS_TARGET_STATE_OBSERVE_FAILED"
+    )) {
+      throw new HssOperationError(
+        capability.errorCode,
+        capability.reason ?? "HSS capability changed or obscured target state",
+        false,
+        false,
+        capability.errorCode !== "HSS_TARGET_STATE_CHANGED",
+      );
+    }
+    return { capability: capability!, targetStateBefore: before, targetStateAfter: after };
+  }
+
+  private async verifyTargetStateAfterHelper(
+    target: StoredTarget,
+    runtime: HssRuntimeFacts,
+    expected: Exclude<HssTargetState, "unknown">,
+  ): Promise<Exclude<HssTargetState, "unknown">> {
+    let observed: HssTargetState = "unknown";
+    let observationError: unknown;
+    try {
+      observed = await this.adapter.observeTargetState(target, runtime);
+    } catch (error) {
+      observationError = error;
+    }
+    if (!observationError && observed === expected) return observed;
+    if (expected === "halted") {
+      try {
+        const restored = await this.adapter.restoreHaltedState(target, runtime);
+        if (restored !== "halted") throw new Error(`restoration returned ${restored}`);
+      } catch (error) {
+        throw new HssOperationError(
+          "HSS_TARGET_STATE_RESTORE_FAILED",
+          `HSS helper exited without preserving halted state and restoration failed: ${error instanceof Error ? error.message : String(error)}`,
+          false,
+          false,
+          true,
+        );
+      }
+    }
+    throw new HssOperationError(
+      observationError ? "HSS_TARGET_STATE_OBSERVE_FAILED" : "HSS_TARGET_STATE_CHANGED",
+      observationError
+        ? "HSS helper exited without a trustworthy target-state observation"
+        : `HSS helper changed target state from ${expected} to ${observed}; halted state was restored when authorized`,
+      false,
+      false,
+      expected !== "halted",
+    );
+  }
+
+  private async settleTargetStateAndOwner(session: HssSessionRecord): Promise<void> {
+    const visibleOwner = this.queue.getOwner(session.probeSerial);
+    const ownerMatches = visibleOwner?.kind === "hss"
+      && visibleOwner.projectRoot === session.projectRoot
+      && visibleOwner.targetGeneration === session.targetGeneration
+      && visibleOwner.details?.captureId === session.captureId;
+    await this.queue.runExclusive(session.probeSerial, async () => {
+      let current = this.readSession(session.captureId);
+      if (current.expectedTargetState) {
+        const target = this.targets.require(current.projectRoot);
+        try {
+          await this.verifyTargetStateAfterHelper(target, current.runtime, current.expectedTargetState);
+        } catch (error) {
+          const normalized = normalizeHssError(error instanceof Error ? error : new Error(String(error)), "HSS_TARGET_STATE_OBSERVE_FAILED", false);
+          if (normalized.stateUnknown) throw error;
+          current = {
+            ...current,
+            state: "failed",
+            updatedAt: new Date().toISOString(),
+            endedAt: new Date().toISOString(),
+            lastError: { code: normalized.code, message: normalized.message },
+          };
+        }
+      }
+      current = { ...current, statePreservationPending: false, updatedAt: new Date().toISOString() };
+      this.writeSession(current);
+      const owner = this.queue.getOwner(current.probeSerial);
+      if (owner?.token === current.ownerToken) this.queue.releaseOwner(current.probeSerial, current.ownerToken);
+    }, ownerMatches ? {
+      allowedOwnerKinds: ["hss"],
+      ownerTarget: { projectRoot: session.projectRoot, targetGeneration: session.targetGeneration },
+      requiredOwner: visibleOwner!,
+    } : {});
   }
 
   private async validateCapturePrerequisites(prepared: PreparedCapture, runtime: HssRuntimeFacts): Promise<Pick<HssStartPreflight, "artifact" | "nonvolatileRanges" | "ramRanges">> {
@@ -305,7 +455,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       const execution = await this.queue.runExclusive(prepared.target.probeSerial, async () => this.preflightStart(prepared, runtime));
       const layout = frameLayout(prepared);
       applyQueue(envelope, execution);
-      envelope.before = { targetGeneration: execution.value.target.generation, artifactGeneration: execution.value.target.artifact!.generation, owner: this.queue.getOwner(execution.value.target.probeSerial) ?? null };
+      envelope.before = { targetGeneration: execution.value.target.generation, artifactGeneration: execution.value.target.artifact!.generation, owner: this.queue.getOwner(execution.value.target.probeSerial) ?? null, targetState: execution.value.targetStateBefore };
       envelope.after = envelope.before;
       envelope.data = {
         dryRun: true,
@@ -390,6 +540,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
           qpcFrequency: created.qpcFrequency,
           configuredInterface: current.interface,
           configuredSpeedKHz: current.speed,
+          expectedTargetState: preflight.targetStateBefore,
           rateHz: prepared.rateHz,
           durationSec: prepared.durationSec,
           descriptors: prepared.variables.map(({ descriptor }) => descriptor),
@@ -431,6 +582,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
           }));
           return session;
         } catch (error) {
+          let terminalError: unknown = error;
           if (launch?.pid) {
             try { await this.adapter.requestStop(created.control); } catch { /* best-effort cleanup of the just-created helper */ }
             const deadline = Date.now() + 2_000;
@@ -443,9 +595,6 @@ export class HssOperations implements CaptureVariableAccessDelegate {
               if (captureIdentityConfirmed) {
                 try { this.adapter.terminate(launch.pid); } catch { /* owner remains fail-closed when termination cannot be proven */ }
               }
-            }
-            if (!this.adapter.isAlive(launch.pid) && claimedOwner) {
-              try { this.queue.releaseOwner(current.probeSerial, claimedOwner.token); } catch { /* already released or replaced */ }
             }
             if (this.adapter.isAlive(launch.pid)) {
               let failClosedOwner = claimedOwner ?? this.queue.getOwner(current.probeSerial);
@@ -475,16 +624,35 @@ export class HssOperations implements CaptureVariableAccessDelegate {
             }
           }
           if (!launch?.pid || !this.adapter.isAlive(launch.pid)) {
-            this.finalizeCreatedFailure(created.packageDir, error);
+            let statePreservationPending = false;
+            if (launch?.pid) {
+              try {
+                await this.verifyTargetStateAfterHelper(current, runtime, preflight.targetStateBefore);
+              } catch (stateError) {
+                terminalError = stateError;
+                statePreservationPending = normalizeHssError(
+                  stateError instanceof Error ? stateError : new Error(String(stateError)),
+                  "HSS_TARGET_STATE_OBSERVE_FAILED",
+                  false,
+                ).stateUnknown;
+              }
+            }
+            this.finalizeCreatedFailure(created.packageDir, terminalError);
             this.updateSession(created.captureId, (provisional) => ({
               ...provisional,
               state: "failed",
+              statePreservationPending,
               updatedAt: new Date().toISOString(),
               endedAt: new Date().toISOString(),
-              lastError: { code: errorCode(error, "HSS_START_FAILED"), message: error instanceof Error ? error.message : String(error) },
+              lastError: { code: errorCode(terminalError, "HSS_START_FAILED"), message: terminalError instanceof Error ? terminalError.message : String(terminalError) },
             }));
+            if (!statePreservationPending && claimedOwner) {
+              try { this.queue.releaseOwner(current.probeSerial, claimedOwner.token); } catch { /* already released or replaced */ }
+            } else if (statePreservationPending) {
+              this.scheduleMonitor(created.captureId);
+            }
           }
-          const normalized = normalizeHssError(error instanceof Error ? error : new Error(String(error)), "HSS_START_FAILED", false);
+          const normalized = normalizeHssError(terminalError instanceof Error ? terminalError : new Error(String(terminalError)), "HSS_START_FAILED", false);
           throw new HssOperationError(normalized.code, normalized.message, normalized.retryable, normalized.writeIssued, normalized.stateUnknown, { captureId: created.captureId, packageDir: created.packageDir });
         }
       }, localMemoryOwner ? {
@@ -574,7 +742,13 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       session = await this.reconcileSession(session.captureId);
       if (session.helperPid !== initialSession.helperPid) envelope.observedEffects.push("helper_pid_recovered_from_start_journal");
       if (session.ownerToken !== initialSession.ownerToken) envelope.observedEffects.push("probe_owner_reconciled");
-      if (ACTIVE_SESSION_STATES.has(session.state) && !this.adapter.isAlive(session.helperPid) && !this.startupJournalPending(session)) {
+      if (TERMINAL_SESSION_STATES.has(session.state) && session.statePreservationPending) {
+        const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
+        await this.settle(session.captureId);
+        session = this.readSession(session.captureId);
+        envelope.observedEffects.push("target_state_reconciled");
+        if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
+      } else if (ACTIVE_SESSION_STATES.has(session.state) && !this.adapter.isAlive(session.helperPid) && !this.startupJournalPending(session)) {
         const databaseExisted = existsSync(join(session.packageDir, "capture.db"));
         const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
         const settlement = await this.settle(session.captureId);
@@ -662,6 +836,9 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         if (!existsSync(session.sessionDir)) envelope.observedEffects.push("session_work_cleaned");
         envelope.warnings.push("The helper had already exited; available Raw data was finalized without issuing a stop request.");
         envelope.verification = { status: "observed", method: "terminal_jcap_state_after_helper_exit" };
+        if (session.lastError?.code.startsWith("HSS_TARGET_STATE_")) {
+          throw new HssOperationError(session.lastError.code, session.lastError.message);
+        }
         return finishEnvelope(envelope, session.state !== "failed");
       }
       const guarded = await this.captureExclusive(session.captureId, async () => {
@@ -711,6 +888,9 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       if (!existsSync(session.sessionDir)) envelope.observedEffects.push("session_work_cleaned");
       if (existsSync(join(session.packageDir, "capture.db"))) envelope.observedEffects.push("capture_index_ready");
       envelope.verification = { status: session.state === "stopped" || session.state === "completed" ? "verified" : "observed", method: "terminal_jcap_state_and_helper_exit" };
+      if (session.lastError?.code.startsWith("HSS_TARGET_STATE_")) {
+        throw new HssOperationError(session.lastError.code, session.lastError.message);
+      }
       return finishEnvelope(envelope, session.state !== "failed");
     } catch (error) {
       return this.failure(envelope, error, "stop");
@@ -727,7 +907,12 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       session = await this.reconcileSession(session.captureId);
       envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid), raw: safeMetadata(session.packageDir) };
       if (this.adapter.isAlive(session.helperPid) || this.startupJournalPending(session)) throw new HssOperationError("CAPTURE_ACTIVE", "an active or starting helper cannot be recovered; call hss_stop or hss_status", true);
-      if (ACTIVE_SESSION_STATES.has(session.state)) {
+      if (TERMINAL_SESSION_STATES.has(session.state) && session.statePreservationPending) {
+        const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
+        await this.settle(session.captureId);
+        envelope.observedEffects.push("target_state_reconciled");
+        if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
+      } else if (ACTIVE_SESSION_STATES.has(session.state)) {
         const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
         const settlement = await this.settle(session.captureId);
         envelope.observedEffects.push("capture_finalized");
@@ -1339,6 +1524,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       durationSec: prepared.durationSec,
       readMode: "periodic",
       resumeBeforeStart: false,
+      expectedTargetState: preflight.targetStateBefore,
       requireFirstSampleIndexZero: false,
       postConnectStabilityRequired: false,
       qualityOracle: prepared.qualityOracle ?? null,
@@ -1401,6 +1587,11 @@ export class HssOperations implements CaptureVariableAccessDelegate {
       let session: HssSessionRecord;
       try { session = this.readSession(captureId); } catch { return; }
       if (TERMINAL_SESSION_STATES.has(session.state)) {
+        if (session.statePreservationPending) {
+          try { await this.settle(captureId); }
+          catch { await delay(250); continue; }
+          return;
+        }
         try { this.queue.releaseOwner(session.probeSerial, session.ownerToken); } catch { /* only the owning MCP process may release a still-live owner record */ }
         return;
       }
@@ -1495,7 +1686,14 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     return this.captureExclusive(captureId, async () => {
       let session = this.readSession(captureId);
       if (TERMINAL_SESSION_STATES.has(session.state)) {
-        try { this.queue.releaseOwner(session.probeSerial, session.ownerToken); } catch { /* another live MCP may still own the record */ }
+        if (session.statePreservationPending) {
+          await this.settleTargetStateAndOwner(session);
+          session = this.readSession(captureId);
+          this.preserveSessionLogs(session);
+          this.cleanupSessionWork(session);
+        } else {
+          try { this.queue.releaseOwner(session.probeSerial, session.ownerToken); } catch { /* another live MCP may still own the record */ }
+        }
         return { recovered: 0 };
       }
       if (this.adapter.isAlive(session.helperPid)) return { recovered: 0 };
@@ -1552,6 +1750,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
           updatedAt: new Date().toISOString(),
           endedAt: new Date().toISOString(),
           result: result ? sanitizeResult(result) : undefined,
+          statePreservationPending: Boolean(session.expectedTargetState),
           ...(state === "failed" ? { lastError: { code: String(result?.errorCode ?? session.lastError?.code ?? "HSS_CAPTURE_FAILED"), message: String(result?.reason ?? session.lastError?.message ?? "HSS capture failed") } } : {}),
         };
       } catch (error) {
@@ -1562,10 +1761,12 @@ export class HssOperations implements CaptureVariableAccessDelegate {
           endedAt: new Date().toISOString(),
           lastError: { code: errorCode(error, "HSS_FINALIZE_FAILED"), message: error instanceof Error ? error.message : String(error) },
           result: result ? sanitizeResult(result) : undefined,
+          statePreservationPending: Boolean(session.expectedTargetState),
         };
       }
       this.writeSession(session);
-      try { this.queue.releaseOwner(session.probeSerial, session.ownerToken); } catch { /* a restarted MCP observes stale-resource cleanup through ProbeQueue */ }
+      await this.settleTargetStateAndOwner(session);
+      session = this.readSession(captureId);
       this.preserveSessionLogs(session);
       this.cleanupSessionWork(session);
       return { recovered: memoryRecovery.count };

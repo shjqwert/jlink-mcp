@@ -55,8 +55,8 @@ test("native adapter accepts only an exact live Helper ready journal", async () 
   const control = controlFiles(root);
   const adapter = new NativeHssHelperAdapter();
   try {
-    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId, helperNonce, pid: process.pid, qpcCounter: "123", heartbeatSequence: 0 }));
-    const launch = { pid: process.pid, launchedAt: new Date().toISOString(), captureId, helperNonce };
+    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId, helperNonce, pid: process.pid, qpcCounter: "123", heartbeatSequence: 0, expectedTargetState: "halted", targetState: "halted", statePreserved: true }));
+    const launch = { pid: process.pid, launchedAt: new Date().toISOString(), captureId, helperNonce, expectedTargetState: "halted" as const };
     await adapter.waitUntilReady(control, launch, 100);
     writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId: "53000000-0000-4000-8000-000000000001", helperNonce, pid: process.pid, qpcCounter: "123", heartbeatSequence: 0 }));
     await assert.rejects(

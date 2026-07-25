@@ -65,6 +65,7 @@ export interface HssCaptureLaunch {
   launchedAt: string;
   captureId: string;
   helperNonce: string;
+  expectedTargetState: Exclude<HssTargetState, "unknown">;
 }
 
 export interface HssMemoryRequest {
@@ -106,8 +107,9 @@ export interface HssMemoryTransaction {
 export interface HssHelperAdapter {
   readonly backend: HssRuntimeFacts["backend"];
   inspectRuntime(target: StoredTarget): Promise<HssRuntimeFacts>;
-  capability(target: StoredTarget, runtime?: HssRuntimeFacts): Promise<HssCapabilityFacts>;
+  capability(target: StoredTarget, runtime: HssRuntimeFacts | undefined, expectedTargetState: Exclude<HssTargetState, "unknown">): Promise<HssCapabilityFacts>;
   observeTargetState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState>;
+  restoreHaltedState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState>;
   qpcTimebase(runtime: HssRuntimeFacts): Promise<HssTimebase>;
   launchCapture(runtime: HssRuntimeFacts, control: HssCaptureControlFiles): Promise<HssCaptureLaunch>;
   waitUntilReady(control: HssCaptureControlFiles, launch: HssCaptureLaunch, timeoutMs?: number): Promise<void>;
@@ -195,7 +197,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
     }
   }
 
-  async capability(target: StoredTarget, supplied?: HssRuntimeFacts): Promise<HssCapabilityFacts> {
+  async capability(target: StoredTarget, supplied: HssRuntimeFacts | undefined, expectedTargetState: Exclude<HssTargetState, "unknown">): Promise<HssCapabilityFacts> {
     const runtime = supplied ?? await this.inspectRuntime(target);
     if (!runtime.available || !runtime.helperPath || !runtime.runtimePath) return { ...runtime, effective: HSS_EFFECTIVE_LIMITS };
     try {
@@ -208,13 +210,18 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
         "--serial", target.probeSerial,
         "--speed", String(target.speed),
         "--jlink-script-mode", "none",
+        "--expected-target-state", expectedTargetState,
       ], 30_000);
       if (observed.status !== "ok") {
+        const code = String(observed.errorCode ?? "HSS_CAPABILITY_FAILED");
+        if (code === "HSS_TARGET_STATE_CHANGED" || code === "HSS_TARGET_STATE_RESTORE_FAILED" || code === "HSS_TARGET_STATE_OBSERVE_FAILED") {
+          throw new HssAdapterError(code, String(observed.reason ?? "HSS capability changed or obscured target state"), false, observed.stateUnknown === true);
+        }
         return {
           ...runtime,
           available: false,
           effective: HSS_EFFECTIVE_LIMITS,
-          errorCode: String(observed.errorCode ?? "HSS_CAPABILITY_FAILED"),
+          errorCode: code,
           reason: String(observed.reason ?? "JLINK_HSS_GetCaps failed"),
           observed: sanitizeObserved(observed),
         };
@@ -262,6 +269,30 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
     return hssTargetStateFromConnectPreflight(observed);
   }
 
+  async restoreHaltedState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState> {
+    assertRuntimeIdentity(runtime);
+    const observed = await runJson(runtime.helperPath, [
+      "cpu-control",
+      "--dll", runtime.runtimePath,
+      "--dll-sha256", runtime.runtimeSha256,
+      "--device", target.device,
+      "--interface", target.interface,
+      "--serial", target.probeSerial,
+      "--speed", String(target.speed),
+      "--operation", "halt",
+      "--jlink-script-mode", "none",
+    ], 30_000);
+    if (observed.status !== "ok" || observed.afterState !== "halted" || observed.haltIssued !== true) {
+      throw new HssAdapterError(
+        String(observed.errorCode ?? "HSS_TARGET_STATE_RESTORE_FAILED"),
+        String(observed.reason ?? "HSS target state could not be restored to halted"),
+        false,
+        true,
+      );
+    }
+    return "halted";
+  }
+
   async qpcTimebase(runtime: HssRuntimeFacts): Promise<HssTimebase> {
     assertRuntimeIdentity(runtime);
     const value = await runJson(runtime.helperPath, ["qpc-timebase"], 10_000);
@@ -276,7 +307,10 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
     const plan = readBoundedJson(control.planPath, 1024 * 1024, "HSS_PLAN_INVALID");
     const captureId = typeof plan.captureId === "string" ? plan.captureId : "";
     const helperNonce = typeof plan.helperInstanceNonce === "string" ? plan.helperInstanceNonce : "";
-    if (!UUID.test(captureId) || !UUID.test(helperNonce)) throw new HssAdapterError("HSS_PLAN_INVALID", "the capture plan is missing its immutable capture/helper identity");
+    const expectedTargetState = plan.expectedTargetState;
+    if (!UUID.test(captureId) || !UUID.test(helperNonce) || expectedTargetState !== "halted" && expectedTargetState !== "running") {
+      throw new HssAdapterError("HSS_PLAN_INVALID", "the capture plan is missing its immutable capture/helper identity or expected target state");
+    }
     mkdirSync(dirname(control.stdoutPath), { recursive: true });
     const stdout = openSync(control.stdoutPath, "ax");
     const stderr = openSync(control.stderrPath, "ax");
@@ -295,7 +329,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       if (!child.pid) throw new HssAdapterError("HSS_HELPER_START_FAILED", "the native helper did not provide a process ID", true);
       child.on("error", () => undefined);
       child.unref();
-      return { pid: child.pid, launchedAt: new Date().toISOString(), captureId, helperNonce };
+      return { pid: child.pid, launchedAt: new Date().toISOString(), captureId, helperNonce, expectedTargetState };
     } catch (error) {
       if (error instanceof HssAdapterError) throw error;
       throw new HssAdapterError("HSS_HELPER_START_FAILED", error instanceof Error ? error.message : String(error), true);
@@ -312,7 +346,8 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
         const ready = readBoundedJson(control.readyFile, 16 * 1024, "HSS_READY_INVALID");
         if (ready.status !== "ready" || ready.pid !== launch.pid || ready.captureId !== launch.captureId || ready.helperNonce !== launch.helperNonce
           || typeof ready.qpcCounter !== "string" || !/^\d+$/.test(ready.qpcCounter)
-          || !Number.isSafeInteger(ready.heartbeatSequence) || Number(ready.heartbeatSequence) < 0) {
+          || !Number.isSafeInteger(ready.heartbeatSequence) || Number(ready.heartbeatSequence) < 0
+          || ready.expectedTargetState !== launch.expectedTargetState || ready.targetState !== launch.expectedTargetState || ready.statePreserved !== true) {
           throw new HssAdapterError("HSS_READY_INVALID", "the Helper ready journal does not match the launched process", false, true);
         }
         return;
