@@ -13,6 +13,7 @@ const EXPECTED_TOOLS = [
   "read_variable", "write_variable", "read_memory", "write_memory", "core_register_access", "peripheral_register_access",
   "target_control", "flash", "erase",
   "hss_start", "hss_status", "hss_stop", "hss_recover",
+  "debug_sequence_execute",
   "capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_export_csv",
   "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
   "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close",
@@ -57,7 +58,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
     for (const tool of tools) assert.ok(tool.inputSchema.properties?.runId, `${tool.name} must accept optional runId evidence routing`);
-    assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 36-tool list");
+    assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 37-tool list");
     for (const name of ["target_control", "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "flash", "erase", "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close", "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command", "hss_start"] as const) {
       const schema = tools.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
       assert.ok(schema.properties?.projectRoot, `${name} must expose projectRoot`);

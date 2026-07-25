@@ -1,0 +1,348 @@
+import { performance } from "node:perf_hooks";
+import type { VariableRefInput, VariableWriteInput } from "./artifact-operations";
+import type { HssCaptureInput } from "./hss-operations";
+import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
+
+export type DebugSequenceStep =
+  | ({ atMs: number; action: "hss_start" } & Omit<HssCaptureInput, "projectRoot" | "dryRun" | "runId">)
+  | { atMs: number; action: "write_variable"; ref: VariableRefInput; value: number; captureOld?: boolean; verify?: boolean; restore?: boolean }
+  | { atMs: number; action: "read_variable"; ref: VariableRefInput }
+  | { atMs: number; action: "hss_stop" };
+
+export type DebugSequenceCleanup =
+  | { action: "restore_variable"; ref: VariableRefInput; value: number }
+  | { action: "hss_stop" };
+
+export interface DebugSequenceInput {
+  projectRoot: string;
+  steps: DebugSequenceStep[];
+  cleanup?: DebugSequenceCleanup[];
+  timeoutMs?: number;
+}
+
+export interface DebugSequenceArtifactOperations {
+  resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{ resolved: { region: string } }>;
+  readVariable(projectRoot: string, ref: VariableRefInput): Promise<OperationEnvelope>;
+  writeVariable(input: VariableWriteInput): Promise<OperationEnvelope>;
+}
+
+export interface DebugSequenceHssOperations {
+  plan(input: HssCaptureInput): Promise<OperationEnvelope>;
+  start(input: HssCaptureInput): Promise<OperationEnvelope>;
+  stop(input: { projectRoot: string; captureId?: string }): Promise<OperationEnvelope>;
+}
+
+export interface DebugSequenceScheduler {
+  now(): number;
+  wait(delayMs: number, signal?: AbortSignal): Promise<void>;
+}
+
+interface StepResult {
+  index: number;
+  action: DebugSequenceStep["action"];
+  plannedAtMs: number;
+  actualAtMs: number;
+  delayMs: number;
+  queueDelayMs: number;
+  durationMs: number;
+  ok: boolean;
+  result: Record<string, unknown>;
+}
+
+const defaultScheduler: DebugSequenceScheduler = {
+  now: () => performance.now(),
+  wait: (delayMs, signal) => abortableDelay(delayMs, signal),
+};
+
+export class DebugSequenceExecutor {
+  constructor(
+    private readonly artifacts: DebugSequenceArtifactOperations,
+    private readonly hss: DebugSequenceHssOperations,
+    private readonly scheduler: DebugSequenceScheduler = defaultScheduler,
+  ) {}
+
+  async execute(input: DebugSequenceInput, signal?: AbortSignal): Promise<OperationEnvelope> {
+    const envelope = createOperationEnvelope("debug_sequence_execute");
+    let plannedDurationMs = 0;
+    let timeoutMs = 0;
+    try {
+      ({ plannedDurationMs, timeoutMs } = await this.preflight(input));
+    } catch (error) {
+      return failEnvelope(envelope, sequenceError("DEBUG_SEQUENCE_INVALID", "preflight", error));
+    }
+
+    envelope.requestedEffects = ["execute_timed_debug_sequence"];
+    const sequenceStartedAt = this.scheduler.now();
+    const deadline = sequenceStartedAt + timeoutMs;
+    const steps: StepResult[] = [];
+    const cleanup: Array<{ action: DebugSequenceCleanup["action"]; ok: boolean; result: Record<string, unknown> }> = [];
+    const createdCaptures: string[] = [];
+    const attemptedWriteRefs = new Set<string>();
+    let failure: { code: string; message: string; state: "failed" | "timed_out" | "cancelled" } | undefined;
+
+    for (let index = 0; index < input.steps.length; index += 1) {
+      const step = input.steps[index];
+      try {
+        this.assertCanContinue(signal, deadline);
+        const targetAt = sequenceStartedAt + step.atMs;
+        if (targetAt > deadline) throw new DebugSequenceError("DEBUG_SEQUENCE_TIMEOUT", "sequence deadline occurs before the next planned step");
+        await this.scheduler.wait(Math.max(0, targetAt - this.scheduler.now()), signal);
+        this.assertCanContinue(signal, deadline);
+      } catch (error) {
+        failure = classifySequenceFailure(error);
+        break;
+      }
+
+      const dispatchedAt = this.scheduler.now();
+      let result: OperationEnvelope;
+      try {
+        if (step.action === "write_variable") attemptedWriteRefs.add(refKey(step.ref));
+        result = await this.executeStep(input.projectRoot, step, createdCaptures);
+      } catch (error) {
+        result = failEnvelope(createOperationEnvelope(step.action), sequenceError("DEBUG_SEQUENCE_STEP_FAILED", "dispatch", error));
+      }
+      const completedAt = this.scheduler.now();
+      steps.push({
+        index,
+        action: step.action,
+        plannedAtMs: step.atMs,
+        actualAtMs: Math.max(0, Math.round(dispatchedAt - sequenceStartedAt)),
+        delayMs: Math.max(0, Math.round(dispatchedAt - sequenceStartedAt - step.atMs)),
+        queueDelayMs: queueDelayMs(result),
+        durationMs: Math.max(0, Math.round(completedAt - dispatchedAt)),
+        ok: result.ok,
+        result: boundedResult(result),
+      });
+      if (!result.ok) {
+        failure = {
+          code: "DEBUG_SEQUENCE_STEP_FAILED",
+          message: `${step.action} failed: ${result.error?.code ?? "UNKNOWN_ERROR"} ${result.error?.message ?? ""}`.trim(),
+          state: "failed",
+        };
+        break;
+      }
+      try {
+        this.assertCanContinue(signal, deadline);
+      } catch (error) {
+        failure = classifySequenceFailure(error);
+        break;
+      }
+    }
+
+    if (failure) {
+      for (const action of input.cleanup ?? []) {
+        const result = await this.executeCleanup(input.projectRoot, action, createdCaptures, attemptedWriteRefs);
+        cleanup.push({ action: action.action, ok: result.ok, result: boundedResult(result) });
+      }
+    }
+
+    const actualDurationMs = Math.max(0, Math.round(this.scheduler.now() - sequenceStartedAt));
+    envelope.data = {
+      state: failure?.state ?? "completed",
+      plannedDurationMs,
+      actualDurationMs,
+      timeoutMs,
+      steps,
+      cleanup,
+      createdCaptureIds: createdCaptures,
+    };
+    envelope.observedEffects = steps.filter(({ ok }) => ok).map(({ action }) => `sequence_${action}_completed`);
+    if (cleanup.length > 0) envelope.observedEffects.push("sequence_cleanup_executed");
+    envelope.verification = {
+      status: failure ? "failed" : "observed",
+      method: "monotonic_absolute_schedule_and_operation_envelopes",
+    };
+    if (failure) {
+      return failEnvelope(envelope, {
+        code: failure.code,
+        stage: "sequence",
+        message: failure.message,
+        retryable: false,
+        writeIssued: steps.some(({ result }) => result.error && (result.error as { writeIssued?: unknown }).writeIssued === true)
+          || envelope.observedEffects.some((effect) => effect.includes("write_variable")),
+        stateUnknown: cleanup.some(({ ok }) => !ok),
+      });
+    }
+    return finishEnvelope(envelope, true);
+  }
+
+  private async preflight(input: DebugSequenceInput): Promise<{ plannedDurationMs: number; timeoutMs: number }> {
+    if (!input.projectRoot) throw new Error("projectRoot is required");
+    if (!Array.isArray(input.steps) || input.steps.length < 2 || input.steps.length > 32) throw new Error("steps must contain 2..32 actions");
+    if (!Array.isArray(input.cleanup ?? []) || (input.cleanup?.length ?? 0) > 4) throw new Error("cleanup must contain at most 4 actions");
+    let previousAt = -1;
+    let activeCapturePlanned = false;
+    for (const step of input.steps) {
+      if (!Number.isSafeInteger(step.atMs) || step.atMs < 0 || step.atMs > 30_000 || step.atMs < previousAt) throw new Error("step atMs values must be monotonic safe integers within 0..30000");
+      previousAt = step.atMs;
+      if (step.action === "hss_start") {
+        if (activeCapturePlanned) throw new Error("a sequence cannot start another HSS capture before stopping its own capture");
+        const planned = await this.hss.plan({ projectRoot: input.projectRoot, ...captureInput(step) });
+        if (!planned.ok) throw new Error(`hss_start preflight failed: ${planned.error?.code ?? "UNKNOWN_ERROR"} ${planned.error?.message ?? ""}`.trim());
+        activeCapturePlanned = true;
+      } else if (step.action === "hss_stop") {
+        if (!activeCapturePlanned) throw new Error("hss_stop requires a preceding sequence hss_start");
+        activeCapturePlanned = false;
+      } else {
+        await this.artifacts.resolveCaptureVariable(input.projectRoot, step.ref);
+      }
+    }
+    for (const action of input.cleanup ?? []) {
+      if (action.action === "restore_variable") {
+        const resolved = await this.artifacts.resolveCaptureVariable(input.projectRoot, action.ref);
+        if (resolved.resolved.region !== "ram") throw new Error("cleanup restore_variable requires a typed RAM variable");
+      }
+    }
+    const plannedDurationMs = input.steps.at(-1)!.atMs;
+    if (plannedDurationMs < 1_000 || plannedDurationMs > 30_000) throw new Error("the planned sequence duration must be 1000..30000 ms");
+    const timeoutMs = input.timeoutMs ?? Math.min(60_000, plannedDurationMs + 10_000);
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < plannedDurationMs || timeoutMs > 60_000) throw new Error("timeoutMs must cover the planned duration and be at most 60000 ms");
+    return { plannedDurationMs, timeoutMs };
+  }
+
+  private async executeStep(projectRoot: string, step: DebugSequenceStep, createdCaptures: string[]): Promise<OperationEnvelope> {
+    switch (step.action) {
+      case "hss_start": {
+        const result = await this.hss.start({ projectRoot, ...captureInput(step) });
+        const captureId = isRecord(result.data) && typeof result.data.captureId === "string" ? result.data.captureId : undefined;
+        if (result.ok && !captureId) return failEnvelope(result, sequenceError("DEBUG_SEQUENCE_CAPTURE_ID_MISSING", "hss_start", new Error("hss_start returned no captureId")));
+        if (captureId) createdCaptures.push(captureId);
+        return result;
+      }
+      case "write_variable":
+        return this.artifacts.writeVariable({
+          projectRoot,
+          ref: step.ref,
+          value: step.value,
+          captureOld: step.captureOld,
+          verify: step.verify ?? true,
+          restore: step.restore,
+        });
+      case "read_variable":
+        return this.artifacts.readVariable(projectRoot, step.ref);
+      case "hss_stop": {
+        const captureId = createdCaptures.at(-1);
+        if (!captureId) return failEnvelope(createOperationEnvelope("hss_stop"), sequenceError("DEBUG_SEQUENCE_CAPTURE_MISSING", "hss_stop", new Error("no sequence-created HSS capture is available")));
+        return this.hss.stop({ projectRoot, captureId });
+      }
+    }
+  }
+
+  private async executeCleanup(
+    projectRoot: string,
+    action: DebugSequenceCleanup,
+    createdCaptures: string[],
+    attemptedWriteRefs: ReadonlySet<string>,
+  ): Promise<OperationEnvelope> {
+    try {
+      if (action.action === "restore_variable") {
+        if (!attemptedWriteRefs.has(refKey(action.ref))) {
+          const skipped = createOperationEnvelope("restore_variable");
+          skipped.data = { skipped: true, reason: "matching_sequence_write_not_dispatched" };
+          return finishEnvelope(skipped, true);
+        }
+        return await this.artifacts.writeVariable({
+          projectRoot,
+          ref: action.ref,
+          value: action.value,
+          captureOld: false,
+          verify: true,
+          restore: false,
+        });
+      }
+      const captureId = createdCaptures.at(-1);
+      if (!captureId) return finishEnvelope(createOperationEnvelope("hss_stop"), true);
+      return await this.hss.stop({ projectRoot, captureId });
+    } catch (error) {
+      return failEnvelope(createOperationEnvelope(action.action), sequenceError("DEBUG_SEQUENCE_CLEANUP_FAILED", "cleanup", error));
+    }
+  }
+
+  private assertCanContinue(signal: AbortSignal | undefined, deadline: number): void {
+    if (signal?.aborted) throw new DebugSequenceError("DEBUG_SEQUENCE_CANCELLED", "the MCP client cancelled the debug sequence");
+    if (this.scheduler.now() > deadline) throw new DebugSequenceError("DEBUG_SEQUENCE_TIMEOUT", "the debug sequence exceeded timeoutMs");
+  }
+}
+
+class DebugSequenceError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+function captureInput(step: Extract<DebugSequenceStep, { action: "hss_start" }>): Omit<HssCaptureInput, "projectRoot"> {
+  return {
+    variables: step.variables,
+    writeVariables: step.writeVariables,
+    rateHz: step.rateHz,
+    durationSec: step.durationSec,
+    qualityOracle: step.qualityOracle,
+  };
+}
+
+function classifySequenceFailure(error: unknown): { code: string; message: string; state: "failed" | "timed_out" | "cancelled" } {
+  if (error instanceof DebugSequenceError && error.code === "DEBUG_SEQUENCE_CANCELLED") return { code: error.code, message: error.message, state: "cancelled" };
+  if (error instanceof DebugSequenceError && error.code === "DEBUG_SEQUENCE_TIMEOUT") return { code: error.code, message: error.message, state: "timed_out" };
+  return { code: "DEBUG_SEQUENCE_STEP_FAILED", message: error instanceof Error ? error.message : String(error), state: "failed" };
+}
+
+function sequenceError(code: string, stage: string, error: unknown): {
+  code: string;
+  stage: string;
+  message: string;
+  retryable: boolean;
+  writeIssued: boolean;
+  stateUnknown: boolean;
+} {
+  return {
+    code,
+    stage,
+    message: error instanceof Error ? error.message : String(error),
+    retryable: false,
+    writeIssued: false,
+    stateUnknown: false,
+  };
+}
+
+function queueDelayMs(envelope: OperationEnvelope): number {
+  const queuedAt = envelope.timestamps.queuedAt;
+  const startedAt = envelope.timestamps.startedAt;
+  if (!queuedAt || !startedAt) return 0;
+  const queued = Date.parse(queuedAt);
+  const started = Date.parse(startedAt);
+  return Number.isFinite(queued) && Number.isFinite(started) ? Math.max(0, started - queued) : 0;
+}
+
+function boundedResult(envelope: OperationEnvelope): Record<string, unknown> {
+  return {
+    ok: envelope.ok,
+    error: envelope.error ?? null,
+    verification: envelope.verification ?? null,
+    data: envelope.data ?? null,
+    capture: envelope.capture ?? null,
+  };
+}
+
+function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (delayMs <= 0) return signal?.aborted ? Promise.reject(signal.reason ?? new Error("cancelled")) : Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(signal?.reason ?? new Error("cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function refKey(ref: VariableRefInput): string {
+  return typeof ref === "string" ? ref : JSON.stringify(ref);
+}

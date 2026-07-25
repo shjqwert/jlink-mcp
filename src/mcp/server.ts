@@ -18,6 +18,7 @@ import { SessionOperations } from "./runtime/session-operations";
 import { TargetRuntimeRegistry } from "./runtime/target-runtime";
 import { TargetStore, type StoredTarget, type TargetConfigureInput } from "./runtime/target-store";
 import { HssOperations, type HssCaptureInput } from "./runtime/hss-operations";
+import { DebugSequenceExecutor, type DebugSequenceInput } from "./runtime/debug-sequence";
 
 export interface JLinkMcpServerOptions {
   cwd?: string;
@@ -32,6 +33,7 @@ export const AGENT_TOOL_NAMES = [
   "read_variable", "write_variable", "read_memory", "write_memory", "core_register_access", "peripheral_register_access",
   "target_control", "flash", "erase",
   "hss_start", "hss_status", "hss_stop", "hss_recover",
+  "debug_sequence_execute",
   "capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_export_csv",
   "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
   "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close",
@@ -87,6 +89,7 @@ const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   hss_status: "Report an HSS capture lifecycle and quality counters.",
   hss_stop: "Stop an active HSS capture and finalize available data.",
   hss_recover: "Recover and index the trustworthy prefix of an interrupted HSS capture.",
+  debug_sequence_execute: "Synchronously execute one bounded multi-step debug sequence on a monotonic local schedule.",
   capture_list: "List bounded local JCAP v1 captures.",
   capture_summary: "Return bounded provenance, lifecycle, variables, quality, and counts for a capture.",
   capture_series: "Return bounded aggregate time-series buckets for selected variables and ticks.",
@@ -140,6 +143,7 @@ export class JLinkMcpServer {
   private readonly registers: SvdRegisterService;
   private readonly sessions: SessionOperations;
   private readonly hss: HssOperations;
+  private readonly sequence: DebugSequenceExecutor;
   private readonly evidence: AcceptanceEvidenceStore;
   private readonly implemented = new Set<AgentToolName>();
 
@@ -168,6 +172,7 @@ export class JLinkMcpServer {
       this.memorySessions,
     );
     this.artifacts.setCaptureWriteDelegate(this.hss);
+    this.sequence = new DebugSequenceExecutor(this.artifacts, this.hss);
     this.server = new McpServer({ name: "jlink-mcp", version: "0.3.2" });
     this.registerTools();
     this.registerResources();
@@ -331,17 +336,18 @@ export class JLinkMcpServer {
     this.registerEnvelopeTool("diagnose_crash", projectRootInput, (input) => this.diagnoseCrash(String(input.projectRoot)));
 
     const hssVariable = z.object({ ref: variableRef, alias: z.string().min(1).max(128).optional(), unit: z.string().min(1).max(64).optional() }).strict();
+    const hssQualityOracle = z.object({
+      ref: variableRef,
+      expectedIncrement: z.number().int().min(1).max(0xffff_ffff),
+      tolerance: z.number().int().min(0).max(0xffff_ffff),
+    }).strict();
     const hssCapture = {
       ...projectRootInput,
       variables: z.array(hssVariable).min(1).max(10),
       writeVariables: z.array(variableRef).max(32).optional(),
       rateHz: z.number().int().min(1).max(1_000),
       durationSec: z.number().int().min(1).max(60),
-      qualityOracle: z.object({
-        ref: variableRef,
-        expectedIncrement: z.number().int().min(1).max(0xffff_ffff),
-        tolerance: z.number().int().min(0).max(0xffff_ffff),
-      }).strict().optional(),
+      qualityOracle: hssQualityOracle.optional(),
       dryRun: z.boolean().default(false),
       runId: acceptanceRunId.optional(),
     };
@@ -350,6 +356,38 @@ export class JLinkMcpServer {
     this.registerEnvelopeTool("hss_status", hssSelector, (input) => this.hss.status({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
     this.registerEnvelopeTool("hss_stop", hssSelector, (input) => this.hss.stop({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
     this.registerEnvelopeTool("hss_recover", hssSelector, (input) => this.hss.recover({ projectRoot: String(input.projectRoot), captureId: input.captureId as string | undefined }));
+    const sequenceStep = z.discriminatedUnion("action", [
+      z.object({
+        atMs: z.number().int().min(0).max(30_000),
+        action: z.literal("hss_start"),
+        variables: z.array(hssVariable).min(1).max(10),
+        writeVariables: z.array(variableRef).max(32).optional(),
+        rateHz: z.number().int().min(1).max(1_000),
+        durationSec: z.number().int().min(1).max(60),
+        qualityOracle: hssQualityOracle.optional(),
+      }).strict(),
+      z.object({
+        atMs: z.number().int().min(0).max(30_000),
+        action: z.literal("write_variable"),
+        ref: variableRef,
+        value: z.number(),
+        captureOld: z.boolean().optional(),
+        verify: z.boolean().optional(),
+        restore: z.boolean().optional(),
+      }).strict(),
+      z.object({ atMs: z.number().int().min(0).max(30_000), action: z.literal("read_variable"), ref: variableRef }).strict(),
+      z.object({ atMs: z.number().int().min(0).max(30_000), action: z.literal("hss_stop") }).strict(),
+    ]);
+    const sequenceCleanup = z.discriminatedUnion("action", [
+      z.object({ action: z.literal("restore_variable"), ref: variableRef, value: z.number() }).strict(),
+      z.object({ action: z.literal("hss_stop") }).strict(),
+    ]);
+    this.registerEnvelopeTool("debug_sequence_execute", {
+      ...projectRootInput,
+      steps: z.array(sequenceStep).min(2).max(32),
+      cleanup: z.array(sequenceCleanup).max(4).optional(),
+      timeoutMs: z.number().int().min(1_000).max(60_000).optional(),
+    }, (input, signal) => this.sequence.execute(input as unknown as DebugSequenceInput, signal));
     this.registerEnvelopeTool("capture_list", { limit: z.number().int().min(1).max(100).default(50), cursor: z.string().optional() },
       (input) => this.hss.captureList({ limit: Number(input.limit), cursor: input.cursor as string | undefined }));
     this.registerEnvelopeTool("capture_summary", { captureId: z.string().uuid() }, (input) => this.hss.captureSummary(String(input.captureId)));
@@ -442,14 +480,14 @@ export class JLinkMcpServer {
   private registerEnvelopeTool(
     name: AgentToolName,
     inputSchema: Record<string, z.ZodType>,
-    handler: (input: Record<string, unknown>) => OperationEnvelope | Promise<OperationEnvelope>,
+    handler: (input: Record<string, unknown>, signal?: AbortSignal) => OperationEnvelope | Promise<OperationEnvelope>,
   ): void {
     this.implemented.add(name);
     const schemaWithRunId = Object.hasOwn(inputSchema, "runId") ? inputSchema : { ...inputSchema, runId: acceptanceRunId.optional() };
-    this.server.registerTool(name, { description: TOOL_DESCRIPTIONS[name], inputSchema: schemaWithRunId }, async (input) => {
+    this.server.registerTool(name, { description: TOOL_DESCRIPTIONS[name], inputSchema: schemaWithRunId }, async (input, extra) => {
       const requestedRunId = (input as Record<string, unknown>).runId;
       const execute = async (): Promise<OperationEnvelope> => {
-        try { return await handler(input as Record<string, unknown>); }
+        try { return await handler(input as Record<string, unknown>, extra.signal); }
         catch (error) {
           return failEnvelope(createOperationEnvelope(name), {
             code: "INTERNAL_ERROR",
