@@ -225,6 +225,53 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
   }
 });
 
+test("HSS writeVariables permit immutable capture-owner writes without consuming sample slots", async () => {
+  const fixture = await createFixture();
+  try {
+    const started = await fixture.hss.start({
+      ...captureInput(fixture, 1, 100, 1),
+      writeVariables: [fixture.ref(2)],
+    });
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    const captureId = String((started.data as { captureId: string }).captureId);
+    const packageDir = String((started.data as { packageDir: string }).packageDir);
+    const metadata = JSON.parse(readFileSync(join(packageDir, "capture.json"), "utf8")) as {
+      variables: Array<{ logicalIdentity: string }>;
+    };
+    assert.deepEqual(metadata.variables.map(({ logicalIdentity }) => logicalIdentity), ["var0"]);
+
+    const readWriteOnly = await fixture.artifacts.readVariable(fixture.projectRoot, fixture.ref(2));
+    assert.equal(readWriteOnly.ok, true, JSON.stringify(readWriteOnly.error));
+    assert.equal((readWriteOnly.data as { typedValue: number }).typedValue, 0);
+
+    const writeOnly = await fixture.artifacts.writeVariable({
+      projectRoot: fixture.projectRoot,
+      ref: fixture.ref(2),
+      value: 1,
+      captureOld: true,
+      verify: true,
+      restore: true,
+    });
+    assert.equal(writeOnly.ok, true, JSON.stringify(writeOnly.error));
+    assert.equal((writeOnly.data as { verificationConnection: string }).verificationConnection, "capture_owner");
+    assert.equal(fixture.adapter.valueAt(0x20000008), 0);
+
+    const undeclared = await fixture.artifacts.writeVariable({
+      projectRoot: fixture.projectRoot,
+      ref: fixture.ref(3),
+      value: 1,
+    });
+    assert.equal(undeclared.error?.code, "VARIABLE_NOT_IN_CAPTURE");
+
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+    const raw = readJcapV1Raw(packageDir);
+    assert.equal(raw.events.filter((event) => event.type === "variable_write").length, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("HSS quality reports no-source captures as partial and indexes target-counter gaps", async () => {
   const fixture = await createFixture();
   try {

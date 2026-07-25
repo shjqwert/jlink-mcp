@@ -38,7 +38,7 @@ import {
 } from "../jcap/jcap-v1";
 import { ANALYSIS_V0_MAX_POINTS } from "../jcap/analysis-v0";
 import type {
-  CaptureVariableWriteDelegate,
+  CaptureVariableAccessDelegate,
   ArtifactVariableService,
   VariableRefInput,
   VariableWriteInput,
@@ -83,6 +83,7 @@ export interface HssQualityOracleInput {
 export interface HssCaptureInput {
   projectRoot: string;
   variables: HssVariableInput[];
+  writeVariables?: VariableRefInput[];
   rateHz: number;
   durationSec: number;
   qualityOracle?: HssQualityOracleInput;
@@ -105,6 +106,7 @@ interface PreparedVariable {
 interface PreparedCapture {
   target: StoredTarget;
   variables: PreparedVariable[];
+  writeVariables: PreparedVariable[];
   rateHz: number;
   durationSec: number;
   qualityOracle?: PreparedQualityOracle;
@@ -154,6 +156,7 @@ interface HssSessionRecord {
   rateHz: number;
   durationSec: number;
   descriptors: JcapV1VariableDescriptor[];
+  writeDescriptors?: JcapV1VariableDescriptor[];
   qualityOracle?: PreparedQualityOracle;
   runtime: HssRuntimeFacts;
   capability: HssCapabilityFacts;
@@ -161,7 +164,7 @@ interface HssSessionRecord {
   lastError?: { code: string; message: string };
 }
 
-export class HssOperations implements CaptureVariableWriteDelegate {
+export class HssOperations implements CaptureVariableAccessDelegate {
   readonly query: JcapV1QueryService;
   private readonly sessionsRoot: string;
   private readonly outputRoot: string;
@@ -227,6 +230,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         ready: runtime.available,
         backend: this.adapter.backend,
         variables: prepared.variables.map(({ descriptor }) => ({ ...descriptor } as Record<string, unknown>)),
+        writeVariables: prepared.writeVariables.map(({ descriptor }) => ({ ...descriptor } as Record<string, unknown>)),
         rateHz: prepared.rateHz,
         durationSec: prepared.durationSec,
         requestedSamples: prepared.rateHz * prepared.durationSec,
@@ -301,6 +305,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         dryRun: true,
         backend: this.adapter.backend,
         variables: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed } as Record<string, unknown>)),
+        writeVariables: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed } as Record<string, unknown>)),
         rateHz: prepared.rateHz,
         durationSec: prepared.durationSec,
         requestedSamples: prepared.rateHz * prepared.durationSec,
@@ -376,6 +381,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
           rateHz: prepared.rateHz,
           durationSec: prepared.durationSec,
           descriptors: prepared.variables.map(({ descriptor }) => descriptor),
+          writeDescriptors: prepared.writeVariables.map(({ descriptor }) => descriptor),
           ...(prepared.qualityOracle ? { qualityOracle: prepared.qualityOracle } : {}),
           runtime,
           capability,
@@ -485,6 +491,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         packageDir: execution.value.packageDir,
         limits: HSS_EFFECTIVE_LIMITS,
         variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
+        writeVariableResolution: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
       };
       envelope.outputFiles = packageFiles(execution.value.packageDir);
       envelope.observedEffects = ["hss_helper_started", "hss_helper_ready", "probe_owner_claimed", "jcap_capture_active"];
@@ -509,6 +516,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
           packageDir: settled.packageDir,
           limits: HSS_EFFECTIVE_LIMITS,
           variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
+          writeVariableResolution: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
         };
         envelope.outputFiles = packageFiles(settled.packageDir);
         envelope.observedEffects = ["hss_helper_started", "probe_owner_claimed", "helper_exited_during_start", "capture_finalized", "probe_owner_released"];
@@ -729,6 +737,57 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     }
   }
 
+  async tryReadVariable(target: StoredTarget, resolved: ResolvedSymbol): Promise<OperationEnvelope | undefined> {
+    const session = this.activeSession(target.projectRoot);
+    if (!session) return undefined;
+    const envelope = createOperationEnvelope("read_variable", target);
+    const logicalIdentity = symbolLogicalIdentity(resolved.ref);
+    const descriptor = [...session.descriptors, ...(session.writeDescriptors ?? [])].find((current) => current.logicalIdentity === logicalIdentity
+      && current.artifactGeneration === resolved.ref.artifactGeneration
+      && current.layoutHash === resolved.ref.layoutHash
+      && current.address.toLowerCase() === hexAddress(resolved.address)
+      && current.type === resolved.type
+      && current.size === resolved.size);
+    if (!descriptor) return this.failure(envelope, new HssOperationError("VARIABLE_NOT_IN_CAPTURE", "capture-aware reads require an immutable descriptor-declared variable"), "capture_descriptor");
+    if (session.state !== "capturing") return this.failure(envelope, new HssOperationError("CAPTURE_NOT_READABLE", `capture is ${session.state}`), "capture_state");
+    return this.captureExclusive(session.captureId, async () => {
+      try {
+        let activeSession = this.readSession(session.captureId);
+        if (activeSession.state !== "capturing") throw new HssOperationError("CAPTURE_NOT_READABLE", `capture is ${activeSession.state}`);
+        activeSession = this.discoverHelperPid(activeSession);
+        if (!this.captureHelperAlive(activeSession)) throw new HssOperationError("HSS_HELPER_IDENTITY_UNVERIFIED", "capture Helper identity or heartbeat is unavailable", true, false, true);
+        activeSession = await this.ensureSessionOwner(activeSession);
+        const owner = this.requiredOwner(activeSession);
+        const execution = await this.queue.runExclusive(target.probeSerial, async () => {
+          const current = this.targets.requireCurrent(target);
+          assertArtifactBindingsCurrent(current);
+          if (current.liveArtifactMatch.status !== "verified") throw new HssOperationError("ARTIFACT_NOT_VERIFIED", "capture-aware read requires a verified live Artifact match");
+          if (!this.captureHelperAlive(activeSession)) throw new HssOperationError("HSS_HELPER_IDENTITY_UNVERIFIED", "capture Helper identity or heartbeat is unavailable", true, false, true);
+          return this.readViaOwner(activeSession, resolved, randomUUID());
+        }, {
+          allowedOwnerKinds: ["hss"],
+          ownerTarget: { projectRoot: target.projectRoot, targetGeneration: target.generation },
+          requiredOwner: owner,
+        });
+        applyQueue(envelope, execution);
+        envelope.before = { captureId: activeSession.captureId };
+        envelope.after = { captureId: activeSession.captureId };
+        envelope.capture = captureSummary(this.readSession(activeSession.captureId));
+        envelope.data = {
+          address: hexAddress(resolved.address),
+          byteCount: resolved.size,
+          dataHex: execution.value.toString("hex"),
+          captureId: activeSession.captureId,
+          readConnection: "capture_owner",
+        };
+        envelope.verification = { status: "observed", method: "capture_owner_read" };
+        return finishEnvelope(envelope, true);
+      } catch (error) {
+        return this.failure(envelope, error, "capture_read");
+      }
+    });
+  }
+
   async tryWriteVariable(
     input: VariableWriteInput,
     target: StoredTarget,
@@ -740,7 +799,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     if (!session) return undefined;
     const envelope = createOperationEnvelope("write_variable", target);
     const logicalIdentity = symbolLogicalIdentity(resolved.ref);
-    const descriptor = session.descriptors.find((current) => current.logicalIdentity === logicalIdentity
+    const descriptor = [...session.descriptors, ...(session.writeDescriptors ?? [])].find((current) => current.logicalIdentity === logicalIdentity
       && current.artifactGeneration === resolved.ref.artifactGeneration
       && current.layoutHash === resolved.ref.layoutHash
       && current.address.toLowerCase() === hexAddress(resolved.address)
@@ -1087,6 +1146,34 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         },
       });
     }
+    const writeVariables: PreparedVariable[] = [];
+    const writeLogical = new Set<string>();
+    for (const ref of input.writeVariables ?? []) {
+      const current = await this.artifacts.resolveCaptureVariable(target.projectRoot, ref);
+      if (current.target.generation !== target.generation) throw new HssOperationError("TARGET_GENERATION_CHANGED", "Target generation changed during HSS write-variable resolution", true);
+      const resolved = current.resolved;
+      if (!resolved.hssEligible || resolved.region !== "ram" || resolved.source !== "elf-dwarf" || resolved.confidence !== "dwarf") throw new HssOperationError("HSS_WRITE_VARIABLE_INELIGIBLE", `${symbolLogicalIdentity(resolved.ref)} is not a verified typed DWARF RAM scalar`);
+      if (resolved.endian !== "little") throw new HssOperationError("HSS_ENDIAN_UNSUPPORTED", `${symbolLogicalIdentity(resolved.ref)} uses unsupported ${resolved.endian}-endian encoding`);
+      const identity = symbolLogicalIdentity(resolved.ref);
+      if (!NATIVE_HSS_SCALAR_TYPES.has(resolved.type) || resolved.size !== hssTypedByteSize(resolved.type)) throw new HssOperationError("HSS_SCALAR_UNSUPPORTED", `${identity} is not one of the native JCAP scalar layouts`);
+      if (Buffer.byteLength(identity, "utf8") > 256) throw new HssOperationError("HSS_VARIABLE_NAME_TOO_LONG", "write-variable logical identities must be at most 256 UTF-8 bytes");
+      if (logical.has(identity)) continue;
+      if (writeLogical.has(identity)) throw new HssOperationError("HSS_WRITE_VARIABLE_DUPLICATE", `duplicate HSS write variable: ${identity}`);
+      writeLogical.add(identity);
+      writeVariables.push({
+        requested: { ref },
+        resolved,
+        cacheRefreshed: current.cacheRefreshed,
+        descriptor: {
+          logicalIdentity: identity,
+          type: resolved.type,
+          address: hexAddress(resolved.address),
+          size: resolved.size,
+          artifactGeneration: resolved.ref.artifactGeneration,
+          layoutHash: resolved.ref.layoutHash,
+        },
+      });
+    }
     let qualityOracle: PreparedQualityOracle | undefined;
     if (input.qualityOracle) {
       if (!Number.isSafeInteger(input.qualityOracle.expectedIncrement) || input.qualityOracle.expectedIncrement < 1
@@ -1113,6 +1200,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
     return {
       target,
       variables: prepared,
+      writeVariables,
       rateHz: input.rateHz,
       durationSec: input.durationSec,
       ...(qualityOracle ? { qualityOracle } : {}),
@@ -1267,6 +1355,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
         rateHz: prepared.rateHz,
         durationSec: prepared.durationSec,
         descriptors: prepared.variables.map(({ descriptor }) => descriptor),
+        writeDescriptors: prepared.writeVariables.map(({ descriptor }) => descriptor),
         ...(prepared.qualityOracle ? { qualityOracle: prepared.qualityOracle } : {}),
         runtime,
         capability,
@@ -1562,7 +1651,7 @@ export class HssOperations implements CaptureVariableWriteDelegate {
   private appendRecoveredMemoryTransaction(session: HssSessionRecord, transaction: HssMemoryTransaction): void {
     const request = transaction.request;
     const context = request.eventContext;
-    const descriptor = context && session.descriptors.find((candidate) => candidate.logicalIdentity === context.logicalIdentity
+    const descriptor = context && [...session.descriptors, ...(session.writeDescriptors ?? [])].find((candidate) => candidate.logicalIdentity === context.logicalIdentity
       && candidate.address.toLowerCase() === String(request.address ?? "").toLowerCase()
       && candidate.size === request.length);
     const bytesHex = request.bytesHex;
@@ -2156,6 +2245,7 @@ function validateSession(value: HssSessionRecord, captureId: string): void {
     || !value.control || !value.control.planPath || !value.control.pidFile || !value.control.readyFile || !value.control.stdoutPath || !value.control.stderrPath || !value.control.stopFile || !value.control.requestFile || !value.control.claimFile || !value.control.responseFile
     || !Number.isSafeInteger(value.helperPid) || value.helperPid < 0 || !provisional && value.helperPid < 1 || !value.ownerToken || !provisional && value.ownerToken === "pending"
     || !UUID.test(value.helperNonce) || !/^\d+$/.test(value.qpcEpochCounter) || !/^\d+$/.test(value.qpcFrequency) || BigInt(value.qpcFrequency) < 1n || !Array.isArray(value.descriptors)
+    || value.writeDescriptors !== undefined && !Array.isArray(value.writeDescriptors)
     || value.qualityOracle !== undefined && (!value.qualityOracle.logicalIdentity || !Number.isSafeInteger(value.qualityOracle.expectedIncrement) || value.qualityOracle.expectedIncrement < 1
       || !Number.isSafeInteger(value.qualityOracle.tolerance) || value.qualityOracle.tolerance < 0 || !Number.isSafeInteger(value.qualityOracle.modulus) || value.qualityOracle.modulus < 2
       || value.qualityOracle.expectedIncrement + value.qualityOracle.tolerance >= value.qualityOracle.modulus)) throw new HssOperationError("HSS_SESSION_INVALID", `invalid HSS session record: ${basename(captureId)}`);

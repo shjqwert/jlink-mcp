@@ -334,6 +334,7 @@ export class JLinkMcpServer {
     const hssCapture = {
       ...projectRootInput,
       variables: z.array(hssVariable).min(1).max(10),
+      writeVariables: z.array(variableRef).max(32).optional(),
       rateHz: z.number().int().min(1).max(1_000),
       durationSec: z.number().int().min(1).max(60),
       qualityOracle: z.object({

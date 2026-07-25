@@ -1369,8 +1369,10 @@ function assertQualityFacts(metadata: JcapV1Metadata, events: readonly JcapV1Eve
 function validateVariableWriteEvent(event: JcapV1Event, variables: readonly JcapV1VariableDescriptor[]): void {
   const selector = event.selector;
   const descriptor = event.descriptor;
-  const expected = typeof selector === "string" ? variables.find((variable) => variable.logicalIdentity === selector) : undefined;
-  if (!expected || event.logicalIdentity !== selector || !isRecord(descriptor) || !sameDescriptor(descriptor, expected)) throw new Error("JCAP variable_write selector does not match a declared variable descriptor");
+  const expected = typeof selector === "string"
+    ? variables.find((variable) => variable.logicalIdentity === selector) ?? standaloneWriteDescriptor(descriptor, selector, variables)
+    : undefined;
+  if (!expected || event.logicalIdentity !== selector || !isRecord(descriptor) || !sameDescriptor(descriptor, expected)) throw new Error("JCAP variable_write selector does not match a declared or embedded variable descriptor");
   if (!isU64(event.operationStartTick) || !isU64(event.operationEndTick)
     || BigInt(event.operationEndTick) < BigInt(event.operationStartTick) || event.tick !== event.operationEndTick
     || !["helper_qpc", "controller_fallback"].includes(String(event.timingSource))) throw new Error("JCAP variable_write timing evidence is invalid");
@@ -1403,6 +1405,25 @@ function validateVariableWriteEvent(event: JcapV1Event, variables: readonly Jcap
   if (event.error !== null && (!isRecord(event.error) || typeof event.error.code !== "string" || !event.error.code || typeof event.error.message !== "string"
     || typeof event.error.writeIssued !== "boolean" || typeof event.error.stateUnknown !== "boolean")) throw new Error("JCAP variable_write error evidence is invalid");
   if (event.outcome === "completed" && event.error !== null || event.outcome !== "completed" && event.error === null) throw new Error("JCAP variable_write outcome and error evidence disagree");
+}
+
+function standaloneWriteDescriptor(
+  value: unknown,
+  selector: string,
+  variables: readonly JcapV1VariableDescriptor[],
+): JcapV1VariableDescriptor | undefined {
+  if (!isRecord(value)
+    || value.logicalIdentity !== selector
+    || typeof value.type !== "string"
+    || SCALAR_BYTES[value.type] !== value.size
+    || !/^0x[0-9a-f]{1,8}$/i.test(String(value.address))
+    || Number.parseInt(String(value.address), 16) + Number(value.size) > 0x1_0000_0000
+    || !SHA256.test(String(value.artifactGeneration))
+    || value.artifactGeneration !== variables[0]?.artifactGeneration
+    || !SHA256.test(String(value.layoutHash))
+    || value.alias !== undefined && (typeof value.alias !== "string" || !value.alias || Buffer.byteLength(value.alias, "utf8") > 128)
+    || value.unit !== undefined && (typeof value.unit !== "string" || !value.unit || Buffer.byteLength(value.unit, "utf8") > 64)) return undefined;
+  return value as unknown as JcapV1VariableDescriptor;
 }
 
 function sameDescriptor(value: Record<string, unknown>, expected: JcapV1VariableDescriptor): boolean {

@@ -65,7 +65,11 @@ export interface TypedSymbolResolver {
   search(target: StoredTarget, query: string, limit: number): Promise<Array<Record<string, unknown>>>;
 }
 
-export interface CaptureVariableWriteDelegate {
+export interface CaptureVariableAccessDelegate {
+  tryReadVariable(
+    target: StoredTarget,
+    resolved: ResolvedSymbol,
+  ): Promise<OperationEnvelope | undefined>;
   tryWriteVariable(
     input: VariableWriteInput,
     target: StoredTarget,
@@ -82,7 +86,7 @@ interface ResolvedReference {
 
 export class ArtifactVariableService {
   private readonly hot: HotVariables;
-  private captureWriteDelegate?: CaptureVariableWriteDelegate;
+  private captureAccessDelegate?: CaptureVariableAccessDelegate;
 
   constructor(
     private readonly targets: TargetStore,
@@ -93,8 +97,8 @@ export class ArtifactVariableService {
     this.hot = new HotVariables(join(storageRoot, "hot-variables.json"));
   }
 
-  setCaptureWriteDelegate(delegate: CaptureVariableWriteDelegate): void {
-    this.captureWriteDelegate = delegate;
+  setCaptureWriteDelegate(delegate: CaptureVariableAccessDelegate): void {
+    this.captureAccessDelegate = delegate;
   }
 
   async resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{ target: StoredTarget; resolved: ResolvedSymbol; cacheRefreshed: boolean }> {
@@ -198,7 +202,7 @@ export class ArtifactVariableService {
     } catch (error) {
       return this.failure(createOperationEnvelope("read_variable"), error, "symbol_resolution");
     }
-    const envelope = await this.direct.readMemory({
+    const envelope = await this.captureAccessDelegate?.tryReadVariable(target, resolved) ?? await this.direct.readMemory({
       projectRoot: target.projectRoot,
       address: resolved.address,
       width: resolved.size * 8 as 8 | 16 | 32,
@@ -243,9 +247,9 @@ export class ArtifactVariableService {
     } catch (error) {
       return this.failure(createOperationEnvelope("write_variable"), error, "symbol_resolution");
     }
-    if (this.captureWriteDelegate) {
+    if (this.captureAccessDelegate) {
       try {
-        const captureEnvelope = await this.captureWriteDelegate.tryWriteVariable(normalizedInput, target, resolved, requested, comparator);
+        const captureEnvelope = await this.captureAccessDelegate.tryWriteVariable(normalizedInput, target, resolved, requested, comparator);
         if (captureEnvelope) {
           decorateTypedWrite(captureEnvelope, resolved);
           if (captureEnvelope.data && typeof captureEnvelope.data === "object" && !Array.isArray(captureEnvelope.data)) {
