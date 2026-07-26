@@ -16,7 +16,7 @@ import {
 } from "./operation-envelope";
 import { DirectMcuService, type NonObserveComparator, type ScalarComparator } from "./direct-operations";
 import { assertSvdBindingCurrent, TargetStore, TargetStoreError, type StoredTarget } from "./target-store";
-import type { VariableComparatorInput } from "./artifact-operations";
+import type { VariableComparatorInput } from "./variable-access-contract";
 
 export interface RegisterWriteInput {
   projectRoot: string;

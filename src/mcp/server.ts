@@ -9,7 +9,7 @@ import { ProcessManager } from "../utils/process-manager";
 import { AcceptanceEvidenceStore, readRepositoryIdentity } from "./acceptance/evidence";
 import { isValidAcceptanceRunId } from "./acceptance/run-id";
 import { DirectMcuService, type CoreRegisterWriteInput, type EraseInput, type FlashInput, type MemoryReadInput, type MemoryWriteInput, type ProbeCommandInput } from "./runtime/direct-operations";
-import { ArtifactVariableService, type VariableRefInput, type VariableWriteInput } from "./runtime/artifact-operations";
+import { ArtifactVariableService } from "./runtime/artifact-operations";
 import { SvdRegisterService, type RegisterWriteInput } from "./runtime/svd-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./runtime/operation-envelope";
 import { ProbeQueue } from "./runtime/probe-queue";
@@ -19,6 +19,8 @@ import { TargetRuntimeRegistry } from "./runtime/target-runtime";
 import { TargetStore, type StoredTarget, type TargetConfigureInput } from "./runtime/target-store";
 import { HssOperations, type HssCaptureInput } from "./runtime/hss-operations";
 import { DebugSequenceExecutor, type DebugSequenceInput } from "./runtime/debug-sequence";
+import type { VariableRefInput, VariableWriteInput } from "./runtime/variable-access-contract";
+import { VariableAccessRouter } from "./runtime/variable-access-router";
 import { JLINK_MCP_VERSION } from "./version";
 
 export interface JLinkMcpServerOptions {
@@ -141,6 +143,7 @@ export class JLinkMcpServer {
   private readonly runtimes = new TargetRuntimeRegistry();
   private readonly direct: DirectMcuService;
   private readonly artifacts: ArtifactVariableService;
+  private readonly variables: VariableAccessRouter;
   private readonly registers: SvdRegisterService;
   private readonly sessions: SessionOperations;
   private readonly hss: HssOperations;
@@ -157,7 +160,7 @@ export class JLinkMcpServer {
     this.queue = new ProbeQueue(options.queueRoot);
     this.memorySessions = new MemorySessionManager(this.queue);
     this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target), undefined, this.memorySessions);
-    this.artifacts = new ArtifactVariableService(this.targets, this.direct);
+    this.artifacts = new ArtifactVariableService(this.targets);
     this.registers = new SvdRegisterService(this.targets, this.direct);
     this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target), this.memorySessions);
     this.evidence = new AcceptanceEvidenceStore(evidenceRoot, readRepositoryIdentity(cwd).commit);
@@ -172,8 +175,8 @@ export class JLinkMcpServer {
       <T>(runId: string, operation: () => Promise<T>) => this.evidence.guardRunMutation(runId, operation),
       this.memorySessions,
     );
-    this.artifacts.setCaptureWriteDelegate(this.hss);
-    this.sequence = new DebugSequenceExecutor(this.artifacts, this.hss);
+    this.variables = new VariableAccessRouter(this.targets, this.artifacts, this.direct, this.hss);
+    this.sequence = new DebugSequenceExecutor(this.variables, this.hss);
     this.server = new McpServer({ name: "jlink-mcp", version: JLINK_MCP_VERSION });
     this.registerTools();
     this.registerResources();
@@ -219,7 +222,7 @@ export class JLinkMcpServer {
     this.registerEnvelopeTool("symbol_resolve", { ...projectRootInput, selector: z.string().min(1).max(1024) },
       (input) => this.artifacts.symbolResolve(String(input.projectRoot), String(input.selector)));
     this.registerEnvelopeTool("read_variable", { ...projectRootInput, ref: variableRef },
-      (input) => this.artifacts.readVariable(String(input.projectRoot), input.ref as VariableRefInput));
+      (input) => this.variables.readVariable(String(input.projectRoot), input.ref as VariableRefInput));
     this.registerEnvelopeTool("write_variable", {
       ...projectRootInput,
       ref: variableRef,
@@ -229,7 +232,7 @@ export class JLinkMcpServer {
       restore: z.boolean().default(false),
       verificationConnection: z.enum(["same_session", "independent_session"]).default("same_session"),
       comparator: variableComparator.default({ mode: "exact" }),
-    }, (input) => this.artifacts.writeVariable(input as unknown as VariableWriteInput));
+    }, (input) => this.variables.writeVariable(input as unknown as VariableWriteInput));
     this.registerEnvelopeTool("read_memory", { ...projectRootInput, address: uint32, width: accessWidth, byteCount: z.number().int().min(1).max(4096) },
       (input) => this.direct.readMemory(input as unknown as MemoryReadInput));
     this.registerEnvelopeTool("write_memory", {

@@ -35,12 +35,6 @@ import {
   type JcapV1VariableDescriptor,
   type JcapRunMutationGuard,
 } from "../jcap/jcap-v1";
-import type {
-  CaptureVariableAccessDelegate,
-  ArtifactVariableService,
-  VariableRefInput,
-  VariableWriteInput,
-} from "./artifact-operations";
 import type { NonObserveComparator, ScalarComparator } from "./direct-operations";
 import { withDirectoryLease } from "./file-lease";
 import {
@@ -60,6 +54,12 @@ import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEn
 import { ProbeQueue, ProbeQueueError, type ProbeOwner } from "./probe-queue";
 import { MemorySessionError, type MemorySessionManager } from "./memory-session";
 import { assertArtifactBindingsCurrent, TargetStore, TargetStoreError, type StoredTarget } from "./target-store";
+import type {
+  CaptureVariableAccess,
+  VariableRefInput,
+  VariableResolver,
+  VariableWriteInput,
+} from "./variable-access-contract";
 
 const ACTIVE_SESSION_STATES = new Set<HssSessionState>(["starting", "capturing", "stopping"]);
 const TERMINAL_SESSION_STATES = new Set<HssSessionState>(["completed", "stopped", "interrupted", "failed"]);
@@ -169,7 +169,7 @@ interface HssSessionRecord {
   lastError?: { code: string; message: string };
 }
 
-export class HssOperations implements CaptureVariableAccessDelegate {
+export class HssOperations implements CaptureVariableAccess {
   readonly query: JcapV1QueryService;
   private readonly sessionsRoot: string;
   private readonly outputRoot: string;
@@ -180,7 +180,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
   constructor(
     private readonly targets: TargetStore,
     private readonly queue: ProbeQueue,
-    private readonly artifacts: ArtifactVariableService,
+    private readonly variables: VariableResolver,
     private readonly adapter: HssHelperAdapter = new NativeHssHelperAdapter(),
     outputRoot = resolve(process.cwd(), "test-output"),
     stateRoot = dirname(targets.filePath),
@@ -1318,7 +1318,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
         || !Number.isSafeInteger(input.qualityOracle.tolerance) || input.qualityOracle.tolerance < 0) {
         throw new HssOperationError("HSS_QUALITY_ORACLE_BOUNDS", "qualityOracle expectedIncrement must be positive and tolerance must be non-negative safe integers");
       }
-      const oracle = await this.artifacts.resolveCaptureVariable(target.projectRoot, input.qualityOracle.ref);
+      const oracle = await this.variables.resolveVariable(target.projectRoot, input.qualityOracle.ref);
       if (oracle.target.generation !== target.generation) throw new HssOperationError("TARGET_GENERATION_CHANGED", "Target generation changed during HSS quality-oracle resolution", true);
       const logicalIdentity = symbolLogicalIdentity(oracle.resolved.ref);
       const variable = prepared.find((candidate) => candidate.descriptor.logicalIdentity === logicalIdentity);
@@ -1352,7 +1352,7 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     requested: HssVariableInput,
     role: "capture" | "write",
   ): Promise<PreparedVariable> {
-    const current = await this.artifacts.resolveCaptureVariable(target.projectRoot, requested.ref);
+    const current = await this.variables.resolveVariable(target.projectRoot, requested.ref);
     if (current.target.generation !== target.generation) {
       const label = role === "capture" ? "variable" : "write-variable";
       throw new HssOperationError("TARGET_GENERATION_CHANGED", `Target generation changed during HSS ${label} resolution`, true);

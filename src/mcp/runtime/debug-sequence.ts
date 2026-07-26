@@ -1,9 +1,9 @@
 import { performance } from "node:perf_hooks";
 import { symbolLogicalIdentity, type ResolvedSymbol } from "../artifact/symbol-catalog";
 import { encodeHssValue } from "../hss/hss-typed-value";
-import type { VariableRefInput, VariableWriteInput } from "./artifact-operations";
 import type { HssCaptureInput } from "./hss-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
+import type { VariableAccess, VariableRefInput } from "./variable-access-contract";
 
 export type DebugSequenceStep =
   | ({ atMs: number; action: "hss_start" } & Omit<HssCaptureInput, "projectRoot" | "dryRun" | "runId">)
@@ -22,12 +22,10 @@ export interface DebugSequenceInput {
   timeoutMs?: number;
 }
 
-export interface DebugSequenceArtifactOperations {
-  resolveCaptureVariable(projectRoot: string, ref: VariableRefInput): Promise<{
+export interface DebugSequenceVariableAccess extends Pick<VariableAccess, "readVariable" | "writeVariable"> {
+  resolveVariable(projectRoot: string, ref: VariableRefInput): Promise<{
     resolved: Pick<ResolvedSymbol, "ref" | "region" | "type" | "endian">;
   }>;
-  readVariable(projectRoot: string, ref: VariableRefInput): Promise<OperationEnvelope>;
-  writeVariable(input: VariableWriteInput): Promise<OperationEnvelope>;
 }
 
 export interface DebugSequenceHssOperations {
@@ -71,7 +69,7 @@ const defaultScheduler: DebugSequenceScheduler = {
 
 export class DebugSequenceExecutor {
   constructor(
-    private readonly artifacts: DebugSequenceArtifactOperations,
+    private readonly variables: DebugSequenceVariableAccess,
     private readonly hss: DebugSequenceHssOperations,
     private readonly scheduler: DebugSequenceScheduler = defaultScheduler,
   ) {}
@@ -241,7 +239,7 @@ export class DebugSequenceExecutor {
         activeCaptureDescriptors = undefined;
         activeCaptureInterval = undefined;
       } else {
-        const { resolved } = await this.artifacts.resolveCaptureVariable(input.projectRoot, step.ref);
+        const { resolved } = await this.variables.resolveVariable(input.projectRoot, step.ref);
         const identity = symbolLogicalIdentity(resolved.ref);
         if (activeCaptureDescriptors && !activeCaptureDescriptors.has(identity)) {
           throw new Error(`${identity} is not declared by the active immutable HSS descriptor set`);
@@ -255,7 +253,7 @@ export class DebugSequenceExecutor {
     }
     for (const action of input.cleanup ?? []) {
       if (action.action === "restore_variable") {
-        const resolved = await this.artifacts.resolveCaptureVariable(input.projectRoot, action.ref);
+        const resolved = await this.variables.resolveVariable(input.projectRoot, action.ref);
         if (resolved.resolved.region !== "ram") throw new Error("cleanup restore_variable requires a typed RAM variable");
         encodeHssValue(resolved.resolved.type, action.value, resolved.resolved.endian);
         const earliestWrite = firstWriteIndex.get(refKey(action.ref));
@@ -291,7 +289,7 @@ export class DebugSequenceExecutor {
         return result;
       }
       case "write_variable":
-        return this.artifacts.writeVariable({
+        return this.variables.writeVariable({
           projectRoot,
           ref: step.ref,
           value: step.value,
@@ -300,7 +298,7 @@ export class DebugSequenceExecutor {
           restore: step.restore,
         });
       case "read_variable":
-        return this.artifacts.readVariable(projectRoot, step.ref);
+        return this.variables.readVariable(projectRoot, step.ref);
       case "hss_stop": {
         const captureId = captures.activeId;
         if (!captureId) return failEnvelope(createOperationEnvelope("hss_stop"), sequenceError("DEBUG_SEQUENCE_CAPTURE_MISSING", "hss_stop", new Error("no sequence-created HSS capture is available")));
@@ -324,7 +322,7 @@ export class DebugSequenceExecutor {
           skipped.data = { skipped: true, reason: "matching_sequence_write_not_issued" };
           return finishEnvelope(skipped, true);
         }
-        return await this.artifacts.writeVariable({
+        return await this.variables.writeVariable({
           projectRoot,
           ref: action.ref,
           value: action.value,

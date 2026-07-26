@@ -7,7 +7,7 @@ import type { ProbeBackend } from "../../probe/backend";
 import type { ResolvedSymbol } from "../artifact/symbol-catalog";
 import { HSS_STATUS_FLAGS } from "../hss/hss-status-flags";
 import { appendJcapV1Sample, readJcapV1Raw } from "../jcap/jcap-v1";
-import { ArtifactVariableService, type TypedSymbolResolver, type VariableRefInput } from "./artifact-operations";
+import { ArtifactVariableService, type TypedSymbolResolver } from "./artifact-operations";
 import { DirectMcuService } from "./direct-operations";
 import {
   HssAdapterError,
@@ -32,6 +32,8 @@ import {
 } from "./memory-session";
 import { ProbeQueue, ProbeQueueError } from "./probe-queue";
 import { TargetStore, type StoredTarget } from "./target-store";
+import type { VariableAccess, VariableRefInput } from "./variable-access-contract";
+import { VariableAccessRouter } from "./variable-access-router";
 
 interface Fixture {
   root: string;
@@ -39,6 +41,7 @@ interface Fixture {
   store: TargetStore;
   queue: ProbeQueue;
   artifacts: ArtifactVariableService;
+  variables: VariableAccess;
   hss: HssOperations;
   adapter: FakeHssAdapter;
   memorySessions?: MemorySessionManager;
@@ -175,12 +178,12 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
       (error: unknown) => error instanceof ProbeQueueError && error.code === "CAPTURE_ACTIVE",
     );
 
-    const undeclared = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(3), value: 99 });
+    const undeclared = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(3), value: 99 });
     assert.equal(undeclared.error?.code, "VARIABLE_NOT_IN_CAPTURE");
     assert.equal(fixture.adapter.writeCount, 0);
 
     fixture.adapter.failNextWriteBeforeIssue = true;
-    const preIssueFailure = await fixture.artifacts.writeVariable({
+    const preIssueFailure = await fixture.variables.writeVariable({
       projectRoot: fixture.projectRoot,
       ref: fixture.ref(0),
       value: 10,
@@ -191,7 +194,7 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal(fixture.adapter.writeCount, 0);
     assert.equal(fixture.adapter.valueAt(0x20000000), 7);
 
-    const defaultWrite = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 11 });
+    const defaultWrite = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 11 });
     assert.equal(defaultWrite.ok, true, JSON.stringify(defaultWrite.error));
     assert.equal(defaultWrite.verification?.status, "verified");
     assert.equal((defaultWrite.data as { oldHex: string | null }).oldHex, "07000000");
@@ -200,7 +203,7 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal((defaultWrite.data as { verificationSource: string }).verificationSource, "capture_owner_readback");
     assert.equal((defaultWrite.data as { targetConsumption: string }).targetConsumption, "not_observed");
 
-    const declared = await fixture.artifacts.writeVariable({
+    const declared = await fixture.variables.writeVariable({
       projectRoot: fixture.projectRoot,
       ref: fixture.ref(0),
       value: 42,
@@ -481,11 +484,11 @@ test("HSS writeVariables permit immutable capture-owner writes without consuming
     assert.deepEqual(fixture.adapter.lastPlan?.symbols.map(({ name }) => name), ["var0"]);
     assert.deepEqual(fixture.adapter.lastPlan?.writeSymbols.map(({ name }) => name), ["var2"]);
 
-    const readWriteOnly = await fixture.artifacts.readVariable(fixture.projectRoot, fixture.ref(2));
+    const readWriteOnly = await fixture.variables.readVariable(fixture.projectRoot, fixture.ref(2));
     assert.equal(readWriteOnly.ok, true, JSON.stringify(readWriteOnly.error));
     assert.equal((readWriteOnly.data as { typedValue: number }).typedValue, 0);
 
-    const writeOnly = await fixture.artifacts.writeVariable({
+    const writeOnly = await fixture.variables.writeVariable({
       projectRoot: fixture.projectRoot,
       ref: fixture.ref(2),
       value: 1,
@@ -497,7 +500,7 @@ test("HSS writeVariables permit immutable capture-owner writes without consuming
     assert.equal((writeOnly.data as { verificationConnection: string }).verificationConnection, "capture_owner");
     assert.equal(fixture.adapter.valueAt(0x20000008), 0);
 
-    const undeclared = await fixture.artifacts.writeVariable({
+    const undeclared = await fixture.variables.writeVariable({
       projectRoot: fixture.projectRoot,
       ref: fixture.ref(3),
       value: 1,
@@ -684,21 +687,21 @@ test("durable write response survives event persistence failure and is reconcile
     const eventsBefore = readFileSync(eventsFile);
     rmSync(eventsFile, { force: true });
     mkdirSync(eventsFile);
-    const written = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 12 });
+    const written = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 12 });
     assert.equal(written.error?.code, "CAPTURE_EVENT_PERSIST_FAILED");
     assert.equal(written.observedEffects.includes("target_memory_written"), true);
     assert.equal(written.observedEffects.includes("capture_event_appended"), false);
     rmSync(eventsFile, { recursive: true, force: true });
     writeFileSync(eventsFile, eventsBefore, { flag: "wx" });
 
-    const reconciled = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
+    const reconciled = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
     assert.equal(reconciled.error?.code, "HSS_MEMORY_LATE_RESPONSE_RECONCILED");
     assert.equal(fixture.adapter.writeCount, 1);
     const recoveryEvent = readJcapV1Raw(packageDir).events.find((event) => event.type === "variable_write");
     assert.equal((recoveryEvent?.requested as { value: number }).value, 12);
     assert.deepEqual(recoveryEvent?.recoveredTransaction, { source: "durable_hss_memory_receipt", phase: "write" });
 
-    const retried = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
+    const retried = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
     assert.equal(retried.ok, true, JSON.stringify(retried.error));
     assert.equal(fixture.adapter.writeCount, 2);
   } finally {
@@ -713,17 +716,17 @@ test("event persistence before receipt ACK is recovered idempotently without dup
     assert.equal(started.ok, true);
     const packageDir = String((started.data as { packageDir: string }).packageDir);
     fixture.adapter.failNextMemoryAcknowledge = true;
-    const written = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 12 });
+    const written = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 12 });
     assert.equal(written.ok, true, JSON.stringify(written.error));
     assert.equal(written.warnings.some((warning) => warning.includes("receipt cleanup is pending")), true);
     assert.equal(readJcapV1Raw(packageDir).events.filter((event) => event.type === "variable_write").length, 1);
 
-    const reconciled = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
+    const reconciled = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
     assert.equal(reconciled.error?.code, "HSS_MEMORY_LATE_RESPONSE_RECONCILED");
     assert.equal(fixture.adapter.writeCount, 1);
     assert.equal(readJcapV1Raw(packageDir).events.filter((event) => event.type === "variable_write").length, 1);
 
-    const retried = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
+    const retried = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
     assert.equal(retried.ok, true, JSON.stringify(retried.error));
     assert.equal(fixture.adapter.writeCount, 2);
   } finally {
@@ -755,7 +758,7 @@ test("a reconciled late IPC response never claims that the current restore was i
     const captureId = String((started.data as { captureId: string }).captureId);
     const packageDir = String((started.data as { packageDir: string }).packageDir);
     fixture.adapter.failNextRestoreBeforeDispatch = true;
-    const written = await fixture.artifacts.writeVariable({
+    const written = await fixture.variables.writeVariable({
       projectRoot: fixture.projectRoot,
       ref: fixture.ref(0),
       value: 12,
@@ -783,7 +786,7 @@ test("a reconciled late IPC response never attributes an unissued current write"
     const captureId = String((started.data as { captureId: string }).captureId);
     const packageDir = String((started.data as { packageDir: string }).packageDir);
     fixture.adapter.failNextWriteBeforeDispatch = true;
-    const written = await fixture.artifacts.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
+    const written = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
     assert.equal(written.error?.code, "HSS_MEMORY_LATE_RESPONSE_RECONCILED");
     assert.equal(fixture.adapter.writeCount, 0);
     assert.equal(fixture.adapter.valueAt(0x20000000), 7);
@@ -872,18 +875,19 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
   const queue = new ProbeQueue(join(root, "queue"));
   const direct = new DirectMcuService(store, queue, async () => { throw new Error("direct backend must not be used by capture-aware tests"); });
   const resolver = new FixtureResolver(counterType);
-  const artifacts = new ArtifactVariableService(store, direct, resolver);
+  const artifacts = new ArtifactVariableService(store, resolver);
   const adapter = new FakeHssAdapter();
   const memoryLauncher = withMemorySessions ? new FixtureMemorySessionLauncher() : undefined;
   const memorySessions = memoryLauncher ? new MemorySessionManager(queue, memoryLauncher, 10_000) : undefined;
   const hss = new HssOperations(store, queue, artifacts, adapter, outputRoot, stateRoot, join(root, "session-work"), undefined, memorySessions);
-  artifacts.setCaptureWriteDelegate(hss);
+  const variables = new VariableAccessRouter(store, artifacts, direct, hss);
   return {
     root,
     projectRoot,
     store,
     queue,
     artifacts,
+    variables,
     hss,
     adapter,
     memorySessions,

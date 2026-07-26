@@ -10,12 +10,13 @@ import { ArtifactVariableService, assertMapAgreement, classifyDwarfResolutionErr
 import { DirectMcuService } from "./direct-operations";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore, type StoredTarget } from "./target-store";
+import { VariableAccessRouter } from "./variable-access-router";
 
 test("unverified variable reads are warned, typed, and preserve running state", async (context) => {
   const fixture = await createFixture(context, "read-unverified");
   fixture.probe.memory.set(0x20000000, Buffer.from("78563412", "hex"));
   const ref = (await fixture.resolver.resolve(fixture.target, "counter")).ref;
-  const result = await fixture.service.readVariable(fixture.projectRoot, ref);
+  const result = await fixture.variables.readVariable(fixture.projectRoot, ref);
   assert.equal(result.ok, true);
   assert.equal((result.data as { typedValue: number }).typedValue, 0x12345678);
   assert.match(result.warnings.join("\n"), /ARTIFACT_UNVERIFIED/);
@@ -38,7 +39,7 @@ test("queued variable reads report the current downgraded Artifact match", async
   const acquired = new Promise<void>((resolve) => { started = resolve; });
   const blocker = fixture.queue.runExclusive(fixture.target.probeSerial, async () => { started(); await waiting; });
   await acquired;
-  const pending = fixture.service.readVariable(fixture.projectRoot, ref);
+  const pending = fixture.variables.readVariable(fixture.projectRoot, ref);
   await fixture.targets.setArtifactMatch(fixture.projectRoot, "unverified", "queue-race", {
     targetGeneration: fixture.target.generation,
     probeSerial: fixture.target.probeSerial,
@@ -55,7 +56,7 @@ test("queued variable reads report the current downgraded Artifact match", async
 test("variable writes require verified Artifact match and default to capture-old plus exact readback", async (context) => {
   const fixture = await createFixture(context, "write-gate");
   const ref = (await fixture.resolver.resolve(fixture.target, "counter")).ref;
-  const blocked = await fixture.service.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9 });
+  const blocked = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9 });
   assert.equal(blocked.error?.code, "ARTIFACT_NOT_VERIFIED");
   assert.deepEqual(fixture.probe.actions, []);
 
@@ -64,7 +65,7 @@ test("variable writes require verified Artifact match and default to capture-old
     probeSerial: fixture.target.probeSerial,
     artifactGeneration: fixture.target.artifact?.generation,
   });
-  const written = await fixture.service.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9 });
+  const written = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9 });
   assert.equal(written.ok, true);
   assert.equal(written.verification.status, "verified");
   assert.deepEqual(fixture.probe.actions, ["read:20000000:4", "write:20000000:4", "read:20000000:4"]);
@@ -85,7 +86,7 @@ test("variable writes map exact, tolerance, masked, and observe comparators", as
       probeSerial: fixture.target.probeSerial,
       artifactGeneration: fixture.target.artifact?.generation,
     });
-    const result = await fixture.service.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9, captureOld: false, verify: true, comparator: item.comparator });
+    const result = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9, captureOld: false, verify: true, comparator: item.comparator });
     assert.equal(result.ok, true, item.name);
     assert.equal(result.verification.method, item.method, item.name);
     assert.deepEqual(fixture.probe.actions, ["write:20000000:4", "read:20000000:4"], item.name);
@@ -100,7 +101,7 @@ test("Artifact mismatch blocks reads before hardware access", async (context) =>
     probeSerial: fixture.target.probeSerial,
     artifactGeneration: fixture.target.artifact?.generation,
   });
-  const result = await fixture.service.readVariable(fixture.projectRoot, ref);
+  const result = await fixture.variables.readVariable(fixture.projectRoot, ref);
   assert.equal(result.error?.code, "ARTIFACT_MISMATCH");
   assert.deepEqual(fixture.probe.actions, []);
 });
@@ -117,13 +118,13 @@ test("stale variable references and same-path Artifact changes issue no hardware
     speed: 1000,
     artifactPath: fixture.artifactPath,
   });
-  const stale = await fixture.service.readVariable(fixture.projectRoot, resolved.ref);
+  const stale = await fixture.variables.readVariable(fixture.projectRoot, resolved.ref);
   assert.equal(stale.error?.code, "STALE_ARTIFACT_REFERENCE");
   assert.deepEqual(fixture.probe.actions, []);
 
   const current = await fixture.resolver.resolve(reconfigured, "counter");
   fixture.resolver.afterResolve = () => writeFileSync(fixture.artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 9, 9, 9, 9]));
-  const changed = await fixture.service.readVariable(fixture.projectRoot, current.ref);
+  const changed = await fixture.variables.readVariable(fixture.projectRoot, current.ref);
   assert.equal(changed.error?.code, "ARTIFACT_GENERATION_STALE");
   assert.deepEqual(fixture.probe.actions, []);
 });
@@ -135,7 +136,7 @@ test("logical selectors resolve directly without persistent cache state", async 
   assert.equal(resolved.ok, true);
   assert.equal((resolved.data as { cacheRefreshed: boolean }).cacheRefreshed, false);
 
-  const currentRead = await fixture.service.readVariable(fixture.projectRoot, "counter");
+  const currentRead = await fixture.variables.readVariable(fixture.projectRoot, "counter");
   assert.equal(currentRead.ok, true);
   assert.equal((currentRead.data as { cacheRefreshed: boolean }).cacheRefreshed, false);
 
@@ -148,7 +149,7 @@ test("logical selectors resolve directly without persistent cache state", async 
     speed: 1000,
     artifactPath: fixture.artifactPath,
   });
-  const refreshedRead = await fixture.service.readVariable(fixture.projectRoot, "counter");
+  const refreshedRead = await fixture.variables.readVariable(fixture.projectRoot, "counter");
   assert.equal(refreshedRead.ok, true, JSON.stringify(refreshedRead.error));
   assert.equal((refreshedRead.data as { cacheRefreshed: boolean }).cacheRefreshed, false);
   assert.deepEqual(fixture.probe.actions, ["read:20000000:4", "read:20000000:4"]);
@@ -158,7 +159,7 @@ test("non-intrusive variable read failure returns HALT_REQUIRED without halting"
   const fixture = await createFixture(context, "halt-required");
   fixture.probe.readResult = { success: false, rawOutput: "running read unavailable", output: "", error: "running read unavailable", errorCode: ProbeErrorCode.NON_INTRUSIVE_READ_UNAVAILABLE };
   const ref = (await fixture.resolver.resolve(fixture.target, "counter")).ref;
-  const result = await fixture.service.readVariable(fixture.projectRoot, ref);
+  const result = await fixture.variables.readVariable(fixture.projectRoot, ref);
   assert.equal(result.error?.code, "HALT_REQUIRED");
   assert.deepEqual(fixture.probe.actions, ["read:20000000:4"]);
 });
@@ -207,7 +208,7 @@ test("MAP-only resolution reports UNKNOWN_LAYOUT without requiring GDB", async (
     artifactPath: fixture.artifactPath,
     mapPath,
   });
-  const service = new ArtifactVariableService(fixture.targets, fixture.direct);
+  const service = new ArtifactVariableService(fixture.targets);
   const result = await service.symbolResolve(fixture.projectRoot, "counter");
   assert.equal(result.error?.code, "UNKNOWN_LAYOUT");
   assert.deepEqual(fixture.probe.actions, []);
@@ -227,8 +228,12 @@ async function createFixture(context: TestContext, name: string) {
   const queue = new ProbeQueue(join(root, "queue"));
   const direct = new DirectMcuService(targets, queue, async () => ({ probe: probe as unknown as ProbeBackend }));
   const resolver = new FixtureResolver();
-  const service = new ArtifactVariableService(targets, direct, resolver);
-  return { projectRoot, stateRoot, artifactPath, targets, target, probe, queue, direct, resolver, service };
+  const service = new ArtifactVariableService(targets, resolver);
+  const variables = new VariableAccessRouter(targets, service, direct, {
+    tryReadVariable: async () => undefined,
+    tryWriteVariable: async () => undefined,
+  });
+  return { projectRoot, stateRoot, artifactPath, targets, target, probe, queue, direct, resolver, service, variables };
 }
 
 class FixtureResolver implements TypedSymbolResolver {

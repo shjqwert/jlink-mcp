@@ -3,9 +3,9 @@ import test from "node:test";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
 import {
   DebugSequenceExecutor,
-  type DebugSequenceArtifactOperations,
   type DebugSequenceHssOperations,
   type DebugSequenceScheduler,
+  type DebugSequenceVariableAccess,
 } from "./debug-sequence";
 
 test("debug sequence executes absolute steps synchronously and reports timing", async () => {
@@ -370,8 +370,8 @@ function sequenceFixture(options: {
       now += delayMs;
     },
   };
-  const artifacts: DebugSequenceArtifactOperations = {
-    resolveCaptureVariable: async (_projectRoot, ref) => ({
+  const variables: DebugSequenceVariableAccess = {
+    resolveVariable: async (_projectRoot, ref) => ({
       resolved: {
         ref: {
           artifactGeneration: "fixture",
@@ -446,7 +446,7 @@ function sequenceFixture(options: {
       return operation("hss_stop", { captureId });
     },
   };
-  return { executor: new DebugSequenceExecutor(artifacts, hss, scheduler), actions, dispatches };
+  return { executor: new DebugSequenceExecutor(variables, hss, scheduler), actions, dispatches };
 }
 
 function operation(tool: string, data: Record<string, unknown>): OperationEnvelope {
