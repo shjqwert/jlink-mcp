@@ -24,6 +24,7 @@ import {
   type HssTimebase,
 } from "./hss-helper-adapter";
 import { HssOperations, type HssCaptureInput } from "./hss-operations";
+import { CaptureQueryOperations } from "./capture-query-operations";
 import {
   MemorySessionManager,
   type MemorySessionLauncher,
@@ -43,6 +44,7 @@ interface Fixture {
   artifacts: ArtifactVariableService;
   variables: VariableAccess;
   hss: HssOperations;
+  captures: CaptureQueryOperations;
   adapter: FakeHssAdapter;
   memorySessions?: MemorySessionManager;
   memoryLauncher?: FixtureMemorySessionLauncher;
@@ -245,22 +247,22 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.deepEqual(writeEvent.sampleAlignment, { method: "terminal_raw_nearest", status: "derive_on_rebuild" });
     assert.equal(Object.hasOwn(writeEvent, "neighbors"), false);
 
-    const summary = await fixture.hss.captureSummary(captureId);
+    const summary = await fixture.captures.summary(captureId);
     assert.equal(summary.ok, true);
-    const series = await fixture.hss.captureSeries({ captureId, variables: ["var0"], startTick: "0", endTick: "100000000", bucketCount: 4 });
+    const series = await fixture.captures.series({ captureId, variables: ["var0"], startTick: "0", endTick: "100000000", bucketCount: 4 });
     assert.equal(series.ok, true);
-    const window = await fixture.hss.captureEventWindow({ captureId, eventId: writeEvent.eventId, variables: ["var0"], beforeMs: 20, afterMs: 20, bucketCount: 4 });
+    const window = await fixture.captures.eventWindow({ captureId, eventId: writeEvent.eventId, variables: ["var0"], beforeMs: 20, afterMs: 20, bucketCount: 4 });
     assert.equal(window.ok, true);
     const indexedWrite = (window.data as { event: Record<string, unknown> }).event;
     assert.deepEqual(indexedWrite.sampleAlignment, { method: "terminal_raw_nearest", status: "resolved" });
     assert.ok(indexedWrite.neighbors && (indexedWrite.neighbors as { before: unknown }).before);
     assert.ok(indexedWrite.neighbors && (indexedWrite.neighbors as { after: unknown }).after);
-    const eventOnlyWindow = await fixture.hss.captureEventWindow({ captureId, eventId: writeEvent.eventId, variables: [], beforeMs: 20, afterMs: 20, bucketCount: 4 });
+    const eventOnlyWindow = await fixture.captures.eventWindow({ captureId, eventId: writeEvent.eventId, variables: [], beforeMs: 20, afterMs: 20, bucketCount: 4 });
     assert.equal(eventOnlyWindow.ok, true);
     assert.deepEqual((eventOnlyWindow.data as { series: { series: unknown[] } }).series.series, []);
-    const exported = await fixture.hss.captureExport(captureId);
+    const exported = await fixture.captures.exportCsv(captureId);
     assert.equal(exported.ok, true);
-    assert.deepEqual(exported.requestedEffects, ["read_bounded_capture_rows", "create_external_csv"]);
+    assert.deepEqual(exported.requestedEffects, ["read_bounded_capture_rows", "repair_capture_index_if_required", "create_external_csv"]);
     assert.equal(exported.observedEffects.includes("external_csv_created"), true);
     assert.equal(String((exported.data as { exportFile: string }).exportFile).startsWith(join(fixture.root, "output", "acceptance-run", "exports")), true);
     const notInterrupted = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
@@ -565,7 +567,7 @@ test("HSS quality reports no-source captures as partial and indexes target-count
     assert.deepEqual((quality.qualityEvidence as { configuration: Record<string, unknown> }).configuration, {
       logicalIdentity: "var0", expectedIncrement: 1, tolerance: 0, modulus: 4_294_967_296,
     });
-    const series = await fixture.hss.captureSeries({ captureId, variables: ["var0"], startTick: "0", endTick: "120000000", bucketCount: 12 });
+    const series = await fixture.captures.series({ captureId, variables: ["var0"], startTick: "0", endTick: "120000000", bucketCount: 12 });
     assert.equal(series.ok, true, JSON.stringify(series.error));
     assert.equal((series.data as { series: Array<{ statusFlags: number }> }).series
       .some((bucket) => (bucket.statusFlags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0), true);
@@ -879,7 +881,8 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
   const adapter = new FakeHssAdapter();
   const memoryLauncher = withMemorySessions ? new FixtureMemorySessionLauncher() : undefined;
   const memorySessions = memoryLauncher ? new MemorySessionManager(queue, memoryLauncher, 10_000) : undefined;
-  const hss = new HssOperations(store, queue, artifacts, adapter, outputRoot, stateRoot, join(root, "session-work"), undefined, memorySessions);
+  const hss = new HssOperations(store, queue, artifacts, adapter, outputRoot, stateRoot, join(root, "session-work"), memorySessions);
+  const captures = new CaptureQueryOperations(outputRoot);
   const variables = new VariableAccessRouter(store, artifacts, direct, hss);
   return {
     root,
@@ -889,6 +892,7 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
     artifacts,
     variables,
     hss,
+    captures,
     adapter,
     memorySessions,
     memoryLauncher,

@@ -22,7 +22,6 @@ import {
   appendJcapV1Event,
   createJcapV1Metadata,
   finalizeJcapV1Metadata,
-  JcapV1QueryService,
   JcapV1Writer,
   readJcapV1Metadata,
   readJcapV1Raw,
@@ -33,7 +32,6 @@ import {
   type JcapV1Event,
   type JcapV1Metadata,
   type JcapV1VariableDescriptor,
-  type JcapRunMutationGuard,
 } from "../jcap/jcap-v1";
 import type { NonObserveComparator, ScalarComparator } from "./direct-operations";
 import { withDirectoryLease } from "./file-lease";
@@ -170,7 +168,6 @@ interface HssSessionRecord {
 }
 
 export class HssOperations implements CaptureVariableAccess {
-  readonly query: JcapV1QueryService;
   private readonly sessionsRoot: string;
   private readonly outputRoot: string;
   private readonly sessionWorkRoot: string;
@@ -185,7 +182,6 @@ export class HssOperations implements CaptureVariableAccess {
     outputRoot = resolve(process.cwd(), "test-output"),
     stateRoot = dirname(targets.filePath),
     sessionWorkRoot = resolve(tmpdir(), "jlink-mcp-hss"),
-    captureMutationGuard?: JcapRunMutationGuard,
     private readonly memorySessions?: MemorySessionManager,
   ) {
     this.outputRoot = resolve(outputRoot);
@@ -194,7 +190,6 @@ export class HssOperations implements CaptureVariableAccess {
     mkdirSync(this.outputRoot, { recursive: true });
     mkdirSync(this.sessionsRoot, { recursive: true });
     mkdirSync(this.sessionWorkRoot, { recursive: true });
-    this.query = new JcapV1QueryService(this.outputRoot, captureMutationGuard);
     try {
       for (const session of this.sessions()) {
         if (ACTIVE_SESSION_STATES.has(session.state) || session.statePreservationPending) this.scheduleMonitor(session.captureId);
@@ -1258,26 +1253,6 @@ export class HssOperations implements CaptureVariableAccess {
     });
   }
 
-  async captureList(input: { limit?: number; cursor?: string }): Promise<OperationEnvelope> {
-    return this.queryEnvelope("capture_list", () => this.query.list(input));
-  }
-
-  async captureSummary(captureId: string): Promise<OperationEnvelope> {
-    return this.queryEnvelope("capture_summary", () => this.query.summary({ captureId }));
-  }
-
-  async captureSeries(input: { captureId: string; variables: string[]; startTick: string; endTick: string; bucketCount: number }): Promise<OperationEnvelope> {
-    return this.queryEnvelope("capture_series", () => this.query.series(input));
-  }
-
-  async captureEventWindow(input: { captureId: string; eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }): Promise<OperationEnvelope> {
-    return this.queryEnvelope("capture_event_window", () => this.query.eventWindow(input));
-  }
-
-  async captureExport(captureId: string): Promise<OperationEnvelope> {
-    return this.queryEnvelope("capture_export_csv", () => this.query.exportCsv({ captureId }));
-  }
-
   private async prepare(input: HssCaptureInput): Promise<PreparedCapture> {
     if (!Number.isSafeInteger(input.rateHz) || input.rateHz < 1 || input.rateHz > HSS_EFFECTIVE_LIMITS.maxRateHz) throw new HssOperationError("HSS_RATE_BOUNDS", `rateHz must be 1..${HSS_EFFECTIVE_LIMITS.maxRateHz}`);
     if (!Number.isSafeInteger(input.durationSec) || input.durationSec < 1 || input.durationSec > HSS_EFFECTIVE_LIMITS.maxDurationSec) throw new HssOperationError("HSS_DURATION_BOUNDS", `durationSec must be 1..${HSS_EFFECTIVE_LIMITS.maxDurationSec}`);
@@ -2025,29 +2000,6 @@ export class HssOperations implements CaptureVariableAccess {
     finally {
       release();
       if (this.captureTails.get(captureId) === tail) this.captureTails.delete(captureId);
-    }
-  }
-
-  private async queryEnvelope(tool: string, operation: () => Promise<Record<string, unknown>>): Promise<OperationEnvelope> {
-    const envelope = createOperationEnvelope(tool);
-    envelope.requestedEffects = tool === "capture_export_csv"
-      ? ["read_bounded_capture_rows", "create_external_csv"]
-      : ["read_bounded_capture_index"];
-    try {
-      envelope.data = await operation();
-      const data = envelope.data as Record<string, unknown>;
-      if (tool === "capture_export_csv") {
-        if (typeof data.exportFile === "string") {
-          envelope.outputFiles.push(data.exportFile);
-          envelope.observedEffects.push("external_csv_created");
-        }
-        envelope.verification = { status: typeof data.exportFile === "string" ? "verified" : "observed", method: "bounded_external_csv_export" };
-      } else {
-        envelope.verification = { status: "verified", method: "bounded_jcap_v1_query" };
-      }
-      return finishEnvelope(envelope, true);
-    } catch (error) {
-      return this.failure(envelope, error, "query");
     }
   }
 

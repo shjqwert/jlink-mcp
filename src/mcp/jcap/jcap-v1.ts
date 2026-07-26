@@ -26,8 +26,6 @@ export const JCAP_STATUS = "stable" as const;
 export type JcapV1CaptureState = "active" | "finalizing" | "completed" | "stopped" | "interrupted" | "failed";
 export type JcapV1IndexStatus = "absent" | "building" | "ready" | "rebuild_required" | "failed";
 export type JcapV1QualitySource = "none" | "jlink" | "target_counter";
-export type JcapRunMutationGuard = <T>(runId: string, operation: () => Promise<T>) => Promise<T>;
-
 export interface JcapV1Provenance {
   captureId: string;
   sessionName?: string;
@@ -203,6 +201,30 @@ export class JcapCaptureAmbiguousError extends Error {
   readonly code = "JCAP_CAPTURE_AMBIGUOUS";
 }
 
+export class JcapRebuildPublishError extends Error {
+  readonly code = "JCAP_REBUILD_PUBLISH_FAILED";
+
+  constructor(
+    message: string,
+    readonly metadataWriteIssued: boolean,
+    readonly databasePublished: boolean,
+    readonly metadataPublished: boolean,
+    readonly stateUnknown: boolean,
+  ) {
+    super(message);
+    this.name = "JcapRebuildPublishError";
+  }
+}
+
+export class JcapExportPublishError extends Error {
+  readonly code = "JCAP_EXPORT_PUBLISH_FAILED";
+
+  constructor(message: string, readonly exportFile: string) {
+    super(message);
+    this.name = "JcapExportPublishError";
+  }
+}
+
 export function createJcapV1Metadata(input: {
   captureId: string;
   backend: JcapV1Metadata["backend"];
@@ -348,81 +370,6 @@ export function finalizeJcapV1Metadata(
   validateMetadata(next, root);
   atomicWriteMetadata(path.join(root, "capture.json"), next);
   return structuredClone(next);
-}
-
-export class JcapV1QueryService {
-  private readonly rootDir: string;
-
-  constructor(rootDir: string, private readonly guardRunMutation?: JcapRunMutationGuard) {
-    this.rootDir = path.resolve(rootDir);
-  }
-
-  async list(input: { limit?: number; cursor?: string } = {}): Promise<Record<string, unknown>> {
-    validateListBounds(input);
-    if (!existsSync(this.rootDir)) return { captures: [] };
-    return jcapCaptureList(this.rootDir, input);
-  }
-
-  async summary(input: { captureId: string }): Promise<Record<string, unknown>> {
-    const location = this.locationFor(input.captureId);
-    return this.mutate(location, async () => {
-      const ready = await this.ensureQueryableIndex(location);
-      if (ready.unavailable) return ready.unavailable;
-      return { ...await jcapCaptureSummary(location.packageDir), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
-    });
-  }
-
-  async series(input: { captureId: string; variables: string[]; startTick: string; endTick: string; bucketCount: number }): Promise<Record<string, unknown>> {
-    validateSeriesBounds(input.variables, input.startTick, input.endTick, input.bucketCount, LIMITS.seriesVariables, LIMITS.seriesBuckets);
-    const location = this.locationFor(input.captureId);
-    return this.mutate(location, async () => {
-      const ready = await this.ensureQueryableIndex(location);
-      if (ready.unavailable) return ready.unavailable;
-      return { ...await jcapCaptureSeries({ packageDir: location.packageDir, variables: input.variables, startTick: input.startTick, endTick: input.endTick, bucketCount: input.bucketCount }), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
-    });
-  }
-
-  async eventWindow(input: { captureId: string; eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }): Promise<Record<string, unknown>> {
-    if (!UUID.test(input.eventId)) throw new JcapBoundsError("eventId must be a UUID");
-    if (!Number.isInteger(input.beforeMs) || input.beforeMs < 0 || input.beforeMs > LIMITS.eventMs || !Number.isInteger(input.afterMs) || input.afterMs < 0 || input.afterMs > LIMITS.eventMs) throw new JcapBoundsError("event window must be 0..60000 ms");
-    validateEventWindowBounds(input.variables, input.bucketCount);
-    const location = this.locationFor(input.captureId);
-    return this.mutate(location, async () => {
-      const ready = await this.ensureQueryableIndex(location);
-      if (ready.unavailable) return ready.unavailable;
-      return { ...await jcapCaptureEventWindow({ packageDir: location.packageDir, eventId: input.eventId, variables: input.variables, beforeMs: input.beforeMs, afterMs: input.afterMs, bucketCount: input.bucketCount }), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
-    });
-  }
-
-  async exportCsv(input: { captureId: string }): Promise<Record<string, unknown>> {
-    const location = this.locationFor(input.captureId);
-    return this.mutate(location, async () => {
-      const ready = await this.ensureQueryableIndex(location);
-      const unavailable = ready.unavailable;
-      const owningRoot = path.dirname(path.dirname(location.packageDir));
-      return unavailable ?? { ...ready.status, ...await jcapCaptureExportCsv(location.packageDir, path.join(owningRoot, "exports")), ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
-    });
-  }
-
-  private async ensureQueryableIndex(location: Pick<CaptureLocation, "packageDir" | "captureId" | "cursor">): Promise<{ status: Awaited<ReturnType<typeof verifyJcapV1Index>>; indexRebuilt: boolean; unavailable?: Record<string, unknown> }> {
-    let status = await verifyJcapV1Index(location.packageDir);
-    let indexRebuilt = false;
-    if (status.indexStatus === "rebuild_required" && !["active", "finalizing"].includes(status.captureState)) {
-      await rebuildJcapV1Index(location.packageDir);
-      status = await verifyJcapV1Index(location.packageDir);
-      indexRebuilt = true;
-    }
-    return { status, indexRebuilt, unavailable: readinessResponse(status, true) };
-  }
-
-  private locationFor(captureId: string): CaptureLocation {
-    if (!UUID.test(captureId)) throw new JcapBoundsError("captureId must be a UUID");
-    return resolveCaptureLocation(this.rootDir, captureId);
-  }
-
-  private mutate<T>(location: CaptureLocation, operation: () => Promise<T>): Promise<T> {
-    return location.runId && this.guardRunMutation ? this.guardRunMutation(location.runId, operation) : operation();
-  }
 }
 
 export class JcapV1Writer {
@@ -644,14 +591,23 @@ export function readJcapV1Raw(packageDir: string): JcapV1Raw {
 }
 
 export async function rebuildJcapV1Index(packageDir: string): Promise<{ captureState: JcapV1CaptureState; indexStatus: JcapV1IndexStatus; databaseFile: string; diagnostics: JcapRawDiagnostic[] }> {
+  return withJcapV1PackageLease(packageDir, () => rebuildJcapV1IndexWithinLease(packageDir));
+}
+
+export async function withJcapV1PackageLease<T>(
+  packageDir: string,
+  operation: () => Promise<T>,
+  errorCode = "JCAP_REBUILD_BUSY",
+): Promise<T> {
   const root = checkedPackageDir(packageDir);
-  return withDirectoryLease(path.join(path.dirname(root), ".locks", `${path.basename(root)}.lock`), () => rebuildJcapV1IndexUnlocked(root), {
+  return withDirectoryLease(path.join(path.dirname(root), ".locks", `${path.basename(root)}.lock`), operation, {
     timeoutMs: 30_000,
-    errorCode: "JCAP_REBUILD_BUSY",
+    errorCode,
   });
 }
 
-async function rebuildJcapV1IndexUnlocked(root: string): Promise<{ captureState: JcapV1CaptureState; indexStatus: JcapV1IndexStatus; databaseFile: string; diagnostics: JcapRawDiagnostic[] }> {
+export async function rebuildJcapV1IndexWithinLease(packageDir: string): Promise<{ captureState: JcapV1CaptureState; indexStatus: JcapV1IndexStatus; databaseFile: string; diagnostics: JcapRawDiagnostic[] }> {
+  const root = checkedPackageDir(packageDir);
   if (activeWriters.has(root)) throw new Error("close the JCAP raw writer before rebuilding the index");
   const originalMetadata = readJcapV1Metadata(root);
   const recoveryMetadata: JcapV1Metadata = originalMetadata.indexStatus === "building"
@@ -671,8 +627,13 @@ async function rebuildJcapV1IndexUnlocked(root: string): Promise<{ captureState:
   const temporary = path.join(root, "capture.db.tmp");
   rmSync(temporary, { force: true });
   let database: sqlite3.Database | undefined;
+  let metadataWriteAttempted = false;
+  let metadataPublished = false;
+  let databasePublished = false;
   try {
+    metadataWriteAttempted = true;
     atomicWriteMetadata(path.join(root, "capture.json"), { ...recoveryMetadata, indexStatus: "building", updatedAt: new Date().toISOString() });
+    metadataPublished = true;
     database = await openDatabase(temporary);
     await exec(database, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;");
     await run(database, "BEGIN IMMEDIATE");
@@ -741,6 +702,7 @@ async function rebuildJcapV1IndexUnlocked(root: string): Promise<{ captureState:
     }
     assertFinalRawIdentities(readJcapV1Metadata(root), raw.sources, true);
     atomicReplaceSync(temporary, databaseFile);
+    databasePublished = true;
     atomicWriteMetadata(path.join(root, "capture.json"), {
       ...recoveryMetadata,
       indexStatus,
@@ -752,11 +714,26 @@ async function rebuildJcapV1IndexUnlocked(root: string): Promise<{ captureState:
     });
     return { captureState, indexStatus, databaseFile, diagnostics: raw.diagnostics };
   } catch (error) {
-    atomicWriteMetadata(path.join(root, "capture.json"), recoveryMetadata);
-    throw error;
+    let recoveryError: unknown;
+    try {
+      atomicWriteMetadata(path.join(root, "capture.json"), recoveryMetadata);
+      metadataPublished = true;
+    } catch (caught) {
+      recoveryError = caught;
+    }
+    const detail = recoveryError
+      ? `; metadata recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`
+      : "";
+    throw new JcapRebuildPublishError(
+      `${error instanceof Error ? error.message : String(error)}${detail}`,
+      metadataPublished || metadataWriteAttempted,
+      databasePublished,
+      metadataPublished,
+      Boolean(recoveryError),
+    );
   } finally {
     if (database) await closeDatabase(database).catch(() => undefined);
-    rmSync(temporary, { force: true });
+    try { rmSync(temporary, { force: true }); } catch { /* preserve the primary rebuild result and publication facts */ }
   }
 }
 
@@ -862,7 +839,7 @@ export async function jcapCaptureSummary(packageDir: string): Promise<Record<str
 }
 
 export async function jcapCaptureSeries(input: { packageDir: string; variables: string[]; startTick: string; endTick: string; bucketCount: number }): Promise<Record<string, unknown>> {
-  validateSeriesBounds(input.variables, input.startTick, input.endTick, input.bucketCount, LIMITS.seriesVariables, LIMITS.seriesBuckets);
+  validateJcapV1SeriesQuery(input);
   const status = await verifyJcapV1Index(input.packageDir);
   if (status.indexStatus !== "ready" || !["completed", "stopped", "interrupted"].includes(status.captureState)) throw new Error(`JCAP capture is not queryable: ${status.captureState}/${status.indexStatus}`);
   const database = await openDatabase(path.join(checkedPackageDir(input.packageDir), "capture.db"), sqlite3.OPEN_READONLY);
@@ -896,9 +873,7 @@ export async function jcapCaptureSeries(input: { packageDir: string; variables: 
 }
 
 export async function jcapCaptureEventWindow(input: { packageDir: string; eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }): Promise<Record<string, unknown>> {
-  if (!UUID.test(input.eventId)) throw new JcapBoundsError("eventId must be a UUID");
-  if (!Number.isInteger(input.beforeMs) || input.beforeMs < 0 || input.beforeMs > LIMITS.eventMs || !Number.isInteger(input.afterMs) || input.afterMs < 0 || input.afterMs > LIMITS.eventMs) throw new JcapBoundsError("event window must be 0..60000 ms");
-  validateEventWindowBounds(input.variables, input.bucketCount);
+  validateJcapV1EventWindowQuery(input);
   const root = checkedPackageDir(input.packageDir);
   const status = await verifyJcapV1Index(root);
   if (status.indexStatus !== "ready" || !["completed", "stopped", "interrupted"].includes(status.captureState)) throw new Error(`JCAP capture is not queryable: ${status.captureState}/${status.indexStatus}`);
@@ -944,7 +919,7 @@ export async function jcapCaptureExportCsv(packageDir: string, exportsDir = path
   const root = checkedPackageDir(packageDir);
   const status = await verifyJcapV1Index(root);
   if (status.indexStatus !== "ready" || !["completed", "stopped", "interrupted"].includes(status.captureState)) throw new Error(`JCAP capture is not exportable: ${status.captureState}/${status.indexStatus}`);
-  const database = await openDatabase(path.join(root, "capture.db"), sqlite3.OPEN_READONLY);
+  let database: sqlite3.Database | undefined = await openDatabase(path.join(root, "capture.db"), sqlite3.OPEN_READONLY);
   const exportDir = path.resolve(exportsDir);
   const exportFile = path.join(exportDir, `${readJcapV1Metadata(root).captureId}.csv`);
   let handle: number | undefined;
@@ -962,17 +937,38 @@ export async function jcapCaptureExportCsv(packageDir: string, exportsDir = path
     fsyncSync(handle);
     closeSync(handle);
     handle = undefined;
+    await closeDatabase(database);
+    database = undefined;
     return { exportFile, rows };
   } catch (error) {
-    if (handle !== undefined) closeSync(handle);
-    if (created) rmSync(exportFile, { force: true });
+    const cleanupErrors: string[] = [];
+    if (handle !== undefined) {
+      try { closeSync(handle); }
+      catch (cleanupError) { cleanupErrors.push(`CSV handle close failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); }
+    }
+    if (database) {
+      try { await closeDatabase(database); }
+      catch (cleanupError) { cleanupErrors.push(`database close failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); }
+    }
+    database = undefined;
+    if (created) {
+      try {
+        rmSync(exportFile, { force: true });
+      } catch (cleanupError) {
+        cleanupErrors.push(`CSV cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+    }
+    if (existsSync(exportFile)) {
+      throw new JcapExportPublishError(
+        [error instanceof Error ? error.message : String(error), ...cleanupErrors].join("; "),
+        exportFile,
+      );
+    }
     throw error;
-  } finally {
-    await closeDatabase(database);
   }
 }
 
-function readinessResponse(status: Record<string, unknown>, requireCompleted = false): Record<string, unknown> | undefined {
+export function jcapV1ReadinessResponse(status: Record<string, unknown>, requireCompleted = false): Record<string, unknown> | undefined {
   const captureState = status.captureState as JcapV1CaptureState | undefined;
   const indexStatus = status.indexStatus as JcapV1IndexStatus | undefined;
   if (indexStatus === "rebuild_required") return { status: "rebuild_required", captureState, indexStatus };
@@ -1515,14 +1511,14 @@ function divideCeiling(value: bigint, divisor: bigint): bigint {
   return (value + divisor - 1n) / divisor;
 }
 
-interface CaptureLocation {
+export interface JcapV1CaptureLocation {
   captureId: string;
   packageDir: string;
   runId?: string;
   cursor: string;
 }
 
-function findCapturePackages(root: string): CaptureLocation[] {
+function findCapturePackages(root: string): JcapV1CaptureLocation[] {
   if (!existsSync(root)) return [];
   const directories: Array<{ capturesDir: string; runId?: string }> = [];
   const add = (capturesDir: string, runId?: string) => {
@@ -1539,7 +1535,7 @@ function findCapturePackages(root: string): CaptureLocation[] {
       add(path.join(root, child.name, "captures"), child.name);
     }
   }
-  const found: CaptureLocation[] = [];
+  const found: JcapV1CaptureLocation[] = [];
   for (const directory of directories) {
     const entries = readdirSync(directory.capturesDir, { withFileTypes: true });
     if (entries.length > 10_000) throw new JcapBoundsError("capture directory contains too many entries");
@@ -1553,7 +1549,7 @@ function findCapturePackages(root: string): CaptureLocation[] {
   return found.sort((left, right) => left.cursor.localeCompare(right.cursor));
 }
 
-function assertNoDuplicateCaptureIds(found: CaptureLocation[]): void {
+function assertNoDuplicateCaptureIds(found: JcapV1CaptureLocation[]): void {
   const seen = new Set<string>();
   for (const entry of found) {
     if (seen.has(entry.captureId)) throw new JcapCaptureAmbiguousError(`duplicate JCAP captureId: ${entry.captureId}`);
@@ -1562,10 +1558,20 @@ function assertNoDuplicateCaptureIds(found: CaptureLocation[]): void {
 }
 
 function resolveCapturePackage(root: string, captureId: string): string {
-  return resolveCaptureLocation(root, captureId).packageDir;
+  return resolveJcapV1CaptureLocation(root, captureId).packageDir;
 }
 
-function resolveCaptureLocation(root: string, captureId: string): CaptureLocation {
+export function validateJcapV1SeriesQuery(input: { variables: string[]; startTick: string; endTick: string; bucketCount: number }): void {
+  validateSeriesBounds(input.variables, input.startTick, input.endTick, input.bucketCount, LIMITS.seriesVariables, LIMITS.seriesBuckets);
+}
+
+export function validateJcapV1EventWindowQuery(input: { eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }): void {
+  if (!UUID.test(input.eventId)) throw new JcapBoundsError("eventId must be a UUID");
+  if (!Number.isInteger(input.beforeMs) || input.beforeMs < 0 || input.beforeMs > LIMITS.eventMs || !Number.isInteger(input.afterMs) || input.afterMs < 0 || input.afterMs > LIMITS.eventMs) throw new JcapBoundsError("event window must be 0..60000 ms");
+  validateEventWindowBounds(input.variables, input.bucketCount);
+}
+
+export function resolveJcapV1CaptureLocation(root: string, captureId: string): JcapV1CaptureLocation {
   if (!UUID.test(captureId)) throw new JcapBoundsError("captureId must be a UUID");
   const matches = findCapturePackages(root).filter((entry) => entry.captureId.toLowerCase() === captureId.toLowerCase());
   if (!matches.length) throw new JcapCaptureNotFoundError(`JCAP capture was not found: ${captureId}`);
@@ -1573,7 +1579,7 @@ function resolveCaptureLocation(root: string, captureId: string): CaptureLocatio
   return matches[0];
 }
 
-async function captureListItem(entry: CaptureLocation): Promise<Record<string, unknown>> {
+async function captureListItem(entry: JcapV1CaptureLocation): Promise<Record<string, unknown>> {
   const inspection = inspectCapturePackage(entry.packageDir);
   if (inspection.kind !== "v1") {
     const invalid = inspection.kind === "invalid_v1";

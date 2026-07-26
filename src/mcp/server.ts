@@ -21,6 +21,11 @@ import { HssOperations, type HssCaptureInput } from "./runtime/hss-operations";
 import { DebugSequenceExecutor, type DebugSequenceInput } from "./runtime/debug-sequence";
 import type { VariableRefInput, VariableWriteInput } from "./runtime/variable-access-contract";
 import { VariableAccessRouter } from "./runtime/variable-access-router";
+import {
+  CaptureQueryOperations,
+  type CaptureEventWindowInput,
+  type CaptureSeriesInput,
+} from "./runtime/capture-query-operations";
 import { JLINK_MCP_VERSION } from "./version";
 
 export interface JLinkMcpServerOptions {
@@ -147,6 +152,7 @@ export class JLinkMcpServer {
   private readonly registers: SvdRegisterService;
   private readonly sessions: SessionOperations;
   private readonly hss: HssOperations;
+  private readonly captures: CaptureQueryOperations;
   private readonly sequence: DebugSequenceExecutor;
   private readonly evidence: AcceptanceEvidenceStore;
   private readonly implemented = new Set<AgentToolName>();
@@ -172,8 +178,11 @@ export class JLinkMcpServer {
       evidenceRoot,
       stateRoot,
       undefined,
-      <T>(runId: string, operation: () => Promise<T>) => this.evidence.guardRunMutation(runId, operation),
       this.memorySessions,
+    );
+    this.captures = new CaptureQueryOperations(
+      evidenceRoot,
+      <T>(runId: string, operation: () => Promise<T>) => this.evidence.guardRunMutation(runId, operation),
     );
     this.variables = new VariableAccessRouter(this.targets, this.artifacts, this.direct, this.hss);
     this.sequence = new DebugSequenceExecutor(this.variables, this.hss);
@@ -393,15 +402,15 @@ export class JLinkMcpServer {
       timeoutMs: z.number().int().min(1_000).max(60_000).optional(),
     }, (input, signal) => this.sequence.execute(input as unknown as DebugSequenceInput, signal));
     this.registerEnvelopeTool("capture_list", { limit: z.number().int().min(1).max(100).default(50), cursor: z.string().optional() },
-      (input) => this.hss.captureList({ limit: Number(input.limit), cursor: input.cursor as string | undefined }));
-    this.registerEnvelopeTool("capture_summary", { captureId: z.string().uuid() }, (input) => this.hss.captureSummary(String(input.captureId)));
+      (input) => this.captures.list({ limit: Number(input.limit), cursor: input.cursor as string | undefined }));
+    this.registerEnvelopeTool("capture_summary", { captureId: z.string().uuid() }, (input) => this.captures.summary(String(input.captureId)));
     this.registerEnvelopeTool("capture_series", {
       captureId: z.string().uuid(),
       variables: z.array(z.string().min(1).max(1024)).min(1).max(32),
       startTick: z.string().regex(/^\d+$/),
       endTick: z.string().regex(/^\d+$/),
       bucketCount: z.number().int().min(1).max(4096),
-    }, (input) => this.hss.captureSeries(input as { captureId: string; variables: string[]; startTick: string; endTick: string; bucketCount: number }));
+    }, (input) => this.captures.series(input as unknown as CaptureSeriesInput));
     this.registerEnvelopeTool("capture_event_window", {
       captureId: z.string().uuid(),
       eventId: z.string().uuid(),
@@ -409,8 +418,8 @@ export class JLinkMcpServer {
       beforeMs: z.number().int().min(0).max(60_000),
       afterMs: z.number().int().min(0).max(60_000),
       bucketCount: z.number().int().min(1).max(2048),
-    }, (input) => this.hss.captureEventWindow(input as { captureId: string; eventId: string; variables: string[]; beforeMs: number; afterMs: number; bucketCount: number }));
-    this.registerEnvelopeTool("capture_export_csv", { captureId: z.string().uuid() }, (input) => this.hss.captureExport(String(input.captureId)));
+    }, (input) => this.captures.eventWindow(input as unknown as CaptureEventWindowInput));
+    this.registerEnvelopeTool("capture_export_csv", { captureId: z.string().uuid() }, (input) => this.captures.exportCsv(String(input.captureId)));
 
     const missing = AGENT_TOOL_NAMES.filter((name) => !this.implemented.has(name));
     if (missing.length) throw new Error(`missing concrete MCP tool handlers: ${missing.join(", ")}`);

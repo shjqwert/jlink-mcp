@@ -5,9 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  JcapBoundsError,
-  JcapCaptureAmbiguousError,
-  JcapV1QueryService,
   JcapV1Writer,
   appendJcapV1Sample,
   createJcapV1Metadata,
@@ -27,6 +24,8 @@ import {
   type JcapV1Metadata,
   type JcapV1Sample,
 } from "./jcap-v1";
+import { CaptureQueryOperations } from "../runtime/capture-query-operations";
+import type { OperationEnvelope } from "../runtime/operation-envelope";
 
 const captureId = "41000000-0000-4000-8000-000000000001";
 const eventId = (value: number) => `42000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
@@ -38,6 +37,11 @@ const samples: JcapV1Sample[] = [
 
 function workspace(): string {
   return mkdtempSync(path.join(os.tmpdir(), "jcap-v1-"));
+}
+
+function dataOf(envelope: OperationEnvelope): Record<string, unknown> {
+  assert.equal(envelope.ok, true, JSON.stringify(envelope.error));
+  return envelope.data as Record<string, unknown>;
 }
 
 function metadata(id = captureId, state: JcapV1Metadata["state"] = "active", durationSec = 1, requestedRateHz = 3): JcapV1Metadata {
@@ -153,11 +157,11 @@ test("JCAP v1 package inspection isolates legacy, invalid, and unknown packages"
     assert.equal(inspectCapturePackage(unknownDir).kind, "unknown");
     assert.equal(inspectCapturePackage(missingDir).kind, "invalid_v1");
 
-    const query = new JcapV1QueryService(root);
+    const query = new CaptureQueryOperations(root);
     const listed: Array<Record<string, unknown>> = [];
     let cursor: string | undefined;
     do {
-      const page = await query.list({ limit: 2, cursor });
+      const page = dataOf(await query.list({ limit: 2, cursor }));
       listed.push(...page.captures as Array<Record<string, unknown>>);
       cursor = page.nextCursor as string | undefined;
     } while (cursor);
@@ -172,12 +176,14 @@ test("JCAP v1 package inspection isolates legacy, invalid, and unknown packages"
 
     const before = readFileSync(path.join(legacyDir, "raw", "events.bin"));
     for (const operation of [
-      () => query.summary({ captureId: ids.v0 }),
+      () => query.summary(ids.v0),
       () => query.series({ captureId: ids.v0, variables: ["counter"], startTick: "0", endTick: "1", bucketCount: 1 }),
       () => query.eventWindow({ captureId: ids.v0, eventId: eventId(1), variables: [], beforeMs: 0, afterMs: 0, bucketCount: 1 }),
-      () => query.exportCsv({ captureId: ids.v0 }),
+      () => query.exportCsv(ids.v0),
     ]) {
-      await assert.rejects(operation, (error: unknown) => (error as { code?: string }).code === "JCAP_VERSION_UNSUPPORTED");
+      const result = await operation();
+      assert.equal(result.ok, false);
+      assert.equal(result.error?.code, "JCAP_VERSION_UNSUPPORTED");
     }
     assert.deepEqual(readFileSync(path.join(legacyDir, "raw", "events.bin")), before);
     assert.equal(existsSync(path.join(legacyDir, "capture.db")), false);
@@ -227,8 +233,8 @@ test("capture_list reports a missing terminal v1 index without rebuilding it", a
     });
     finalizeJcapV1Metadata(packageDir, "stopped");
 
-    const query = new JcapV1QueryService(root);
-    const listed = await query.list({ limit: 10 });
+    const query = new CaptureQueryOperations(root);
+    const listed = dataOf(await query.list({ limit: 10 }));
     const item = (listed.captures as Array<Record<string, unknown>>)
       .find((candidate) => candidate.captureId === captureIdWithoutIndex);
     assert.equal(item?.formatStatus, "supported");
@@ -296,23 +302,25 @@ test("JCAP v1 finalizes exactly four durable files and round-trips bounded queri
     assert.deepEqual(indexedWrite.sampleAlignment, { method: "terminal_raw_nearest", status: "resolved" });
     assert.deepEqual(indexedWrite.neighbors, { before: { sampleIndex: 0, tick: "10" }, after: { sampleIndex: 1, tick: "20" } });
 
-    const query = new JcapV1QueryService(root);
+    const query = new CaptureQueryOperations(root);
     unlinkSync(path.join(packageDir, "capture.db"));
-    assert.equal((await query.summary({ captureId })).indexRebuilt, true);
+    assert.equal(dataOf(await query.summary(captureId)).indexRebuilt, true);
     assert.deepEqual(rawHashes(packageDir), beforeHashes);
     assert.deepEqual(await jcapCaptureSeries({ packageDir, variables: ["counter", "feedback"], startTick: "10", endTick: "30", bucketCount: 2 }), seriesBefore);
     assert.deepEqual(await jcapCaptureEventWindow({ packageDir, eventId: eventId(2), variables: ["counter"], beforeMs: 0, afterMs: 0, bucketCount: 1 }), windowBefore);
 
     writeFileSync(path.join(packageDir, "capture.db"), "not a sqlite database");
-    assert.equal((await query.series({ captureId, variables: ["counter"], startTick: "10", endTick: "30", bucketCount: 2 })).indexRebuilt, true);
+    assert.equal(dataOf(await query.series({ captureId, variables: ["counter"], startTick: "10", endTick: "30", bucketCount: 2 })).indexRebuilt, true);
 
     const exported = await jcapCaptureExportCsv(packageDir, path.join(root, "exports"));
     assert.equal(exported.rows, 6);
     assert.equal(path.dirname(exported.exportFile), path.join(root, "exports"));
     assert.deepEqual(readdirSync(packageDir).sort(), ["capture.db", "capture.json", "raw"]);
-    const listed = await query.list();
+    const listed = dataOf(await query.list());
     assert.equal((listed.captures as Array<Record<string, unknown>>)[0].captureId, captureId);
-    await assert.rejects(() => query.series({ captureId, variables: Array.from({ length: 33 }, (_, index) => `v${index}`), startTick: "0", endTick: "1", bucketCount: 1 }), JcapBoundsError);
+    const bounded = await query.series({ captureId, variables: Array.from({ length: 33 }, (_, index) => `v${index}`), startTick: "0", endTick: "1", bucketCount: 1 });
+    assert.equal(bounded.ok, false);
+    assert.equal(bounded.error?.code, "JCAP_BOUNDS");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -406,7 +414,9 @@ test("JCAP v1 capture lookup rejects duplicate IDs across normal and run-scoped 
       });
       finalizeJcapV1Metadata(packageDir, "stopped");
     }
-    await assert.rejects(() => new JcapV1QueryService(root).list(), JcapCaptureAmbiguousError);
+    const listed = await new CaptureQueryOperations(root).list();
+    assert.equal(listed.ok, false);
+    assert.equal(listed.error?.code, "JCAP_CAPTURE_AMBIGUOUS");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -430,7 +440,7 @@ test("JCAP v1 metadata enforces the 60 second capture bound and exports into the
     finalizeJcapV1Metadata(packageDir, "stopped");
     await rebuildJcapV1Index(packageDir);
     assert.equal(readJcapV1Metadata(packageDir).durationSec, 60);
-    const exported = await new JcapV1QueryService(root).exportCsv({ captureId });
+    const exported = dataOf(await new CaptureQueryOperations(root).exportCsv(captureId));
     assert.equal(path.dirname(String(exported.exportFile)), path.join(root, "run-1", "exports"));
     assert.deepEqual(readdirSync(packageDir).sort(), ["capture.db", "capture.json", "raw"]);
   } finally {
