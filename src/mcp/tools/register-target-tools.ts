@@ -1,0 +1,291 @@
+import { z } from "zod";
+import type { ProbeBackend } from "../../probe/backend";
+import { ArtifactVariableService } from "../runtime/artifact-operations";
+import {
+  DirectMcuService,
+  type CoreRegisterWriteInput,
+  type EraseInput,
+  type FlashInput,
+  type MemoryReadInput,
+  type MemoryWriteInput,
+  type ProbeCommandInput,
+} from "../runtime/direct-operations";
+import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "../runtime/operation-envelope";
+import { SvdRegisterService, type RegisterWriteInput } from "../runtime/svd-operations";
+import { TargetRuntimeRegistry } from "../runtime/target-runtime";
+import type { TargetConfigureInput } from "../runtime/target-store";
+import type { VariableRefInput, VariableWriteInput } from "../runtime/variable-access-contract";
+import { VariableAccessRouter } from "../runtime/variable-access-router";
+import type { RegisterEnvelopeTool } from "./tool-contract";
+import { actionInputFailure, relabelEnvelope } from "./tool-envelope";
+import { projectRootInput, userConfirmation, variableRef } from "./tool-schemas";
+
+interface TargetToolServices {
+  discoveryProbe: ProbeBackend;
+  direct: DirectMcuService;
+  runtimes: TargetRuntimeRegistry;
+  artifacts: ArtifactVariableService;
+  variables: VariableAccessRouter;
+  registers: SvdRegisterService;
+}
+
+export function registerTargetTools(register: RegisterEnvelopeTool, services: TargetToolServices): void {
+  const uint32 = z.number().int().min(0).max(0xffff_ffff);
+  const accessWidth = z.union([z.literal(8), z.literal(16), z.literal(32)]);
+  const variableNonObserveComparator = z.union([
+    z.object({ mode: z.literal("exact") }),
+    z.object({ mode: z.literal("tolerance"), absTolerance: z.number().nonnegative(), relTolerance: z.number().nonnegative() }),
+    z.object({ mode: z.literal("masked"), maskHex: z.string().regex(/^(?:[0-9a-fA-F]{2})+$/) }),
+  ]);
+  const variableComparator = z.union([
+    variableNonObserveComparator,
+    z.object({
+      mode: z.literal("observe"),
+      durationMs: z.number().int().min(1).max(60_000),
+      maxPolls: z.number().int().min(1).max(1_000),
+      intervalMs: z.number().int().min(1).max(10_000),
+      comparator: variableNonObserveComparator,
+    }),
+  ]);
+
+  register("list_devices", {}, async () => listDevices(services.discoveryProbe));
+  register("target_configure", {
+    projectRoot: z.string().min(1),
+    device: z.string().min(1),
+    probeSerial: z.string().min(1),
+    interface: z.enum(["SWD", "JTAG"]),
+    speed: z.number().int().min(1).max(50_000),
+    artifactPath: z.string().optional(),
+    mapPath: z.string().optional(),
+    svdPath: z.string().optional(),
+    jlinkPath: z.string().optional(),
+    gdbServerPath: z.string().optional(),
+    gdbPath: z.string().optional(),
+    ports: z.object({
+      gdb: z.number().int().min(1).max(65535).optional(),
+      rtt: z.number().int().min(1).max(65535).optional(),
+      swo: z.number().int().min(1).max(65535).optional(),
+    }).optional(),
+    artifactFlashImages: z.array(z.object({
+      path: z.string().min(1),
+      baseAddress: uint32.optional(),
+    })).max(64).optional(),
+    memoryRegions: z.array(z.object({
+      start: uint32,
+      length: z.number().int().positive().max(0x1_0000_0000),
+      kind: z.enum(["ram", "flash", "rom", "peripheral", "unknown"]),
+      writable: z.boolean(),
+    })).max(128).optional(),
+  }, async (input) => {
+    const result = await services.direct.configure(input as unknown as TargetConfigureInput);
+    const previousGeneration = typeof result.before?.targetGeneration === "string"
+      ? result.before.targetGeneration
+      : undefined;
+    if (
+      result.ok
+      && result.target
+      && previousGeneration
+      && await services.runtimes.invalidate(result.target.projectRoot, previousGeneration)
+    ) {
+      result.observedEffects.push("process_local_target_runtime_disposed");
+    }
+    return result;
+  });
+  register("target_status", projectRootInput,
+    (input) => services.direct.status(String(input.projectRoot)));
+
+  register("artifact_probe", {
+    ...projectRootInput,
+    explicitArtifact: z.string().min(1).optional(),
+    explicitMap: z.string().min(1).optional(),
+    maxFiles: z.number().int().min(1).max(100_000).optional(),
+    maxDepth: z.number().int().min(0).max(64).optional(),
+    maxCandidates: z.number().int().min(1).max(4096).optional(),
+  }, (input) => services.artifacts.artifactProbe(input as never));
+  register("symbol_search", {
+    ...projectRootInput,
+    query: z.string().min(1).max(256),
+    limit: z.number().int().min(1).max(128).default(64),
+  }, (input) => services.artifacts.symbolSearch(
+    String(input.projectRoot),
+    String(input.query),
+    Number(input.limit),
+  ));
+  register("symbol_resolve", {
+    ...projectRootInput,
+    selector: z.string().min(1).max(1024),
+  }, (input) => services.artifacts.symbolResolve(
+    String(input.projectRoot),
+    String(input.selector),
+  ));
+  register("read_variable", { ...projectRootInput, ref: variableRef },
+    (input) => services.variables.readVariable(
+      String(input.projectRoot),
+      input.ref as VariableRefInput,
+    ));
+  register("write_variable", {
+    ...projectRootInput,
+    ref: variableRef,
+    value: z.number(),
+    captureOld: z.boolean().default(true),
+    verify: z.boolean().default(true),
+    restore: z.boolean().default(false),
+    verificationConnection: z.enum(["same_session", "independent_session"]).default("same_session"),
+    comparator: variableComparator.default({ mode: "exact" }),
+  }, (input) => services.variables.writeVariable(input as unknown as VariableWriteInput));
+
+  register("read_memory", {
+    ...projectRootInput,
+    address: uint32,
+    width: accessWidth,
+    byteCount: z.number().int().min(1).max(4096),
+  }, (input) => services.direct.readMemory(input as unknown as MemoryReadInput));
+  register("write_memory", {
+    ...projectRootInput,
+    address: uint32,
+    width: accessWidth,
+    byteCount: z.number().int().min(1).max(4096),
+    dataHex: z.string().min(2),
+    captureOld: z.boolean().default(false),
+    verify: z.boolean().default(true),
+  }, (input) => services.direct.writeMemory(input as unknown as MemoryWriteInput));
+  register("core_register_access", {
+    ...projectRootInput,
+    action: z.enum(["read", "read_all", "write"]),
+    name: z.string().min(1).max(32).optional(),
+    value: uint32.optional(),
+    verify: z.boolean().default(false),
+  }, async (input) => {
+    const projectRoot = String(input.projectRoot);
+    if (input.action === "read") {
+      if (typeof input.name !== "string" || input.value !== undefined || input.verify !== false) {
+        return actionInputFailure("core_register_access", "action=read requires name and accepts no value or verify options");
+      }
+      return relabelEnvelope(await services.direct.readCoreRegister(projectRoot, input.name), "core_register_access");
+    }
+    if (input.action === "read_all") {
+      if (input.name !== undefined || input.value !== undefined || input.verify !== false) {
+        return actionInputFailure("core_register_access", "action=read_all accepts no name, value, or verify options");
+      }
+      return relabelEnvelope(await services.direct.readCoreRegisters(projectRoot), "core_register_access");
+    }
+    if (typeof input.name !== "string" || typeof input.value !== "number") {
+      return actionInputFailure("core_register_access", "action=write requires name and value");
+    }
+    return relabelEnvelope(await services.direct.writeCoreRegister({
+      projectRoot,
+      name: input.name,
+      value: input.value,
+      verify: Boolean(input.verify),
+    } as CoreRegisterWriteInput), "core_register_access");
+  });
+  register("peripheral_register_access", {
+    ...projectRootInput,
+    action: z.enum(["read", "read_many", "write"]),
+    selector: z.string().min(3).max(512).optional(),
+    selectors: z.array(z.string().min(3).max(512)).min(1).max(32).optional(),
+    value: uint32.optional(),
+    captureOld: z.boolean().default(false),
+    verify: z.boolean().default(true),
+    restore: z.boolean().default(false),
+    comparator: variableComparator.default({ mode: "exact" }),
+  }, async (input) => {
+    const projectRoot = String(input.projectRoot);
+    if (input.action === "read") {
+      if (
+        typeof input.selector !== "string" || input.selectors !== undefined || input.value !== undefined
+        || input.captureOld !== false || input.restore !== false
+      ) return actionInputFailure("peripheral_register_access", "action=read requires selector only");
+      return relabelEnvelope(await services.registers.readRegister(projectRoot, input.selector), "peripheral_register_access");
+    }
+    if (input.action === "read_many") {
+      if (
+        !Array.isArray(input.selectors) || input.selector !== undefined || input.value !== undefined
+        || input.captureOld !== false || input.restore !== false
+      ) return actionInputFailure("peripheral_register_access", "action=read_many requires selectors only");
+      return relabelEnvelope(await services.registers.readRegisters(
+        projectRoot,
+        input.selectors as string[],
+      ), "peripheral_register_access");
+    }
+    if (typeof input.selector !== "string" || typeof input.value !== "number" || input.selectors !== undefined) {
+      return actionInputFailure("peripheral_register_access", "action=write requires selector and value");
+    }
+    return relabelEnvelope(await services.registers.writeRegister({
+      projectRoot,
+      selector: input.selector,
+      value: input.value,
+      captureOld: Boolean(input.captureOld),
+      verify: Boolean(input.verify),
+      restore: Boolean(input.restore),
+      comparator: input.comparator as RegisterWriteInput["comparator"],
+    }), "peripheral_register_access");
+  });
+
+  register("target_control", {
+    ...projectRootInput,
+    action: z.enum(["halt", "resume", "reset", "reset_halt"]),
+  }, async (input) => {
+    const action = input.action as "halt" | "resume" | "reset" | "reset_halt";
+    const envelope = relabelEnvelope(
+      await services.direct.control(action, String(input.projectRoot)),
+      "target_control",
+    );
+    envelope.data = {
+      action,
+      ...(isRecord(envelope.data) ? envelope.data : { result: envelope.data }),
+    };
+    return envelope;
+  });
+  register("flash", {
+    ...projectRootInput,
+    path: z.string().min(1),
+    baseAddress: uint32.optional(),
+    userConfirmed: userConfirmation,
+  }, (input) => services.direct.flash(input as unknown as FlashInput));
+  register("erase", {
+    ...projectRootInput,
+    verifyBlank: z.boolean().default(false),
+    userConfirmed: userConfirmation,
+  }, (input) => services.direct.erase(input as unknown as EraseInput));
+  register("probe_command", {
+    ...projectRootInput,
+    commands: z.array(z.string().min(1)).min(1).max(100),
+    userConfirmed: userConfirmation,
+  }, (input) => services.direct.probeCommand(input as unknown as ProbeCommandInput));
+}
+
+async function listDevices(discoveryProbe: ProbeBackend): Promise<OperationEnvelope> {
+  const envelope = createOperationEnvelope("list_devices");
+  try {
+    envelope.before = { probe: discoveryProbe.getStatus() };
+    const result = await discoveryProbe.listDevices();
+    envelope.after = { probe: discoveryProbe.getStatus() };
+    envelope.data = { output: result.output, rawOutput: result.rawOutput, error: result.error };
+    envelope.verification = { status: "observed", method: "J-Link ShowEmuList" };
+    if (!result.success) {
+      return failEnvelope(envelope, {
+        code: result.errorCode ?? "PROBE_DISCOVERY_FAILED",
+        stage: "discovery",
+        message: result.error || result.output || "Probe discovery failed",
+        retryable: true,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    }
+    return finishEnvelope(envelope, true);
+  } catch (error) {
+    return failEnvelope(envelope, {
+      code: "PROBE_DISCOVERY_FAILED",
+      stage: "discovery",
+      message: error instanceof Error ? error.message : String(error),
+      retryable: true,
+      writeIssued: false,
+      stateUnknown: false,
+    });
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
