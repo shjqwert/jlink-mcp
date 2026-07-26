@@ -20,14 +20,6 @@ const standaloneBuild = esbuild.build({
   external: ["sqlite3"],
 });
 
-// Local loopback JCAP offline UI
-const uiBuild = esbuild.build({
-  ...common,
-  entryPoints: ["src/mcp/ui.ts"],
-  outfile: "out/mcp/ui.js",
-  external: ["sqlite3"],
-});
-
 const doctorBuild = esbuild.build({
   ...common,
   entryPoints: ["src/mcp/doctor.ts"],
@@ -35,5 +27,5 @@ const doctorBuild = esbuild.build({
   external: ["sqlite3"],
 });
 
-await Promise.all([standaloneBuild, uiBuild, doctorBuild]);
+await Promise.all([standaloneBuild, doctorBuild]);
 console.log("Build complete");

@@ -91,7 +91,7 @@ const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   hss_stop: "Stop an active HSS capture and finalize available data.",
   hss_recover: "Recover and index the trustworthy prefix of an interrupted HSS capture.",
   debug_sequence_execute: "Synchronously execute multiple HSS/read/write operations on fixed intervals over at least one second and wait until completion. Do not use for a single variable read or write.",
-  capture_list: "List bounded local JCAP v1 captures.",
+  capture_list: "List bounded local Capture packages and report whether each package is supported JCAP v1, legacy, or invalid.",
   capture_summary: "Return bounded provenance, lifecycle, variables, quality, and counts for a capture.",
   capture_series: "Return bounded aggregate time-series buckets for selected variables and ticks.",
   capture_event_window: "Return one event and bounded neighboring series data.",

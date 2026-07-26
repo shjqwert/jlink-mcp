@@ -12,8 +12,6 @@ const allowed = new Set([
   "out/mcp/doctor.js.map",
   "out/mcp/standalone.js",
   "out/mcp/standalone.js.map",
-  "out/mcp/ui.js",
-  "out/mcp/ui.js.map",
   "native/hss-helper/bin/hss_helper.exe",
   "native/hss-helper/bin/hss_helper.exe.sha256",
 ]);

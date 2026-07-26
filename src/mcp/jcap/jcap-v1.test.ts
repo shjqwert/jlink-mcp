@@ -13,6 +13,7 @@ import {
   createJcapV1Metadata,
   finalizeJcapV1Capture,
   finalizeJcapV1Metadata,
+  inspectCapturePackage,
   jcapCaptureEventWindow,
   jcapCaptureExportCsv,
   jcapCaptureSeries,
@@ -98,6 +99,145 @@ function stableSummary(value: Record<string, unknown>): Record<string, unknown> 
   if (copy.metadata && typeof copy.metadata === "object" && !Array.isArray(copy.metadata)) delete (copy.metadata as Record<string, unknown>).updatedAt;
   return copy;
 }
+
+function writeLegacyV0Signature(packageDir: string): void {
+  const rawDir = path.join(packageDir, "raw");
+  mkdirSync(rawDir, { recursive: true });
+  const header = {
+    formatVersion: 0,
+    status: "experimental",
+    kind: "event",
+    payloadEncoding: "json",
+    payloadBytes: 2,
+    payloadSha256: createHash("sha256").update("{}").digest("hex"),
+  };
+  writeFileSync(path.join(rawDir, "events.bin"), `${JSON.stringify(header)}\n{}\n`);
+}
+
+function writeActiveV1Fixture(packageDir: string, id: string): void {
+  writeJcapV1Raw({
+    packageDir,
+    metadata: metadata(id),
+    samples: [],
+    events: [{ eventId: eventId(Number(id.at(-1) ?? "1")), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" }],
+  });
+}
+
+test("JCAP v1 package inspection isolates legacy, invalid, and unknown packages", async () => {
+  const root = workspace();
+  const capturesDir = path.join(root, "captures");
+  const ids = {
+    v1: "41000000-0000-4000-8000-000000000001",
+    v0: "41000000-0000-4000-8000-000000000002",
+    invalid: "41000000-0000-4000-8000-000000000003",
+    unknown: "41000000-0000-4000-8000-000000000004",
+    missing: "41000000-0000-4000-8000-000000000005",
+  };
+  try {
+    writeActiveV1Fixture(path.join(capturesDir, `${ids.v1}.jcap`), ids.v1);
+    const legacyDir = path.join(capturesDir, `${ids.v0}.jcap`);
+    writeLegacyV0Signature(legacyDir);
+    const invalidDir = path.join(capturesDir, `${ids.invalid}.jcap`);
+    mkdirSync(invalidDir, { recursive: true });
+    writeFileSync(path.join(invalidDir, "capture.json"), "{\"formatVersion\":1");
+    const unknownDir = path.join(capturesDir, `${ids.unknown}.jcap`);
+    mkdirSync(path.join(unknownDir, "raw"), { recursive: true });
+    writeFileSync(path.join(unknownDir, "raw", "events.bin"), "{}\n");
+    const missingDir = path.join(capturesDir, `${ids.missing}.jcap`);
+    writeActiveV1Fixture(missingDir, ids.missing);
+    unlinkSync(path.join(missingDir, "capture.json"));
+
+    assert.equal(inspectCapturePackage(path.join(capturesDir, `${ids.v1}.jcap`)).kind, "v1");
+    assert.equal(inspectCapturePackage(legacyDir).kind, "legacy_v0");
+    assert.equal(inspectCapturePackage(invalidDir).kind, "invalid_v1");
+    assert.equal(inspectCapturePackage(unknownDir).kind, "unknown");
+    assert.equal(inspectCapturePackage(missingDir).kind, "invalid_v1");
+
+    const query = new JcapV1QueryService(root);
+    const listed: Array<Record<string, unknown>> = [];
+    let cursor: string | undefined;
+    do {
+      const page = await query.list({ limit: 2, cursor });
+      listed.push(...page.captures as Array<Record<string, unknown>>);
+      cursor = page.nextCursor as string | undefined;
+    } while (cursor);
+    assert.deepEqual(listed.map((entry) => entry.captureId), Object.values(ids));
+    assert.deepEqual(listed.map((entry) => [entry.captureId, entry.formatStatus, entry.detectedFormat]), [
+      [ids.v1, "supported", undefined],
+      [ids.v0, "unsupported", "legacy_v0"],
+      [ids.invalid, "invalid", "invalid_v1"],
+      [ids.unknown, "unsupported", "unknown"],
+      [ids.missing, "invalid", "invalid_v1"],
+    ]);
+
+    const before = readFileSync(path.join(legacyDir, "raw", "events.bin"));
+    for (const operation of [
+      () => query.summary({ captureId: ids.v0 }),
+      () => query.series({ captureId: ids.v0, variables: ["counter"], startTick: "0", endTick: "1", bucketCount: 1 }),
+      () => query.eventWindow({ captureId: ids.v0, eventId: eventId(1), variables: [], beforeMs: 0, afterMs: 0, bucketCount: 1 }),
+      () => query.exportCsv({ captureId: ids.v0 }),
+    ]) {
+      await assert.rejects(operation, (error: unknown) => (error as { code?: string }).code === "JCAP_VERSION_UNSUPPORTED");
+    }
+    assert.deepEqual(readFileSync(path.join(legacyDir, "raw", "events.bin")), before);
+    assert.equal(existsSync(path.join(legacyDir, "capture.db")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("JCAP package inspection rejects conflicting metadata and Raw versions", () => {
+  const root = workspace();
+  const capturesDir = path.join(root, "captures");
+  const metadataV0RawV1Id = "41000000-0000-4000-8000-000000000006";
+  const metadataV1RawV0Id = "41000000-0000-4000-8000-000000000007";
+  try {
+    const metadataV0RawV1Dir = path.join(capturesDir, `${metadataV0RawV1Id}.jcap`);
+    writeActiveV1Fixture(metadataV0RawV1Dir, metadataV0RawV1Id);
+    writeFileSync(path.join(metadataV0RawV1Dir, "capture.json"), JSON.stringify({ formatVersion: 0 }));
+    const metadataV0RawV1 = inspectCapturePackage(metadataV0RawV1Dir);
+    assert.equal(metadataV0RawV1.kind, "invalid_v1");
+    assert.match(metadataV0RawV1.reason, /versions conflict/i);
+
+    const metadataV1RawV0Dir = path.join(capturesDir, `${metadataV1RawV0Id}.jcap`);
+    writeLegacyV0Signature(metadataV1RawV0Dir);
+    writeFileSync(path.join(metadataV1RawV0Dir, "capture.json"), `${JSON.stringify(metadata(metadataV1RawV0Id), null, 2)}\n`);
+    const metadataV1RawV0 = inspectCapturePackage(metadataV1RawV0Dir);
+    assert.equal(metadataV1RawV0.kind, "invalid_v1");
+    assert.match(metadataV1RawV0.reason, /versions conflict/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capture_list reports a missing terminal v1 index without rebuilding it", async () => {
+  const root = workspace();
+  const captureIdWithoutIndex = "41000000-0000-4000-8000-000000000008";
+  const packageDir = path.join(root, "captures", `${captureIdWithoutIndex}.jcap`);
+  try {
+    writeJcapV1Raw({
+      packageDir,
+      metadata: metadata(captureIdWithoutIndex),
+      samples: [{ sampleIndex: 0, tick: "10", statusFlags: 1, values: { counter: 1, feedback: 4 } }],
+      events: [
+        { eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(2), eventSequence: 1, type: "lifecycle", tick: "10", state: "finalizing" },
+        { eventId: eventId(3), eventSequence: 2, type: "lifecycle", tick: "11", state: "stopped" },
+      ],
+    });
+    finalizeJcapV1Metadata(packageDir, "stopped");
+
+    const query = new JcapV1QueryService(root);
+    const listed = await query.list({ limit: 10 });
+    const item = (listed.captures as Array<Record<string, unknown>>)
+      .find((candidate) => candidate.captureId === captureIdWithoutIndex);
+    assert.equal(item?.formatStatus, "supported");
+    assert.equal(item?.indexStatus, "rebuild_required");
+    assert.equal(existsSync(path.join(packageDir, "capture.db")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("JCAP v1 finalizes exactly four durable files and round-trips bounded queries and rebuild", async () => {
   const root = workspace();

@@ -125,9 +125,11 @@ JCAP v1 retains exactly four durable files:
 
 Capture queries use `capture.db`; a verified package can rebuild a missing or damaged index from metadata and Raw files. Explicit CSV exports are written outside the package.
 
-## Offline UI and local evidence
+JCAP v1 is the only supported Capture format. Discoverable legacy JCAP v0 packages remain untouched on disk, appear as unsupported in `capture_list`, and cannot be queried or exported.
 
-The existing Offline UI is retained for compatibility and is outside this Agent contract.
+The standalone executable is the MCP stdio CLI. It does not expose a public Node.js JCAP API.
+
+## Local evidence
 
 Generated captures, exports, acceptance evidence, J-Link DLLs, local project paths, Probe serials, and Artifact hashes belong in ignored local storage such as `test-output/`. Do not commit them.
 

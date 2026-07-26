@@ -65,7 +65,7 @@ const CHECKS: CheckDefinition[] = [
   { id: "lint", command: npm, args: ["run", "lint"] },
   nodeTests("unit-foundation", [
     "out/probe/backend.test.js", "out/probe/jlink.test.js", "out/gdb/gdb-client.test.js", "out/gdb/elf-resolver.test.js",
-    "out/mcp/jcap/analysis-v0.test.js", "out/mcp/jcap/jcap-v0.test.js", "out/mcp/preflight/temp-preflight.test.js", "out/mcp/rtt-channel/rtt-channel.test.js",
+    "out/mcp/preflight/temp-preflight.test.js", "out/mcp/rtt-channel/rtt-channel.test.js",
   ]),
   nodeTests("unit-acceptance", ["out/mcp/acceptance/evidence.test.js", "out/mcp/acceptance/software-runner.test.js"]),
   nodeTests("unit-artifact", [
@@ -107,7 +107,7 @@ const REQUIREMENTS: Record<string, string[]> = {
   T16: ["jcap-v1-store / Interrupted valid-prefix recovery"],
   T17: ["jcap-v1-store / Four files and authoritative Raw integrity"],
   T18: ["jcap-v1-store; capture-query-index / Atomic equivalent DB rebuild"],
-  T19: ["capture-query-index / Bounded AI and UI queries"],
+  T19: ["capture-query-index / Bounded capture queries"],
   T20: ["ai-debug-workflow / Evidence-backed Agent debugging loop"],
 };
 

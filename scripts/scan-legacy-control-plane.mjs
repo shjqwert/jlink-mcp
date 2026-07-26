@@ -4,7 +4,7 @@ import { extname, join, relative, resolve } from "node:path";
 const workspace = resolve(process.cwd());
 const sourceRoots = ["src", "scripts", "native"].map((path) => resolve(workspace, path));
 const extensions = new Set([".ts", ".mjs", ".js", ".cpp", ".h", ".json"]);
-const excluded = new Set(["src/mcp/ui.test.ts", "scripts/scan-legacy-control-plane.mjs", "scripts/check-agent-guidance.mjs"]);
+const excluded = new Set(["scripts/scan-legacy-control-plane.mjs", "scripts/check-agent-guidance.mjs"]);
 const forbidden = [
   /approval-broker/i,
   /approvalBroker/,

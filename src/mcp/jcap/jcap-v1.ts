@@ -17,15 +17,6 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import sqlite3 from "sqlite3";
 import { atomicReplaceSync } from "../../utils/atomic-file";
-import {
-  ANALYSIS_V0_MAX_POINTS,
-  analyzeJcapV0,
-  type AnalysisV0Event,
-  type AnalysisV0Profile,
-  type AnalysisV0Result,
-  type AnalysisV0Role,
-  type AnalysisV0Source,
-} from "./analysis-v0";
 import { HSS_STATUS_FLAGS } from "../hss/hss-status-flags";
 import { withDirectoryLease } from "../runtime/file-lease";
 
@@ -139,7 +130,6 @@ const LIMITS = {
   eventMs: 60000,
   eventCount: 128,
   eventBytes: 4 * 1024 * 1024,
-  analysisBytes: 4 * 1024 * 1024,
   exportRows: 1_000_000,
 } as const;
 
@@ -177,16 +167,11 @@ interface IndexValueRow extends ValueRow { tick_key: string }
 interface IndexSampleRow extends SampleRow { tick_key: string }
 interface IndexEventRow extends EventRow { tick_key: string }
 
-export interface AnalysisV0RunRequest {
-  captureId: string;
-  profile: AnalysisV0Profile;
-  signalRoles: Record<string, AnalysisV0Role>;
-  eventId?: string;
-  beforeMs?: number;
-  afterMs?: number;
-  startTick?: string;
-  endTick?: string;
-}
+export type JcapPackageInspection =
+  | { kind: "v1"; metadata: JcapV1Metadata }
+  | { kind: "legacy_v0"; reason: string }
+  | { kind: "invalid_v1"; reason: string }
+  | { kind: "unknown"; reason: string };
 
 const activeWriters = new Set<string>();
 const utf8 = new TextDecoder("utf-8", { fatal: true });
@@ -201,6 +186,10 @@ export class JcapCaptureNotFoundError extends Error {
 
 export class JcapVersionUnsupportedError extends Error {
   readonly code = "JCAP_VERSION_UNSUPPORTED";
+}
+
+export class JcapPackageInvalidError extends Error {
+  readonly code = "JCAP_PACKAGE_INVALID";
 }
 
 export class JcapIntegrityError extends Error {
@@ -254,20 +243,54 @@ export function createJcapV1Metadata(input: {
 }
 
 export function readJcapV1Metadata(packageDir: string): JcapV1Metadata {
+  const inspection = inspectCapturePackage(packageDir);
+  if (inspection.kind === "v1") return inspection.metadata;
+  if (inspection.kind === "invalid_v1") throw new JcapPackageInvalidError(inspection.reason);
+  throw new JcapVersionUnsupportedError(inspection.reason);
+}
+
+export function inspectCapturePackage(packageDir: string): JcapPackageInspection {
   const root = checkedPackageDir(packageDir);
-  const file = path.join(root, "capture.json");
-  let value: unknown;
-  try {
-    const bytes = readFileSync(file);
-    if (bytes.length > 4 * 1024 * 1024) throw new Error("capture.json exceeds 4 MiB");
-    value = JSON.parse(utf8.decode(bytes));
-  } catch (error) {
-    if (error instanceof JcapVersionUnsupportedError) throw error;
-    throw new JcapVersionUnsupportedError(`JCAP v1 capture.json is missing or invalid: ${error instanceof Error ? error.message : String(error)}`);
+  const metadataFile = path.join(root, "capture.json");
+  if (existsSync(metadataFile)) {
+    const rawVersion = inspectRawFrameVersion(root);
+    let value: unknown;
+    try {
+      const bytes = readBoundedFile(metadataFile, 4 * 1024 * 1024);
+      if (!bytes) {
+        return rawVersion === 0
+          ? { kind: "legacy_v0", reason: "JCAP formatVersion 0 is no longer supported" }
+          : { kind: "invalid_v1", reason: "JCAP v1 capture.json exceeds 4 MiB" };
+      }
+      value = JSON.parse(utf8.decode(bytes));
+    } catch (error) {
+      return rawVersion === 0
+        ? { kind: "legacy_v0", reason: "JCAP formatVersion 0 is no longer supported" }
+        : { kind: "invalid_v1", reason: `JCAP v1 capture.json is invalid: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (isRecord(value) && value.formatVersion === 0) {
+      return rawVersion === 1
+        ? { kind: "invalid_v1", reason: "JCAP metadata and Raw frame versions conflict" }
+        : { kind: "legacy_v0", reason: "JCAP formatVersion 0 is no longer supported" };
+    }
+    if (!isRecord(value) || value.formatVersion !== 1) {
+      if (rawVersion === 0) return { kind: "legacy_v0", reason: "JCAP formatVersion 0 is no longer supported" };
+      if (rawVersion === 1) return { kind: "invalid_v1", reason: "JCAP v1 capture.json has an invalid formatVersion" };
+      return { kind: "unknown", reason: "JCAP package format is not recognized" };
+    }
+    if (rawVersion === 0) return { kind: "invalid_v1", reason: "JCAP metadata and Raw frame versions conflict" };
+    try {
+      validateMetadata(value as JcapV1Metadata, root);
+      return { kind: "v1", metadata: value as JcapV1Metadata };
+    } catch (error) {
+      return { kind: "invalid_v1", reason: `JCAP v1 capture.json failed validation: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
-  if (!isRecord(value) || value.formatVersion !== 1) throw new JcapVersionUnsupportedError("JCAP package is not formatVersion 1");
-  validateMetadata(value as JcapV1Metadata, root);
-  return value as JcapV1Metadata;
+
+  const rawVersion = inspectRawFrameVersion(root);
+  if (rawVersion === 0) return { kind: "legacy_v0", reason: "JCAP formatVersion 0 is no longer supported" };
+  if (rawVersion === 1) return { kind: "invalid_v1", reason: "JCAP v1 capture.json is missing" };
+  return { kind: "unknown", reason: "JCAP package format is not recognized" };
 }
 
 export function updateJcapV1Metadata(packageDir: string, update: (current: JcapV1Metadata) => JcapV1Metadata): JcapV1Metadata {
@@ -371,60 +394,6 @@ export class JcapV1QueryService {
     });
   }
 
-  async analysisRun(input: AnalysisV0RunRequest): Promise<Record<string, unknown>> {
-    validateAnalysisRunInput(input);
-    const location = this.locationFor(input.captureId);
-    return this.mutate(location, () => this.analysisRunPackage(input, location.packageDir));
-  }
-
-  private async analysisRunPackage(input: AnalysisV0RunRequest, packageDir: string): Promise<Record<string, unknown>> {
-    const ready = await this.ensureQueryableIndex({ packageDir, captureId: input.captureId, cursor: input.captureId });
-    const unavailable = ready.unavailable;
-    if (unavailable) return unavailable;
-    const database = await openDatabase(path.join(packageDir, "capture.db"));
-    try {
-      let startTick = input.startTick;
-      let endTick = input.endTick;
-      if (input.eventId) {
-        const event = await get<EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events WHERE event_id=?", [input.eventId]);
-        if (!event) throw new Error("JCAP event was not found");
-        const center = BigInt(event.tick);
-        const before = BigInt(input.beforeMs!) * 1_000_000n;
-        const after = BigInt(input.afterMs!) * 1_000_000n;
-        if (center + after > U64_MAX) throw new JcapBoundsError("analysis event window exceeds u64 ticks");
-        startTick = (center > before ? center - before : 0n).toString();
-        endTick = (center + after).toString();
-      }
-      const variables = Object.keys(input.signalRoles).sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
-      const placeholders = variables.map(() => "?").join(",");
-      const rows = variables.length ? await all<ValueRow>(database, `SELECT sample_index,tick,status_flags,variable,value FROM sample_values WHERE variable IN (${placeholders}) AND tick_key BETWEEN ? AND ? ORDER BY tick_key,sample_index,variable LIMIT ?`, [...variables, u64Key(startTick!), u64Key(endTick!), ANALYSIS_V0_MAX_POINTS + 1]) : [];
-      if (rows.length > ANALYSIS_V0_MAX_POINTS) throw new JcapBoundsError(`analysis point limit exceeded: ${ANALYSIS_V0_MAX_POINTS}`);
-      const eventRows = await all<EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events WHERE tick_key BETWEEN ? AND ? ORDER BY tick_key,event_sequence,event_id LIMIT ?", [u64Key(startTick!), u64Key(endTick!), ANALYSIS_V0_MAX_POINTS + 1]);
-      if (eventRows.length > ANALYSIS_V0_MAX_POINTS) throw new JcapBoundsError(`analysis event limit exceeded: ${ANALYSIS_V0_MAX_POINTS}`);
-      const events = eventRows.map((row) => JSON.parse(row.json) as AnalysisV0Event);
-      const rawSources = (await all<SourceRow>(database, "SELECT file,sha256,bytes,valid_bytes,diagnostic FROM raw_sources ORDER BY file")).map<AnalysisV0Source>((source) => ({
-        file: source.file,
-        sha256: source.sha256,
-        bytes: source.bytes,
-        validBytes: source.valid_bytes,
-      }));
-      const result = analyzeJcapV0({
-        captureId: input.captureId,
-        profile: input.profile,
-        signalRoles: input.signalRoles,
-        window: { startTick: startTick!, endTick: endTick!, ...(input.eventId ? { eventId: input.eventId } : {}) },
-        points: rows.map((row) => ({ sampleIndex: row.sample_index, tick: row.tick, statusFlags: row.status_flags, variable: row.variable, value: row.value })),
-        events,
-        rawSources,
-      });
-      bounded(result, LIMITS.analysisBytes);
-      await persistAnalysisRun(database, result);
-      return { ...result, ...(ready.indexRebuilt ? { indexRebuilt: true } : {}) };
-    } finally {
-      await closeDatabase(database);
-    }
-  }
-
   async rebuild(input: { captureId: string }): Promise<Record<string, unknown>> {
     const location = this.locationFor(input.captureId);
     return this.mutate(location, async () => {
@@ -466,48 +435,6 @@ export class JcapV1QueryService {
 
   private mutate<T>(location: CaptureLocation, operation: () => Promise<T>): Promise<T> {
     return location.runId && this.guardRunMutation ? this.guardRunMutation(location.runId, operation) : operation();
-  }
-}
-
-async function persistAnalysisRun(database: sqlite3.Database, result: AnalysisV0Result): Promise<void> {
-  await run(database, "BEGIN IMMEDIATE");
-  try {
-    await exec(database, `
-      CREATE TABLE IF NOT EXISTS analysis_schema_version (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS analysis_runs (analysis_run_id TEXT PRIMARY KEY, input_digest TEXT NOT NULL, result_json TEXT NOT NULL, raw_source_tuple_json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS analysis_findings (analysis_run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, type TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(analysis_run_id, ordinal), FOREIGN KEY(analysis_run_id) REFERENCES analysis_runs(analysis_run_id) ON DELETE CASCADE);
-    `);
-    await run(database, "INSERT OR IGNORE INTO analysis_schema_version(singleton,version) VALUES(1,1)");
-    const schema = await get<{ version: number }>(database, "SELECT version FROM analysis_schema_version WHERE singleton=1");
-    if (schema?.version !== 1) throw new Error("unsupported analysis schema version");
-    await run(database, "INSERT OR REPLACE INTO analysis_runs(analysis_run_id,input_digest,result_json,raw_source_tuple_json) VALUES(?,?,?,?)", [result.analysisRunId, result.analysisRunId, JSON.stringify(result), JSON.stringify(result.rawSources)]);
-    await run(database, "DELETE FROM analysis_findings WHERE analysis_run_id=?", [result.analysisRunId]);
-    for (const [ordinal, finding] of result.findings.entries()) await run(database, "INSERT INTO analysis_findings(analysis_run_id,ordinal,type,json) VALUES(?,?,?,?)", [result.analysisRunId, ordinal, String(finding.type), JSON.stringify(finding)]);
-    await run(database, "COMMIT");
-  } catch (error) {
-    await run(database, "ROLLBACK").catch(() => undefined);
-    throw error;
-  }
-}
-
-function validateAnalysisRunInput(input: AnalysisV0RunRequest): void {
-  const allowed = new Set(["captureId", "profile", "signalRoles", "eventId", "beforeMs", "afterMs", "startTick", "endTick"]);
-  if (!isRecord(input) || Object.keys(input).some((key) => !allowed.has(key))) throw new JcapBoundsError("analysis_run accepts only captureId, profile, signalRoles and one window selector");
-  if (!UUID.test(input.captureId)) throw new JcapBoundsError("captureId must be a UUID");
-  if (input.profile !== "generic_control" && input.profile !== "generic_state_machine") throw new JcapBoundsError("analysis profile must be generic_control or generic_state_machine");
-  if (!isRecord(input.signalRoles)) throw new JcapBoundsError("signalRoles must be an object");
-  const variables = Object.keys(input.signalRoles);
-  if (variables.length > 16) throw new JcapBoundsError("analysis accepts at most 16 signalRoles");
-  validateVariableNames(variables);
-  if (Object.values(input.signalRoles).some((role) => !["command", "feedback", "state"].includes(role))) throw new JcapBoundsError("analysis v0 roles are command, feedback, or state");
-  const eventWindow = input.eventId !== undefined || input.beforeMs !== undefined || input.afterMs !== undefined;
-  const tickWindow = input.startTick !== undefined || input.endTick !== undefined;
-  if (eventWindow === tickWindow) throw new JcapBoundsError("select exactly one event or tick analysis window");
-  if (eventWindow) {
-    if (typeof input.eventId !== "string" || !UUID.test(input.eventId)) throw new JcapBoundsError("eventId must be a UUID");
-    if (!Number.isInteger(input.beforeMs) || input.beforeMs! < 0 || input.beforeMs! > LIMITS.eventMs || !Number.isInteger(input.afterMs) || input.afterMs! < 0 || input.afterMs! > LIMITS.eventMs) throw new JcapBoundsError("analysis event window must be 0..60000 ms");
-  } else if (!isU64(input.startTick) || !isU64(input.endTick) || BigInt(input.startTick!) > BigInt(input.endTick!)) {
-    throw new JcapBoundsError("analysis tick window must be ordered decimal u64 startTick/endTick");
   }
 }
 
@@ -1136,6 +1063,46 @@ function checkedPackageDir(value: string): string {
   return resolved;
 }
 
+function inspectRawFrameVersion(packageDir: string): 0 | 1 | undefined {
+  for (const name of ["events.bin", "samples.bin"]) {
+    const file = path.join(packageDir, "raw", name);
+    if (!existsSync(file)) continue;
+    const handle = openSync(file, "r");
+    try {
+      const buffer = Buffer.alloc(8 * 1024);
+      const length = readSync(handle, buffer, 0, buffer.length, 0);
+      const lineEnd = buffer.subarray(0, length).indexOf(0x0a);
+      if (lineEnd < 0) continue;
+      const header = JSON.parse(utf8.decode(buffer.subarray(0, lineEnd))) as unknown;
+      if (isRecord(header) && (header.formatVersion === 0 || header.formatVersion === 1)) return header.formatVersion;
+    } catch {
+      continue;
+    } finally {
+      closeSync(handle);
+    }
+  }
+  return undefined;
+}
+
+function readBoundedFile(file: string, maxBytes: number): Buffer | undefined {
+  const stats = statSync(file);
+  if (!stats.isFile()) throw new Error("capture.json is not a regular file");
+  if (stats.size > maxBytes) return undefined;
+  const handle = openSync(file, "r");
+  try {
+    const bytes = Buffer.alloc(stats.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const length = readSync(handle, bytes, offset, bytes.length - offset, offset);
+      if (length === 0) break;
+      offset += length;
+    }
+    return bytes.subarray(0, offset);
+  } finally {
+    closeSync(handle);
+  }
+}
+
 export function appendJcapV1Event(packageDir: string, event: JcapV1Event): void {
   const root = checkedPackageDir(packageDir);
   const metadata = readJcapV1Metadata(root);
@@ -1620,7 +1587,21 @@ function resolveCaptureLocation(root: string, captureId: string): CaptureLocatio
 }
 
 async function captureListItem(entry: CaptureLocation): Promise<Record<string, unknown>> {
-  const metadata = readJcapV1Metadata(entry.packageDir);
+  const inspection = inspectCapturePackage(entry.packageDir);
+  if (inspection.kind !== "v1") {
+    const invalid = inspection.kind === "invalid_v1";
+    return {
+      captureId: entry.captureId,
+      ...(entry.runId ? { runId: entry.runId } : {}),
+      formatStatus: invalid ? "invalid" : "unsupported",
+      detectedFormat: inspection.kind,
+      error: {
+        code: invalid ? "JCAP_PACKAGE_INVALID" : "JCAP_VERSION_UNSUPPORTED",
+        message: inspection.reason,
+      },
+    };
+  }
+  const metadata = inspection.metadata;
   const status = await verifyJcapV1Index(entry.packageDir);
   let timeRange: { startTick: string; endTick: string } | undefined;
   if (status.indexStatus === "ready") {
@@ -1635,6 +1616,8 @@ async function captureListItem(entry: CaptureLocation): Promise<Record<string, u
   return {
     captureId: entry.captureId,
     ...(entry.runId ? { runId: entry.runId } : {}),
+    formatStatus: "supported",
+    formatVersion: 1,
     captureState: status.captureState,
     indexStatus: status.indexStatus,
     variables: metadata.variables.map((variable) => ({ logicalIdentity: variable.logicalIdentity, type: variable.type, alias: variable.alias, unit: variable.unit })),

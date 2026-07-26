@@ -1,10 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { basename, join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const workspace = resolve(process.cwd());
+const require = createRequire(import.meta.url);
+const fixtureApi = require(resolve(workspace, "out", "mcp", "jcap", "jcap-v1.js"));
 const packageJson = JSON.parse(readFileSync(resolve(workspace, "package.json"), "utf8"));
 const version = String(packageJson.version);
 const releaseDir = resolve(workspace, "release", `v${version}`);
@@ -42,42 +45,6 @@ const installed = resolve(installRoot, "node_modules", "jlink-mcp");
 const doctor = run(process.execPath, [resolve(installed, "out", "mcp", "doctor.js")], installRoot, true);
 assertDoctorReport(doctor.stdout, "installed");
 await assertMcpSurface(resolve(installed, "out", "mcp", "standalone.js"), installRoot, "installed");
-
-const smoke = `
-const fs = require("node:fs");
-const path = require("node:path");
-const os = require("node:os");
-const api = require(${JSON.stringify(resolve(installed, "out", "mcp", "standalone.js"))});
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "jlink-mcp-release-jcap-"));
-const packageDir = path.join(root, "release-smoke.jcap");
-api.writeJcapV0Raw({
-  packageDir,
-  provenance: {
-    captureId: "41000000-0000-4000-8000-000000000000",
-    backend: "release-test",
-    runtime: {},
-    target: {},
-    script: { mode: "none" }
-  },
-  samples: [{ sampleIndex: 0, tick: "0", statusFlags: 0, values: { signal: 1 } }],
-  events: [
-    { eventId: "41000000-0000-4000-8000-000000000001", eventSequence: 0, type: "lifecycle", tick: "0", state: "planned" },
-    { eventId: "41000000-0000-4000-8000-000000000002", eventSequence: 1, type: "lifecycle", tick: "1", state: "active" },
-    { eventId: "41000000-0000-4000-8000-000000000003", eventSequence: 2, type: "lifecycle", tick: "2", state: "finalizing" },
-    { eventId: "41000000-0000-4000-8000-000000000004", eventSequence: 3, type: "lifecycle", tick: "3", state: "completed" }
-  ]
-});
-api.rebuildJcapV0Index(packageDir)
-  .then(() => api.verifyJcapV0Index(packageDir))
-  .then((result) => {
-    if (!result || result.indexStatus !== "ready" || result.captureState !== "completed") throw new Error("JCAP index did not become ready");
-    process.stdout.write(JSON.stringify({ status: "ok", packageDir }));
-  })
-  .catch((error) => { process.stderr.write(String(error)); process.exitCode = 1; });
-`;
-const jcap = run(process.execPath, ["-e", smoke], installRoot, true);
-const jcapResult = JSON.parse(jcap.stdout);
-if (jcapResult.status !== "ok") throw new Error("installed JCAP smoke test failed");
 
 const helper = resolve(installed, "native", "hss-helper", "bin", "hss_helper.exe");
 const helperVersion = run(helper, ["version"], installRoot, true);
@@ -132,6 +99,7 @@ function assertDoctorReport(output, label) {
 
 async function assertMcpSurface(standalone, cwd, label) {
   const localRoot = resolve(cwd, ".jlink-mcp-release-smoke");
+  const captureId = writeReleaseFixture(resolve(localRoot, "evidence", "captures"));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [standalone],
@@ -152,9 +120,55 @@ async function assertMcpSurface(standalone, cwd, label) {
     }
     const tools = (await client.listTools()).tools;
     if (tools.length !== 37) throw new Error(`${label} MCP exposed ${tools.length} tools instead of 37`);
+    const listed = parseEnvelope(await client.callTool({ name: "capture_list", arguments: { limit: 10 } }));
+    if (!listed.ok || !listed.data?.captures?.some((entry) => entry.captureId === captureId && entry.formatStatus === "supported")) {
+      throw new Error(`${label} MCP did not list the JCAP v1 release fixture`);
+    }
+    const summary = parseEnvelope(await client.callTool({ name: "capture_summary", arguments: { captureId } }));
+    if (!summary.ok || summary.data?.sampleCount !== 1 || summary.data?.indexStatus !== "ready") {
+      throw new Error(`${label} MCP could not query and rebuild the JCAP v1 release fixture`);
+    }
   } finally {
     await client.close();
   }
+}
+
+function writeReleaseFixture(capturesDir) {
+  const captureId = "41000000-0000-4000-8000-000000000099";
+  const packageDir = resolve(capturesDir, `${captureId}.jcap`);
+  const metadata = fixtureApi.createJcapV1Metadata({
+    captureId,
+    backend: "fake-jlink-hss",
+    requestedRateHz: 1,
+    durationSec: 1,
+    variables: [{ logicalIdentity: "signal", type: "uint32", address: "0x20000000", size: 4, artifactGeneration: "a".repeat(64), layoutHash: "b".repeat(64) }],
+    provenance: {
+      captureId,
+      backend: "fake-jlink-hss",
+      runtime: { helperProtocolVersion: 1 },
+      target: { projectRoot: "C:\\release-fixture", generation: "43000000-0000-4000-8000-000000000099", device: "FIXTURE", probeSerial: "123456789", interface: "SWD", speed: 4000 },
+      script: { mode: "none" },
+      artifact: { path: "C:\\release-fixture\\firmware.elf", generation: "a".repeat(64), sha256: "e".repeat(64) },
+    },
+  });
+  fixtureApi.writeJcapV1Raw({
+    packageDir,
+    metadata,
+    samples: [{ sampleIndex: 0, tick: "1", statusFlags: 1, values: { signal: 1 } }],
+    events: [
+      { eventId: "42000000-0000-4000-8000-000000000091", eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+      { eventId: "42000000-0000-4000-8000-000000000092", eventSequence: 1, type: "lifecycle", tick: "1", state: "finalizing" },
+      { eventId: "42000000-0000-4000-8000-000000000093", eventSequence: 2, type: "lifecycle", tick: "2", state: "stopped" },
+    ],
+  });
+  fixtureApi.finalizeJcapV1Metadata(packageDir, "stopped");
+  return captureId;
+}
+
+function parseEnvelope(result) {
+  const text = result.content?.find((item) => item.type === "text")?.text;
+  if (typeof text !== "string") throw new Error("MCP tool result did not include a text envelope");
+  return JSON.parse(text);
 }
 
 function runNpm(args, cwd, capture = false) {
