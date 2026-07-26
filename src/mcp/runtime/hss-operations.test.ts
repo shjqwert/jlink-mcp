@@ -576,6 +576,34 @@ test("HSS quality reports no-source captures as partial and indexes target-count
   }
 });
 
+test("HSS quality strips sensitive Helper provenance before publishing the quality event", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.resultQualityEvidence = {
+      dll: "sensitive-dll",
+      jlinkScriptFile: "sensitive-script",
+      jlinkScriptExecOutput: "sensitive-output",
+      helperVersion: "fixture-helper",
+    };
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    const captureId = String((started.data as { captureId: string }).captureId);
+    const packageDir = String((started.data as { packageDir: string }).packageDir);
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+
+    const raw = readJcapV1Raw(packageDir);
+    const quality = raw.events.find((event) => event.type === "quality")!;
+    const provenance = quality.qualityEvidence as Record<string, unknown>;
+    assert.equal(provenance.dll, undefined);
+    assert.equal(provenance.jlinkScriptFile, undefined);
+    assert.equal(provenance.jlinkScriptExecOutput, undefined);
+    assert.equal(provenance.helperVersion, "fixture-helper");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("HSS quality oracle rejects counter modulo and reset ambiguity without losing ordinary bounded evidence", async () => {
   const fixture = await createFixture("uint8");
   try {
@@ -1032,6 +1060,7 @@ class FakeHssAdapter implements HssHelperAdapter {
   counterIncrement = 1;
   counterModulus?: number;
   initialSampleTickStep = 10_000_000n;
+  resultQualityEvidence?: Record<string, unknown>;
   private ignoreNextStopRequest = false;
 
   async inspectRuntime(): Promise<HssRuntimeFacts> {
@@ -1209,6 +1238,7 @@ class FakeHssAdapter implements HssHelperAdapter {
       rawWriteTimeNsTotal: 56_000,
       rawWriteTimeNsMax: 2_000,
       rawWriteTimeNsAverage: 1_000,
+      qualityEvidence: this.resultQualityEvidence,
     }]);
   }
 
