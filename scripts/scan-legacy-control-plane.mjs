@@ -21,6 +21,8 @@ const forbidden = [
   /\bgdb_load\b/,
   /registerPrompt|\.prompt\s*\(/,
   /jlink:\/\/discovery\/catalog/,
+  /JcapV0QueryService/,
+  /from\s+["'][^"']*jcap-v0["']/,
   /from\s+["']vscode["']|require\s*\(\s*["']vscode["']\s*\)/,
 ];
 
@@ -41,7 +43,15 @@ const packageText = readFileSync(resolve(workspace, "package.json"), "utf8");
 for (const token of ["activationEvents", '"contributes"', "@types/vscode", "@vscode/vsce", "vscode:prepublish", "vsix"]) {
   if (packageText.includes(token)) findings.push(`package.json: ${token}`);
 }
-for (const file of ["src/extension.ts", ".vscodeignore", "out/extension.js"]) {
+for (const file of [
+  "src/extension.ts",
+  ".vscodeignore",
+  "out/extension.js",
+  "src/mcp/jcap/jcap-v0.ts",
+  "src/mcp/ui.ts",
+  "src/mcp/ui-page.ts",
+  "out/mcp/ui.js",
+]) {
   if (existsSync(resolve(workspace, file))) findings.push(`${file}: must not exist`);
 }
 

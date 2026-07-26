@@ -42,7 +42,7 @@ function fixture(overrides: Partial<HssSessionRecord> = {}): HssSessionRecord {
     },
     helperPid: 1234,
     helperNonce: randomUUID(),
-    ownerToken: "owner-token",
+    ownerToken: randomUUID(),
     qpcEpochCounter: "0",
     qpcFrequency: "10000000",
     rateHz: 100,

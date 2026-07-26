@@ -64,10 +64,10 @@ test("ProbeQueue serializes separate Node processes and returns actual sequence 
     "const root=process.argv[2], log=process.argv[3], id=process.argv[4];",
     "(async()=>{const q=new ProbeQueue(root);const r=await q.runExclusive('1003',async m=>{fs.appendFileSync(log,JSON.stringify({id,kind:'start',sequence:m.queueSequence})+'\\n');await new Promise(r=>setTimeout(r,40));fs.appendFileSync(log,JSON.stringify({id,kind:'end',sequence:m.queueSequence})+'\\n');});process.stdout.write(String(r.queueSequence));})().catch(e=>{process.stderr.write(String(e.stack||e));process.exit(1);});",
   ].join("");
-  const children = ["a", "b", "c"].map((id) => runChild(script, [modulePath, root, logPath, id]));
+  const children = ["a", "b", "c", "d", "e", "f", "g", "h"].map((id) => runChild(script, [modulePath, root, logPath, id]));
   const sequences = (await Promise.all(children)).map(Number);
   const records = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { kind: string; sequence: number });
-  assert.deepEqual(records.map((record) => record.kind), ["start", "end", "start", "end", "start", "end"]);
+  assert.deepEqual(records.map((record) => record.kind), Array.from({ length: children.length }, () => ["start", "end"]).flat());
   assert.deepEqual(records.filter((record) => record.kind === "start").map((record) => record.sequence), [...sequences].sort((a, b) => a - b));
 });
 

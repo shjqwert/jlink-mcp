@@ -77,7 +77,7 @@ const CHECKS: CheckDefinition[] = [
   ]),
   nodeTests("unit-svd", ["out/mcp/runtime/svd-operations.test.js", "out/mcp/svd/svd-catalog.test.js"]),
   nodeTests("unit-hss-jcap", [
-    "out/mcp/hss/hss-typed-value.test.js", "out/mcp/hss-dll/hss-api-candidate.test.js", "out/mcp/jcap/jcap-v1.test.js",
+    "out/mcp/hss/hss-typed-value.test.js", "out/mcp/hss-dll/hss-api-candidate.test.js", "out/mcp/jcap/analysis-v0.test.js", "out/mcp/jcap/jcap-v1.test.js",
     "out/mcp/runtime/hss-helper-adapter.test.js", "out/mcp/runtime/hss-quality-evidence.test.js", "out/mcp/runtime/hss-session-store.test.js", "out/mcp/runtime/hss-operations.test.js", "out/mcp/sqlite-runtime.test.js", "out/utils/atomic-file.test.js",
   ]),
   { id: "surface", command: npm, args: ["run", "test:surface"] },

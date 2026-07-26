@@ -427,7 +427,8 @@ function recoverStaleLease(leaseDir: string): void {
   try {
     const lease = JSON.parse(readFileSync(join(leaseDir, "owner.json"), "utf8")) as LeaseRecord;
     if (!validIdentityRecord(lease) || !identityRecordLive(lease)) removeDirectoryIfTokenMatches(leaseDir, lease.token);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !existsSync(leaseDir)) return;
     throw new ProbeQueueError("QUEUE_STATE_INVALID", "Probe lease state is malformed and was not removed automatically");
   }
 }
