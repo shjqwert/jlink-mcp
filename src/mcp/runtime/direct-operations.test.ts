@@ -504,14 +504,14 @@ test("post-mutation observation rejection remains an issued uncertain failure", 
 
   const erase = await fixture(context, "erase-observe-reject");
   erase.probe.observationRejectOnCall = 2;
-  const eraseResult = await erase.service.erase(erase.projectRoot);
+  const eraseResult = await erase.service.erase({ projectRoot: erase.projectRoot });
   assert.equal(eraseResult.error?.writeIssued, true);
   assert.equal(eraseResult.error?.stateUnknown, true);
   assert.equal((eraseResult.data as { command: { success: boolean } }).command.success, true);
 
   const raw = await fixture(context, "raw-observe-reject");
   raw.probe.observationRejectOnCall = 2;
-  const rawResult = await raw.service.probeCommand(raw.projectRoot, ["w4 0x20000000, 1"]);
+  const rawResult = await raw.service.probeCommand({ projectRoot: raw.projectRoot, commands: ["w4 0x20000000, 1"] });
   assert.equal(rawResult.error?.writeIssued, true);
   assert.equal(rawResult.error?.stateUnknown, true);
   assert.equal((rawResult.data as { command: { success: boolean } }).command.success, true);
@@ -763,12 +763,12 @@ test("flash revalidates its input inside the Probe lease", async (context) => {
 
 test("erase with unsupported blank verification is rejected before erase", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "erase-verify");
-  const rejected = await service.erase(projectRoot, true);
+  const rejected = await service.erase({ projectRoot, verifyBlank: true });
   assert.equal(rejected.ok, false);
   assert.equal(rejected.error?.code, "BLANK_VERIFICATION_UNSUPPORTED");
   assert.deepEqual(probe.actions, []);
 
-  const erased = await service.erase(projectRoot, false);
+  const erased = await service.erase({ projectRoot, verifyBlank: false });
   assert.equal(erased.ok, true);
   assert.equal(erased.artifact, null);
   assert.deepEqual(probe.actions, ["erase"]);
@@ -785,7 +785,7 @@ test("erase reports a fatal J-Link programming diagnostic as issued with unknown
     stateUnknown: true,
   };
 
-  const result = await service.erase(projectRoot);
+  const result = await service.erase({ projectRoot });
 
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, ProbeErrorCode.JLINK_COMMAND_FAILED);
@@ -798,7 +798,7 @@ test("erase reports a fatal J-Link programming diagnostic as issued with unknown
 test("erase reports unknown and known vendor target-state changes without auto-recovery", async (context) => {
   const unknown = await fixture(context, "erase-before-unknown");
   unknown.probe.observations.push({ state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } });
-  const observedUnknown = await unknown.service.erase(unknown.projectRoot);
+  const observedUnknown = await unknown.service.erase({ projectRoot: unknown.projectRoot });
   assert.equal(observedUnknown.ok, true);
   assert.ok(observedUnknown.observedEffects.includes("vendor_target_state_change:unknown->running"));
   assert.deepEqual(unknown.probe.actions, ["erase"]);
@@ -808,7 +808,7 @@ test("erase reports unknown and known vendor target-state changes without auto-r
     { state: "running", source: "dhcsr", result: ok() },
     { state: "halted", source: "dhcsr", result: ok() },
   );
-  const result = await changed.service.erase(changed.projectRoot);
+  const result = await changed.service.erase({ projectRoot: changed.projectRoot });
   assert.equal(result.ok, true);
   assert.ok(result.observedEffects.includes("vendor_target_state_change:running->halted"));
   assert.equal(result.verification.status, "executed_unverified");
@@ -818,7 +818,7 @@ test("erase reports unknown and known vendor target-state changes without auto-r
 test("raw Probe commands preserve exact payload and report unknown effects", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "raw-command");
   const commands = ["mem 0x20000000, 4", "rreg PC"];
-  const result = await service.probeCommand(projectRoot, commands);
+  const result = await service.probeCommand({ projectRoot, commands });
   assert.equal(result.ok, true);
   assert.deepEqual((result.data as { commands: string[] }).commands, commands);
   assert.equal((result.data as { sideEffects: string }).sideEffects, "unknown");
@@ -828,7 +828,7 @@ test("raw Probe commands preserve exact payload and report unknown effects", asy
 test("failed raw Probe command still invalidates Artifact state when issue was possible", async (context) => {
   const { service, probe, targets, projectRoot } = await fixture(context, "raw-command-failure");
   probe.rawResult = { success: false, rawOutput: "partial", output: "partial", error: "connection lost" };
-  const result = await service.probeCommand(projectRoot, ["unknown-command"]);
+  const result = await service.probeCommand({ projectRoot, commands: ["unknown-command"] });
   assert.equal(result.ok, false);
   assert.equal(result.error?.writeIssued, true);
   assert.equal(result.error?.stateUnknown, false);
@@ -842,7 +842,7 @@ test("failed raw Probe command still invalidates Artifact state when issue was p
     { state: "running", source: "dhcsr", result: ok() },
     { state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } },
   );
-  const unknownResult = await unknown.service.probeCommand(unknown.projectRoot, ["unknown-command"]);
+  const unknownResult = await unknown.service.probeCommand({ projectRoot: unknown.projectRoot, commands: ["unknown-command"] });
   assert.equal(unknownResult.ok, false);
   assert.equal(unknownResult.error?.writeIssued, true);
   assert.equal(unknownResult.error?.stateUnknown, true);

@@ -234,24 +234,6 @@ test("GDB backtrace reports a hidden transition from halted to unknown", async (
   assert.equal((result.data as { output: string }).output, "partial");
 });
 
-test("GDB client disconnect requires an explicitly running target and keeps the server alive", async (context) => {
-  const fixtureValue = await fixture(context, "gdb-disconnect-state");
-  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
-  fixtureValue.gdb.executionState = "halted";
-  const refused = await fixtureValue.sessions.gdbDisconnect(fixtureValue.projectRoot);
-  assert.equal(refused.ok, false);
-  assert.equal(refused.error?.code, "RESUME_REQUIRED");
-  assert.equal(fixtureValue.gdb.connected, true);
-  assert.equal(fixtureValue.probe.serverRunning, true);
-
-  fixtureValue.gdb.executionState = "running";
-  const disconnected = await fixtureValue.sessions.gdbDisconnect(fixtureValue.projectRoot);
-  assert.equal(disconnected.ok, true);
-  assert.equal(fixtureValue.gdb.connected, false);
-  assert.equal(fixtureValue.probe.serverRunning, true);
-  assert.equal((disconnected.data as { gdbServerStillRunning: boolean }).gdbServerStillRunning, true);
-});
-
 test("GDB Server stop leaves an already halted target halted and reports its final state", async (context) => {
   const fixtureValue = await fixture(context, "gdb-stop-halted");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
@@ -327,20 +309,6 @@ test("GDB connect reports and retains an unexpected running-to-halted transition
   assert.equal((result.data as { cleanup: string }).cleanup, "client_retained_to_avoid_hidden_resume");
 });
 
-test("no-op GDB disconnect never invents running-state evidence", async (context) => {
-  const fixtureValue = await fixture(context, "gdb-disconnect-noop-state");
-  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
-  fixtureValue.gdb.connected = false;
-  fixtureValue.runtime.gdbServerTargetExecutionState = "unknown";
-  const disconnected = await fixtureValue.sessions.gdbDisconnect(fixtureValue.projectRoot);
-  assert.equal(disconnected.ok, true);
-  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
-  const refusedStop = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
-  assert.equal(refusedStop.ok, false);
-  assert.equal(refusedStop.error?.code, "TARGET_STATE_UNKNOWN");
-  assert.equal(fixtureValue.probe.serverRunning, true);
-});
-
 test("an idle GDB client exit invalidates cached state before the next connect", async (context) => {
   const fixtureValue = await fixture(context, "gdb-idle-client-exit");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
@@ -400,7 +368,6 @@ test("memory owner blocks every GDB operation with MEMORY_SESSION_ACTIVE and own
     sessions.gdbCommand(fixtureValue.projectRoot, "info threads"),
     sessions.gdbWait(fixtureValue.projectRoot, 1),
     sessions.gdbBacktrace(fixtureValue.projectRoot),
-    sessions.gdbDisconnect(fixtureValue.projectRoot),
     sessions.gdbServerStop(fixtureValue.projectRoot),
   ]);
   for (const result of results) {
@@ -413,17 +380,6 @@ test("memory owner blocks every GDB operation with MEMORY_SESSION_ACTIVE and own
   assert.equal(fixtureValue.gdb.waitCalls, 0);
   assert.equal(fixtureValue.gdb.backtraceCalls, 0);
   fixtureValue.queue.releaseOwner(fixtureValue.target.probeSerial, owner.token);
-});
-
-test("RTT channel lookup never falls back to channel zero", async (context) => {
-  const fixtureValue = await fixture(context, "rtt-channel");
-  const result = await fixtureValue.sessions.rttChannelRead(fixtureValue.projectRoot, {
-    snapshot: { controlBlockAddress: "0x20000000", upChannels: [{ index: 0, name: "log", direction: "up" }], downChannels: [] },
-    selector: "missing",
-    ring: { dataHex: "01020304", rdOff: 0, wrOff: 2 },
-  });
-  assert.equal(result.ok, false);
-  assert.equal(result.error?.code, "RTT_CHANNEL_NOT_FOUND");
 });
 
 async function fixture(context: TestContext, name: string, withArtifact = false) {

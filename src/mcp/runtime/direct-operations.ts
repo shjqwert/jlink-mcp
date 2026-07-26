@@ -1100,10 +1100,9 @@ export class DirectMcuService {
     });
   }
 
-  erase(input: EraseInput | string, legacyVerifyBlank = false): Promise<OperationEnvelope> {
-    const request = typeof input === "string" ? { projectRoot: input, verifyBlank: legacyVerifyBlank } : input;
-    if (this.requireUserConfirmation && request.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("erase"));
-    const { projectRoot, verifyBlank = false } = request;
+  erase(input: EraseInput): Promise<OperationEnvelope> {
+    if (this.requireUserConfirmation && input.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("erase"));
+    const { projectRoot, verifyBlank = false } = input;
     return this.queued("erase", projectRoot, ["erase_flash"], async (envelope, target, runtime) => {
       if (verifyBlank && !runtime.probe.supportsBlankVerification()) throw executionError("BLANK_VERIFICATION_UNSUPPORTED", "validation", "this backend has no trustworthy blank verification; erase was not issued");
       const before = await observe(runtime.probe);
@@ -1140,10 +1139,9 @@ export class DirectMcuService {
     });
   }
 
-  probeCommand(input: ProbeCommandInput | string, legacyCommands?: string[]): Promise<OperationEnvelope> {
-    const request = typeof input === "string" ? { projectRoot: input, commands: legacyCommands ?? [] } : input;
-    if (this.requireUserConfirmation && request.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("probe_command"));
-    const { projectRoot, commands } = request;
+  probeCommand(input: ProbeCommandInput): Promise<OperationEnvelope> {
+    if (this.requireUserConfirmation && input.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("probe_command"));
+    const { projectRoot, commands } = input;
     if (!Array.isArray(commands) || commands.length < 1 || commands.length > 100 || commands.some((command) => !command || /[\0\r\n]/.test(command))) {
       return Promise.resolve(failEnvelope(createOperationEnvelope("probe_command"), {
         code: "INVALID_COMMAND", stage: "validation", message: "commands must contain 1..100 exact single-line J-Link commands", retryable: false, writeIssued: false, stateUnknown: false,

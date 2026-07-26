@@ -394,15 +394,6 @@ export class JcapV1QueryService {
     });
   }
 
-  async rebuild(input: { captureId: string }): Promise<Record<string, unknown>> {
-    const location = this.locationFor(input.captureId);
-    return this.mutate(location, async () => {
-      const status = await verifyJcapV1Index(location.packageDir);
-      if (["active", "finalizing"].includes(status.captureState)) return { status: "not_ready", ...status };
-      return rebuildJcapV1Index(location.packageDir);
-    });
-  }
-
   async exportCsv(input: { captureId: string }): Promise<Record<string, unknown>> {
     const location = this.locationFor(input.captureId);
     return this.mutate(location, async () => {
@@ -422,10 +413,6 @@ export class JcapV1QueryService {
       indexRebuilt = true;
     }
     return { status, indexRebuilt, unavailable: readinessResponse(status, true) };
-  }
-
-  private packageFor(captureId: string): string {
-    return this.locationFor(captureId).packageDir;
   }
 
   private locationFor(captureId: string): CaptureLocation {

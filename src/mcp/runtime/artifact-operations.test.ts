@@ -207,7 +207,7 @@ test("MAP-only resolution reports UNKNOWN_LAYOUT without requiring GDB", async (
     artifactPath: fixture.artifactPath,
     mapPath,
   });
-  const service = new ArtifactVariableService(fixture.targets, fixture.direct, fixture.stateRoot);
+  const service = new ArtifactVariableService(fixture.targets, fixture.direct);
   const result = await service.symbolResolve(fixture.projectRoot, "counter");
   assert.equal(result.error?.code, "UNKNOWN_LAYOUT");
   assert.deepEqual(fixture.probe.actions, []);
@@ -227,7 +227,7 @@ async function createFixture(context: TestContext, name: string) {
   const queue = new ProbeQueue(join(root, "queue"));
   const direct = new DirectMcuService(targets, queue, async () => ({ probe: probe as unknown as ProbeBackend }));
   const resolver = new FixtureResolver();
-  const service = new ArtifactVariableService(targets, direct, stateRoot, resolver);
+  const service = new ArtifactVariableService(targets, direct, resolver);
   return { projectRoot, stateRoot, artifactPath, targets, target, probe, queue, direct, resolver, service };
 }
 

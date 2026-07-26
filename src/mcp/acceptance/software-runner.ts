@@ -65,7 +65,7 @@ const CHECKS: CheckDefinition[] = [
   { id: "lint", command: npm, args: ["run", "lint"] },
   nodeTests("unit-foundation", [
     "out/probe/backend.test.js", "out/probe/jlink.test.js", "out/gdb/gdb-client.test.js", "out/gdb/elf-resolver.test.js",
-    "out/mcp/preflight/temp-preflight.test.js", "out/mcp/rtt-channel/rtt-channel.test.js",
+    "out/mcp/preflight/temp-preflight.test.js",
   ]),
   nodeTests("unit-acceptance", ["out/mcp/acceptance/evidence.test.js", "out/mcp/acceptance/software-runner.test.js"]),
   nodeTests("unit-artifact", [

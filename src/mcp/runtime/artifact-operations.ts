@@ -87,7 +87,6 @@ export class ArtifactVariableService {
   constructor(
     private readonly targets: TargetStore,
     private readonly direct: DirectMcuService,
-    _storageRoot: string,
     private readonly symbols: TypedSymbolResolver = new GdbTypedSymbolResolver(),
   ) {}
 

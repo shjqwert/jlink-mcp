@@ -255,11 +255,6 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     const eventOnlyWindow = await fixture.hss.captureEventWindow({ captureId, eventId: writeEvent.eventId, variables: [], beforeMs: 20, afterMs: 20, bucketCount: 4 });
     assert.equal(eventOnlyWindow.ok, true);
     assert.deepEqual((eventOnlyWindow.data as { series: { series: unknown[] } }).series.series, []);
-    const rebuilt = await fixture.hss.captureRebuild(captureId);
-    assert.equal(rebuilt.ok, true);
-    assert.deepEqual(rebuilt.requestedEffects, ["read_authoritative_capture", "build_temporary_capture_index", "atomically_publish_capture_db"]);
-    assert.equal(rebuilt.observedEffects.includes("capture_db_atomically_published"), true);
-    assert.equal(rebuilt.observedEffects.includes("raw_identities_revalidated"), true);
     const exported = await fixture.hss.captureExport(captureId);
     assert.equal(exported.ok, true);
     assert.deepEqual(exported.requestedEffects, ["read_bounded_capture_rows", "create_external_csv"]);
@@ -305,26 +300,21 @@ test("HSS scalar preparation preserves capture and write role errors", async () 
   }
 });
 
-test("HSS capability, dry-run, and start restore an unexpected halted-to-running transition and fail closed", async () => {
+test("HSS dry-run and start restore an unexpected halted-to-running transition and fail closed", async () => {
   const fixture = await createFixture();
   try {
     fixture.adapter.targetState = "halted";
     fixture.adapter.capabilityStateAfter = "running";
 
-    const capability = await fixture.hss.capability(fixture.projectRoot);
-    assert.equal(capability.error?.code, "HSS_TARGET_STATE_CHANGED");
-    assert.equal(fixture.adapter.targetState, "halted");
-    assert.equal(fixture.adapter.restoreCount, 1);
-
     const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
     assert.equal(dryRun.error?.code, "HSS_TARGET_STATE_CHANGED");
     assert.equal(fixture.adapter.targetState, "halted");
-    assert.equal(fixture.adapter.restoreCount, 2);
+    assert.equal(fixture.adapter.restoreCount, 1);
 
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
     assert.equal(started.error?.code, "HSS_TARGET_STATE_CHANGED");
     assert.equal(fixture.adapter.targetState, "halted");
-    assert.equal(fixture.adapter.restoreCount, 3);
+    assert.equal(fixture.adapter.restoreCount, 2);
     assert.equal(fixture.adapter.launchCount, 0);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -450,8 +440,8 @@ test("HSS never resumes an initially running target to repair a state mismatch",
   try {
     fixture.adapter.targetState = "running";
     fixture.adapter.capabilityStateAfter = "halted";
-    const capability = await fixture.hss.capability(fixture.projectRoot);
-    assert.equal(capability.error?.code, "HSS_TARGET_STATE_CHANGED");
+    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
+    assert.equal(dryRun.error?.code, "HSS_TARGET_STATE_CHANGED");
     assert.equal(fixture.adapter.restoreCount, 0);
     assert.equal(fixture.adapter.targetState, "halted");
   } finally {
@@ -882,7 +872,7 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
   const queue = new ProbeQueue(join(root, "queue"));
   const direct = new DirectMcuService(store, queue, async () => { throw new Error("direct backend must not be used by capture-aware tests"); });
   const resolver = new FixtureResolver(counterType);
-  const artifacts = new ArtifactVariableService(store, direct, stateRoot, resolver);
+  const artifacts = new ArtifactVariableService(store, direct, resolver);
   const adapter = new FakeHssAdapter();
   const memoryLauncher = withMemorySessions ? new FixtureMemorySessionLauncher() : undefined;
   const memorySessions = memoryLauncher ? new MemorySessionManager(queue, memoryLauncher, 10_000) : undefined;

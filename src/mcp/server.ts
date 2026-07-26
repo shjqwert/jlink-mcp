@@ -148,7 +148,7 @@ export class JLinkMcpServer {
   private readonly evidence: AcceptanceEvidenceStore;
   private readonly implemented = new Set<AgentToolName>();
 
-  constructor(probeConfig?: ProbeFactoryConfig, _rttPort?: number, _gdbPath?: string, options: JLinkMcpServerOptions = {}) {
+  constructor(probeConfig?: ProbeFactoryConfig, options: JLinkMcpServerOptions = {}) {
     this.discoveryProbe = createProbeBackend(probeConfig ?? { type: "jlink" }, this.discoveryProcesses);
     const cwd = options.cwd ?? process.cwd();
     const stateRoot = options.storageRoot ?? join(cwd, ".jlink-mcp");
@@ -157,7 +157,7 @@ export class JLinkMcpServer {
     this.queue = new ProbeQueue(options.queueRoot);
     this.memorySessions = new MemorySessionManager(this.queue);
     this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target), undefined, this.memorySessions);
-    this.artifacts = new ArtifactVariableService(this.targets, this.direct, stateRoot);
+    this.artifacts = new ArtifactVariableService(this.targets, this.direct);
     this.registers = new SvdRegisterService(this.targets, this.direct);
     this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target), this.memorySessions);
     this.evidence = new AcceptanceEvidenceStore(evidenceRoot, readRepositoryIdentity(cwd).commit);

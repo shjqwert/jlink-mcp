@@ -202,32 +202,6 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     } catch { /* explicit hss_status surfaces malformed durable session records */ }
   }
 
-  async capability(projectRoot: string): Promise<OperationEnvelope> {
-    let target: StoredTarget;
-    try { target = this.targets.require(projectRoot); }
-    catch (error) { return this.failure(createOperationEnvelope("hss_capability"), error, "target_lookup"); }
-    const envelope = createOperationEnvelope("hss_capability", target);
-    envelope.requestedEffects = ["connect_probe", "read_hss_capability"];
-    try {
-      envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null };
-      const execution = await this.queue.runExclusive(target.probeSerial, async () => {
-        const current = this.targets.requireCurrent(target);
-        const runtime = await this.adapter.inspectRuntime(current);
-        return this.capabilityPreservingTargetState(current, runtime);
-      });
-      applyQueue(envelope, execution);
-      envelope.before = { ...envelope.before, targetState: execution.value.targetStateBefore };
-      envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, targetState: execution.value.targetStateAfter };
-      envelope.data = execution.value.capability;
-      envelope.observedEffects = execution.value.capability.available ? ["probe_connected", "hss_capability_observed"] : [];
-      envelope.verification = { status: "observed", method: "helper_abi_and_JLINK_HSS_GetCaps" };
-      if (!execution.value.capability.available) envelope.warnings.push("HSS is unavailable; no fallback backend was selected.");
-      return finishEnvelope(envelope, true);
-    } catch (error) {
-      return this.failure(envelope, error, "capability");
-    }
-  }
-
   async plan(input: HssCaptureInput): Promise<OperationEnvelope> {
     const envelope = createOperationEnvelope("hss_plan");
     try {
@@ -1300,10 +1274,6 @@ export class HssOperations implements CaptureVariableAccessDelegate {
     return this.queryEnvelope("capture_event_window", () => this.query.eventWindow(input));
   }
 
-  async captureRebuild(captureId: string): Promise<OperationEnvelope> {
-    return this.queryEnvelope("capture_index_rebuild", () => this.query.rebuild({ captureId }));
-  }
-
   async captureExport(captureId: string): Promise<OperationEnvelope> {
     return this.queryEnvelope("capture_export_csv", () => this.query.exportCsv({ captureId }));
   }
@@ -2060,18 +2030,13 @@ export class HssOperations implements CaptureVariableAccessDelegate {
 
   private async queryEnvelope(tool: string, operation: () => Promise<Record<string, unknown>>): Promise<OperationEnvelope> {
     const envelope = createOperationEnvelope(tool);
-    envelope.requestedEffects = tool === "capture_index_rebuild"
-      ? ["read_authoritative_capture", "build_temporary_capture_index", "atomically_publish_capture_db"]
-      : tool === "capture_export_csv"
-        ? ["read_bounded_capture_rows", "create_external_csv"]
-        : ["read_bounded_capture_index"];
+    envelope.requestedEffects = tool === "capture_export_csv"
+      ? ["read_bounded_capture_rows", "create_external_csv"]
+      : ["read_bounded_capture_index"];
     try {
       envelope.data = await operation();
       const data = envelope.data as Record<string, unknown>;
-      if (tool === "capture_index_rebuild") {
-        if (data.indexStatus === "ready") envelope.observedEffects.push("capture_db_atomically_published", "raw_identities_revalidated");
-        envelope.verification = { status: data.indexStatus === "ready" ? "verified" : "observed", method: "raw_identity_revalidation_and_sqlite_integrity_check" };
-      } else if (tool === "capture_export_csv") {
+      if (tool === "capture_export_csv") {
         if (typeof data.exportFile === "string") {
           envelope.outputFiles.push(data.exportFile);
           envelope.observedEffects.push("external_csv_created");

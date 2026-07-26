@@ -3,8 +3,6 @@ import { isAbsolute, normalize } from "node:path";
 import type { GDBResponse, GDBTargetExecutionState, GDBUnexpectedExit } from "../../gdb/gdb-client";
 import { ProbeErrorCode, type ProbeBackend } from "../../probe/backend";
 import type { RTTClient } from "../../rtt/rtt-client";
-import { rttChannelListTool, rttChannelReadTool } from "../rtt-channel/rtt-channel-tools";
-import type { RttChannelSnapshot } from "../rtt-channel/rtt-channel-types";
 import {
   createOperationEnvelope,
   failEnvelope,
@@ -182,16 +180,6 @@ export class SessionOperations {
         runtime.gdbServerStopping = false;
       }
     }, owner);
-  }
-
-  async gdbServerStatus(projectRoot: string): Promise<OperationEnvelope> {
-    let target: StoredTarget;
-    try { target = this.targets.require(projectRoot); } catch (error) { return this.failure(createOperationEnvelope("gdb_server_status"), error, "target_lookup"); }
-    const envelope = createOperationEnvelope("gdb_server_status", target);
-    const runtime = await this.trackedRuntimeFor(target);
-    envelope.data = { owner: this.queue.getOwner(target.probeSerial) ?? null, processLocal: runtime.probe.getGDBServerStatus() };
-    envelope.verification = { status: "observed", method: "owner_store_and_process_manager" };
-    return finishEnvelope(envelope, true);
   }
 
   gdbConnect(projectRoot: string, symbolFile?: string): Promise<OperationEnvelope> {
@@ -395,25 +383,6 @@ export class SessionOperations {
     return this.gdbBacktrace(projectRoot, full);
   }
 
-  gdbDisconnect(projectRoot: string): Promise<OperationEnvelope> {
-    return this.withGdbOwner("gdb_disconnect", projectRoot, ["disconnect_gdb_client"], async (envelope, _target, runtime) => {
-      const wasConnected = runtime.gdb.isConnected();
-      const executionState = runtime.gdb.getTargetExecutionState();
-      envelope.before = { gdbClientConnected: wasConnected, targetExecutionState: executionState, gdbServerRunning: runtime.probe.isGDBServerRunning() };
-      if (wasConnected && executionState !== "running") {
-        throw disconnectStateError(executionState, "disconnecting the GDB client");
-      }
-      await runtime.gdb.disconnect();
-      if (wasConnected) runtime.gdbServerTargetExecutionState = "running";
-      const serverStillRunning = runtime.probe.isGDBServerRunning();
-      envelope.observedEffects.push(wasConnected ? "gdb_client_disconnected" : "no_op");
-      envelope.after = { gdbClientConnected: runtime.gdb.isConnected(), targetExecutionState: runtime.gdbServerTargetExecutionState ?? "unknown", gdbServerRunning: serverStillRunning };
-      envelope.data = { wasConnected, targetExecutionStateBeforeDisconnect: executionState, gdbServerStillRunning: serverStillRunning };
-      if (!serverStillRunning) throw new SessionError("GDB_SERVER_EXITED_ON_CLIENT_DISCONNECT", "GDB Server exited while disconnecting the client", true, true, true);
-      envelope.verification = { status: "observed", method: "client_and_server_process_state" };
-    });
-  }
-
   rttConnect(projectRoot: string): Promise<OperationEnvelope> {
     return this.queued("rtt_connect", projectRoot, ["connect_existing_rtt_endpoint"], ["gdb"], async (envelope, _target, runtime) => {
       try { await runtime.rtt.connect(); } catch (error) { throw new SessionError("RTT_NOT_AVAILABLE", `cannot connect to existing RTT endpoint: ${error instanceof Error ? error.message : String(error)}`, true, false); }
@@ -454,32 +423,6 @@ export class SessionOperations {
       envelope.requestedEffects = ["clear_local_rtt_buffer"];
       envelope.observedEffects = ["local_rtt_buffer_cleared"];
       envelope.data = runtime.rtt.getStats();
-    });
-  }
-
-  rttChannelList(projectRoot: string, snapshot: RttChannelSnapshot): Promise<OperationEnvelope> {
-    return this.localTarget("rtt_channel_list", projectRoot, (envelope) => { envelope.data = rttChannelListTool(snapshot); });
-  }
-
-  rttChannelRead(projectRoot: string, input: {
-    snapshot: RttChannelSnapshot;
-    selector: string | number;
-    ring: { dataHex: string; rdOff: number; wrOff: number };
-    maxBytes?: number;
-  }): Promise<OperationEnvelope> {
-    return this.localTarget("rtt_channel_read", projectRoot, (envelope) => {
-      if (!/^(?:[0-9a-fA-F]{2})+$/.test(input.ring.dataHex)) throw new SessionError("INVALID_ARGUMENT", "ring.dataHex must contain complete hexadecimal bytes", false, false);
-      try {
-        envelope.data = rttChannelReadTool({
-          snapshot: input.snapshot,
-          selector: input.selector,
-          ring: { buffer: Buffer.from(input.ring.dataHex, "hex"), rdOff: input.ring.rdOff, wrOff: input.ring.wrOff },
-          maxBytes: input.maxBytes,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new SessionError(/not found/i.test(message) ? "RTT_CHANNEL_NOT_FOUND" : "RTT_CHANNEL_INVALID", message, false, false);
-      }
     });
   }
 

@@ -53,16 +53,11 @@ async function main() {
   const probeConfig = buildProbeConfig();
   process.stderr.write(`Starting MCP server with probe: ${probeConfig.type}\n`);
 
-  const server = new JLinkMcpServer(
-    probeConfig,
-    undefined, // rttPort derived from probe
-    env("GDB_PATH") || "arm-none-eabi-gdb",
-    {
-      storageRoot: env("JLINK_MCP_STORAGE_ROOT"),
-      evidenceRoot: env("JLINK_MCP_EVIDENCE_ROOT"),
-      queueRoot: env("JLINK_MCP_QUEUE_ROOT"),
-    }
-  );
+  const server = new JLinkMcpServer(probeConfig, {
+    storageRoot: env("JLINK_MCP_STORAGE_ROOT"),
+    evidenceRoot: env("JLINK_MCP_EVIDENCE_ROOT"),
+    queueRoot: env("JLINK_MCP_QUEUE_ROOT"),
+  });
 
   const shutdown = async () => { await server.dispose(); process.exit(0); };
   process.on("SIGINT", () => { void shutdown(); });
