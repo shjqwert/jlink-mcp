@@ -1,0 +1,378 @@
+{
+  "schemaVersion": 1,
+  "traces": [
+    {
+      "caseId": "list-connected-probes",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{ "type": "tool_call", "tool": "list_devices", "arguments": {} }]
+    },
+    {
+      "caseId": "erase-user-rejects",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        { "type": "tool_call", "tool": "target_status", "arguments": { "projectRoot": "<project-root>" } },
+        {
+          "type": "confirmation_request",
+          "operationId": "erase-denied-1",
+          "tool": "erase",
+          "impact": "Erases target Flash and removes the programmed firmware.",
+          "arguments": { "projectRoot": "<project-root>", "verifyBlank": false }
+        },
+        {
+          "type": "user_confirmation",
+          "operationId": "erase-denied-1",
+          "source": "user",
+          "approved": false
+        }
+      ]
+    },
+    {
+      "caseId": "read-variable-needs-target",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "tool_call",
+          "tool": "target_configure",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "device": "TEST",
+            "probeSerial": "123456",
+            "interface": "SWD",
+            "speed": 2000
+          }
+        },
+        {
+          "type": "tool_call",
+          "tool": "read_variable",
+          "arguments": { "projectRoot": "<project-root>", "ref": "motorState" }
+        }
+      ]
+    },
+    {
+      "caseId": "write-variable-direct",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "write_variable",
+        "arguments": {
+          "projectRoot": "<project-root>",
+          "ref": "debugEnable",
+          "value": 1,
+          "verify": true,
+          "verificationConnection": "independent_session",
+          "comparator": { "mode": "tolerance", "absTolerance": 0.01, "relTolerance": 0 }
+        }
+      }]
+    },
+    {
+      "caseId": "flash-requires-confirmation",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "tool_call",
+          "tool": "target_configure",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "device": "TEST",
+            "probeSerial": "123456",
+            "interface": "SWD",
+            "speed": 2000
+          }
+        },
+        {
+          "type": "confirmation_request",
+          "operationId": "flash-1",
+          "tool": "flash",
+          "impact": "Programs target Flash and replaces the current firmware image.",
+          "arguments": { "projectRoot": "<project-root>", "path": "firmware.hex" }
+        },
+        { "type": "user_confirmation", "operationId": "flash-1", "source": "user", "approved": true },
+        {
+          "type": "tool_call",
+          "operationId": "flash-1",
+          "tool": "flash",
+          "arguments": { "projectRoot": "<project-root>", "path": "firmware.hex", "userConfirmed": true }
+        }
+      ]
+    },
+    {
+      "caseId": "erase-requires-confirmation",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "confirmation_request",
+          "operationId": "erase-1",
+          "tool": "erase",
+          "impact": "Erases target Flash and removes the programmed firmware.",
+          "arguments": { "projectRoot": "<project-root>", "verifyBlank": false }
+        },
+        { "type": "user_confirmation", "operationId": "erase-1", "source": "user", "approved": true },
+        {
+          "type": "tool_call",
+          "operationId": "erase-1",
+          "tool": "erase",
+          "arguments": { "projectRoot": "<project-root>", "verifyBlank": false, "userConfirmed": true }
+        }
+      ]
+    },
+    {
+      "caseId": "probe-command-requires-confirmation",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "confirmation_request",
+          "operationId": "probe-1",
+          "tool": "probe_command",
+          "impact": "Issues a raw reset command that changes the target execution state.",
+          "arguments": { "projectRoot": "<project-root>", "commands": ["reset"] }
+        },
+        { "type": "user_confirmation", "operationId": "probe-1", "source": "user", "approved": true },
+        {
+          "type": "tool_call",
+          "operationId": "probe-1",
+          "tool": "probe_command",
+          "arguments": { "projectRoot": "<project-root>", "commands": ["reset"], "userConfirmed": true }
+        }
+      ]
+    },
+    {
+      "caseId": "gdb-command-requires-confirmation",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        { "type": "tool_call", "tool": "gdb_open", "arguments": { "projectRoot": "<project-root>" } },
+        {
+          "type": "confirmation_request",
+          "operationId": "gdb-1",
+          "tool": "gdb_command",
+          "impact": "Changes the program counter and therefore the next executed instruction.",
+          "arguments": { "projectRoot": "<project-root>", "command": "set $pc=0x1000", "timeoutMs": 15000 }
+        },
+        { "type": "user_confirmation", "operationId": "gdb-1", "source": "user", "approved": true },
+        {
+          "type": "tool_call",
+          "operationId": "gdb-1",
+          "tool": "gdb_command",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "command": "set $pc=0x1000",
+            "timeoutMs": 15000,
+            "userConfirmed": true
+          }
+        },
+        { "type": "tool_call", "tool": "gdb_close", "arguments": { "projectRoot": "<project-root>" } }
+      ]
+    },
+    {
+      "caseId": "hss-capability-only",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "hss_start",
+        "arguments": {
+          "projectRoot": "<project-root>",
+          "variables": [{ "ref": "capabilityProbe" }],
+          "rateHz": 1,
+          "durationSec": 1,
+          "dryRun": true
+        }
+      }]
+    },
+    {
+      "caseId": "hss-new-capture-preflight",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "tool_call",
+          "callId": "hss-dry-new",
+          "tool": "hss_start",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "variables": [{ "ref": "counter" }, { "ref": "state" }],
+            "rateHz": 1000,
+            "durationSec": 5,
+            "dryRun": true
+          }
+        },
+        { "type": "tool_result", "callId": "hss-dry-new", "ok": true, "result": { "dryRun": true } },
+        {
+          "type": "tool_call",
+          "tool": "hss_start",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "variables": [{ "ref": "counter" }, { "ref": "state" }],
+            "rateHz": 1000,
+            "durationSec": 5,
+            "dryRun": false
+          }
+        },
+        { "type": "tool_call", "tool": "hss_stop", "arguments": { "projectRoot": "<project-root>" } }
+      ]
+    },
+    {
+      "caseId": "hss-fresh-preflight-reuse",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "tool_call",
+          "tool": "hss_start",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "variables": [{ "ref": "counter" }],
+            "rateHz": 500,
+            "durationSec": 3,
+            "dryRun": false
+          }
+        },
+        { "type": "tool_call", "tool": "hss_stop", "arguments": { "projectRoot": "<project-root>" } }
+      ]
+    },
+    {
+      "caseId": "hss-rate-change-needs-preflight",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "tool_call",
+          "callId": "hss-dry-rate",
+          "tool": "hss_start",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "variables": [{ "ref": "counter" }],
+            "rateHz": 900,
+            "durationSec": 4,
+            "qualityOracle": { "ref": "counter", "expectedIncrement": 1, "tolerance": 0 },
+            "dryRun": true
+          }
+        },
+        { "type": "tool_result", "callId": "hss-dry-rate", "ok": true, "result": { "dryRun": true } },
+        {
+          "type": "tool_call",
+          "tool": "hss_start",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "variables": [{ "ref": "counter" }],
+            "rateHz": 900,
+            "durationSec": 4,
+            "qualityOracle": { "ref": "counter", "expectedIncrement": 1, "tolerance": 0 },
+            "dryRun": false
+          }
+        },
+        { "type": "tool_call", "tool": "hss_stop", "arguments": { "projectRoot": "<project-root>" } }
+      ]
+    },
+    {
+      "caseId": "hss-write-allowlist-preflight",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [
+        {
+          "type": "tool_call",
+          "callId": "hss-dry-write",
+          "tool": "hss_start",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "variables": [{ "ref": "state" }],
+            "writeVariables": ["debugCommand"],
+            "rateHz": 500,
+            "durationSec": 3,
+            "dryRun": true
+          }
+        },
+        { "type": "tool_result", "callId": "hss-dry-write", "ok": true, "result": { "dryRun": true } },
+        {
+          "type": "tool_call",
+          "tool": "hss_start",
+          "arguments": {
+            "projectRoot": "<project-root>",
+            "variables": [{ "ref": "state" }],
+            "writeVariables": ["debugCommand"],
+            "rateHz": 500,
+            "durationSec": 3,
+            "dryRun": false
+          }
+        },
+        { "type": "tool_call", "tool": "hss_stop", "arguments": { "projectRoot": "<project-root>" } }
+      ]
+    },
+    {
+      "caseId": "single-read-not-sequence",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "read_variable",
+        "arguments": { "projectRoot": "<project-root>", "ref": "motorSpeed" }
+      }]
+    },
+    {
+      "caseId": "timed-workflow-uses-sequence",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "debug_sequence_execute",
+        "arguments": {
+          "projectRoot": "<project-root>",
+          "steps": [
+            { "atMs": 0, "action": "write_variable", "ref": "debugCommand", "value": 1 },
+            { "atMs": 2000, "action": "write_variable", "ref": "debugCommand", "value": 0 }
+          ]
+        }
+      }]
+    },
+    {
+      "caseId": "capture-summary-may-repair",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "capture_summary",
+        "arguments": { "captureId": "43000000-0000-4000-8000-000000000001" }
+      }]
+    },
+    {
+      "caseId": "capture-series-bounded",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "capture_series",
+        "arguments": {
+          "captureId": "43000000-0000-4000-8000-000000000001",
+          "variables": ["state"],
+          "startTick": "100",
+          "endTick": "200",
+          "bucketCount": 20
+        }
+      }]
+    },
+    {
+      "caseId": "capture-event-window",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "capture_event_window",
+        "arguments": {
+          "captureId": "43000000-0000-4000-8000-000000000001",
+          "eventId": "44000000-0000-4000-8000-000000000007",
+          "variables": ["state"],
+          "beforeMs": 100,
+          "afterMs": 100,
+          "bucketCount": 20
+        }
+      }]
+    },
+    {
+      "caseId": "capture-export-csv",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "capture_export_csv",
+        "arguments": { "captureId": "43000000-0000-4000-8000-000000000001" }
+      }]
+    },
+    {
+      "caseId": "diagnose-halted-crash",
+      "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
+      "events": [{
+        "type": "tool_call",
+        "tool": "diagnose_crash",
+        "arguments": { "projectRoot": "<project-root>" }
+      }]
+    }
+  ]
+}

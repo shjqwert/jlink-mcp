@@ -1,0 +1,443 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "list-connected-probes",
+      "userGoal": "列出当前连接的 J-Link 探针，不要连接目标。",
+      "scenario": { "targetConfigured": false },
+      "simulatedToolResults": { "list_devices": { "ok": true, "devices": [] } },
+      "expected": {
+        "steps": [{ "id": "list", "tool": "list_devices" }],
+        "forbiddenTools": ["target_configure", "probe_command"]
+      }
+    },
+    {
+      "id": "erase-user-rejects",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。先查询目标状态，再请求擦除该目标的 Flash，不做空白校验（verifyBlank=false）。",
+      "scenario": { "targetConfigured": true, "userApproves": false },
+      "simulatedToolResults": {
+        "target_status": { "ok": true, "configured": true },
+        "erase": { "ok": true }
+      },
+      "expected": {
+        "steps": [{ "id": "status", "tool": "target_status" }],
+        "rejectedOperations": [{ "tool": "erase", "arguments": { "verifyBlank": false } }],
+        "forbiddenTools": ["flash", "probe_command", "erase"]
+      }
+    },
+    {
+      "id": "read-variable-needs-target",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，当前还没有配置目标。先用设备 STM32F407VG、合成测试探针 EVAL-PROBE-001、SWD、2000 kHz 配置，再读取变量 motorState。",
+      "scenario": { "targetConfigured": false, "variable": "motorState" },
+      "simulatedToolResults": {
+        "target_configure": { "ok": true },
+        "read_variable": { "ok": true, "value": 2 }
+      },
+      "expected": {
+        "steps": [
+          { "id": "configure", "tool": "target_configure" },
+          { "id": "read", "tool": "read_variable", "arguments": { "ref": "motorState" } }
+        ],
+        "order": [["configure", "read"]],
+        "forbiddenTools": ["debug_sequence_execute", "write_variable"]
+      }
+    },
+    {
+      "id": "write-variable-direct",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。直接将 debugEnable 写为 1，不要预读；使用独立会话验证，比较器为 tolerance（absTolerance=0.01、relTolerance=0）。",
+      "scenario": { "targetConfigured": true, "variable": "debugEnable" },
+      "simulatedToolResults": { "write_variable": { "ok": true } },
+      "expected": {
+        "steps": [{
+          "id": "write",
+          "tool": "write_variable",
+          "arguments": {
+            "ref": "debugEnable",
+            "value": 1,
+            "verify": true,
+            "verificationConnection": "independent_session",
+            "comparator": { "mode": "tolerance", "absTolerance": 0.01, "relTolerance": 0 }
+          }
+        }],
+        "forbiddenTools": ["debug_sequence_execute", "target_configure"]
+      }
+    },
+    {
+      "id": "flash-requires-confirmation",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，当前还没有配置目标。先用设备 STM32F407VG、合成测试探针 EVAL-PROBE-001、SWD、2000 kHz 配置，再刷写相对路径 firmware.hex。",
+      "scenario": { "targetConfigured": false, "userApproves": true },
+      "simulatedToolResults": {
+        "target_configure": { "ok": true },
+        "flash": { "ok": true }
+      },
+      "expected": {
+        "steps": [
+          { "id": "configure", "tool": "target_configure" },
+          { "id": "flash", "tool": "flash", "arguments": { "path": "firmware.hex", "userConfirmed": true } }
+        ],
+        "order": [["configure", "flash"]],
+        "confirmations": [{ "stepId": "flash" }],
+        "forbiddenTools": ["erase"]
+      }
+    },
+    {
+      "id": "erase-requires-confirmation",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。擦除该目标的 Flash。",
+      "scenario": { "targetConfigured": true, "userApproves": true },
+      "simulatedToolResults": { "erase": { "ok": true } },
+      "expected": {
+        "steps": [{ "id": "erase", "tool": "erase", "arguments": { "userConfirmed": true } }],
+        "confirmations": [{ "stepId": "erase" }],
+        "forbiddenTools": ["flash"]
+      }
+    },
+    {
+      "id": "probe-command-requires-confirmation",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。只用 probe_command 在该目标上执行原始 J-Link Commander 命令 reset；不要改用 target_control。",
+      "scenario": { "targetConfigured": true, "userApproves": true },
+      "simulatedToolResults": { "probe_command": { "ok": true } },
+      "expected": {
+        "steps": [{
+          "id": "command",
+          "tool": "probe_command",
+          "arguments": { "commands": ["reset"], "userConfirmed": true }
+        }],
+        "confirmations": [{ "stepId": "command" }],
+        "forbiddenTools": ["target_control"]
+      }
+    },
+    {
+      "id": "gdb-command-requires-confirmation",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。打开 GDB，执行 set $pc=0x1000，然后关闭。",
+      "scenario": { "targetConfigured": true, "userApproves": true },
+      "simulatedToolResults": {
+        "gdb_open": { "ok": true },
+        "gdb_command": { "ok": true },
+        "gdb_close": { "ok": true }
+      },
+      "expected": {
+        "steps": [
+          { "id": "open", "tool": "gdb_open" },
+          { "id": "command", "tool": "gdb_command", "arguments": { "command": "set $pc=0x1000", "userConfirmed": true } },
+          { "id": "close", "tool": "gdb_close" }
+        ],
+        "order": [["open", "command"], ["command", "close"]],
+        "confirmations": [{ "stepId": "command" }],
+        "forbiddenTools": ["probe_command"]
+      }
+    },
+    {
+      "id": "hss-capability-only",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。只用 capabilityProbe、1 Hz、1 秒和 dryRun=true 检查当前目标是否支持 HSS，不要开始采集。",
+      "scenario": { "targetConfigured": true },
+      "simulatedToolResults": {
+        "target_status": { "ok": true, "configured": true },
+        "hss_start": { "ok": true, "dryRun": true }
+      },
+      "expected": {
+        "steps": [{
+          "id": "capability",
+          "tool": "hss_start",
+          "arguments": {
+            "variables": [{ "ref": "capabilityProbe" }],
+            "rateHz": 1,
+            "durationSec": 1,
+            "dryRun": true
+          }
+        }],
+        "allowedExtraTools": ["target_status"],
+        "toolCallLimits": { "hss_start": 1, "target_status": 1 },
+        "forbiddenTools": ["hss_stop"]
+      }
+    },
+    {
+      "id": "hss-new-capture-preflight",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。首次以 1000 Hz 采集 counter 和 state 5 秒，先预检再开始，结束后停止。",
+      "scenario": { "targetConfigured": true, "freshMatchingPreflight": false },
+      "simulatedToolResults": {
+        "target_status": { "ok": true, "configured": true },
+        "hss_start": { "ok": true },
+        "hss_status": [
+          { "ok": true, "active": true },
+          { "ok": true, "active": false }
+        ],
+        "hss_stop": { "ok": true }
+      },
+      "expected": {
+        "steps": [
+          {
+            "id": "dry",
+            "tool": "hss_start",
+            "arguments": { "variables": [{ "ref": "counter" }, { "ref": "state" }], "rateHz": 1000, "durationSec": 5, "dryRun": true }
+          },
+          {
+            "id": "live",
+            "tool": "hss_start",
+            "arguments": { "variables": [{ "ref": "counter" }, { "ref": "state" }], "rateHz": 1000, "durationSec": 5 }
+          },
+          { "id": "stop", "tool": "hss_stop" }
+        ],
+        "order": [["dry", "live"], ["live", "stop"]],
+        "preflightPairs": [{
+          "dryRunStepId": "dry",
+          "liveStepId": "live"
+        }],
+        "allowedExtraTools": ["target_status", "hss_status"],
+        "toolCallLimits": { "hss_start": 2, "hss_status": 3, "hss_stop": 1, "target_status": 1 }
+      }
+    },
+    {
+      "id": "hss-fresh-preflight-reuse",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。刚刚已经对 counter、500 Hz、3 秒这组完全相同参数成功预检；现在直接开始 HSS，结束后停止。",
+      "scenario": {
+        "targetConfigured": true,
+        "freshMatchingPreflight": true,
+        "preflightArguments": { "variables": [{ "ref": "counter" }], "rateHz": 500, "durationSec": 3 }
+      },
+      "simulatedToolResults": {
+        "hss_start": { "ok": true },
+        "hss_status": [
+          { "ok": true, "active": true },
+          { "ok": true, "active": false }
+        ],
+        "target_status": { "ok": true, "configured": true },
+        "hss_stop": { "ok": true }
+      },
+      "expected": {
+        "steps": [
+          {
+            "id": "live",
+            "tool": "hss_start",
+            "arguments": { "variables": [{ "ref": "counter" }], "rateHz": 500, "durationSec": 3 }
+          },
+          { "id": "stop", "tool": "hss_stop" }
+        ],
+        "order": [["live", "stop"]],
+        "allowedExtraTools": ["hss_status", "target_status"],
+        "toolCallLimits": { "hss_start": 1, "hss_status": 3, "hss_stop": 1, "target_status": 1 }
+      }
+    },
+    {
+      "id": "hss-rate-change-needs-preflight",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。上次预检是 500 Hz，现在改成 900 Hz 采集 counter 4 秒；质量判据为 ref=counter、expectedIncrement=1、tolerance=0。先用完全相同参数预检，再开始并停止。",
+      "scenario": { "targetConfigured": true, "freshMatchingPreflight": false, "previousRateHz": 500 },
+      "simulatedToolResults": {
+        "hss_start": { "ok": true },
+        "hss_status": [
+          { "ok": true, "active": true },
+          { "ok": true, "active": false }
+        ],
+        "hss_stop": { "ok": true }
+      },
+      "expected": {
+        "steps": [
+          {
+            "id": "dry",
+            "tool": "hss_start",
+            "arguments": {
+              "variables": [{ "ref": "counter" }],
+              "rateHz": 900,
+              "durationSec": 4,
+              "qualityOracle": { "ref": "counter", "expectedIncrement": 1, "tolerance": 0 },
+              "dryRun": true
+            }
+          },
+          {
+            "id": "live",
+            "tool": "hss_start",
+            "arguments": {
+              "variables": [{ "ref": "counter" }],
+              "rateHz": 900,
+              "durationSec": 4,
+              "qualityOracle": { "ref": "counter", "expectedIncrement": 1, "tolerance": 0 }
+            }
+          },
+          { "id": "stop", "tool": "hss_stop" }
+        ],
+        "order": [["dry", "live"], ["live", "stop"]],
+        "preflightPairs": [{
+          "dryRunStepId": "dry",
+          "liveStepId": "live"
+        }],
+        "allowedExtraTools": ["hss_status"],
+        "toolCallLimits": { "hss_start": 2, "hss_status": 3, "hss_stop": 1 }
+      }
+    },
+    {
+      "id": "hss-write-allowlist-preflight",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。以 500 Hz 采集 state 3 秒，并允许会话内写 debugCommand；先用完全相同参数预检，再开始并停止。",
+      "scenario": { "targetConfigured": true, "freshMatchingPreflight": false },
+      "simulatedToolResults": {
+        "hss_start": { "ok": true },
+        "hss_status": [
+          { "ok": true, "active": true },
+          { "ok": true, "active": false }
+        ],
+        "hss_stop": { "ok": true }
+      },
+      "expected": {
+        "steps": [
+          {
+            "id": "dry",
+            "tool": "hss_start",
+            "arguments": {
+              "variables": [{ "ref": "state" }],
+              "writeVariables": ["debugCommand"],
+              "rateHz": 500,
+              "durationSec": 3,
+              "dryRun": true
+            }
+          },
+          {
+            "id": "live",
+            "tool": "hss_start",
+            "arguments": {
+              "variables": [{ "ref": "state" }],
+              "writeVariables": ["debugCommand"],
+              "rateHz": 500,
+              "durationSec": 3
+            }
+          },
+          { "id": "stop", "tool": "hss_stop" }
+        ],
+        "order": [["dry", "live"], ["live", "stop"]],
+        "preflightPairs": [{
+          "dryRunStepId": "dry",
+          "liveStepId": "live"
+        }],
+        "allowedExtraTools": ["hss_status"],
+        "toolCallLimits": { "hss_start": 2, "hss_status": 3, "hss_stop": 1 }
+      }
+    },
+    {
+      "id": "single-read-not-sequence",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。读取一次 motorSpeed，不要创建定时序列。",
+      "scenario": { "targetConfigured": true },
+      "simulatedToolResults": { "read_variable": { "ok": true, "value": 0 } },
+      "expected": {
+        "steps": [{ "id": "read", "tool": "read_variable", "arguments": { "ref": "motorSpeed" } }],
+        "forbiddenTools": ["debug_sequence_execute"]
+      }
+    },
+    {
+      "id": "timed-workflow-uses-sequence",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置。将 debugCommand 写 1，精确等待 2 秒后写 0，并同步等待整个流程结束。",
+      "scenario": { "targetConfigured": true, "plannedDurationMs": 2000 },
+      "simulatedToolResults": { "debug_sequence_execute": { "ok": true } },
+      "expected": {
+        "steps": [{ "id": "sequence", "tool": "debug_sequence_execute" }],
+        "forbiddenTools": ["read_variable", "write_variable", "hss_start"]
+      }
+    },
+    {
+      "id": "capture-summary-may-repair",
+      "userGoal": "查看 Capture 43000000-0000-4000-8000-000000000001 的摘要；如果索引损坏，允许工具按契约自愈。",
+      "scenario": { "captureId": "43000000-0000-4000-8000-000000000001", "indexState": "invalid" },
+      "simulatedToolResults": {
+        "capture_summary": {
+          "ok": true,
+          "indexRebuilt": true,
+          "captureId": "43000000-0000-4000-8000-000000000001",
+          "sampleCount": 200,
+          "eventCount": 1
+        }
+      },
+      "expected": {
+        "steps": [{
+          "id": "summary",
+          "tool": "capture_summary",
+          "arguments": { "captureId": "43000000-0000-4000-8000-000000000001" }
+        }],
+        "forbiddenTools": ["target_configure", "hss_recover"]
+      }
+    },
+    {
+      "id": "capture-series-bounded",
+      "userGoal": "读取 Capture 43000000-0000-4000-8000-000000000001 中 tick 100 到 200 的 state 聚合序列，bucketCount=20。",
+      "scenario": { "captureId": "43000000-0000-4000-8000-000000000001" },
+      "simulatedToolResults": {
+        "capture_series": {
+          "ok": true,
+          "captureId": "43000000-0000-4000-8000-000000000001",
+          "series": [{ "ref": "state", "buckets": [] }]
+        }
+      },
+      "expected": {
+        "steps": [{
+          "id": "series",
+          "tool": "capture_series",
+          "arguments": {
+            "captureId": "43000000-0000-4000-8000-000000000001",
+            "variables": ["state"],
+            "startTick": "100",
+            "endTick": "200",
+            "bucketCount": 20
+          }
+        }],
+        "forbiddenTools": ["target_configure", "read_variable"]
+      }
+    },
+    {
+      "id": "capture-event-window",
+      "userGoal": "查看 Capture 43000000-0000-4000-8000-000000000001 中事件 44000000-0000-4000-8000-000000000007 附近 state 的数据窗口，前后各 100 ms，bucketCount=20。",
+      "scenario": { "captureId": "43000000-0000-4000-8000-000000000001" },
+      "simulatedToolResults": {
+        "capture_event_window": {
+          "ok": true,
+          "eventId": "44000000-0000-4000-8000-000000000007",
+          "series": [{ "ref": "state", "buckets": [] }]
+        }
+      },
+      "expected": {
+        "steps": [{
+          "id": "window",
+          "tool": "capture_event_window",
+          "arguments": {
+            "captureId": "43000000-0000-4000-8000-000000000001",
+            "eventId": "44000000-0000-4000-8000-000000000007",
+            "variables": ["state"],
+            "beforeMs": 100,
+            "afterMs": 100,
+            "bucketCount": 20
+          }
+        }],
+        "forbiddenTools": ["target_configure", "capture_series"]
+      }
+    },
+    {
+      "id": "capture-export-csv",
+      "userGoal": "将 Capture 43000000-0000-4000-8000-000000000001 的有界数据导出为 CSV。",
+      "scenario": { "captureId": "43000000-0000-4000-8000-000000000001" },
+      "simulatedToolResults": { "capture_export_csv": { "ok": true } },
+      "expected": {
+        "steps": [{
+          "id": "export",
+          "tool": "capture_export_csv",
+          "arguments": { "captureId": "43000000-0000-4000-8000-000000000001" }
+        }],
+        "forbiddenTools": ["target_configure", "capture_list"]
+      }
+    },
+    {
+      "id": "diagnose-halted-crash",
+      "userGoal": "工程根目录为 C:\\eval\\jlink-project，目标已配置且已暂停。使用聚合诊断能力收集 Cortex-M 崩溃证据；不要打开 GDB、单独读取内存或寄存器，也不要恢复运行。",
+      "scenario": { "targetConfigured": true, "targetState": "halted" },
+      "simulatedToolResults": {
+        "target_status": { "ok": true, "configured": true, "state": "halted" },
+        "diagnose_crash": {
+          "ok": true,
+          "targetState": "halted",
+          "faultRegisters": { "cfsr": 0, "hfsr": 0 },
+          "coreRegisters": { "pc": 4096, "lr": 4294967295, "sp": 536870912 },
+          "backtrace": [{ "pc": 4096, "symbol": "fault_handler" }]
+        },
+        "core_register_access": { "ok": true, "registers": {} },
+        "gdb_backtrace": { "ok": true, "frames": [] }
+      },
+      "expected": {
+        "steps": [{ "id": "diagnose", "tool": "diagnose_crash" }],
+        "forbiddenTools": ["target_control", "gdb_command", "probe_command"]
+      }
+    }
+  ]
+}

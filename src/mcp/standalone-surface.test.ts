@@ -58,11 +58,45 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     assert.equal(client.getServerVersion()?.version, "1.1.2");
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
+    const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
     const sequenceDescription = tools.find((tool) => tool.name === "debug_sequence_execute")?.description ?? "";
     assert.match(sequenceDescription, /multiple.*at least one second/i);
     assert.match(sequenceDescription, /wait until completion/i);
     assert.match(sequenceDescription, /not.*single variable read or write/i);
-    for (const tool of tools) assert.ok(tool.inputSchema.properties?.runId, `${tool.name} must accept optional runId evidence routing`);
+    const hssStartDescription = toolByName.get("hss_start")?.description ?? "";
+    assert.match(hssStartDescription, /dryRun=true/i);
+    assert.match(hssStartDescription, /same capture parameters/i);
+    assert.match(hssStartDescription, /capability-only.*dryRun=true/i);
+    assert.match(hssStartDescription, /capability-only.*at least one.*variable/i);
+    const hssVariablesSchema = toolByName.get("hss_start")?.inputSchema.properties?.variables as { description?: unknown } | undefined;
+    const hssVariablesDescription = typeof hssVariablesSchema?.description === "string" ? hssVariablesSchema.description : "";
+    assert.match(hssVariablesDescription, /capability-only.*non-empty/i);
+    for (const name of ["flash", "erase", "probe_command", "gdb_command"]) {
+      const description = toolByName.get(name)?.description ?? "";
+      assert.match(description, /explain the exact target effects/i, `${name} must explain confirmation effects`);
+      assert.match(description, /explicit user confirmation/i, `${name} must require explicit user confirmation`);
+    }
+    for (const name of ["capture_summary", "capture_series", "capture_event_window", "capture_export_csv"]) {
+      const description = toolByName.get(name)?.description ?? "";
+      assert.match(description, /repair and atomically republish capture\.db/i, `${name} must disclose index repair`);
+      assert.match(description, /Raw identity.*SQLite integrity/i, `${name} must disclose repair verification`);
+    }
+    assert.doesNotMatch(toolByName.get("capture_list")?.description ?? "", /republish capture\.db/i);
+    for (const name of [
+      "target_status", "artifact_probe", "symbol_search", "symbol_resolve", "read_variable", "write_variable",
+      "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "target_control",
+      "flash", "erase", "hss_start", "hss_status", "hss_stop", "hss_recover", "debug_sequence_execute",
+      "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
+      "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command",
+    ]) {
+      assert.match(toolByName.get(name)?.description ?? "", /target_configure/i, `${name} must disclose target_configure prerequisite`);
+    }
+    for (const tool of tools) {
+      const runId = tool.inputSchema.properties?.runId as { description?: string } | undefined;
+      assert.ok(runId, `${tool.name} must accept optional runId evidence routing`);
+      assert.match(runId.description ?? "", /Acceptance evidence routing identifier/i, `${tool.name}.runId must explain evidence routing`);
+      assert.match(runId.description ?? "", /not a general task ID/i, `${tool.name}.runId must reject task-ID semantics`);
+    }
     assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 37-tool list");
     for (const name of ["target_control", "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "flash", "erase", "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close", "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command", "hss_start"] as const) {
       const schema = tools.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
@@ -72,11 +106,25 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       for (const removed of removedFields) assert.equal(schema.properties?.[removed], undefined, `${name} must not expose ${removed}`);
     }
     {
-      const properties = tools.find((tool) => tool.name === "write_variable")?.inputSchema.properties as Record<string, { default?: unknown }>;
+      const properties = tools.find((tool) => tool.name === "write_variable")?.inputSchema.properties as Record<string, { default?: unknown; description?: string }>;
       assert.equal(properties.captureOld?.default, true);
       assert.equal(properties.verify?.default, true);
       assert.equal(properties.restore?.default, false);
       assert.equal(properties.verificationConnection?.default, "same_session");
+      assert.match(properties.verificationConnection?.description ?? "", /independent_session.*separate runtime/i);
+      assert.match(properties.comparator?.description ?? "", /post-write value is verified/i);
+    }
+    {
+      const properties = tools.find((tool) => tool.name === "hss_start")?.inputSchema.properties as Record<string, { description?: string }>;
+      assert.match(properties.writeVariables?.description ?? "", /do not consume.*sampling slots/i);
+      assert.match(properties.qualityOracle?.description ?? "", /not a universal capture quality verdict/i);
+      assert.match(properties.dryRun?.description ?? "", /Repeat preflight after capture parameters change/i);
+    }
+    {
+      const properties = tools.find((tool) => tool.name === "capture_series")?.inputSchema.properties as Record<string, { description?: string }>;
+      assert.match(properties.startTick?.description ?? "", /Inclusive unsigned decimal capture tick/i);
+      assert.match(properties.startTick?.description ?? "", /less than or equal to endTick/i);
+      assert.match(properties.endTick?.description ?? "", /greater than or equal to startTick/i);
     }
     {
       const properties = tools.find((tool) => tool.name === "write_memory")?.inputSchema.properties as Record<string, { default?: unknown }>;

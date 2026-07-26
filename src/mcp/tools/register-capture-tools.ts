@@ -22,8 +22,10 @@ export function registerCaptureTools(
   register("capture_series", {
     captureId: z.string().uuid(),
     variables: z.array(z.string().min(1).max(1024)).min(1).max(32),
-    startTick: z.string().regex(/^\d+$/),
-    endTick: z.string().regex(/^\d+$/),
+    startTick: z.string().regex(/^\d+$/)
+      .describe("Inclusive unsigned decimal capture tick. Must use the capture timebase and be less than or equal to endTick."),
+    endTick: z.string().regex(/^\d+$/)
+      .describe("Inclusive unsigned decimal capture tick. Must use the capture timebase and be greater than or equal to startTick."),
     bucketCount: z.number().int().min(1).max(4096),
   }, (input) => services.captures.series(input as unknown as CaptureSeriesInput));
   register("capture_event_window", {

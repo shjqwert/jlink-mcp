@@ -8,7 +8,7 @@ export const projectRootInput = {
 export const acceptanceRunId = z.string().refine(
   isValidAcceptanceRunId,
   "runId must be a bounded immutable non-reserved directory name",
-);
+).describe("Optional Acceptance evidence routing identifier. This is not a general task ID; omit it outside an active Acceptance run.");
 
 export const variableRef = z.string().min(1).max(1024)
   .describe("Logical typed symbol selector; the server re-resolves it against the current Artifact generation");

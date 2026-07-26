@@ -33,20 +33,27 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
   const uint32 = z.number().int().min(0).max(0xffff_ffff);
   const accessWidth = z.union([z.literal(8), z.literal(16), z.literal(32)]);
   const variableNonObserveComparator = z.union([
-    z.object({ mode: z.literal("exact") }),
-    z.object({ mode: z.literal("tolerance"), absTolerance: z.number().nonnegative(), relTolerance: z.number().nonnegative() }),
-    z.object({ mode: z.literal("masked"), maskHex: z.string().regex(/^(?:[0-9a-fA-F]{2})+$/) }),
-  ]);
+    z.object({ mode: z.literal("exact") }).describe("Require the verification read to equal the requested typed value exactly."),
+    z.object({
+      mode: z.literal("tolerance"),
+      absTolerance: z.number().nonnegative().describe("Maximum absolute numeric difference."),
+      relTolerance: z.number().nonnegative().describe("Maximum relative numeric difference."),
+    }).describe("Accept a finite numeric value within the configured absolute or relative tolerance."),
+    z.object({
+      mode: z.literal("masked"),
+      maskHex: z.string().regex(/^(?:[0-9a-fA-F]{2})+$/).describe("Byte mask applied to requested and observed encoded values before comparison."),
+    }).describe("Compare only bits selected by maskHex."),
+  ]).describe("Single-read verification comparator.");
   const variableComparator = z.union([
     variableNonObserveComparator,
     z.object({
       mode: z.literal("observe"),
-      durationMs: z.number().int().min(1).max(60_000),
-      maxPolls: z.number().int().min(1).max(1_000),
-      intervalMs: z.number().int().min(1).max(10_000),
-      comparator: variableNonObserveComparator,
-    }),
-  ]);
+      durationMs: z.number().int().min(1).max(60_000).describe("Maximum observation window in milliseconds."),
+      maxPolls: z.number().int().min(1).max(1_000).describe("Maximum verification reads within the observation window."),
+      intervalMs: z.number().int().min(1).max(10_000).describe("Delay between verification reads in milliseconds."),
+      comparator: variableNonObserveComparator.describe("Comparator applied to each observed value."),
+    }).describe("Poll until a value matches or the bounded observation window ends."),
+  ]).describe("How the post-write value is verified; this does not change whether a write is issued.");
 
   register("list_devices", {}, async () => listDevices(services.discoveryProbe));
   register("target_configure", {
@@ -130,7 +137,9 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
     captureOld: z.boolean().default(true),
     verify: z.boolean().default(true),
     restore: z.boolean().default(false),
-    verificationConnection: z.enum(["same_session", "independent_session"]).default("same_session"),
+    verificationConnection: z.enum(["same_session", "independent_session"])
+      .describe("Use same_session for transaction-local readback, or independent_session to reconnect and verify persistence through a separate runtime.")
+      .default("same_session"),
     comparator: variableComparator.default({ mode: "exact" }),
   }, (input) => services.variables.writeVariable(input as unknown as VariableWriteInput));
 
