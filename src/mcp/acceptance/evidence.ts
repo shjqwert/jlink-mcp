@@ -18,7 +18,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z, type ZodType } from "zod";
 import type { OperationEnvelope } from "../runtime/operation-envelope";
-import { withDirectoryLease } from "../runtime/file-lease";
+import { withDirectoryLease } from "../../utils/directory-lease";
 import { readJcapV1Metadata, readJcapV1Raw, verifyJcapV1Index } from "../jcap/jcap-v1";
 import { isValidAcceptanceRunId } from "./run-id";
 

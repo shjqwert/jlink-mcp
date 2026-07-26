@@ -18,7 +18,7 @@ import { TextDecoder } from "node:util";
 import sqlite3 from "sqlite3";
 import { atomicReplaceSync } from "../../utils/atomic-file";
 import { HSS_STATUS_FLAGS } from "../hss/hss-status-flags";
-import { withDirectoryLease } from "../runtime/file-lease";
+import { withDirectoryLease } from "../../utils/directory-lease";
 
 export const JCAP_FORMAT_VERSION = 1 as const;
 export const JCAP_STATUS = "stable" as const;

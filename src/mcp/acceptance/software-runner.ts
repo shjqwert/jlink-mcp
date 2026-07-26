@@ -73,7 +73,7 @@ const CHECKS: CheckDefinition[] = [
     "out/mcp/runtime/target-store.test.js", "out/mcp/runtime/artifact-operations.test.js",
   ]),
   nodeTests("unit-direct", [
-    "out/mcp/runtime/probe-queue.test.js", "out/mcp/runtime/memory-session.test.js", "out/mcp/runtime/direct-operations.test.js", "out/mcp/runtime/debug-sequence.test.js", "out/mcp/runtime/file-lease.test.js", "out/mcp/runtime/session-operations.test.js",
+    "out/mcp/runtime/probe-queue.test.js", "out/mcp/runtime/memory-session.test.js", "out/mcp/runtime/direct-operations.test.js", "out/mcp/runtime/debug-sequence.test.js", "out/utils/directory-lease.test.js", "out/mcp/runtime/session-operations.test.js",
   ]),
   nodeTests("unit-svd", ["out/mcp/runtime/svd-operations.test.js", "out/mcp/svd/svd-catalog.test.js"]),
   nodeTests("unit-hss-jcap", [

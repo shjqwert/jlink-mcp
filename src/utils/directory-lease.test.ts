@@ -3,7 +3,7 @@ import fs, { mkdtempSync, rmSync, type PathLike } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { withDirectoryLease } from "./file-lease";
+import { withDirectoryLease } from "./directory-lease";
 
 test("directory lease uses bounded backoff for transient EPERM and publishes when no contender exists", async (context) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "jlink-file-lease-"));

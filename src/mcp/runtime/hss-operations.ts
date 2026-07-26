@@ -34,7 +34,7 @@ import {
   type JcapV1VariableDescriptor,
 } from "../jcap/jcap-v1";
 import type { NonObserveComparator, ScalarComparator } from "./direct-operations";
-import { withDirectoryLease } from "./file-lease";
+import { withDirectoryLease } from "../../utils/directory-lease";
 import {
   HSS_EFFECTIVE_LIMITS,
   HssAdapterError,
