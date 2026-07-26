@@ -10,7 +10,7 @@ if (result.error) throw result.error;
 if (result.status !== 0) throw new Error(`doctor exited ${String(result.status)}: ${result.stdout}`);
 
 const report = JSON.parse(result.stdout);
-if (report.status !== "ok" || report.version !== "1.1.2") {
+if (report.status !== "ok" || report.version !== "1.1.3") {
   throw new Error(`doctor returned an invalid release report: ${result.stdout}`);
 }
 for (const id of ["platform", "node", "standalone", "sqlite", "hss-helper"]) {

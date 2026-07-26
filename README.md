@@ -4,29 +4,29 @@ Standalone MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
 The server serializes physical Probe access and reports observed state and side effects. It does not infer a Target from an environment default: configure each canonical `projectRoot` with `target_configure` before target operations.
 
-## Install the current stable v1.1.2 release
+## Install the current stable v1.1.3 release
 
 - Windows x64 with Node.js 22 or 24.
 - SEGGER J-Link Software and a connected supported J-Link Probe for hardware operations.
 - A project-local ELF with DWARF for typed variables and crash source mapping; an SVD is required for peripheral register access.
 
 Ordinary users do not need Visual Studio, CMake, Python, or a database server. Download
-`jlink-mcp-v1.1.2-windows-x64.zip` and `SHA256SUMS.txt` from the
-[v1.1.2 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v1.1.2),
+`jlink-mcp-v1.1.3-windows-x64.zip` and `SHA256SUMS.txt` from the
+[v1.1.3 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v1.1.3),
 verify the checksum, and extract the ZIP. Then run:
 
 ```powershell
 .\doctor.cmd
-codex mcp add jlink -- D:\Tools\jlink-mcp-v1.1.2-windows-x64\jlink-mcp.cmd
+codex mcp add jlink -- D:\Tools\jlink-mcp-v1.1.3-windows-x64\jlink-mcp.cmd
 ```
 
 The portable ZIP includes production npm dependencies, the SQLite native binding, and the
 prebuilt `hss_helper.exe`. The only vendor runtime installed separately is SEGGER J-Link Software.
 
-The Release also provides `jlink-mcp-1.1.2.tgz` for an online npm installation:
+The Release also provides `jlink-mcp-1.1.3.tgz` for an online npm installation:
 
 ```powershell
-npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v1.1.2/jlink-mcp-1.1.2.tgz
+npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v1.1.3/jlink-mcp-1.1.3.tgz
 jlink-mcp-doctor
 codex mcp add jlink -- jlink-mcp
 ```
@@ -57,7 +57,7 @@ npm run test:release-install
 `build:release` produces a statically linked Windows x64 HSS Helper, verifies its product and
 protocol versions, runs its self-test, and builds the Node entry points. `pack:release` runs the
 complete release gate, then creates the installable npm archive, portable ZIP, and SHA-256 manifest
-under `release/v1.1.2/`. The package is marked private to prevent accidental npm Registry
+under `release/v1.1.3/`. The package is marked private to prevent accidental npm Registry
 publication; release artifacts are distributed only through GitHub Releases.
 
 ## Portable MCP configuration

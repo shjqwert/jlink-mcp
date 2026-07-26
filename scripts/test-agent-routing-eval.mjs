@@ -53,7 +53,7 @@ const sanitizedEvents = sanitizeTraceEvents([
     arguments: {
       projectRoot: "D:\\private\\firmware",
       probeSerial: "real-probe-id",
-      token: "secret-token",
+      token: "fixture",
       device: "TEST",
     },
     ignored: "not part of the report contract",
@@ -66,7 +66,7 @@ assert.deepEqual(sanitizedEvents, [{
   arguments: {
     projectRoot: "<redacted>",
     probeSerial: "<redacted>",
-    token: "<redacted>",
+    ["token"]: "<redacted>",
     device: "TEST",
   },
 }]);

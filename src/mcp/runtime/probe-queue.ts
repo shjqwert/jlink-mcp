@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { atomicReplaceSync } from "../../utils/atomic-file";
 import { canonicalProbeSerial, ProbeIdentityError } from "./probe-identity";
 
 export type ProbeOwnerKind = "hss" | "gdb" | "memory";
@@ -481,7 +482,7 @@ function atomicJsonWrite(filePath: string, value: unknown): void {
   mkdirSync(dirname(filePath), { recursive: true });
   const temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temporary, JSON.stringify(value), { encoding: "utf8", flag: "wx" });
-  renameSync(temporary, filePath);
+  atomicReplaceSync(temporary, filePath);
 }
 
 function identityRecord(token: string): TicketRecord {
