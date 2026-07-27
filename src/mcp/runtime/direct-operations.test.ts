@@ -498,8 +498,9 @@ test("post-mutation observation rejection remains an issued uncertain failure", 
   writeFileSync(join(flash.projectRoot, "image.bin"), Buffer.from([1, 2, 3, 4]));
   flash.probe.observationRejectOnCall = 2;
   const flashResult = await flash.service.flash({ projectRoot: flash.projectRoot, path: "image.bin", baseAddress: 0x08000000 });
+  assert.equal(flashResult.error?.code, "POST_FLASH_STATE_OBSERVATION_FAILED");
   assert.equal(flashResult.error?.writeIssued, true);
-  assert.equal(flashResult.error?.stateUnknown, true);
+  assert.equal(flashResult.error?.stateUnknown, false);
   assert.equal((flashResult.data as { command: { success: boolean } }).command.success, true);
 
   const erase = await fixture(context, "erase-observe-reject");
@@ -577,7 +578,8 @@ test("flash cleanup failure cannot replace a verified hardware result", async (c
 
   assert.equal(result.ok, true);
   assert.equal(result.verification.status, "verified");
-  assert.deepEqual(result.observedEffects, ["flash_program_issued", "vendor_verification_succeeded"]);
+  assert.deepEqual(result.observedEffects, ["reset", "halt", "flash_program_issued", "vendor_verification_succeeded", "vendor_target_state_change:running->halted"]);
+  assert.deepEqual(result.requestedEffects, ["reset", "halt", "program_flash", "vendor_verify"]);
   assert.match(result.warnings.join("\n"), /cleanup failed.*hardware result remains authoritative/i);
   assert.equal(probe.flashPaths.length, 1);
 });
@@ -588,7 +590,7 @@ test("flash reports vendor target-state changes without resuming a previously ru
   unknown.probe.observations.push({ state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } });
   const observedUnknown = await unknown.service.flash({ projectRoot: unknown.projectRoot, path: "image.bin", baseAddress: 0x08000000 });
   assert.equal(observedUnknown.ok, true);
-  assert.ok(observedUnknown.observedEffects.includes("vendor_target_state_change:unknown->running"));
+  assert.ok(observedUnknown.observedEffects.includes("vendor_target_state_change:unknown->halted"));
   assert.equal(unknown.probe.actions.length, 1);
 
   const changed = await fixture(context, "flash-hidden-state-change");
@@ -800,7 +802,8 @@ test("erase reports unknown and known vendor target-state changes without auto-r
   unknown.probe.observations.push({ state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } });
   const observedUnknown = await unknown.service.erase({ projectRoot: unknown.projectRoot });
   assert.equal(observedUnknown.ok, true);
-  assert.ok(observedUnknown.observedEffects.includes("vendor_target_state_change:unknown->running"));
+  assert.ok(observedUnknown.observedEffects.includes("vendor_target_state_change:unknown->halted"));
+  assert.deepEqual(observedUnknown.requestedEffects, ["reset", "halt", "erase_flash"]);
   assert.deepEqual(unknown.probe.actions, ["erase"]);
 
   const changed = await fixture(context, "erase-hidden-state-change");
@@ -813,6 +816,21 @@ test("erase reports unknown and known vendor target-state changes without auto-r
   assert.ok(result.observedEffects.includes("vendor_target_state_change:running->halted"));
   assert.equal(result.verification.status, "executed_unverified");
   assert.equal((result.data as { command: { success: boolean } }).command.success, true);
+});
+
+test("erase fails closed when the backend does not leave the target halted", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "erase-final-running");
+  probe.observations.push(
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.erase({ projectRoot });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_ERASE_FINAL_STATE_UNCONFIRMED");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, false);
 });
 
 test("raw Probe commands preserve exact payload and report unknown effects", async (context) => {
@@ -1512,8 +1530,18 @@ class FakeProbe extends ProbeBackend {
     if (this.writeRegisterReject) throw this.writeRegisterReject;
     return ok();
   }
-  async flash(filePath: string, baseAddress?: number): Promise<CommandResult> { this.flashPaths.push(filePath); this.actions.push(`flash:${filePath}:${baseAddress ?? "embedded"}`); return ok(); }
-  async erase(): Promise<CommandResult> { this.actions.push("erase"); return this.eraseResult ?? ok(); }
+  async flash(filePath: string, baseAddress?: number): Promise<CommandResult> {
+    this.flashPaths.push(filePath);
+    this.actions.push(`flash:${filePath}:${baseAddress ?? "embedded"}`);
+    this.targetState = "halted";
+    return ok();
+  }
+  async erase(): Promise<CommandResult> {
+    this.actions.push("erase");
+    const result = this.eraseResult ?? ok();
+    if (result.success) this.targetState = "halted";
+    return result;
+  }
   async setBreakpoint(): Promise<CommandResult> { return ok(); }
   async clearBreakpoints(): Promise<CommandResult> { return ok(); }
   async startGDBServer(): Promise<{ success: boolean; message: string }> { return { success: true, message: "ok" }; }

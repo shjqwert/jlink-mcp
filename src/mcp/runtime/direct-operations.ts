@@ -942,7 +942,7 @@ export class DirectMcuService {
     } catch (error) {
       return Promise.resolve(this.failure(createOperationEnvelope("flash"), error, "validation"));
     }
-    return this.queuedWithTarget("flash", target, ["program_flash", "vendor_verify", "preserve_pre_flash_halt_state"], async (envelope, current, runtime) => {
+    return this.queuedWithTarget("flash", target, ["reset", "halt", "program_flash", "vendor_verify"], async (envelope, current, runtime) => {
       const liveFlashFile = inspectFlashFile(current.projectRoot, flashFile.path, flashFile.baseAddress);
       if (!sameFlashBinding(liveFlashFile, flashFile)) {
         throw new TargetStoreError("FLASH_INPUT_CHANGED", "flash input changed while the request waited for the Probe queue; no hardware command was issued");
@@ -989,7 +989,7 @@ export class DirectMcuService {
           }
           throw commandError(result, "flash_verify", issued, issued);
         }
-        envelope.observedEffects.push("flash_program_issued", "vendor_verification_succeeded");
+        envelope.observedEffects.push("reset", "halt", "flash_program_issued", "vendor_verification_succeeded");
         let vendorAfter: TargetStateObservation | undefined;
         let vendorObservationError: unknown;
         try {
@@ -1007,7 +1007,7 @@ export class DirectMcuService {
         let haltResult: CommandResult | undefined;
         let haltError: unknown;
         let finalObservationError: unknown;
-        const haltRestoreAttempted = before.state === "halted" && vendorAfter?.state !== "halted";
+        const haltRestoreAttempted = vendorAfter?.state !== "halted";
         if (haltRestoreAttempted) {
           try {
             haltResult = await runtime.probe.halt();
@@ -1056,7 +1056,7 @@ export class DirectMcuService {
         };
         envelope.verification = { status: "verified", method: "immutable_snapshot_and_vendor_flash_verify" };
         if (!associated) envelope.warnings.push("Flash verified by the vendor, but its hash is not associated with the configured Artifact.");
-        if (before.state === "halted" && haltRestoreAttempted) {
+        if (haltRestoreAttempted) {
           if (vendorObservationError) {
             throw executionError(
               "POST_FLASH_STATE_OBSERVATION_FAILED",
@@ -1103,7 +1103,7 @@ export class DirectMcuService {
   erase(input: EraseInput): Promise<OperationEnvelope> {
     if (this.requireUserConfirmation && input.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("erase"));
     const { projectRoot, verifyBlank = false } = input;
-    return this.queued("erase", projectRoot, ["erase_flash"], async (envelope, target, runtime) => {
+    return this.queued("erase", projectRoot, ["reset", "halt", "erase_flash"], async (envelope, target, runtime) => {
       if (verifyBlank && !runtime.probe.supportsBlankVerification()) throw executionError("BLANK_VERIFICATION_UNSUPPORTED", "validation", "this backend has no trustworthy blank verification; erase was not issued");
       const before = await observe(runtime.probe);
       envelope.before = observationData(before);
@@ -1125,7 +1125,7 @@ export class DirectMcuService {
         }
         throw commandError(result, "erase", issued, issued);
       }
-      envelope.observedEffects.push("erase_issued");
+      envelope.observedEffects.push("reset", "halt", "erase_issued");
       const after = await observeAfterMutation(runtime.probe, "erase");
       envelope.after = observationData(after);
       const updated = await this.transitionArtifact(target, "mismatch", "erase", true);
@@ -1133,6 +1133,9 @@ export class DirectMcuService {
       envelope.data = { command: commandData(result), verifyBlank };
       envelope.verification = { status: verifyBlank ? "verified" : "executed_unverified", method: verifyBlank ? "backend_blank_check" : undefined };
       requireKnownPostWriteState(after, "erase");
+      if (after.state !== "halted") {
+        throw executionError("POST_ERASE_FINAL_STATE_UNCONFIRMED", "final_observation", `erase did not leave the target halted; observed ${after.state}`, { writeIssued: true, stateUnknown: false });
+      }
       if (before.state !== after.state) {
         envelope.observedEffects.push(`vendor_target_state_change:${before.state}->${after.state}`);
       }

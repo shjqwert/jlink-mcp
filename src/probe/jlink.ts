@@ -52,7 +52,8 @@ function fatalJLinkCommandDiagnostic(raw: string): string | undefined {
   return raw.split(/\r?\n/)
     .map((line) => line.trim())
     .find((line) => /^(?:\*+\s*error:\s*)?verification of ramcode failed\b/i.test(line)
-      || /^failed to (?:prepare for programming|download ramcode)\b/i.test(line));
+      || /^failed to (?:prepare for programming|download ramcode)\b/i.test(line)
+      || /^\*+\s*error:\s*failed to verify\s+@\s+address\s+0x[0-9a-f]+\b/i.test(line));
 }
 
 export class JLinkBackend extends ProbeBackend {
@@ -482,10 +483,10 @@ export class JLinkBackend extends ProbeBackend {
     if (!filePath || /[\0\r\n\"]/.test(filePath)) return { success: false, rawOutput: "", output: "", error: "invalid flash path", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     const address = path.extname(filePath).toLowerCase() === ".bin" ? baseAddress : 0;
     if (address === undefined) return { success: false, rawOutput: "", output: "", error: "raw BIN flash requires a base address", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
-    return this.executeDirect([`loadfile "${filePath}" 0x${address.toString(16)} noreset`], 180000);
+    return this.executeDirect(["r", "halt", `loadfile "${filePath}" 0x${address.toString(16)} noreset`], 180000);
   }
   async erase(): Promise<CommandResult> {
-    return this.executeDirect(["erase 0 0 noreset"]);
+    return this.executeDirect(["r", "halt", "erase 0 0 noreset"]);
   }
 
   async setBreakpoint(address: number): Promise<CommandResult> {

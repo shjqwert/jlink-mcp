@@ -90,7 +90,7 @@ test("JLinkBackend does not treat a kill error as process exit", async () => {
   assert.ok(elapsed >= 40, `kill error released the Probe operation before exit (${elapsed}ms)`);
 });
 
-test("JLinkBackend disables close-time resume and uses noreset flash and erase forms", async () => {
+test("JLinkBackend resets and halts in-session before noreset flash and erase forms", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
@@ -102,9 +102,9 @@ test("JLinkBackend disables close-time resume and uses noreset flash and erase f
   assert.equal((await backend.flash("C:\\firmware\\app.bin", 0x08000000)).success, true);
   assert.equal((await backend.erase()).success, true);
   assert.deepEqual(scripts, [
-    "exec SetRestartOnClose = 0\nloadfile \"C:\\firmware\\app.hex\" 0x0 noreset\nexit\n",
-    "exec SetRestartOnClose = 0\nloadfile \"C:\\firmware\\app.bin\" 0x8000000 noreset\nexit\n",
-    "exec SetRestartOnClose = 0\nerase 0 0 noreset\nexit\n",
+    "exec SetRestartOnClose = 0\nr\nhalt\nloadfile \"C:\\firmware\\app.hex\" 0x0 noreset\nexit\n",
+    "exec SetRestartOnClose = 0\nr\nhalt\nloadfile \"C:\\firmware\\app.bin\" 0x8000000 noreset\nexit\n",
+    "exec SetRestartOnClose = 0\nr\nhalt\nerase 0 0 noreset\nexit\n",
   ]);
 });
 
@@ -143,6 +143,26 @@ test("JLinkBackend fails a zero-exit erase when J-Link reports a fatal RAMCode d
   assert.equal(result.success, false);
   assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
   assert.equal(result.stateUnknown, true);
+});
+
+test("JLinkBackend fails a zero-exit flash when J-Link reports an address verify failure", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, [
+      "Programming flash [100%] Done.",
+      "****** Error: Failed to verify @ address 0x0000C000",
+      "O.K.",
+    ].join("\n")),
+  );
+
+  const result = await backend.flash("C:\\firmware\\app.hex");
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.stateUnknown, true);
+  assert.match(result.error ?? "", /0x0000C000/i);
 });
 
 test("JLinkBackend permits a zero-exit flash with the nonfatal target-RAM PC diagnostic", async () => {
