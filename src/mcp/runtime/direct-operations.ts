@@ -6,7 +6,7 @@ import { createRepoTempDir } from "../preflight/temp-preflight";
 import { parseElfFlashSegments } from "../../gdb/elf-resolver";
 import type { QueueMetadata } from "./probe-queue";
 import { ProbeQueue, ProbeQueueError } from "./probe-queue";
-import { MemorySessionError, MemorySessionManager, persistentMemorySessionEvidence } from "./memory-session";
+import { MemorySessionError, MemorySessionManager, persistentMemorySessionEvidence, type MemorySessionCloseResult } from "./memory-session";
 import {
   createOperationEnvelope,
   executionError,
@@ -1264,7 +1264,63 @@ export class DirectMcuService {
             await operation(envelope, current, runtime);
           } catch (error) {
             if (options.closePersistentMemorySessionOnError && persistentProbe) {
-              await this.memorySessions?.closeForTarget(current);
+              let memorySessionClose: MemorySessionCloseResult | undefined;
+              try {
+                memorySessionClose = await this.memorySessions?.closeForTarget(current);
+              } catch (closeError) {
+                annotateMemorySessionRetirement(envelope, {
+                  status: "close_failed",
+                  error: errorMessage(closeError),
+                });
+                throw combineWithMemorySessionRetirement(error, `close failed: ${errorMessage(closeError)}`);
+              }
+              if (!memorySessionClose) {
+                annotateMemorySessionRetirement(envelope, { status: "close_unconfirmed" });
+                throw combineWithMemorySessionRetirement(error, "close did not confirm the active memory session");
+              }
+              let afterClose: TargetStateObservation;
+              try {
+                const independentRuntime = await this.runtimeFor(current);
+                afterClose = await observe(independentRuntime.probe);
+              } catch (observationError) {
+                annotateMemorySessionRetirement(envelope, {
+                  status: "final_observation_failed",
+                  operationTargetState: envelopeTargetState(envelope.after),
+                  targetStateBeforeClose: memorySessionClose.targetStateBeforeClose,
+                  error: errorMessage(observationError),
+                });
+                throw combineWithMemorySessionRetirement(error, `independent final observation failed: ${errorMessage(observationError)}`);
+              }
+              const operationTargetState = envelopeTargetState(envelope.after);
+              if (operationTargetState === "unknown" || memorySessionClose.targetStateBeforeClose === "unknown" || afterClose.state === "unknown") {
+                annotateMemorySessionRetirement(envelope, {
+                  status: "state_unknown",
+                  operationTargetState,
+                  targetStateBeforeClose: memorySessionClose.targetStateBeforeClose,
+                  targetStateAfterReconnect: afterClose.state,
+                });
+                throw combineWithMemorySessionRetirement(error, "target state remained unknown across memory-session retirement");
+              }
+              const knownStates = [operationTargetState, memorySessionClose.targetStateBeforeClose, afterClose.state]
+                .filter((state): state is "running" | "halted" => state === "running" || state === "halted");
+              if (new Set(knownStates).size > 1) {
+                annotateMemorySessionRetirement(envelope, {
+                  status: "state_mismatch",
+                  operationTargetState,
+                  targetStateBeforeClose: memorySessionClose.targetStateBeforeClose,
+                  targetStateAfterReconnect: afterClose.state,
+                });
+                throw combineWithMemorySessionRetirement(
+                  error,
+                  `target state observations disagree: operation=${operationTargetState ?? "unavailable"}, beforeClose=${memorySessionClose.targetStateBeforeClose}, afterReconnect=${afterClose.state}`,
+                );
+              }
+              annotateMemorySessionRetirement(envelope, {
+                status: "verified",
+                operationTargetState,
+                targetStateBeforeClose: memorySessionClose.targetStateBeforeClose,
+                targetStateAfterReconnect: afterClose.state,
+              });
             }
             throw error;
           }
@@ -1753,6 +1809,46 @@ function unexpectedReadObservationError(error: unknown, operation: string): Oper
     error instanceof Error ? error.message : `target-state observation failed after ${operation}`,
     { stateUnknown: true },
   );
+}
+
+function annotateMemorySessionRetirement(envelope: OperationEnvelope, facts: Record<string, unknown>): void {
+  envelope.data = {
+    ...(envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {}),
+    memorySessionRetirement: facts,
+  };
+}
+
+function combineWithMemorySessionRetirement(original: unknown, diagnostic: string): Error {
+  const message = `${errorMessage(original)}; memory-session retirement unconfirmed: ${diagnostic}`;
+  if (original instanceof OperationExecutionError) {
+    return new OperationExecutionError({
+      ...original.detail,
+      message,
+      stateUnknown: true,
+    });
+  }
+  if (original instanceof MemorySessionError) {
+    return new MemorySessionError(
+      original.code,
+      message,
+      original.retryable,
+      true,
+      original.retainOwner,
+      original.resourcePid,
+      original.dispatched,
+    );
+  }
+  return executionError("MEMORY_SESSION_RETIREMENT_UNCONFIRMED", "memory_session_close", message, { stateUnknown: true });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function envelopeTargetState(value: unknown): "running" | "halted" | "unknown" | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const state = (value as { targetState?: unknown }).targetState;
+  return state === "running" || state === "halted" || state === "unknown" ? state : undefined;
 }
 
 function memoryBytes(probe: ProbeBackend, result: CommandResult, address: number, byteCount: number, accessSize: 1 | 2 | 4): Buffer {

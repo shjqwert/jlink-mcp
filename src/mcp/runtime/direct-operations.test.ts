@@ -158,18 +158,73 @@ test("read_memory retires its session after known target-state drift without mar
   probe.observations.push(
     { state: "running", source: "dhcsr", result: ok() },
     { state: "halted", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
   );
   const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
   assert.equal(result.error?.stateUnknown, false);
   assert.equal((result.data as { dataHex: string }).dataHex, "11223344");
+  assert.deepEqual((result.data as { memorySessionRetirement: unknown }).memorySessionRetirement, {
+    status: "verified",
+    operationTargetState: "halted",
+    targetStateBeforeClose: "halted",
+    targetStateAfterReconnect: "halted",
+  });
   assert.equal(queue.getOwner(targets.require(projectRoot).probeSerial), undefined);
 
   probe.targetState = "halted";
   const resumed = await service.control("resume", projectRoot);
   assert.equal(resumed.ok, true);
   assert.equal(resumed.error, undefined);
+});
+
+test("read_memory preserves hidden-state causality when session retirement changes the final state", async (context) => {
+  const { service, probe, targets, queue, projectRoot } = await fixture(context, "read-memory-retirement-state-drift");
+  probe.memory.set(0x20000000, Buffer.from([0x11, 0x22, 0x33, 0x44]));
+  probe.observations.push(
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.match(result.error?.message ?? "", /memory read changed target run state/);
+  assert.match(result.error?.message ?? "", /target state observations disagree/);
+  assert.deepEqual((result.data as { memorySessionRetirement: unknown }).memorySessionRetirement, {
+    status: "state_mismatch",
+    operationTargetState: "halted",
+    targetStateBeforeClose: "halted",
+    targetStateAfterReconnect: "running",
+  });
+  assert.equal(queue.getOwner(targets.require(projectRoot).probeSerial), undefined);
+});
+
+test("read_memory preserves hidden-state causality when the independent closing observation fails", async (context) => {
+  const { service, probe, targets, queue, projectRoot } = await fixture(context, "read-memory-retirement-observation-failed");
+  probe.memory.set(0x20000000, Buffer.from([0x11, 0x22, 0x33, 0x44]));
+  probe.observationRejectOnCall = 4;
+  probe.observations.push(
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.match(result.error?.message ?? "", /memory read changed target run state/);
+  assert.match(result.error?.message ?? "", /independent final observation failed/);
+  assert.equal((result.data as { memorySessionRetirement: { status: string } }).memorySessionRetirement.status, "final_observation_failed");
+  assert.equal(queue.getOwner(targets.require(projectRoot).probeSerial), undefined);
 });
 
 test("read_memory retains its owner fail-closed when session retirement cannot confirm helper exit", async (context) => {
@@ -202,16 +257,26 @@ test("read_memory retains its owner fail-closed when session retirement cannot c
   });
   const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
   probe.memory.set(0x20000000, Buffer.from([0x11, 0x22, 0x33, 0x44]));
+  probe.readResult = {
+    success: false,
+    rawOutput: "transport failed",
+    output: "",
+    error: "transport failed",
+    errorCode: ProbeErrorCode.TARGET_UNREACHABLE,
+  };
   probe.observations.push(
     { state: "running", source: "dhcsr", result: ok() },
-    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "running", source: "dhcsr", result: ok() },
   );
 
   const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
 
   assert.equal(result.ok, false);
-  assert.equal(result.error?.code, "MEMORY_SESSION_CLOSE_UNCONFIRMED");
+  assert.equal(result.error?.code, ProbeErrorCode.TARGET_UNREACHABLE);
   assert.equal(result.error?.stateUnknown, true);
+  assert.match(result.error?.message ?? "", /transport failed/);
+  assert.match(result.error?.message ?? "", /native memory helper did not exit after close/);
+  assert.equal((result.data as { memorySessionRetirement: { status: string } }).memorySessionRetirement.status, "close_failed");
   assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
 });
 
@@ -220,6 +285,8 @@ test("failed read_memory preserves failure and final-state evidence", async (con
   drift.probe.readResult = { success: false, rawOutput: "transport failed", output: "", error: "transport failed", errorCode: ProbeErrorCode.TARGET_UNREACHABLE };
   drift.probe.observations.push(
     { state: "running", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
     { state: "halted", source: "dhcsr", result: ok() },
   );
   const driftResult = await drift.service.readMemory({ projectRoot: drift.projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
