@@ -183,7 +183,7 @@ export class SessionOperations {
   }
 
   gdbConnect(projectRoot: string, symbolFile?: string): Promise<OperationEnvelope> {
-    return this.withGdbOwner("gdb_connect", projectRoot, ["connect_gdb_client"], async (envelope, target, runtime) => {
+    return this.withGdbOwner("gdb_connect", projectRoot, ["connect_gdb_client", "conditionally_restore_running_state_after_attach"], async (envelope, target, runtime) => {
       const executionStateBeforeConnect = runtime.gdbServerTargetExecutionState ?? "unknown";
       envelope.before = {
         ...(envelope.before as Record<string, unknown>),
@@ -250,6 +250,53 @@ export class SessionOperations {
         }
       }
       if (executionStateAfterConnect !== executionStateBeforeConnect) {
+        if (executionStateAfterConnect === "halted" && gdbAttachReportedFault(result)) {
+          envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target", "target_fault_observed");
+          envelope.data = {
+            ...result,
+            symbolFile: explicitSymbols ?? null,
+            targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+            targetExecutionStateAfterConnect: executionStateAfterConnect,
+            gdbClientConnected: runtime.gdb.isConnected(),
+            cleanup: "client_retained_and_fault_not_resumed",
+          };
+          throw new SessionError(
+            "TARGET_FAULTED_DURING_GDB_ATTACH",
+            "GDB attached to a target stopped in a fault handler; the client remains connected and the target was not resumed",
+            false,
+            true,
+            false,
+          );
+        }
+        if (executionStateAfterConnect === "halted"
+            && executionStateBeforeConnect === "running"
+            && gdbAttachReportedNormalTrap(result)) {
+          envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target");
+          const restore = await runtime.gdb.command("continue");
+          const executionStateAfterRestore = runtime.gdb.getTargetExecutionState();
+          runtime.gdbServerTargetExecutionState = executionStateAfterRestore;
+          envelope.data = {
+            ...result,
+            symbolFile: explicitSymbols ?? null,
+            targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+            targetExecutionStateAfterConnect: executionStateAfterConnect,
+            targetExecutionStateAfterRestore: executionStateAfterRestore,
+            stateRestore: restore,
+            gdbClientConnected: runtime.gdb.isConnected(),
+          };
+          if (!restore.success || executionStateAfterRestore !== "running") {
+            throw new SessionError(
+              "GDB_ATTACH_STATE_RESTORE_FAILED",
+              "GDB attach halted the running target and the requested running state could not be restored",
+              false,
+              true,
+              executionStateAfterRestore === "unknown",
+            );
+          }
+          envelope.observedEffects.push("target_state_restored:halted->running");
+          envelope.verification = { status: "verified", method: "gdb_attach_response_and_explicit_continue" };
+          return;
+        }
         envelope.observedEffects.push("gdb_client_connected", `unexpected_target_state_change:${executionStateBeforeConnect}->${executionStateAfterConnect}`);
         envelope.data = {
           ...result,
@@ -576,6 +623,18 @@ export class SessionOperations {
       evidenceTimestamp: target.liveArtifactMatch.timestamp,
     } : null;
   }
+}
+
+function gdbAttachReportedFault(result: { output?: string; rawOutput?: string }): boolean {
+  return /\b(?:HardFault|MemManage|BusFault|UsageFault|NMI)_Handler\b/i.test(`${result.output ?? ""}\n${result.rawOutput ?? ""}`);
+}
+
+function gdbAttachReportedNormalTrap(result: { rawOutput?: string }): boolean {
+  return (result.rawOutput ?? "").split(/\r?\n/).some((line) =>
+    line.startsWith("*stopped,")
+    && /(?:^|,)reason="signal-received"(?:,|$)/.test(line)
+    && /(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(line)
+  );
 }
 
 function userConfirmationRequired(): Promise<OperationEnvelope> {

@@ -402,6 +402,33 @@ test("JCAP v1 recovery indexes a valid prefix without changing a truncated Raw t
   }
 });
 
+test("JCAP v1 rebuild opens a Windows package path beyond MAX_PATH", { skip: process.platform !== "win32" }, async () => {
+  const base = workspace();
+  let root = base;
+  while (path.join(root, "captures", `${captureId}.jcap`, "capture.db.tmp").length <= 270) {
+    root = path.join(root, "portable-release-segment");
+  }
+  const packageDir = path.join(root, "captures", `${captureId}.jcap`);
+  try {
+    writeJcapV1Raw({
+      packageDir,
+      metadata: metadata(),
+      samples: [samples[0]],
+      events: [
+        { eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(2), eventSequence: 1, type: "lifecycle", tick: "10", state: "finalizing" },
+        { eventId: eventId(3), eventSequence: 2, type: "lifecycle", tick: "11", state: "stopped" },
+      ],
+    });
+    finalizeJcapV1Metadata(packageDir, "stopped");
+    const rebuilt = await rebuildJcapV1Index(packageDir);
+    assert.equal(rebuilt.indexStatus, "ready");
+    assert.equal(existsSync(path.join(packageDir, "capture.db")), true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("JCAP v1 rebuild failure preserves an existing valid DB and rejects v0 metadata", async () => {
   const root = workspace();
   const packageDir = path.join(root, "captures", `${captureId}.jcap`);

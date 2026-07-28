@@ -23,6 +23,7 @@ export interface JLinkConfig {
 
 const GDB_SERVER_PROCESS = "jlink-gdb-server";
 export type JLinkSpawn = (command: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
+const PROBE_ONLY_RAW_COMMANDS = new Set(["showemulist", "showconf"]);
 
 // Lines that are JLink connection boilerplate
 const BOILERPLATE_PATTERNS = [
@@ -110,11 +111,15 @@ export class JLinkBackend extends ProbeBackend {
    */
   private async execRaw(commands: string[], timeoutMs = 30000): Promise<CommandResult> {
     this.connectionGeneration += 1;
+    const autoConnect = commands.length > 0
+      && commands.every((command) => PROBE_ONLY_RAW_COMMANDS.has(command.trim().toLowerCase()))
+      ? "0"
+      : "1";
     const args = [
       "-device", this.config.device,
       "-if", this.config.interface,
       "-speed", String(this.config.speed),
-      "-autoconnect", "1",
+      "-autoconnect", autoConnect,
       "-ExitOnError", "1",
       "-NoGui", "1",
     ];

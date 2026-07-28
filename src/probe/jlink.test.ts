@@ -79,6 +79,24 @@ test("JLinkBackend timeout waits for JLinkExe exit before returning", async () =
   assert.ok(elapsed >= 40, `Probe queue could be released before fake JLinkExe exit (${elapsed}ms)`);
 });
 
+test("JLinkBackend does not auto-connect for probe-only raw commands", async () => {
+  const scripts: string[] = [];
+  const spawnedArgs: string[][] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    (_command, args) => {
+      spawnedArgs.push([...args]);
+      return successfulProcess(scripts);
+    },
+  );
+
+  assert.equal((await backend.executeRaw(["showemulist"])).success, true);
+  assert.equal((await backend.executeRaw(["showconf"])).success, true);
+  assert.equal((await backend.executeRaw(["showemulist", "mem8 0x20000000, 1"])).success, true);
+  assert.deepEqual(spawnedArgs.map((args) => args[args.indexOf("-autoconnect") + 1]), ["0", "0", "1"]);
+});
+
 test("JLinkBackend does not treat a kill error as process exit", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const backend = new JLinkBackend({ device: "TEST", serialNumber: "SERIAL", interface: "SWD", speed: 1000 }, new ProcessManager(), () => fakeProcess(signals, true));

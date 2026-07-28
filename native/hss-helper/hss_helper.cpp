@@ -3891,6 +3891,45 @@ static bool self_test_non_intrusive_attach_profile() {
     && !resolve_non_intrusive_attach_device_from_catalog("Other", catalog, &attach_device);
 }
 
+static std::string ready_heartbeat_json(
+  const std::string& capture_id,
+  const std::string& helper_instance_nonce,
+  DWORD pid,
+  int64_t counter,
+  uint64_t heartbeat_sequence,
+  const std::string& initial_target_state,
+  const std::string& expected_target_state,
+  bool resume_issued,
+  bool target_halted
+) {
+  return "{\"status\":\"ready\",\"captureId\":\"" + escape(capture_id)
+    + "\",\"helperNonce\":\"" + escape(helper_instance_nonce) + "\",\"pid\":" + std::to_string(pid)
+    + ",\"qpcCounter\":\"" + std::to_string(counter) + "\",\"heartbeatSequence\":" + std::to_string(heartbeat_sequence)
+    + ",\"initialTargetState\":\"" + initial_target_state + "\",\"expectedTargetState\":\"" + expected_target_state
+    + "\",\"resumeIssued\":" + (resume_issued ? "true" : "false") + ",\"targetState\":\""
+    + (target_halted ? "halted" : "running") + "\"}";
+}
+
+static bool self_test_ready_heartbeat_json() {
+  const std::string json = ready_heartbeat_json(
+    "123e4567-e89b-42d3-a456-426614174000",
+    "nonce",
+    123U,
+    456,
+    7U,
+    "halted",
+    "running",
+    true,
+    false
+  );
+  StrictJson parsed;
+  std::string reason;
+  return StrictJsonParser(json).parse(&parsed, &reason)
+    && json_string(json, "status") == "ready"
+    && json_string(json, "targetState") == "running"
+    && json_bool(json, "resumeIssued", false);
+}
+
 static int self_test() {
   U32 parsed_u32 = 0;
   int parsed_int = 0;
@@ -3943,6 +3982,10 @@ static int self_test() {
   }
   if (!self_test_hss_start_frequency()) {
     error_json("HSS_SELF_TEST_START_FREQUENCY_FAILED", "JLINK_HSS_Start frequency did not preserve the requested Hz value");
+    return 0;
+  }
+  if (!self_test_ready_heartbeat_json()) {
+    error_json("HSS_SELF_TEST_READY_JOURNAL_FAILED", "ready heartbeat JSON was not structurally valid");
     return 0;
   }
   if (!self_test_memory_session_control()) {
@@ -4418,7 +4461,7 @@ static int self_test() {
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v1-sha256-crc32-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"hssStartFrequencyValidated\":true,\"memorySessionControlValidated\":true,\"memorySessionProtocolValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
+    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"readyJournalValidated\":true,\"hssStartFrequencyValidated\":true,\"memorySessionControlValidated\":true,\"memorySessionProtocolValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
@@ -5594,12 +5637,17 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   int64_t last_heartbeat_ns = now_ns();
   bool ready_journal_write_failed = false;
   const auto publish_ready_heartbeat = [&](int64_t counter) {
-    const bool published = counter >= 0 && write_text_file_a(ready_file, "{\"status\":\"ready\",\"captureId\":\"" + escape(capture_id)
-      + "\",\"helperNonce\":\"" + escape(helper_instance_nonce) + "\",\"pid\":" + std::to_string(GetCurrentProcessId())
-      + ",\"qpcCounter\":\"" + std::to_string(counter) + "\",\"heartbeatSequence\":" + std::to_string(heartbeat_sequence++)
-      + ",\"initialTargetState\":\"" + initial_target_state + "\",\"expectedTargetState\":\"" + expected_target_state
-      + "\",\"resumeIssued\":" + (resume_before_start ? "true" : "false") + ",\"targetState\":\""
-      + (after_start.finalRaw > 0 ? "halted" : "running") + "}");
+    const bool published = counter >= 0 && write_text_file_a(ready_file, ready_heartbeat_json(
+      capture_id,
+      helper_instance_nonce,
+      GetCurrentProcessId(),
+      counter,
+      heartbeat_sequence++,
+      initial_target_state,
+      expected_target_state,
+      resume_before_start,
+      after_start.finalRaw > 0
+    ));
     if (!published) ready_journal_write_failed = true;
     else last_heartbeat_ns = now_ns();
     return published;

@@ -1718,7 +1718,8 @@ async function validIndexSchema(database: sqlite3.Database): Promise<boolean> {
 
 function openDatabase(file: string, mode?: number): Promise<sqlite3.Database> {
   return new Promise((resolve, reject) => {
-    const database = new sqlite3.Database(file, mode ?? (sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE), (error) => error ? reject(error) : resolve(database));
+    const sqliteFile = process.platform === "win32" ? path.toNamespacedPath(file) : file;
+    const database = new sqlite3.Database(sqliteFile, mode ?? (sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE), (error) => error ? reject(error) : resolve(database));
   });
 }
 

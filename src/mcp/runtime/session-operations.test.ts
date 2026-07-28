@@ -294,19 +294,87 @@ test("stale Artifact during GDB load retains a halted client to avoid hidden res
   assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.status, "unverified");
 });
 
-test("GDB connect reports and retains an unexpected running-to-halted transition", async (context) => {
+test("GDB connect restores a normal attach halt to the requested running state", async (context) => {
   const fixtureValue = await fixture(context, "gdb-connect-hidden-halt");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped: signal-received signal SIGTRAP at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = { success: true, output: "running", rawOutput: "^running", observedTargetExecutionState: "running" };
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  assert.equal(result.ok, true);
+  assert.deepEqual(fixtureValue.gdb.commands, ["continue"]);
+  assert.deepEqual(result.observedEffects, ["gdb_client_connected", "gdb_attach_halted_target", "target_state_restored:halted->running"]);
+  assert.equal(fixtureValue.gdb.isConnected(), true);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
+  assert.equal((result.data as { targetExecutionStateAfterConnect: string }).targetExecutionStateAfterConnect, "halted");
+  assert.equal((result.data as { targetExecutionStateAfterRestore: string }).targetExecutionStateAfterRestore, "running");
+});
+
+test("GDB connect retains and reports a fault-handler stop without resuming it", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-fault-handler");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "HardFault_Handler () at startup.s:408",
+    rawOutput: '*stopped,frame={func="HardFault_Handler"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "TARGET_FAULTED_DURING_GDB_ATTACH");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+});
+
+test("GDB connect keeps an unclassified attach stop halted", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-unclassified-stop");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at 0x00001234",
+    rawOutput: '*stopped,frame={addr="0x00001234"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
   const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
-  assert.equal(result.error?.writeIssued, true);
-  assert.equal(result.error?.stateUnknown, false);
-  assert.deepEqual(result.observedEffects, ["gdb_client_connected", "unexpected_target_state_change:running->halted"]);
-  assert.equal(fixtureValue.gdb.isConnected(), true);
+  assert.deepEqual(fixtureValue.gdb.commands, []);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
-  assert.equal((result.data as { cleanup: string }).cleanup, "client_retained_to_avoid_hidden_resume");
+});
+
+test("GDB connect fails closed when an attach halt cannot be restored", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-restore-failure");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped: signal-received signal SIGTRAP at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = {
+    success: false,
+    output: "continue failed",
+    rawOutput: '^error,msg="continue failed"',
+    error: "continue failed",
+    observedTargetExecutionState: "unknown",
+  };
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "GDB_ATTACH_STATE_RESTORE_FAILED");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.deepEqual(fixtureValue.gdb.commands, ["continue"]);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
 });
 
 test("an idle GDB client exit invalidates cached state before the next connect", async (context) => {

@@ -126,7 +126,7 @@ async function assertMcpSurface(standalone, cwd, label) {
     }
     const summary = parseEnvelope(await client.callTool({ name: "capture_summary", arguments: { captureId } }));
     if (!summary.ok || summary.data?.sampleCount !== 1 || summary.data?.indexStatus !== "ready") {
-      throw new Error(`${label} MCP could not query and rebuild the JCAP v1 release fixture`);
+      throw new Error(`${label} MCP could not query and rebuild the JCAP v1 release fixture: ${JSON.stringify(summary)}`);
     }
   } finally {
     await client.close();
