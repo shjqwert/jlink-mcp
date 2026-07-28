@@ -305,7 +305,7 @@ test("GDB connect restores a normal attach halt to the requested running state",
     observedTargetExecutionState: "halted",
   };
   fixtureValue.gdb.commandResult = { success: true, output: "running", rawOutput: "^running", observedTargetExecutionState: "running" };
-  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, true);
   assert.deepEqual(fixtureValue.gdb.commands, ["continue"]);
   assert.deepEqual(result.observedEffects, ["gdb_client_connected", "gdb_attach_halted_target", "target_state_restored:halted->running"]);
@@ -313,6 +313,46 @@ test("GDB connect restores a normal attach halt to the requested running state",
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
   assert.equal((result.data as { targetExecutionStateAfterConnect: string }).targetExecutionStateAfterConnect, "halted");
   assert.equal((result.data as { targetExecutionStateAfterRestore: string }).targetExecutionStateAfterRestore, "running");
+});
+
+test("GDB connect restores the audited RT-06 J-Link attach stop only with explicit authorization", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-jlink-no-reason-stop");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at prvCheckTasksWaitingTermination()",
+    rawOutput: '&"target remote localhost:2331\\n"\r\n'
+      + '~"Remote debugging using localhost:2331\\n"\r\n'
+      + '*stopped,frame={addr="0x0001c0c4",func="prvCheckTasksWaitingTermination",args=[],file="D:\\\\FOC_Project\\\\Appl\\\\Source\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",fullname="D:\\\\FOC_Project\\\\Appl\\\\Source\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",line="3665",arch="armv7e-m"},thread-id="1",stopped-threads="all"\r\n'
+      + "^done\r\n(gdb) \r\n",
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = { success: true, output: "running", rawOutput: "^running", observedTargetExecutionState: "running" };
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
+  assert.equal(result.ok, true);
+  assert.deepEqual(fixtureValue.gdb.commands, ["continue"]);
+  assert.deepEqual(result.observedEffects, ["gdb_client_connected", "gdb_attach_halted_target", "target_state_restored:halted->running"]);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
+  assert.equal((result.data as { attachStopClassification: string }).attachStopClassification, "reasonless_attach_like_stop");
+  assert.match(result.warnings.join("\n"), /could not distinguish.*application BKPT.*watchpoint.*fault/i);
+});
+
+test("GDB connect keeps the audited RT-06 J-Link attach stop halted without explicit authorization", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-jlink-no-restore-authorization");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at prvCheckTasksWaitingTermination()",
+    rawOutput: '*stopped,frame={addr="0x0001c0c4",func="prvCheckTasksWaitingTermination",args=[],file="tasks.c",fullname="tasks.c",line="3665",arch="armv7e-m"},thread-id="1",stopped-threads="all"\r\n^done\r\n',
+    observedTargetExecutionState: "halted",
+  };
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
 });
 
 test("GDB connect retains and reports a fault-handler stop without resuming it", async (context) => {
@@ -325,7 +365,7 @@ test("GDB connect retains and reports a fault-handler stop without resuming it",
     rawOutput: '*stopped,frame={func="HardFault_Handler"}\n^done',
     observedTargetExecutionState: "halted",
   };
-  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "TARGET_FAULTED_DURING_GDB_ATTACH");
   assert.equal(result.error?.writeIssued, true);
@@ -344,11 +384,57 @@ test("GDB connect keeps an unclassified attach stop halted", async (context) => 
     rawOutput: '*stopped,frame={addr="0x00001234"}\n^done',
     observedTargetExecutionState: "halted",
   };
-  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
   assert.deepEqual(fixtureValue.gdb.commands, []);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+});
+
+test("GDB connect keeps an explicit breakpoint stop halted", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-breakpoint-stop");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at main()",
+    rawOutput: '*stopped,reason="breakpoint-hit",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+});
+
+test("GDB connect authorization never resumes watchpoint or non-SIGTRAP signal stops", async (context) => {
+  const cases = [
+    {
+      name: "watchpoint",
+      rawOutput: '*stopped,reason="watchpoint-trigger",wpt={number="2",exp="counter"},frame={func="main"}\n^done',
+    },
+    {
+      name: "non-sigtrap",
+      rawOutput: '*stopped,reason="signal-received",signal-name="SIGSEGV",frame={func="main"}\n^done',
+    },
+  ];
+  for (const item of cases) {
+    const fixtureValue = await fixture(context, `gdb-connect-${item.name}-stop`);
+    await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+    fixtureValue.gdb.executionState = "halted";
+    fixtureValue.gdb.connectResult = {
+      success: true,
+      output: `Stopped: ${item.name}`,
+      rawOutput: item.rawOutput,
+      observedTargetExecutionState: "halted",
+    };
+    const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
+    assert.equal(result.ok, false, item.name);
+    assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE", item.name);
+    assert.deepEqual(fixtureValue.gdb.commands, [], item.name);
+    assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted", item.name);
+  }
 });
 
 test("GDB connect fails closed when an attach halt cannot be restored", async (context) => {
@@ -368,7 +454,7 @@ test("GDB connect fails closed when an attach halt cannot be restored", async (c
     error: "continue failed",
     observedTargetExecutionState: "unknown",
   };
-  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "GDB_ATTACH_STATE_RESTORE_FAILED");
   assert.equal(result.error?.writeIssued, true);

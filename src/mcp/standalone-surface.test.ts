@@ -106,6 +106,13 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       for (const removed of removedFields) assert.equal(schema.properties?.[removed], undefined, `${name} must not expose ${removed}`);
     }
     {
+      const properties = tools.find((tool) => tool.name === "gdb_open")?.inputSchema.properties as Record<string, { default?: unknown; description?: string }>;
+      assert.equal(properties.restoreRunningStateAfterAttach?.default, false);
+      assert.match(properties.restoreRunningStateAfterAttach?.description ?? "", /explicitly authorize.*previously running target/i);
+      assert.match(properties.restoreRunningStateAfterAttach?.description ?? "", /reasonless stop cannot distinguish.*BKPT.*watchpoint.*fault/i);
+      assert.match(properties.restoreRunningStateAfterAttach?.description ?? "", /independently verifying healthy running state/i);
+    }
+    {
       const properties = tools.find((tool) => tool.name === "write_variable")?.inputSchema.properties as Record<string, { default?: unknown; description?: string }>;
       assert.equal(properties.captureOld?.default, true);
       assert.equal(properties.verify?.default, true);

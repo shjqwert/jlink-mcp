@@ -14,7 +14,16 @@ interface SessionToolServices {
 }
 
 export function registerSessionTools(register: RegisterEnvelopeTool, services: SessionToolServices): void {
-  register("gdb_open", projectRootInput, (input) => gdbOpen(services, String(input.projectRoot)));
+  register("gdb_open", {
+    ...projectRootInput,
+    restoreRunningStateAfterAttach: z.boolean().default(false).describe(
+      "Explicitly authorize restoring a previously running target after a SIGTRAP or reasonless J-Link attach-like stop. A reasonless stop cannot distinguish attach from application BKPT, watchpoint, or non-standard fault; use only after independently verifying healthy running state. Named fault handlers and explicit breakpoint, watchpoint, or non-SIGTRAP reasons remain fail-closed.",
+    ),
+  }, (input) => gdbOpen(
+    services,
+    String(input.projectRoot),
+    Boolean(input.restoreRunningStateAfterAttach),
+  ));
   register("gdb_command", {
     ...projectRootInput,
     command: z.string().min(1),
@@ -61,7 +70,11 @@ export function registerSessionTools(register: RegisterEnvelopeTool, services: S
     (input) => diagnoseCrash(services, String(input.projectRoot)));
 }
 
-async function gdbOpen(services: SessionToolServices, projectRoot: string): Promise<OperationEnvelope> {
+async function gdbOpen(
+  services: SessionToolServices,
+  projectRoot: string,
+  restoreRunningStateAfterAttach: boolean,
+): Promise<OperationEnvelope> {
   let target: StoredTarget;
   try {
     target = services.targets.require(projectRoot);
@@ -79,7 +92,11 @@ async function gdbOpen(services: SessionToolServices, projectRoot: string): Prom
 
   const server = await services.sessions.gdbServerStart(target.projectRoot);
   if (!server.ok) return relabelEnvelope(server, "gdb_open");
-  const client = await services.sessions.gdbConnect(target.projectRoot, target.artifact.path);
+  const client = await services.sessions.gdbConnect(
+    target.projectRoot,
+    target.artifact.path,
+    restoreRunningStateAfterAttach,
+  );
   const envelope = relabelEnvelope(client, "gdb_open");
   envelope.requestedEffects = distinct([...server.requestedEffects, ...client.requestedEffects]);
   envelope.observedEffects = distinct([...server.observedEffects, ...client.observedEffects]);

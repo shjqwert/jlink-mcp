@@ -182,8 +182,10 @@ export class SessionOperations {
     }, owner);
   }
 
-  gdbConnect(projectRoot: string, symbolFile?: string): Promise<OperationEnvelope> {
-    return this.withGdbOwner("gdb_connect", projectRoot, ["connect_gdb_client", "conditionally_restore_running_state_after_attach"], async (envelope, target, runtime) => {
+  gdbConnect(projectRoot: string, symbolFile?: string, restoreRunningStateAfterAttach = false): Promise<OperationEnvelope> {
+    const requestedEffects = ["connect_gdb_client"];
+    if (restoreRunningStateAfterAttach) requestedEffects.push("restore_running_state_after_attach");
+    return this.withGdbOwner("gdb_connect", projectRoot, requestedEffects, async (envelope, target, runtime) => {
       const executionStateBeforeConnect = runtime.gdbServerTargetExecutionState ?? "unknown";
       envelope.before = {
         ...(envelope.before as Record<string, unknown>),
@@ -268,9 +270,11 @@ export class SessionOperations {
             false,
           );
         }
-        if (executionStateAfterConnect === "halted"
+        const attachStopClassification = gdbAttachStopClassification(result);
+        if (restoreRunningStateAfterAttach
+            && executionStateAfterConnect === "halted"
             && executionStateBeforeConnect === "running"
-            && gdbAttachReportedNormalTrap(result)) {
+            && attachStopClassification) {
           envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target");
           const restore = await runtime.gdb.command("continue");
           const executionStateAfterRestore = runtime.gdb.getTargetExecutionState();
@@ -281,6 +285,8 @@ export class SessionOperations {
             targetExecutionStateBeforeConnect: executionStateBeforeConnect,
             targetExecutionStateAfterConnect: executionStateAfterConnect,
             targetExecutionStateAfterRestore: executionStateAfterRestore,
+            attachStopClassification,
+            restoreRunningStateAfterAttachAuthorized: true,
             stateRestore: restore,
             gdbClientConnected: runtime.gdb.isConnected(),
           };
@@ -294,6 +300,11 @@ export class SessionOperations {
             );
           }
           envelope.observedEffects.push("target_state_restored:halted->running");
+          if (attachStopClassification === "reasonless_attach_like_stop") {
+            envelope.warnings.push(
+              "The reasonless J-Link stop could not distinguish an attach halt from an application BKPT, watchpoint, or non-standard fault; running state was restored only because the caller explicitly authorized it.",
+            );
+          }
           envelope.verification = { status: "verified", method: "gdb_attach_response_and_explicit_continue" };
           return;
         }
@@ -303,6 +314,7 @@ export class SessionOperations {
           symbolFile: explicitSymbols ?? null,
           targetExecutionStateBeforeConnect: executionStateBeforeConnect,
           targetExecutionStateAfterConnect: executionStateAfterConnect,
+          restoreRunningStateAfterAttachAuthorized: restoreRunningStateAfterAttach,
           gdbClientConnected: runtime.gdb.isConnected(),
           cleanup: "client_retained_to_avoid_hidden_resume",
         };
@@ -629,12 +641,23 @@ function gdbAttachReportedFault(result: { output?: string; rawOutput?: string })
   return /\b(?:HardFault|MemManage|BusFault|UsageFault|NMI)_Handler\b/i.test(`${result.output ?? ""}\n${result.rawOutput ?? ""}`);
 }
 
-function gdbAttachReportedNormalTrap(result: { rawOutput?: string }): boolean {
-  return (result.rawOutput ?? "").split(/\r?\n/).some((line) =>
-    line.startsWith("*stopped,")
-    && /(?:^|,)reason="signal-received"(?:,|$)/.test(line)
-    && /(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(line)
-  );
+function gdbAttachStopClassification(
+  result: { rawOutput?: string },
+): "sigtrap_stop" | "reasonless_attach_like_stop" | undefined {
+  for (const line of (result.rawOutput ?? "").split(/\r?\n/)) {
+    if (!line.startsWith("*stopped,")) continue;
+    if (
+      /(?:^|,)reason="signal-received"(?:,|$)/.test(line)
+      && /(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(line)
+    ) return "sigtrap_stop";
+    if (
+      !/(?:^|,)reason="/.test(line)
+      && !/(?:^|,)signal-name="/.test(line)
+      && /(?:^|,)frame=\{[^}]*\baddr="0x[0-9a-f]+"[^}]*\bfunc="[^"]+"[^}]*\}/i.test(line)
+      && /,thread-id="\d+",stopped-threads="all"(?:,|$)/.test(line)
+    ) return "reasonless_attach_like_stop";
+  }
+  return undefined;
 }
 
 function userConfirmationRequired(): Promise<OperationEnvelope> {
