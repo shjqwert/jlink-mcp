@@ -272,6 +272,50 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
   }
 });
 
+test("active HSS writes fail closed for unconfigured, unknown, crossing, and non-RAM regions", async () => {
+  const fixture = await createFixture();
+  try {
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    const captureId = String((started.data as { captureId: string }).captureId);
+    const cases: Array<{ name: string; code: string; memoryRegions: StoredTarget["memoryRegions"] }> = [
+      { name: "unconfigured", code: "MEMORY_REGION_NOT_VERIFIED", memoryRegions: [] },
+      { name: "unknown", code: "MEMORY_REGION_NOT_VERIFIED", memoryRegions: [{ start: 0x20000000, length: 4, kind: "unknown", writable: true }] },
+      {
+        name: "cross-region",
+        code: "MEMORY_RANGE_CROSSES_REGION",
+        memoryRegions: [
+          { start: 0x20000000, length: 2, kind: "ram", writable: true },
+          { start: 0x20000002, length: 2, kind: "peripheral", writable: true },
+        ],
+      },
+      { name: "RAM/peripheral conflict", code: "SYMBOL_REGION_CONFLICT", memoryRegions: [{ start: 0x20000000, length: 4, kind: "peripheral", writable: true }] },
+    ];
+
+    for (const scenario of cases) {
+      const target = { ...fixture.target, memoryRegions: scenario.memoryRegions };
+      const resolved = await fixture.resolver.resolve(target, "var0");
+      const result = await fixture.hss.tryWriteVariable(
+        { projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 9 },
+        target,
+        resolved,
+        u32(9),
+        { mode: "exact", type: "uint32", endian: "little" },
+      );
+
+      assert.equal(result?.error?.code, scenario.code, scenario.name);
+      assert.equal(result?.error?.writeIssued, false, scenario.name);
+      assert.equal(fixture.adapter.writeCount, 0, scenario.name);
+      assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.kind, "hss", scenario.name);
+    }
+
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("HSS scalar preparation preserves capture and write role errors", async () => {
   const fixture = await createFixture();
   try {

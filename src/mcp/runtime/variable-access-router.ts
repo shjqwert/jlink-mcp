@@ -5,6 +5,7 @@ import {
   type NonObserveComparator,
   type ScalarComparator,
   DirectMcuService,
+  validateStructuredWriteRegion,
 } from "./direct-operations";
 import {
   createOperationEnvelope,
@@ -116,6 +117,17 @@ export class VariableAccessRouter implements VariableAccess {
     }
 
     const { target, resolved, cacheRefreshed } = context;
+    const regionError = validateStructuredWriteRegion(target, resolved.address, resolved.size, "ram");
+    if (regionError) {
+      return failEnvelope(createOperationEnvelope("write_variable", target), {
+        code: regionError.code,
+        stage: "validation",
+        message: regionError.message,
+        retryable: false,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    }
     try {
       const captureEnvelope = await this.capture.tryWriteVariable(normalizedInput, target, resolved, requested, comparator);
       if (captureEnvelope !== undefined) {

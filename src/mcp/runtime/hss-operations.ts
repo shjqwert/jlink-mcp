@@ -30,7 +30,7 @@ import {
   type JcapV1Metadata,
   type JcapV1VariableDescriptor,
 } from "../jcap/jcap-v1";
-import type { NonObserveComparator, ScalarComparator } from "./direct-operations";
+import { validateStructuredWriteRegion, type NonObserveComparator, type ScalarComparator } from "./direct-operations";
 import {
   qualityEvidenceFrom,
   type PreparedQualityOracle,
@@ -948,6 +948,8 @@ export class HssOperations implements CaptureVariableAccess {
     let session = this.sessionStore.active(target.projectRoot);
     if (!session) return undefined;
     const envelope = createOperationEnvelope("write_variable", target);
+    const regionError = validateStructuredWriteRegion(target, resolved.address, resolved.size, "ram");
+    if (regionError) return this.failure(envelope, new HssOperationError(regionError.code, regionError.message), "validation");
     const logicalIdentity = symbolLogicalIdentity(resolved.ref);
     const descriptor = [...session.descriptors, ...(session.writeDescriptors ?? [])].find((current) => current.logicalIdentity === logicalIdentity
       && current.artifactGeneration === resolved.ref.artifactGeneration

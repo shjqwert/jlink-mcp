@@ -74,6 +74,40 @@ export interface StructuredMemoryWriteInput extends MemoryReadInput {
   semanticData?: Record<string, unknown>;
 }
 
+export type StructuredWriteRegionErrorCode =
+  | "MEMORY_RANGE_CROSSES_REGION"
+  | "MEMORY_REGION_NOT_VERIFIED"
+  | "MEMORY_REGION_NOT_WRITABLE"
+  | "SYMBOL_REGION_CONFLICT"
+  | "SVD_REGION_CONFLICT";
+
+export interface StructuredWriteRegionError {
+  code: StructuredWriteRegionErrorCode;
+  message: string;
+}
+
+export function validateStructuredWriteRegion(
+  target: StoredTarget,
+  address: number,
+  byteCount: number,
+  knownRegion: StructuredMemoryWriteInput["knownRegion"],
+): StructuredWriteRegionError | undefined {
+  const configured = locateMemoryRegion(target, address, byteCount);
+  const overlaps = overlappingMemoryRegions(target, address, byteCount);
+  if (!configured && overlaps.length > 0) return { code: "MEMORY_RANGE_CROSSES_REGION", message: "structured write crosses a configured memory-region boundary" };
+  if (!configured || configured.kind === "unknown") return { code: "MEMORY_REGION_NOT_VERIFIED", message: "memory write requires a configured, verified memory region" };
+  if (!configured.writable || configured.kind === "flash" || configured.kind === "rom") {
+    return { code: "MEMORY_REGION_NOT_WRITABLE", message: `configured ${configured.kind} region is not writable` };
+  }
+  if (knownRegion === "ram" && configured.kind !== "ram") {
+    return { code: "SYMBOL_REGION_CONFLICT", message: `DWARF reports RAM but Target configuration reports ${configured.kind}` };
+  }
+  if (knownRegion === "peripheral" && configured.kind !== "peripheral") {
+    return { code: "SVD_REGION_CONFLICT", message: `SVD reports peripheral space but Target configuration reports ${configured.kind}` };
+  }
+  return undefined;
+}
+
 export interface StructuredMemoryReadRequest {
   address: number;
   width: 8 | 16 | 32;
@@ -540,19 +574,8 @@ export class DirectMcuService {
     }
     return this.queued(tool, input.projectRoot, ["structured_memory_write"], async (envelope, target, runtime) => {
       validateExpectedTarget(input, target);
-      const configured = locateMemoryRegion(target, input.address, input.byteCount);
-      const overlaps = overlappingMemoryRegions(target, input.address, input.byteCount);
-      if (!configured && overlaps.length > 0) throw executionError("MEMORY_RANGE_CROSSES_REGION", "validation", "structured write crosses a configured memory-region boundary");
-      if (!configured || configured.kind === "unknown") throw executionError("MEMORY_REGION_NOT_VERIFIED", "validation", "memory write requires a configured, verified memory region");
-      if (configured && (!configured.writable || configured.kind === "flash" || configured.kind === "rom")) {
-        throw executionError("MEMORY_REGION_NOT_WRITABLE", "validation", `configured ${configured.kind} region is not writable`);
-      }
-      if (configured && input.knownRegion === "ram" && configured.kind !== "ram") {
-        throw executionError("SYMBOL_REGION_CONFLICT", "validation", `DWARF reports RAM but Target configuration reports ${configured.kind}`);
-      }
-      if (configured && input.knownRegion === "peripheral" && configured.kind !== "peripheral") {
-        throw executionError("SVD_REGION_CONFLICT", "validation", `SVD reports peripheral space but Target configuration reports ${configured.kind}`);
-      }
+      const regionError = validateStructuredWriteRegion(target, input.address, input.byteCount, input.knownRegion);
+      if (regionError) throw executionError(regionError.code, "validation", regionError.message);
 
       const before = await observe(runtime.probe);
       envelope.before = observationData(before);
