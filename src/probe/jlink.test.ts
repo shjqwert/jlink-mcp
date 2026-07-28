@@ -9,7 +9,7 @@ import test from "node:test";
 import { findJLinkInstallDir, getConfig, selectJLinkInstallDir } from "../utils/config";
 import { ProcessManager } from "../utils/process-manager";
 import { ProbeErrorCode, type CommandResult } from "./backend";
-import { JLinkBackend, type JLinkSpawn } from "./jlink";
+import { JLinkBackend, waitForGdbServerReady, type JLinkSpawn } from "./jlink";
 
 test("J-Link installation discovery prefers an installation declaring the requested device", (context) => {
   const root = mkdtempSync(join(tmpdir(), "jlink-discovery-test-"));
@@ -194,6 +194,43 @@ test("JLinkBackend GDB Server arguments disable implicit reset, halt, and single
   assert.ok(args.includes("-nosinglerun"));
   assert.equal(args.includes("-singlerun"), false);
   assert.deepEqual(args.slice(-2), ["-select", "USB=123456"]);
+});
+
+test("GDB Server readiness accepts stderr and text split across chunks", async () => {
+  const processHandle = readinessProcess();
+  const ready = waitForGdbServerReady(processHandle, 1_000);
+  (processHandle.stderr as PassThrough).write("Waiting for connec");
+  (processHandle.stderr as PassThrough).write("tion from GDB\n");
+  assert.deepEqual(await ready, { ready: true, message: "ready output observed on stderr" });
+  assert.equal(processHandle.stdout!.listenerCount("data"), 0);
+  assert.equal(processHandle.stderr!.listenerCount("data"), 0);
+  assert.equal(processHandle.listenerCount("exit"), 0);
+  assert.equal(processHandle.listenerCount("error"), 0);
+});
+
+test("GDB Server readiness timeout retains bounded stdout and stderr diagnostics", async () => {
+  const processHandle = readinessProcess();
+  const ready = waitForGdbServerReady(processHandle, 10);
+  (processHandle.stdout as PassThrough).write(`prefix-${"x".repeat(20_000)}`);
+  (processHandle.stderr as PassThrough).write("vendor startup failed");
+  const result = await ready;
+  assert.equal(result.ready, false);
+  assert.match(result.message, /no readiness output within 10ms/);
+  assert.match(result.message, /vendor startup failed/);
+  assert.ok(Buffer.byteLength(result.message, "utf8") < 18 * 1024);
+});
+
+test("GDB Server combined output remains bounded for stderr-heavy failures", () => {
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+  );
+  const append = (backend as unknown as { appendGdbOutput(line: string): void }).appendGdbOutput.bind(backend);
+  for (let index = 0; index < 2_000; index += 1) append(`[ERR] vendor diagnostic ${index}`);
+  const output = backend.getGDBServerOutput(2_000);
+  assert.equal(output.length, 1000);
+  assert.equal(output[0], "[ERR] vendor diagnostic 1000");
+  assert.equal(output.at(-1), "[ERR] vendor diagnostic 1999");
 });
 
 test("JLinkBackend uses helper bytes and rejects a read that changes target state", async (context) => {
@@ -454,5 +491,16 @@ function helperProcess(json: string): ChildProcess {
     child.emit("exit", 0, null);
     child.emit("close", 0, null);
   });
+  return child as unknown as ChildProcess;
+}
+
+function readinessProcess(): ChildProcess {
+  type MutableChild = EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+  };
+  const child = new EventEmitter() as MutableChild;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
   return child as unknown as ChildProcess;
 }

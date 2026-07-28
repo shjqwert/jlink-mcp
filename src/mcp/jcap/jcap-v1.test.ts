@@ -245,6 +245,45 @@ test("capture_list reports a missing terminal v1 index without rebuilding it", a
   }
 });
 
+test("capture_list rejects cursors that were not issued by the server", async () => {
+  const root = workspace();
+  try {
+    const query = new CaptureQueryOperations(root);
+    for (const cursor of [
+      "not-a-valid-cursor",
+      "ABCDEF00-0000-4000-8000-000000000001\0",
+      `${captureId}\0run\0extra`,
+      `${captureId}`,
+      `${captureId}\0${"x".repeat(1024)}`,
+    ]) {
+      const listed = await query.list({ cursor, limit: 10 });
+      assert.equal(listed.ok, false);
+      assert.equal(listed.error?.code, "INVALID_CURSOR");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capture_list normalizes uppercase package UUIDs before issuing cursors", async () => {
+  const root = workspace();
+  const lowerFirst = "41000000-0000-4000-8000-000000000001";
+  const upperSecond = "AB000000-0000-4000-8000-000000000002";
+  try {
+    writeActiveV1Fixture(path.join(root, "captures", `${lowerFirst}.jcap`), lowerFirst);
+    writeActiveV1Fixture(path.join(root, "captures", `${upperSecond}.jcap`), upperSecond.toLowerCase());
+    const query = new CaptureQueryOperations(root);
+    const first = dataOf(await query.list({ limit: 1 }));
+    const cursor = first.nextCursor;
+    assert.equal(typeof cursor, "string");
+    assert.match(String(cursor), /^[0-9a-f-]+\0/);
+    const second = dataOf(await query.list({ limit: 1, cursor: String(cursor) }));
+    assert.deepEqual((second.captures as Array<Record<string, unknown>>).map((entry) => entry.captureId), [upperSecond.toLowerCase()]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("JCAP v1 finalizes exactly four durable files and round-trips bounded queries and rebuild", async () => {
   const root = workspace();
   const capturesDir = path.join(root, "captures");

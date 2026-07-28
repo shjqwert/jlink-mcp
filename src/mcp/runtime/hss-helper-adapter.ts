@@ -16,7 +16,7 @@ import {
 import { dirname, extname, join, resolve } from "node:path";
 import type { StoredTarget } from "./target-store";
 
-export const HSS_HELPER_PROTOCOL_VERSION = 2;
+export const HSS_HELPER_PROTOCOL_VERSION = 3;
 export const HSS_EFFECTIVE_LIMITS = { maxVariables: 10, maxWriteVariables: 32, maxRateHz: 1_000, maxDurationSec: 60 } as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -65,7 +65,9 @@ export interface HssCaptureLaunch {
   launchedAt: string;
   captureId: string;
   helperNonce: string;
+  initialTargetState: Exclude<HssTargetState, "unknown">;
   expectedTargetState: Exclude<HssTargetState, "unknown">;
+  resumeBeforeStart: boolean;
 }
 
 export interface HssMemoryRequest {
@@ -307,9 +309,16 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
     const plan = readBoundedJson(control.planPath, 1024 * 1024, "HSS_PLAN_INVALID");
     const captureId = typeof plan.captureId === "string" ? plan.captureId : "";
     const helperNonce = typeof plan.helperInstanceNonce === "string" ? plan.helperInstanceNonce : "";
+    const initialTargetState = plan.initialTargetState;
     const expectedTargetState = plan.expectedTargetState;
-    if (!UUID.test(captureId) || !UUID.test(helperNonce) || expectedTargetState !== "halted" && expectedTargetState !== "running") {
-      throw new HssAdapterError("HSS_PLAN_INVALID", "the capture plan is missing its immutable capture/helper identity or expected target state");
+    const resumeBeforeStart = plan.resumeBeforeStart;
+    if (plan.planFormatVersion !== 3
+      || !UUID.test(captureId) || !UUID.test(helperNonce)
+      || initialTargetState !== "halted" && initialTargetState !== "running"
+      || expectedTargetState !== "running"
+      || typeof resumeBeforeStart !== "boolean"
+      || resumeBeforeStart !== (initialTargetState === "halted")) {
+      throw new HssAdapterError("HSS_PLAN_INVALID", "the capture plan is missing its immutable identity or authorized initial/capture target-state transition");
     }
     mkdirSync(dirname(control.stdoutPath), { recursive: true });
     const stdout = openSync(control.stdoutPath, "ax");
@@ -329,7 +338,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       if (!child.pid) throw new HssAdapterError("HSS_HELPER_START_FAILED", "the native helper did not provide a process ID", true);
       child.on("error", () => undefined);
       child.unref();
-      return { pid: child.pid, launchedAt: new Date().toISOString(), captureId, helperNonce, expectedTargetState };
+      return { pid: child.pid, launchedAt: new Date().toISOString(), captureId, helperNonce, initialTargetState, expectedTargetState, resumeBeforeStart };
     } catch (error) {
       if (error instanceof HssAdapterError) throw error;
       throw new HssAdapterError("HSS_HELPER_START_FAILED", error instanceof Error ? error.message : String(error), true);
@@ -347,7 +356,10 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
         if (ready.status !== "ready" || ready.pid !== launch.pid || ready.captureId !== launch.captureId || ready.helperNonce !== launch.helperNonce
           || typeof ready.qpcCounter !== "string" || !/^\d+$/.test(ready.qpcCounter)
           || !Number.isSafeInteger(ready.heartbeatSequence) || Number(ready.heartbeatSequence) < 0
-          || ready.expectedTargetState !== launch.expectedTargetState || ready.targetState !== launch.expectedTargetState || ready.statePreserved !== true) {
+          || ready.initialTargetState !== launch.initialTargetState
+          || ready.expectedTargetState !== launch.expectedTargetState
+          || ready.resumeIssued !== launch.resumeBeforeStart
+          || ready.targetState !== launch.expectedTargetState) {
           throw new HssAdapterError("HSS_READY_INVALID", "the Helper ready journal does not match the launched process", false, true);
         }
         return;

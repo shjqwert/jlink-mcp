@@ -18,7 +18,7 @@ const allowed = new Set([
 const required = [...allowed];
 const findings = [];
 
-if (packageJson.version !== "1.1.3") findings.push(`release version must be 1.1.3, found ${String(packageJson.version)}`);
+if (packageJson.version !== "1.1.4") findings.push(`release version must be 1.1.4, found ${String(packageJson.version)}`);
 if (packageJson.private !== true) findings.push("package must remain private to prevent npm Registry publication");
 if (JSON.stringify(packageJson.os) !== JSON.stringify(["win32"])) findings.push("package os must be [\"win32\"]");
 if (JSON.stringify(packageJson.cpu) !== JSON.stringify(["x64"])) findings.push("package cpu must be [\"x64\"]");

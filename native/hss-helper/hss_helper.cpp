@@ -30,7 +30,7 @@
 #endif
 
 #ifndef HSS_HELPER_PROTOCOL_VERSION
-#define HSS_HELPER_PROTOCOL_VERSION 2
+#define HSS_HELPER_PROTOCOL_VERSION 3
 #endif
 
 using U8 = std::uint8_t;
@@ -3505,6 +3505,91 @@ static void self_test_halt() {
   self_test_target_state_raw = 1;
 }
 
+struct HssCaptureTransitionEvidence {
+  int haltedBeforeResume = -1;
+  int haltedAfterResume = -1;
+  bool resumeIssued = false;
+  bool goMissing = false;
+  bool goCrashed = false;
+  TargetStateGuardEvidence captureState;
+};
+
+static bool enter_hss_capture_state(
+  JLINKARM_IsHalted_Fn is_halted,
+  JLINKARM_Halt_Fn halt,
+  JLINKARM_Go_Fn go,
+  bool resume_before_start,
+  const std::string& expected_target_state,
+  HssCaptureTransitionEvidence* evidence
+) {
+  if (!evidence) return false;
+  *evidence = {};
+  bool crashed = false;
+  if (!is_halted) {
+    evidence->captureState.stateUnknown = true;
+    return false;
+  }
+  evidence->haltedBeforeResume = call_int0(is_halted, &crashed);
+  if (crashed || (evidence->haltedBeforeResume != 0 && evidence->haltedBeforeResume != 1)) {
+    evidence->captureState.stateUnknown = true;
+    return false;
+  }
+  if (resume_before_start) {
+    if (!go) {
+      evidence->goMissing = true;
+      return false;
+    }
+    evidence->resumeIssued = true;
+    call_void0(go, &crashed);
+    if (crashed) {
+      evidence->goCrashed = true;
+      evidence->captureState.stateUnknown = true;
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  evidence->haltedAfterResume = call_int0(is_halted, &crashed);
+  if (crashed || (evidence->haltedAfterResume != 0 && evidence->haltedAfterResume != 1)) {
+    evidence->captureState.stateUnknown = true;
+    return false;
+  }
+  return enforce_expected_target_state(is_halted, halt, expected_target_state, &evidence->captureState);
+}
+
+static void self_test_go() {
+  self_test_target_state_raw = 0;
+}
+
+static void self_test_go_no_transition() {}
+
+static void self_test_go_exception() {
+  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+}
+
+static bool self_test_capture_transition() {
+  HssCaptureTransitionEvidence evidence;
+  self_test_target_state_raw = 1;
+  if (!enter_hss_capture_state(self_test_is_halted, self_test_halt, self_test_go, true, "running", &evidence)
+      || !evidence.resumeIssued || evidence.goMissing || evidence.goCrashed
+      || evidence.haltedBeforeResume != 1 || evidence.haltedAfterResume != 0) return false;
+  self_test_target_state_raw = 0;
+  if (!enter_hss_capture_state(self_test_is_halted, self_test_halt, self_test_go, false, "running", &evidence)
+      || evidence.resumeIssued || evidence.haltedBeforeResume != 0 || evidence.haltedAfterResume != 0) return false;
+  self_test_target_state_raw = 1;
+  if (enter_hss_capture_state(self_test_is_halted, self_test_halt, nullptr, true, "running", &evidence)
+      || !evidence.goMissing || evidence.resumeIssued) return false;
+  self_test_target_state_raw = 1;
+  if (enter_hss_capture_state(self_test_is_halted, self_test_halt, self_test_go_no_transition, true, "running", &evidence)
+      || !evidence.resumeIssued || evidence.haltedAfterResume != 1) return false;
+  self_test_target_state_raw = -1;
+  if (enter_hss_capture_state(self_test_is_halted, self_test_halt, self_test_go, true, "running", &evidence)
+      || evidence.resumeIssued || !evidence.captureState.stateUnknown) return false;
+  self_test_target_state_raw = 1;
+  if (enter_hss_capture_state(self_test_is_halted, self_test_halt, self_test_go_exception, true, "running", &evidence)
+      || !evidence.resumeIssued || !evidence.goCrashed || !evidence.captureState.stateUnknown) return false;
+  return true;
+}
+
 static bool self_test_target_state_guard() {
   TargetStateGuardEvidence evidence;
   self_test_target_state_raw = 1;
@@ -3607,6 +3692,10 @@ static int self_test() {
   }
   if (!self_test_target_state_guard()) {
     error_json("HSS_SELF_TEST_TARGET_STATE_GUARD_FAILED", "HSS target-state preservation guard failed");
+    return 0;
+  }
+  if (!self_test_capture_transition()) {
+    error_json("HSS_SELF_TEST_CAPTURE_TRANSITION_FAILED", "HSS halted-to-running capture transition failed");
     return 0;
   }
   if (!self_test_non_intrusive_attach_profile()) {
@@ -4074,7 +4163,7 @@ static int self_test() {
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v1-sha256-crc32-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
+    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
@@ -4811,6 +4900,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string serial_text = json_string(plan, "serial");
   const std::string read_mode = json_string(plan, "readMode", "periodic");
   const bool resume_before_start = json_bool(plan, "resumeBeforeStart", false);
+  const std::string initial_target_state = json_string(plan, "initialTargetState");
   const std::string expected_target_state = json_string(plan, "expectedTargetState");
   const bool require_first_sample_index_zero = json_bool(plan, "requireFirstSampleIndexZero", false);
   const int speed = json_int(plan, "speedKhz", 4000);
@@ -4839,12 +4929,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}");
   if (dll_utf8.empty() || output_file.empty() || pid_file.empty() || ready_file.empty() || write_request_file.empty() || write_claim_file.empty() || write_response_file.empty()
       || !std::regex_match(capture_id, uuid) || !std::regex_match(helper_instance_nonce, uuid)
-      || plan_format_version != 2 || !symbol_arrays_valid
+      || plan_format_version != 3 || !symbol_arrays_valid
       || !valid_jcap_symbols(symbols) || !valid_write_symbols(write_symbols, symbols)
       || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
       || !valid_jcap_samples_path(output_file, capture_id, &output_path)
-      || (expected_target_state != "halted" && expected_target_state != "running")
-      || (resume_before_start && expected_target_state == "halted")) {
+      || (initial_target_state != "halted" && initial_target_state != "running")
+      || expected_target_state != "running"
+      || resume_before_start != (initial_target_state == "halted")) {
     error_json("HSS_PLAN_INVALID", "plan is missing required fields");
     return 0;
   }
@@ -5080,40 +5171,37 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     return 0;
   }
   TargetStateGuardEvidence before_capture;
-  if (!enforce_expected_target_state(arm_halted, arm_halt, expected_target_state, &before_capture)) {
+  if (!enforce_expected_target_state(arm_halted, arm_halt, initial_target_state, &before_capture)) {
     bool close_crashed = false;
     call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
-    target_state_guard_error_json("target state changed before HSS capture start", expected_target_state, before_capture, close_crashed);
+    target_state_guard_error_json("target state changed before the authorized HSS transition", initial_target_state, before_capture, close_crashed);
     return 0;
   }
   const uint64_t connect_ordinal = artifact_match_connection.connected();
-  int halted_before_resume = -1;
-  int halted_after_resume = -1;
-  if (arm_halted) {
-    halted_before_resume = call_int0(arm_halted, &crashed);
-    if (crashed) halted_before_resume = -2;
-  }
-  if (resume_before_start) {
-    if (!arm_go) {
+  HssCaptureTransitionEvidence transition;
+  if (!enter_hss_capture_state(arm_halted, arm_halt, arm_go, resume_before_start, expected_target_state, &transition)) {
+    if (transition.goMissing) {
       call_void0(arm_close, &crashed);
       FreeLibrary(dll);
       error_json("JLINK_GO_MISSING", "JLINKARM_Go export missing", dll_utf8);
       return 0;
     }
-    call_void0(arm_go, &crashed);
-    if (crashed) {
+    if (transition.goCrashed) {
       call_void0(arm_close, &crashed);
       FreeLibrary(dll);
       error_json("JLINK_GO_EXCEPTION", "JLINKARM_Go raised a structured exception", dll_utf8);
       return 0;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    target_state_guard_error_json("target did not enter the authorized HSS capture state", expected_target_state, transition.captureState, close_crashed);
+    return 0;
   }
-  if (arm_halted) {
-    halted_after_resume = call_int0(arm_halted, &crashed);
-    if (crashed) halted_after_resume = -2;
-  }
+  const int halted_before_resume = transition.haltedBeforeResume;
+  const int halted_after_resume = transition.haltedAfterResume;
+  const TargetStateGuardEvidence capture_state = transition.captureState;
 
   PostConnectStabilityEvidence post_connect_evidence;
   std::string post_connect_error_code;
@@ -5255,8 +5343,9 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     const bool published = counter >= 0 && write_text_file_a(ready_file, "{\"status\":\"ready\",\"captureId\":\"" + escape(capture_id)
       + "\",\"helperNonce\":\"" + escape(helper_instance_nonce) + "\",\"pid\":" + std::to_string(GetCurrentProcessId())
       + ",\"qpcCounter\":\"" + std::to_string(counter) + "\",\"heartbeatSequence\":" + std::to_string(heartbeat_sequence++)
-      + ",\"expectedTargetState\":\"" + expected_target_state + "\",\"targetState\":\""
-      + (after_start.finalRaw > 0 ? "halted" : "running") + "\",\"statePreserved\":true}");
+      + ",\"initialTargetState\":\"" + initial_target_state + "\",\"expectedTargetState\":\"" + expected_target_state
+      + "\",\"resumeIssued\":" + (resume_before_start ? "true" : "false") + ",\"targetState\":\""
+      + (after_start.finalRaw > 0 ? "halted" : "running") + "}");
     if (!published) ready_journal_write_failed = true;
     else last_heartbeat_ns = now_ns();
     return published;
@@ -5511,6 +5600,8 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
      << ",\"configuredSpeedKHz\":" << speed
      << ",\"readMode\":\"" << read_mode << "\""
      << ",\"resetBeforeCapture\":" << (require_first_sample_index_zero ? "true" : "false")
+    << ",\"initialTargetState\":\"" << initial_target_state << "\""
+    << ",\"expectedTargetState\":\"" << expected_target_state << "\""
     << ",\"resumeBeforeStart\":" << (resume_before_start ? "true" : "false")
     << ",\"resumeIssued\":" << (resume_before_start ? "true" : "false")
     << ",\"targetWasHaltedBeforeResume\":" << (halted_before_resume > 0 ? "true" : "false")

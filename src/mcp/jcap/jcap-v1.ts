@@ -133,6 +133,7 @@ const LIMITS = {
 
 const U64_MAX = 18_446_744_073_709_551_615n;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LIST_CURSOR = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\0[^\0]*$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const SCALAR_BYTES: Readonly<Record<string, number>> = Object.freeze({ int8: 1, uint8: 1, int16: 2, uint16: 2, int32: 4, uint32: 4, float32: 4 });
 const RAW_KINDS = ["sample", "event"] as const;
@@ -199,6 +200,10 @@ export class JcapIntegrityError extends Error {
 
 export class JcapCaptureAmbiguousError extends Error {
   readonly code = "JCAP_CAPTURE_AMBIGUOUS";
+}
+
+export class JcapInvalidCursorError extends Error {
+  readonly code = "INVALID_CURSOR";
 }
 
 export class JcapRebuildPublishError extends Error {
@@ -911,7 +916,10 @@ export async function jcapCaptureList(rootDir: string, options: { limit?: number
 function validateListBounds(options: { limit?: number; cursor?: string }): number {
   const limit = options.limit ?? LIMITS.listDefault;
   if (!Number.isInteger(limit) || limit < 1 || limit > LIMITS.listMax) throw new JcapBoundsError("capture list limit must be 1..100");
-  if (Buffer.byteLength(options.cursor ?? "", "utf8") > 1024) throw new JcapBoundsError("capture list cursor exceeds 1024 bytes");
+  if (Buffer.byteLength(options.cursor ?? "", "utf8") > 1024) throw new JcapInvalidCursorError("capture list cursor exceeds 1024 bytes");
+  if (options.cursor !== undefined && !LIST_CURSOR.test(options.cursor)) {
+    throw new JcapInvalidCursorError("capture list cursor is not a server-issued JCAP cursor");
+  }
   return limit;
 }
 
@@ -1541,8 +1549,9 @@ function findCapturePackages(root: string): JcapV1CaptureLocation[] {
     if (entries.length > 10_000) throw new JcapBoundsError("capture directory contains too many entries");
     for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.toLowerCase().endsWith(".jcap")) continue;
-      const captureId = entry.name.slice(0, -5);
-      if (!UUID.test(captureId)) continue;
+      const discoveredCaptureId = entry.name.slice(0, -5);
+      if (!UUID.test(discoveredCaptureId)) continue;
+      const captureId = discoveredCaptureId.toLowerCase();
       found.push({ captureId, packageDir: path.join(directory.capturesDir, entry.name), runId: directory.runId, cursor: `${captureId}\0${directory.runId ?? ""}` });
     }
   }

@@ -286,6 +286,7 @@ export class HssOperations implements CaptureVariableAccess {
       try {
         const restored = await this.adapter.restoreHaltedState(target, runtime);
         if (restored !== "halted") throw new Error(`restoration returned ${restored}`);
+        return restored;
       } catch (error) {
         throw new HssOperationError(
           "HSS_TARGET_STATE_RESTORE_FAILED",
@@ -303,7 +304,7 @@ export class HssOperations implements CaptureVariableAccess {
         : `HSS helper changed target state from ${expected} to ${observed}; halted state was restored when authorized`,
       false,
       false,
-      expected !== "halted",
+      true,
     );
   }
 
@@ -427,7 +428,7 @@ export class HssOperations implements CaptureVariableAccess {
     catch (error) { return this.failure(initial, error, "validation"); }
     if (input.dryRun) return this.dryRun(prepared);
     const envelope = createOperationEnvelope("hss_start", prepared.target);
-    envelope.requestedEffects = ["connect_probe", "start_hss_capture", "create_jcap_package"];
+    envelope.requestedEffects = ["connect_probe", "start_hss_capture", "create_jcap_package", "conditionally_resume_for_hss", "restore_initial_target_state_after_capture"];
     try {
       const existing = this.sessionStore.active(prepared.target.projectRoot);
       if (existing) throw new HssOperationError("CAPTURE_ACTIVE", `capture ${existing.captureId} is already active for this project`, true);
@@ -607,6 +608,7 @@ export class HssOperations implements CaptureVariableAccess {
       };
       envelope.outputFiles = packageFiles(execution.value.packageDir);
       envelope.observedEffects = ["hss_helper_started", "hss_helper_ready", "probe_owner_claimed", "jcap_capture_active"];
+      if (execution.value.expectedTargetState === "halted") envelope.observedEffects.push("target_resumed_for_hss");
       envelope.verification = { status: "observed", method: "helper_ready_journal_pid_owner_and_active_jcap_metadata" };
       this.scheduleMonitor(execution.value.captureId);
       if (execution.value.state === "stopping") {
@@ -1404,7 +1406,7 @@ export class HssOperations implements CaptureVariableAccess {
       throw error;
     }
     const plan = {
-      planFormatVersion: 2,
+      planFormatVersion: 3,
       dllPath: runtime.runtimePath,
       dllSha256: runtime.runtimeSha256,
       runtimeIdentityValidated: true,
@@ -1431,8 +1433,9 @@ export class HssOperations implements CaptureVariableAccess {
       requestedRateHz: prepared.rateHz,
       durationSec: prepared.durationSec,
       readMode: "periodic",
-      resumeBeforeStart: false,
-      expectedTargetState: preflight.targetStateBefore,
+      initialTargetState: preflight.targetStateBefore,
+      resumeBeforeStart: preflight.targetStateBefore === "halted",
+      expectedTargetState: "running",
       requireFirstSampleIndexZero: false,
       postConnectStabilityRequired: false,
       qualityOracle: prepared.qualityOracle ?? null,

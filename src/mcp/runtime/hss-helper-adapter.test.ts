@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -55,14 +56,69 @@ test("native adapter accepts only an exact live Helper ready journal", async () 
   const control = controlFiles(root);
   const adapter = new NativeHssHelperAdapter();
   try {
-    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId, helperNonce, pid: process.pid, qpcCounter: "123", heartbeatSequence: 0, expectedTargetState: "halted", targetState: "halted", statePreserved: true }));
-    const launch = { pid: process.pid, launchedAt: new Date().toISOString(), captureId, helperNonce, expectedTargetState: "halted" as const };
+    writeFileSync(control.readyFile, JSON.stringify({
+      status: "ready",
+      captureId,
+      helperNonce,
+      pid: process.pid,
+      qpcCounter: "123",
+      heartbeatSequence: 0,
+      initialTargetState: "halted",
+      expectedTargetState: "running",
+      resumeIssued: true,
+      targetState: "running",
+    }));
+    const launch = {
+      pid: process.pid,
+      launchedAt: new Date().toISOString(),
+      captureId,
+      helperNonce,
+      initialTargetState: "halted" as const,
+      expectedTargetState: "running" as const,
+      resumeBeforeStart: true,
+    };
     await adapter.waitUntilReady(control, launch, 100);
     writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId: "53000000-0000-4000-8000-000000000001", helperNonce, pid: process.pid, qpcCounter: "123", heartbeatSequence: 0 }));
     await assert.rejects(
       () => adapter.waitUntilReady(control, launch, 100),
       (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_READY_INVALID",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native adapter rejects a v2 capture plan before spawning the Helper", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-plan-version-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  const helperPath = path.join(root, "hss_helper.exe");
+  const runtimePath = path.join(root, "JLink_x64.dll");
+  try {
+    writeFileSync(helperPath, "helper");
+    writeFileSync(runtimePath, "runtime");
+    const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+    writeFileSync(control.planPath, JSON.stringify({
+      planFormatVersion: 2,
+      captureId,
+      helperInstanceNonce: helperNonce,
+      initialTargetState: "halted",
+      expectedTargetState: "running",
+      resumeBeforeStart: true,
+    }));
+    await assert.rejects(
+      () => adapter.launchCapture({
+        backend: "jlink-hss",
+        available: true,
+        helperPath,
+        runtimePath,
+        helperSha256: digest("helper"),
+        runtimeSha256: digest("runtime"),
+        helperProtocolVersion: 3,
+      }, control),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_PLAN_INVALID",
+    );
+    assert.equal(existsSync(control.pidFile), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

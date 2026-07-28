@@ -13,7 +13,7 @@ if (version.status !== 0) process.exit(version.status ?? 1);
 
 const versionResponse = parseJson(version.stdout, "HSS Helper version");
 if (versionResponse.status !== "ok"
-  || versionResponse.helperProtocolVersion !== 2
+  || versionResponse.helperProtocolVersion !== 3
   || versionResponse.architecture !== "x64"
   || versionResponse.helperVersion !== packageJson.version) {
   throw new Error(`HSS Helper version mismatch: ${JSON.stringify(versionResponse)}`);
@@ -27,7 +27,7 @@ if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 
 const response = parseJson(result.stdout, "HSS Helper self-test");
-if (response.status !== "ok" || response.command !== "self-test") {
+if (response.status !== "ok" || response.command !== "self-test" || response.captureTransitionValidated !== true) {
   throw new Error(`HSS Helper self-test failed: ${String(response.errorCode ?? response.reason ?? response.status)}`);
 }
 

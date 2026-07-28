@@ -326,19 +326,24 @@ test("HSS dry-run and start restore an unexpected halted-to-running transition a
   }
 });
 
-test("HSS stop restores an unexpected halted-to-running transition and reports failure", async () => {
+test("HSS stop restores the authorized halted-to-running capture transition", async () => {
   const fixture = await createFixture();
   try {
     fixture.adapter.targetState = "halted";
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
     assert.equal(started.ok, true, JSON.stringify(started.error));
+    assert.equal(fixture.adapter.resumeCount, 1);
+    assert.equal(fixture.adapter.lastPlan?.initialTargetState, "halted");
+    assert.equal(fixture.adapter.lastPlan?.expectedTargetState, "running");
+    assert.equal(fixture.adapter.lastPlan?.resumeBeforeStart, true);
+    assert.equal(started.observedEffects.includes("target_resumed_for_hss"), true);
     fixture.adapter.stopStateAfter = "running";
 
     const stopped = await fixture.hss.stop({
       projectRoot: fixture.projectRoot,
       captureId: String((started.data as { captureId: string }).captureId),
     });
-    assert.equal(stopped.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
     assert.equal(fixture.adapter.targetState, "halted");
     assert.equal(fixture.adapter.restoreCount, 1);
   } finally {
@@ -352,7 +357,7 @@ test("HSS startup failure restores halted state after the helper exits", async (
     fixture.adapter.targetState = "halted";
     fixture.adapter.failReadyAndExitStateAfter = "running";
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
-    assert.equal(started.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(started.error?.code, "HSS_HELPER_EXITED_BEFORE_READY");
     assert.equal(fixture.adapter.targetState, "halted");
     assert.equal(fixture.adapter.restoreCount, 1);
     assert.equal(fixture.adapter.launchCount, 1);
@@ -418,7 +423,7 @@ test("HSS constructor resumes terminal target-state settlement after a process r
   }
 });
 
-test("HSS terminal settlement restores halted state after an already-exited helper", async () => {
+test("HSS terminal settlement restores the authorized halted state after an already-exited helper", async () => {
   const fixture = await createFixture();
   try {
     fixture.adapter.targetState = "halted";
@@ -431,7 +436,7 @@ test("HSS terminal settlement restores halted state after an already-exited help
       projectRoot: fixture.projectRoot,
       captureId: String((started.data as { captureId: string }).captureId),
     });
-    assert.equal(stopped.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
     assert.equal(fixture.adapter.targetState, "halted");
     assert.equal(fixture.adapter.restoreCount, 1);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
@@ -482,7 +487,10 @@ test("HSS writeVariables permit immutable capture-owner writes without consuming
       variables: Array<{ logicalIdentity: string }>;
     };
     assert.deepEqual(metadata.variables.map(({ logicalIdentity }) => logicalIdentity), ["var0"]);
-    assert.equal(fixture.adapter.lastPlan?.planFormatVersion, 2);
+    assert.equal(fixture.adapter.lastPlan?.planFormatVersion, 3);
+    assert.equal(fixture.adapter.lastPlan?.initialTargetState, "running");
+    assert.equal(fixture.adapter.lastPlan?.expectedTargetState, "running");
+    assert.equal(fixture.adapter.lastPlan?.resumeBeforeStart, false);
     assert.deepEqual(fixture.adapter.lastPlan?.symbols.map(({ name }) => name), ["var0"]);
     assert.deepEqual(fixture.adapter.lastPlan?.writeSymbols.map(({ name }) => name), ["var2"]);
 
@@ -1036,6 +1044,9 @@ class FakeHssAdapter implements HssHelperAdapter {
   launchCount = 0;
   lastPlan?: {
     planFormatVersion: number;
+    initialTargetState: "running" | "halted";
+    expectedTargetState: "running";
+    resumeBeforeStart: boolean;
     symbols: Array<{ name: string; address: string; size: number; type: string }>;
     writeSymbols: Array<{ name: string; address: string; size: number; type: string }>;
   };
@@ -1053,6 +1064,7 @@ class FakeHssAdapter implements HssHelperAdapter {
   capabilityStateAfter?: HssTargetState;
   stopStateAfter?: HssTargetState;
   restoreCount = 0;
+  resumeCount = 0;
   failRestore = false;
   counterGapAt?: number;
   counterGapFrames = 0;
@@ -1065,7 +1077,7 @@ class FakeHssAdapter implements HssHelperAdapter {
 
   async inspectRuntime(): Promise<HssRuntimeFacts> {
     this.inspectCount += 1;
-    return { backend: this.backend, available: true, helperPath: "fake-helper", runtimePath: "fake-runtime", helperSha256: "2".repeat(64), runtimeSha256: "1".repeat(64), helperVersion: "1", helperProtocolVersion: 2, architecture: process.arch, abi: { fake: true } };
+    return { backend: this.backend, available: true, helperPath: "fake-helper", runtimePath: "fake-runtime", helperSha256: "2".repeat(64), runtimeSha256: "1".repeat(64), helperVersion: "1", helperProtocolVersion: 3, architecture: process.arch, abi: { fake: true } };
   }
 
   async capability(_target: StoredTarget, runtime?: HssRuntimeFacts): Promise<HssCapabilityFacts> {
@@ -1094,11 +1106,22 @@ class FakeHssAdapter implements HssHelperAdapter {
       captureId: string;
       helperInstanceNonce: string;
       outputFile: string;
-      expectedTargetState: "running" | "halted";
+      initialTargetState: "running" | "halted";
+      expectedTargetState: "running";
+      resumeBeforeStart: boolean;
       symbols: Array<{ name: string; address: string; size: number; type: string }>;
       writeSymbols: Array<{ name: string; address: string; size: number; type: string }>;
     };
-    if (plan.planFormatVersion !== 2 || !Array.isArray(plan.symbols) || !Array.isArray(plan.writeSymbols)) throw new Error("fake Helper plan contract mismatch");
+    if (plan.planFormatVersion !== 3 || plan.expectedTargetState !== "running"
+      || plan.resumeBeforeStart !== (plan.initialTargetState === "halted")
+      || this.targetState !== plan.initialTargetState
+      || !Array.isArray(plan.symbols) || !Array.isArray(plan.writeSymbols)) {
+      throw new Error("fake Helper plan contract mismatch");
+    }
+    if (plan.resumeBeforeStart) {
+      this.resumeCount += 1;
+      this.targetState = "running";
+    }
     this.lastPlan = structuredClone(plan);
     const packageDir = join(plan.outputFile, "..", "..");
     for (let sampleIndex = 0; sampleIndex < 12; sampleIndex += 1) {
@@ -1111,7 +1134,18 @@ class FakeHssAdapter implements HssHelperAdapter {
     }
     const pid = this.nextPid++;
     writeFileSync(control.pidFile, JSON.stringify({ captureId: plan.captureId, helperNonce: plan.helperInstanceNonce, pid }), { encoding: "utf8", flag: "wx" });
-    writeFileSync(control.readyFile, JSON.stringify({ status: "ready", captureId: plan.captureId, helperNonce: plan.helperInstanceNonce, pid, qpcCounter: this.qpc.toString(), heartbeatSequence: 0, expectedTargetState: plan.expectedTargetState, targetState: plan.expectedTargetState, statePreserved: true }), { encoding: "utf8", flag: "wx" });
+    writeFileSync(control.readyFile, JSON.stringify({
+      status: "ready",
+      captureId: plan.captureId,
+      helperNonce: plan.helperInstanceNonce,
+      pid,
+      qpcCounter: this.qpc.toString(),
+      heartbeatSequence: 0,
+      initialTargetState: plan.initialTargetState,
+      expectedTargetState: plan.expectedTargetState,
+      resumeIssued: plan.resumeBeforeStart,
+      targetState: plan.expectedTargetState,
+    }), { encoding: "utf8", flag: "wx" });
     this.alive.add(pid);
     this.pidForControl.set(control.planPath, pid);
     this.records.set(control.planPath, []);
@@ -1132,7 +1166,15 @@ class FakeHssAdapter implements HssHelperAdapter {
     }, 10);
     timer.unref();
     this.sampleTimers.set(pid, timer);
-    return { pid, launchedAt: new Date().toISOString(), captureId: plan.captureId, helperNonce: plan.helperInstanceNonce, expectedTargetState: plan.expectedTargetState };
+    return {
+      pid,
+      launchedAt: new Date().toISOString(),
+      captureId: plan.captureId,
+      helperNonce: plan.helperInstanceNonce,
+      initialTargetState: plan.initialTargetState,
+      expectedTargetState: plan.expectedTargetState,
+      resumeBeforeStart: plan.resumeBeforeStart,
+    };
   }
 
   async waitUntilReady(control: HssCaptureControlFiles, launch: HssCaptureLaunch): Promise<void> {

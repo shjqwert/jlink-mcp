@@ -63,6 +63,11 @@ export class JLinkBackend extends ProbeBackend {
   private config: JLinkConfig;
   private processManager: ProcessManager;
   private gdbOutputBuffer: string[] = [];
+
+  private appendGdbOutput(line: string): void {
+    this.gdbOutputBuffer.push(line);
+    if (this.gdbOutputBuffer.length > 1000) this.gdbOutputBuffer.splice(0, this.gdbOutputBuffer.length - 1000);
+  }
   private connectionGeneration = 0;
   private readonly spawnProcess: JLinkSpawn;
 
@@ -542,14 +547,13 @@ export class JLinkBackend extends ProbeBackend {
         managed.process.stdout?.on("data", (d: Buffer) => {
           for (const line of d.toString().split("\n").filter(Boolean)) {
             log(`[GDB Server] ${line}`);
-            this.gdbOutputBuffer.push(line);
-            if (this.gdbOutputBuffer.length > 1000) this.gdbOutputBuffer.shift();
+            this.appendGdbOutput(line);
           }
         });
         managed.process.stderr?.on("data", (d: Buffer) => {
           for (const line of d.toString().split("\n").filter(Boolean)) {
             logError(`[GDB Server] ${line}`);
-            this.gdbOutputBuffer.push(`[ERR] ${line}`);
+            this.appendGdbOutput(`[ERR] ${line}`);
           }
         });
         const readiness = await waitForGdbServerReady(managed.process, 15_000);
@@ -681,27 +685,49 @@ function transactionTimestamp(value: number | undefined): string | undefined {
   return Number.isNaN(timestamp.getTime()) ? undefined : timestamp.toISOString();
 }
 
-function waitForGdbServerReady(processHandle: ChildProcess, timeoutMs: number): Promise<{ ready: boolean; message: string }> {
+const GDB_READINESS_TAIL_BYTES = 16 * 1024;
+const GDB_READY_PATTERN = /Waiting for (?:GDB )?connection|Listening on TCP\/IP port|Waiting for connection from GDB/i;
+
+export function waitForGdbServerReady(processHandle: ChildProcess, timeoutMs: number): Promise<{ ready: boolean; message: string }> {
   return new Promise((resolveReady) => {
     let settled = false;
+    let stdoutTail = "";
+    let stderrTail = "";
+    let timeout: NodeJS.Timeout | undefined;
+    const appendTail = (current: string, chunk: Buffer | string): string => {
+      const bytes = Buffer.from(`${current}${chunk.toString()}`, "utf8");
+      return bytes.subarray(Math.max(0, bytes.length - GDB_READINESS_TAIL_BYTES)).toString("utf8");
+    };
+    const diagnostics = (reason: string): string => {
+      const stdout = stdoutTail.trim();
+      const stderr = stderrTail.trim();
+      return `${reason}; stdoutTail=${JSON.stringify(stdout)}; stderrTail=${JSON.stringify(stderr)}`;
+    };
     const finish = (ready: boolean, message: string) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
-      processHandle.stdout?.off("data", onData);
+      if (timeout) clearTimeout(timeout);
+      processHandle.stdout?.off("data", onStdout);
+      processHandle.stderr?.off("data", onStderr);
       processHandle.off("exit", onExit);
       processHandle.off("error", onError);
       resolveReady({ ready, message });
     };
-    const onData = (chunk: Buffer) => {
-      const text = chunk.toString();
-      if (/Waiting for (?:GDB )?connection|Listening on TCP\/IP port|Waiting for connection from GDB/i.test(text)) finish(true, "ready output observed");
+    const onStdout = (chunk: Buffer | string) => {
+      stdoutTail = appendTail(stdoutTail, chunk);
+      if (GDB_READY_PATTERN.test(stdoutTail)) finish(true, "ready output observed on stdout");
     };
-    const onExit = (code: number | null) => finish(false, `process exited with code ${code}`);
-    const onError = (error: Error) => finish(false, error.message);
-    processHandle.stdout?.on("data", onData);
+    const onStderr = (chunk: Buffer | string) => {
+      stderrTail = appendTail(stderrTail, chunk);
+      if (GDB_READY_PATTERN.test(stderrTail)) finish(true, "ready output observed on stderr");
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
+      finish(false, diagnostics(`process exited with code ${code} signal ${signal ?? "none"}`));
+    const onError = (error: Error) => finish(false, diagnostics(`process error: ${error.message}`));
+    processHandle.stdout?.on("data", onStdout);
+    processHandle.stderr?.on("data", onStderr);
     processHandle.once("exit", onExit);
     processHandle.once("error", onError);
-    const timeout = setTimeout(() => finish(false, `no readiness output within ${timeoutMs}ms`), timeoutMs);
+    timeout = setTimeout(() => finish(false, diagnostics(`no readiness output within ${timeoutMs}ms`)), timeoutMs);
   });
 }
