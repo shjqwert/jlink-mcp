@@ -365,8 +365,9 @@ export class DirectMcuService {
       const region = locateMemoryRegion(target, input.address, input.byteCount);
       const overlaps = overlappingMemoryRegions(target, input.address, input.byteCount);
       if (!region && overlaps.length > 0) throw executionError("MEMORY_RANGE_CROSSES_REGION", "validation", "write range crosses a configured memory-region boundary");
-      if (region && (!region.writable || region.kind === "flash" || region.kind === "rom")) throw executionError("MEMORY_REGION_NOT_WRITABLE", "validation", `configured ${region.kind} region is not writable by raw memory access`);
       const artifactAffecting = !region || region.kind === "unknown";
+      if (!region || region.kind === "unknown") throw executionError("MEMORY_REGION_NOT_VERIFIED", "validation", "memory write requires a configured, verified memory region");
+      if (region && (!region.writable || region.kind === "flash" || region.kind === "rom")) throw executionError("MEMORY_REGION_NOT_WRITABLE", "validation", `configured ${region.kind} region is not writable by raw memory access`);
       if (artifactAffecting) envelope.warnings.push("Memory region is unknown; the write is explicit but Artifact verification will become unverified.");
       const before = await observe(runtime.probe);
       envelope.before = observationData(before);
@@ -542,6 +543,7 @@ export class DirectMcuService {
       const configured = locateMemoryRegion(target, input.address, input.byteCount);
       const overlaps = overlappingMemoryRegions(target, input.address, input.byteCount);
       if (!configured && overlaps.length > 0) throw executionError("MEMORY_RANGE_CROSSES_REGION", "validation", "structured write crosses a configured memory-region boundary");
+      if (!configured || configured.kind === "unknown") throw executionError("MEMORY_REGION_NOT_VERIFIED", "validation", "memory write requires a configured, verified memory region");
       if (configured && (!configured.writable || configured.kind === "flash" || configured.kind === "rom")) {
         throw executionError("MEMORY_REGION_NOT_WRITABLE", "validation", `configured ${configured.kind} region is not writable`);
       }

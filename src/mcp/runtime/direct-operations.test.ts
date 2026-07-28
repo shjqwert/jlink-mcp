@@ -12,7 +12,7 @@ import {
   type TargetStateObservation,
 } from "../../probe/backend";
 import { repoTempRoot } from "../preflight/temp-preflight";
-import { DirectMcuService, removeFlashSnapshotDirectory, type FlashSnapshotCleanup } from "./direct-operations";
+import { DirectMcuService, removeFlashSnapshotDirectory, type FlashSnapshotCleanup, type MemoryWriteInput } from "./direct-operations";
 import { MemorySessionError, MemorySessionManager, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore } from "./target-store";
@@ -528,15 +528,13 @@ test("write_core_register fails when the target no longer remains halted", async
   assert.ok(probe.actions.includes("write-register:PC:8192"));
 });
 
-test("write_memory defaults to no old-value read and no readback", async (context) => {
+test("write_memory refuses an unconfigured region before issuing a write", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "write-defaults");
-  const result = await service.writeMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4, dataHex: "78563412" });
-  assert.equal(result.ok, true);
-  assert.equal(result.verification.status, "executed_unverified");
-  assert.deepEqual(probe.actions, ["write:20000000:4:4"]);
-  assert.equal((result.data as { oldHex?: string }).oldHex, undefined);
-  assert.equal((result.data as { readbackHex?: string }).readbackHex, undefined);
-  assert.equal((result.data as { regionStatus: string }).regionStatus, "unknown");
+  const result = await service.writeMemory({ projectRoot, address: 0x10000000, width: 32, byteCount: 4, dataHex: "78563412", knownRegion: "ram" } as MemoryWriteInput & { knownRegion: "ram" });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_REGION_NOT_VERIFIED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
 });
 
 test("write_memory refuses an unknown initial state and fails on target-state drift", async (context) => {
@@ -670,6 +668,7 @@ test("post-write readback decode failures retain issued and unknown-state facts"
     interface: prior.interface,
     speed: prior.speed,
     artifactPath,
+    memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "ram", writable: true }],
   });
   await memory.targets.setArtifactMatch(memory.projectRoot, "verified", "test_verified", {
     targetGeneration: configured.generation,
@@ -683,7 +682,7 @@ test("post-write readback decode failures retain issued and unknown-state facts"
   assert.equal(memoryResult.error?.writeIssued, true);
   assert.equal(memoryResult.error?.stateUnknown, true);
   assert.equal(memoryResult.after.targetState, "running");
-  assert.equal(memory.targets.require(memory.projectRoot).liveArtifactMatch.source, "unknown_memory_write");
+  assert.equal(memory.targets.require(memory.projectRoot).liveArtifactMatch.source, "test_verified");
 
   const register = await fixture(context, "register-readback-decode");
   register.probe.targetState = "halted";
@@ -1147,11 +1146,13 @@ test("write_memory rejects ranges that cross configured region boundaries", asyn
   const result = await service.writeMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 8, dataHex: "0000000000000000" });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "MEMORY_RANGE_CROSSES_REGION");
+  assert.equal(result.error?.writeIssued, false);
   assert.deepEqual(probe.actions, []);
 });
 
-test("configured unknown-region writes invalidate Artifact evidence", async (context) => {
-  const { service, targets, projectRoot } = await fixture(context, "write-configured-unknown");
+test("write_memory refuses a configured unknown region before issuing a write", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "write-configured-unknown");
+  const beforeMatch = targets.require(projectRoot).liveArtifactMatch;
   const before = targets.require(projectRoot);
   await targets.configure({
     projectRoot,
@@ -1162,8 +1163,43 @@ test("configured unknown-region writes invalidate Artifact evidence", async (con
     memoryRegions: [{ start: 0x20000000, length: 16, kind: "unknown", writable: true }],
   });
   const result = await service.writeMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4, dataHex: "01020304" });
-  assert.equal(result.ok, true);
-  assert.equal(targets.require(projectRoot).liveArtifactMatch.source, "unknown_memory_write");
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_REGION_NOT_VERIFIED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
+  assert.equal(targets.require(projectRoot).liveArtifactMatch.status, beforeMatch.status);
+  assert.equal(targets.require(projectRoot).liveArtifactMatch.source, beforeMatch.source);
+});
+
+test("write_memory refuses a non-writable Flash region before issuing a write", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "write-flash-region");
+  const before = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: before.device,
+    probeSerial: before.probeSerial,
+    interface: before.interface,
+    speed: before.speed,
+    memoryRegions: [{ start: 0, length: 16, kind: "flash", writable: false }],
+  });
+
+  const result = await service.writeMemory({ projectRoot, address: 0, width: 32, byteCount: 4, dataHex: "01020304" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_REGION_NOT_WRITABLE");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
+});
+
+test("write_memory refuses an unaligned address before issuing a write", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "write-unaligned");
+
+  const result = await service.writeMemory({ projectRoot, address: 0x20000002, width: 32, byteCount: 4, dataHex: "01020304" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "UNALIGNED_ACCESS");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
 });
 
 test("post-write unknown target state is a structured uncertain failure", async (context) => {
@@ -1692,7 +1728,14 @@ async function fixture(context: TestContext, name: string, cleanupFlashSnapshot?
   const projectRoot = join(root, "project");
   mkdirSync(projectRoot, { recursive: true });
   const targets = new TargetStore(join(root, "state"));
-  await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
+  await targets.configure({
+    projectRoot,
+    device: "TEST",
+    probeSerial: "123456",
+    interface: "SWD",
+    speed: 1000,
+    memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "ram", writable: true }],
+  });
   const probe = new FakeProbe();
   const queue = new ProbeQueue(join(root, "queue"));
   const sessions = new MemorySessionManager(queue, new FakeMemorySessionLauncher(probe), 10_000);
