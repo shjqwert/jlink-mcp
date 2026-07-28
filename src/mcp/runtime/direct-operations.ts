@@ -119,6 +119,7 @@ export type FlashSnapshotCleanup = (snapshotRoot: string) => Promise<Error | und
 interface DirectQueueOptions {
   persistentMemorySession?: boolean;
   requirePersistentMemorySession?: boolean;
+  failClosedWithoutMemorySessionManager?: boolean;
   verificationConnection?: "same_session" | "independent_session";
   verificationRequested?: boolean;
 }
@@ -222,8 +223,8 @@ export class DirectMcuService {
         }
         envelope.data = { noOp: false, command: commandData(result), requestedFinalState: finalState };
         if (!result.success) {
-          const issued = result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
-          throw commandError(result, "execution", issued, issued);
+          const issued = result.writeIssued ?? result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
+          throw commandError(result, "execution", issued, result.stateUnknown ?? issued);
         }
         envelope.observedEffects.push(...requestedEffects);
       }
@@ -235,6 +236,10 @@ export class DirectMcuService {
       }
       envelope.data = { noOp: isIdempotent, command: result ? commandData(result) : null, finalState };
       envelope.verification = { status: "verified", method: after.source };
+    }, {
+      persistentMemorySession: true,
+      requirePersistentMemorySession: true,
+      failClosedWithoutMemorySessionManager: true,
     });
   }
 
@@ -1235,8 +1240,8 @@ export class DirectMcuService {
         refreshArtifact(envelope, current);
         const memoryClose = options.persistentMemorySession ? undefined : await this.memorySessions?.closeForTarget(current);
         const persistentProbe = options.persistentMemorySession ? await this.memorySessions?.probeFor(current, metadata) : undefined;
-        if (options.requirePersistentMemorySession && this.memorySessions && !persistentProbe) {
-          throw new MemorySessionError("SAME_SESSION_UNAVAILABLE", "write_variable requires a validated persistent memory session for same-session verification", true, false);
+        if (options.requirePersistentMemorySession && !persistentProbe && (this.memorySessions || options.failClosedWithoutMemorySessionManager)) {
+          throw new MemorySessionError("SAME_SESSION_UNAVAILABLE", `${tool} requires a validated persistent native session`, true, false);
         }
         const runtime = persistentProbe ? { probe: persistentProbe } : await this.runtimeFor(current);
         let memorySessionClose: Record<string, unknown> | undefined;

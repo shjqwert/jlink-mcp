@@ -3121,6 +3121,32 @@ static const char* memory_session_state_name(int halted) {
   return halted == 0 ? "running" : halted == 1 ? "halted" : "unknown";
 }
 
+static std::string memory_session_reply_json(
+  const std::string& id,
+  bool ok,
+  const std::string& code,
+  const std::string& reason,
+  const char* state_before,
+  const char* state_after,
+  bool write_issued,
+  const std::vector<unsigned char>* bytes = nullptr,
+  const char* api = "",
+  bool state_unknown = false
+) {
+  std::ostringstream output;
+  output << "{\"id\":\"" << escape(id)
+    << "\",\"status\":\"" << (ok ? "ok" : "error") << "\"";
+  if (!ok) output << ",\"errorCode\":\"" << escape(code) << "\",\"reason\":\"" << escape(reason) << "\"";
+  if (bytes) output << ",\"bytesHex\":\"" << bytes_hex(*bytes) << "\"";
+  if (api && *api) output << ",\"api\":\"" << escape(api) << "\"";
+  output << ",\"targetStateBefore\":\"" << state_before
+    << "\",\"targetStateAfter\":\"" << state_after
+    << "\",\"writeIssued\":" << (write_issued ? "true" : "false")
+    << ",\"stateUnknown\":" << (state_unknown ? "true" : "false")
+    << "}";
+  return output.str();
+}
+
 static void memory_session_reply(
   const std::string& id,
   bool ok,
@@ -3133,16 +3159,97 @@ static void memory_session_reply(
   const char* api = "",
   bool state_unknown = false
 ) {
-  std::cout << "{\"id\":\"" << escape(id)
-    << "\",\"status\":\"" << (ok ? "ok" : "error") << "\"";
-  if (!ok) std::cout << ",\"errorCode\":\"" << escape(code) << "\",\"reason\":\"" << escape(reason) << "\"";
-  if (bytes) std::cout << ",\"bytesHex\":\"" << bytes_hex(*bytes) << "\"";
-  if (api && *api) std::cout << ",\"api\":\"" << escape(api) << "\"";
-  std::cout << ",\"targetStateBefore\":\"" << state_before
-    << "\",\"targetStateAfter\":\"" << state_after
-    << "\",\"writeIssued\":" << (write_issued ? "true" : "false")
-    << ",\"stateUnknown\":" << (state_unknown ? "true" : "false")
-    << "}\n" << std::flush;
+  std::cout << memory_session_reply_json(id, ok, code, reason, state_before, state_after, write_issued, bytes, api, state_unknown)
+    << "\n" << std::flush;
+}
+
+struct MemorySessionControlEvidence {
+  bool issued = false;
+  bool crashed = false;
+  int stateAfter = -1;
+  const char* api = "";
+};
+
+static bool execute_memory_session_control(
+  JLINKARM_IsHalted_Fn is_halted,
+  JLINKARM_Halt_Fn action,
+  const char* action_api,
+  int expected_halted,
+  MemorySessionControlEvidence* evidence
+) {
+  if (!evidence) return false;
+  *evidence = {};
+  if (!is_halted || !action || !action_api || !*action_api || (expected_halted != 0 && expected_halted != 1)) return false;
+  evidence->issued = true;
+  evidence->api = action_api;
+  call_void0(action, &evidence->crashed);
+  if (evidence->crashed) return false;
+  evidence->api = "JLINKARM_IsHalted";
+  evidence->stateAfter = call_int0(is_halted, &evidence->crashed);
+  return !evidence->crashed && evidence->stateAfter == expected_halted;
+}
+
+static bool execute_memory_session_reset(
+  JLINKARM_IsHalted_Fn is_halted,
+  JLINKARM_Reset_Fn reset,
+  JLINKARM_Halt_Fn final_action,
+  const char* final_action_api,
+  int expected_halted,
+  MemorySessionControlEvidence* evidence
+) {
+  if (!evidence) return false;
+  *evidence = {};
+  if (!is_halted || !reset || !final_action || !final_action_api || !*final_action_api || (expected_halted != 0 && expected_halted != 1)) return false;
+  evidence->issued = true;
+  evidence->api = "JLINKARM_Reset";
+  call_void0(reset, &evidence->crashed);
+  if (!evidence->crashed) {
+    evidence->api = final_action_api;
+    call_void0(final_action, &evidence->crashed);
+  }
+  if (evidence->crashed) return false;
+  evidence->api = "JLINKARM_IsHalted";
+  evidence->stateAfter = call_int0(is_halted, &evidence->crashed);
+  return !evidence->crashed && evidence->stateAfter == expected_halted;
+}
+
+static std::string handle_memory_session_control_request(
+  const StrictJson& request,
+  const std::string& id,
+  const std::string& op,
+  int before,
+  JLINKARM_IsHalted_Fn is_halted,
+  JLINKARM_Halt_Fn halt,
+  JLINKARM_Go_Fn go,
+  JLINKARM_Reset_Fn reset
+) {
+  const char* before_name = memory_session_state_name(before);
+  if (!json_exact_keys(request, { "id", "op" })) {
+    return memory_session_reply_json(id, false, "MEMORY_SESSION_REQUEST_INVALID", "control request has unexpected fields", before_name, before_name, false);
+  }
+  const bool request_halt = op == "halt" || op == "reset_halt";
+  const bool request_reset = op == "reset" || op == "reset_halt";
+  const char* action_api = request_halt ? "JLINKARM_Halt" : "JLINKARM_Go";
+  MemorySessionControlEvidence control;
+  const bool control_ok = request_reset
+    ? execute_memory_session_reset(is_halted, reset, request_halt ? halt : go, action_api, request_halt ? 1 : 0, &control)
+    : execute_memory_session_control(is_halted, request_halt ? halt : go, action_api, request_halt ? 1 : 0, &control);
+  const bool state_unknown = control.crashed || (control.stateAfter != 0 && control.stateAfter != 1);
+  const char* reported_api = control_ok && request_reset
+    ? (request_halt ? "JLINKARM_Reset+JLINKARM_Halt" : "JLINKARM_Reset+JLINKARM_Go")
+    : control.api;
+  return memory_session_reply_json(
+    id,
+    control_ok,
+    control.crashed ? "JLINK_CONTROL_EXCEPTION" : state_unknown ? "JLINK_STATE_OBSERVATION_FAILED" : "JLINK_CONTROL_STATE_MISMATCH",
+    control.crashed ? "J-Link control raised a structured exception" : state_unknown ? "target state could not be observed after control" : "J-Link control did not reach the requested final state",
+    before_name,
+    memory_session_state_name(control.stateAfter),
+    control.issued,
+    nullptr,
+    reported_api,
+    state_unknown
+  );
 }
 
 static bool wait_for_memory_session_activation(std::string* error_code, std::string* error_reason) {
@@ -3244,13 +3351,16 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
   auto arm_select_sn = reinterpret_cast<JLINKARM_EMU_SelectByUSBSN_Fn>(required(dll, "JLINKARM_EMU_SelectByUSBSN"));
   auto arm_get_sn = reinterpret_cast<JLINKARM_GetSN_Fn>(required(dll, "JLINKARM_GetSN"));
   auto arm_halted = reinterpret_cast<JLINKARM_IsHalted_Fn>(required(dll, "JLINKARM_IsHalted"));
+  auto arm_halt = reinterpret_cast<JLINKARM_Halt_Fn>(required(dll, "JLINKARM_Halt"));
+  auto arm_go = reinterpret_cast<JLINKARM_Go_Fn>(required(dll, "JLINKARM_Go"));
+  auto arm_reset = reinterpret_cast<JLINKARM_Reset_Fn>(required(dll, "JLINKARM_Reset"));
   auto arm_read_u8 = reinterpret_cast<JLINKARM_ReadMemU8_Fn>(required(dll, "JLINKARM_ReadMemU8"));
   auto arm_read_u16 = reinterpret_cast<JLINKARM_ReadMemU16_Fn>(required(dll, "JLINKARM_ReadMemU16"));
   auto arm_read_u32 = reinterpret_cast<JLINKARM_ReadMemU32_Fn>(required(dll, "JLINKARM_ReadMemU32"));
   auto arm_write_u8 = reinterpret_cast<JLINKARM_WriteU8_Fn>(required(dll, "JLINKARM_WriteU8"));
   auto arm_write_u16 = reinterpret_cast<JLINKARM_WriteU16_Fn>(required(dll, "JLINKARM_WriteU16"));
   auto arm_write_u32 = reinterpret_cast<JLINKARM_WriteU32_Fn>(required(dll, "JLINKARM_WriteU32"));
-  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted
+  if (!arm_open || !arm_close || !arm_exec || !arm_tif || !arm_speed || !arm_connect || !arm_select_sn || !arm_get_sn || !arm_halted || !arm_halt || !arm_go || !arm_reset
       || !arm_read_u8 || !arm_read_u16 || !arm_read_u32 || !arm_write_u8 || !arm_write_u16 || !arm_write_u32) {
     FreeLibrary(dll);
     return startup_error("JLINK_BASE_EXPORT_MISSING", "required J-Link memory-session exports are unavailable");
@@ -3406,6 +3516,11 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
         continue;
       }
       memory_session_reply(id, true, "", "", before_name, before_name, false, nullptr, "JLINKARM_IsHalted");
+      continue;
+    }
+    if (op == "halt" || op == "resume" || op == "reset" || op == "reset_halt") {
+      std::cout << handle_memory_session_control_request(request, id, op, before, arm_halted, arm_halt, arm_go, arm_reset)
+        << "\n" << std::flush;
       continue;
     }
 
@@ -3566,6 +3681,106 @@ static void self_test_go_exception() {
   RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
 }
 
+static void self_test_reset() {
+  self_test_target_state_raw = 1;
+}
+
+static void self_test_reset_exception() {
+  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+}
+
+static bool self_test_memory_session_control() {
+  MemorySessionControlEvidence evidence;
+  self_test_target_state_raw = 0;
+  if (!execute_memory_session_control(self_test_is_halted, self_test_halt, "JLINKARM_Halt", 1, &evidence)
+      || !evidence.issued || evidence.crashed || evidence.stateAfter != 1 || std::string(evidence.api) != "JLINKARM_IsHalted") return false;
+  self_test_target_state_raw = 1;
+  if (!execute_memory_session_control(self_test_is_halted, self_test_go, "JLINKARM_Go", 0, &evidence)
+      || !evidence.issued || evidence.crashed || evidence.stateAfter != 0 || std::string(evidence.api) != "JLINKARM_IsHalted") return false;
+  self_test_target_state_raw = 1;
+  if (execute_memory_session_control(self_test_is_halted, self_test_go_no_transition, "JLINKARM_Go", 0, &evidence)
+      || !evidence.issued || evidence.crashed || evidence.stateAfter != 1 || std::string(evidence.api) != "JLINKARM_IsHalted") return false;
+  if (execute_memory_session_control(self_test_is_halted, nullptr, "JLINKARM_Go", 0, &evidence)
+      || evidence.issued || evidence.crashed || evidence.stateAfter != -1 || std::string(evidence.api) != "") return false;
+  self_test_target_state_raw = 1;
+  if (execute_memory_session_control(self_test_is_halted, self_test_go_exception, "JLINKARM_Go", 0, &evidence)
+      || !evidence.issued || !evidence.crashed || evidence.stateAfter != -1 || std::string(evidence.api) != "JLINKARM_Go") return false;
+  self_test_target_state_raw = 0;
+  if (!execute_memory_session_reset(self_test_is_halted, self_test_reset, self_test_halt, "JLINKARM_Halt", 1, &evidence)
+      || !evidence.issued || evidence.crashed || evidence.stateAfter != 1 || std::string(evidence.api) != "JLINKARM_IsHalted") return false;
+  self_test_target_state_raw = 0;
+  if (!execute_memory_session_reset(self_test_is_halted, self_test_reset, self_test_go, "JLINKARM_Go", 0, &evidence)
+      || !evidence.issued || evidence.crashed || evidence.stateAfter != 0 || std::string(evidence.api) != "JLINKARM_IsHalted") return false;
+  self_test_target_state_raw = 0;
+  if (execute_memory_session_reset(self_test_is_halted, self_test_reset, self_test_go_exception, "JLINKARM_Go", 0, &evidence)
+      || !evidence.issued || !evidence.crashed || evidence.stateAfter != -1 || std::string(evidence.api) != "JLINKARM_Go") return false;
+  self_test_target_state_raw = 0;
+  if (execute_memory_session_reset(self_test_is_halted, self_test_reset_exception, self_test_go, "JLINKARM_Go", 0, &evidence)
+      || !evidence.issued || !evidence.crashed || evidence.stateAfter != -1 || std::string(evidence.api) != "JLINKARM_Reset") return false;
+  return true;
+}
+
+static bool self_test_memory_session_protocol() {
+  const std::string id = "123e4567-e89b-42d3-a456-426614174000";
+  StrictJson request;
+  std::string reason;
+  const std::string success_request = "{\"id\":\"" + id + "\",\"op\":\"reset_halt\"}";
+  if (!StrictJsonParser(success_request).parse(&request, &reason)) {
+    std::cerr << "memory protocol success request parse: " << reason << "\n";
+    return false;
+  }
+  self_test_target_state_raw = 0;
+  const std::string success = handle_memory_session_control_request(
+    request, id, "reset_halt", 0, self_test_is_halted, self_test_halt, self_test_go, self_test_reset
+  );
+  if (json_string(success, "status") != "ok"
+      || json_string(success, "api") != "JLINKARM_Reset+JLINKARM_Halt"
+      || json_string(success, "targetStateBefore") != "running"
+      || json_string(success, "targetStateAfter") != "halted"
+      || !json_bool(success, "writeIssued", false)
+      || json_bool(success, "stateUnknown", true)) {
+    std::cerr << "memory protocol success response: " << success << "\n";
+    return false;
+  }
+
+  const std::string invalid_request = "{\"id\":\"" + id + "\",\"op\":\"halt\",\"extra\":true}";
+  request = {};
+  reason.clear();
+  if (!StrictJsonParser(invalid_request).parse(&request, &reason)) {
+    std::cerr << "memory protocol invalid request parse: " << reason << "\n";
+    return false;
+  }
+  const std::string invalid = handle_memory_session_control_request(
+    request, id, "halt", 0, self_test_is_halted, self_test_halt, self_test_go, self_test_reset
+  );
+  if (json_string(invalid, "status") != "error"
+      || json_string(invalid, "errorCode") != "MEMORY_SESSION_REQUEST_INVALID"
+      || json_bool(invalid, "writeIssued", true)
+      || json_bool(invalid, "stateUnknown", true)) {
+    std::cerr << "memory protocol invalid response: " << invalid << "\n";
+    return false;
+  }
+
+  const std::string exception_request = "{\"id\":\"" + id + "\",\"op\":\"reset\"}";
+  request = {};
+  reason.clear();
+  if (!StrictJsonParser(exception_request).parse(&request, &reason)) {
+    std::cerr << "memory protocol exception request parse: " << reason << "\n";
+    return false;
+  }
+  self_test_target_state_raw = 0;
+  const std::string reset_exception = handle_memory_session_control_request(
+    request, id, "reset", 0, self_test_is_halted, self_test_halt, self_test_go, self_test_reset_exception
+  );
+  const bool valid_exception = json_string(reset_exception, "status") == "error"
+    && json_string(reset_exception, "errorCode") == "JLINK_CONTROL_EXCEPTION"
+    && json_string(reset_exception, "api") == "JLINKARM_Reset"
+    && json_bool(reset_exception, "writeIssued", false)
+    && json_bool(reset_exception, "stateUnknown", false);
+  if (!valid_exception) std::cerr << "memory protocol exception response: " << reset_exception << "\n";
+  return valid_exception;
+}
+
 static bool self_test_capture_transition() {
   HssCaptureTransitionEvidence evidence;
   self_test_target_state_raw = 1;
@@ -3696,6 +3911,14 @@ static int self_test() {
   }
   if (!self_test_capture_transition()) {
     error_json("HSS_SELF_TEST_CAPTURE_TRANSITION_FAILED", "HSS halted-to-running capture transition failed");
+    return 0;
+  }
+  if (!self_test_memory_session_control()) {
+    error_json("HSS_SELF_TEST_MEMORY_CONTROL_FAILED", "persistent memory-session control failed");
+    return 0;
+  }
+  if (!self_test_memory_session_protocol()) {
+    error_json("HSS_SELF_TEST_MEMORY_PROTOCOL_FAILED", "persistent memory-session control protocol failed");
     return 0;
   }
   if (!self_test_non_intrusive_attach_profile()) {
@@ -4163,7 +4386,7 @@ static int self_test() {
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v1-sha256-crc32-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
+    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"memorySessionControlValidated\":true,\"memorySessionProtocolValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples

@@ -548,9 +548,9 @@ class NativeMemorySessionProbe extends ProbeBackend {
   }
 
   async getDeviceInfo(): Promise<CommandResult> { return unsupported("memory session does not expose device info"); }
-  async halt(): Promise<CommandResult> { return unsupported("memory session must not halt the target"); }
-  async resume(): Promise<CommandResult> { return unsupported("memory session must not resume the target"); }
-  async reset(): Promise<CommandResult> { return unsupported("memory session must not reset the target"); }
+  async halt(): Promise<CommandResult> { return this.control("halt"); }
+  async resume(): Promise<CommandResult> { return this.control("resume"); }
+  async reset(halt = false): Promise<CommandResult> { return this.control(halt ? "reset_halt" : "reset"); }
   async step(): Promise<CommandResult> { return unsupported("memory session does not step the target"); }
   async readAllRegisters(): Promise<CommandResult> { return unsupported("memory session does not read core registers"); }
   async readRegister(): Promise<CommandResult> { return unsupported("memory session does not read core registers"); }
@@ -569,6 +569,14 @@ class NativeMemorySessionProbe extends ProbeBackend {
   setDevice(): void { /* target binding is immutable for this session */ }
   async listDevices(): Promise<CommandResult> { return unsupported("memory session does not enumerate devices"); }
   dispose(): void { void this.session.close().catch(() => undefined); }
+
+  private async control(op: "halt" | "resume" | "reset" | "reset_halt"): Promise<CommandResult> {
+    try {
+      return sessionCommand(await this.session.request({ op }), true);
+    } catch (error) {
+      return sessionException(error, true);
+    }
+  }
 }
 
 export class MemorySessionError extends Error {

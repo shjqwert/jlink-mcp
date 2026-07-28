@@ -33,6 +33,87 @@ test("direct CPU controls are idempotent and report verified final state", async
   assert.equal(typeof resume.queueSequence, "number");
 });
 
+test("CPU controls use one persistent native session instead of the reconnecting J-Link backend", async (context) => {
+  const { targets, queue, projectRoot } = await fixture(context, "control-persistent-session");
+  const launcher = new PreDispatchMemorySessionLauncher();
+  const sessions = new MemorySessionManager(queue, launcher, 10_000);
+  let reconnectingBackendCalls = 0;
+  const service = new DirectMcuService(targets, queue, async () => {
+    reconnectingBackendCalls += 1;
+    return { probe: new FakeProbe() };
+  }, undefined, sessions);
+  launcher.probe.targetState = "running";
+
+  const halt = await service.control("halt", projectRoot);
+  assert.equal(halt.ok, true);
+  assert.equal(launcher.probe.targetState, "halted");
+  assert.deepEqual(launcher.probe.actions, ["halt"]);
+
+  const resume = await service.control("resume", projectRoot);
+  assert.equal(resume.ok, true);
+  assert.equal(launcher.probe.targetState, "running");
+  assert.deepEqual(launcher.probe.actions, ["halt", "resume"]);
+
+  const resetHalt = await service.control("reset_halt", projectRoot);
+  assert.equal(resetHalt.ok, true);
+  assert.equal(launcher.probe.targetState, "halted");
+
+  const reset = await service.control("reset", projectRoot);
+  assert.equal(reset.ok, true);
+  assert.equal(launcher.probe.targetState, "running");
+  assert.deepEqual(launcher.probe.actions, ["halt", "resume", "reset_halt", "reset"]);
+  assert.equal(reconnectingBackendCalls, 0);
+  await sessions.dispose();
+});
+
+test("halt fails closed when a persistent native control session is unavailable", async (context) => {
+  const { probe, targets, queue, projectRoot } = await fixture(context, "control-session-unavailable");
+  const sessions = new MemorySessionManager(queue, new UnavailableMemorySessionLauncher(), 10_000);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
+  probe.targetState = "running";
+
+  const result = await service.control("halt", projectRoot);
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "SAME_SESSION_UNAVAILABLE");
+  assert.deepEqual(probe.actions, []);
+});
+
+test("control failure preserves explicit native dispatch and target-state evidence", async (context) => {
+  const first = await fixture(context, "control-failure-unissued-known");
+  first.probe.targetState = "running";
+  first.probe.haltResult = {
+    success: false,
+    rawOutput: "pre-dispatch rejection",
+    output: "",
+    error: "pre-dispatch rejection",
+    errorCode: ProbeErrorCode.PROBE_BUSY,
+    writeIssued: false,
+    stateUnknown: false,
+  };
+
+  const unissued = await first.service.control("halt", first.projectRoot);
+  assert.equal(unissued.ok, false);
+  assert.equal(unissued.error?.writeIssued, false);
+  assert.equal(unissued.error?.stateUnknown, false);
+
+  const second = await fixture(context, "control-failure-issued-known");
+  second.probe.targetState = "running";
+  second.probe.haltResult = {
+    success: false,
+    rawOutput: "known final state mismatch",
+    output: "",
+    error: "known final state mismatch",
+    errorCode: ProbeErrorCode.TARGET_UNREACHABLE,
+    writeIssued: true,
+    stateUnknown: false,
+  };
+
+  const issued = await second.service.control("halt", second.projectRoot);
+  assert.equal(issued.ok, false);
+  assert.equal(issued.error?.writeIssued, true);
+  assert.equal(issued.error?.stateUnknown, false);
+});
+
 test("read_memory preserves running state and returns decoded bytes", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "read-memory");
   probe.targetState = "running";
@@ -1431,7 +1512,9 @@ async function fixture(context: TestContext, name: string, cleanupFlashSnapshot?
   await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
   const probe = new FakeProbe();
   const queue = new ProbeQueue(join(root, "queue"));
-  const service = new DirectMcuService(targets, queue, async () => ({ probe }), cleanupFlashSnapshot, undefined, false);
+  const sessions = new MemorySessionManager(queue, new FakeMemorySessionLauncher(probe), 10_000);
+  context.after(async () => { await sessions.dispose(); });
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), cleanupFlashSnapshot, sessions, false);
   return { service, probe, targets, queue, projectRoot };
 }
 
@@ -1559,6 +1642,17 @@ class FakeProbe extends ProbeBackend {
 
 class UnavailableMemorySessionLauncher implements MemorySessionLauncher {
   async open(): Promise<undefined> { return undefined; }
+}
+
+class FakeMemorySessionLauncher implements MemorySessionLauncher {
+  private readonly session: PreDispatchMemorySession;
+  constructor(probe: ProbeBackend) {
+    this.session = new PreDispatchMemorySession(probe);
+  }
+  async open(_target: Parameters<MemorySessionLauncher["open"]>[0], onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    onStarted?.(this.session.pid, this.session.runtime);
+    return this.session;
+  }
 }
 
 class PreDispatchMemorySessionLauncher implements MemorySessionLauncher {

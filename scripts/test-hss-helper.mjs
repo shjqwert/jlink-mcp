@@ -27,7 +27,11 @@ if (result.error) throw result.error;
 if (result.status !== 0) process.exit(result.status ?? 1);
 
 const response = parseJson(result.stdout, "HSS Helper self-test");
-if (response.status !== "ok" || response.command !== "self-test" || response.captureTransitionValidated !== true) {
+if (response.status !== "ok"
+  || response.command !== "self-test"
+  || response.captureTransitionValidated !== true
+  || response.memorySessionControlValidated !== true
+  || response.memorySessionProtocolValidated !== true) {
   throw new Error(`HSS Helper self-test failed: ${String(response.errorCode ?? response.reason ?? response.status)}`);
 }
 
