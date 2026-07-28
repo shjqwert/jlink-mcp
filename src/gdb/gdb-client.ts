@@ -640,7 +640,7 @@ export class GDBClient {
 }
 
 function hasMiPrompt(raw: string): boolean {
-  return /(?:^|\r?\n)\(gdb\)(?=\r?\n|$)/m.test(raw);
+  return /(?:^|\r?\n)\(gdb\)[\t ]*(?=\r?\n|$)/m.test(raw);
 }
 
 function findMiResult(raw: string, kind: "done" | "error" | "running" | "connected" | "exit"): string | undefined {

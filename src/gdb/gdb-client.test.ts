@@ -43,6 +43,19 @@ test("GDBClient accepts the standard line-anchored MI connected result class", a
   await client.disconnect();
 });
 
+test("GDBClient accepts an MI prompt with trailing horizontal whitespace", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const client = new GDBClient(
+    "fake-gdb",
+    undefined,
+    () => createFakeGdbProcess(signals, "^connected\n(gdb) \r\n", false, false, undefined, false, "(gdb) \r\n"),
+  );
+  const result = await client.connect("localhost", 2331);
+  assert.equal(result.success, true);
+  assert.equal(client.isConnected(), true);
+  await client.disconnect();
+});
+
 test("GDBClient ignores kill-error as exit and waits for the real exit event", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(signals, undefined, true));
@@ -222,6 +235,7 @@ function createFakeGdbProcess(
   exitOnCommand = false,
   commands?: string[],
   emitLiveErrorOnCommand = false,
+  initialPrompt = "(gdb)\n",
 ): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
@@ -279,6 +293,6 @@ function createFakeGdbProcess(
     }
     return true;
   };
-  setImmediate(() => child.stdout.write("(gdb)\n"));
+  setImmediate(() => child.stdout.write(initialPrompt));
   return child as unknown as ChildProcess;
 }

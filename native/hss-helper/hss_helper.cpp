@@ -379,15 +379,25 @@ static int call_exec(JLINKARM_ExecCommand_Fn fn, const char* command, char* out,
   return return_code;
 }
 
-static int call_hss_start(JLINK_HSS_Start_Fn fn, JLINK_HSS_MEM_BLOCK_DESC* blocks, U32 count, U32 period_us, bool* crashed) {
+static int call_hss_start(JLINK_HSS_Start_Fn fn, JLINK_HSS_MEM_BLOCK_DESC* blocks, U32 count, U32 frequency_hz, bool* crashed) {
   int return_code = 0;
   *crashed = false;
   __try {
-    return_code = fn(blocks, count, period_us);
+    return_code = fn(blocks, count, frequency_hz);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     *crashed = true;
   }
   return return_code;
+}
+
+static int start_hss_capture(
+  JLINK_HSS_Start_Fn fn,
+  JLINK_HSS_MEM_BLOCK_DESC* blocks,
+  U32 count,
+  U32 requested_rate_hz,
+  bool* crashed
+) {
+  return call_hss_start(fn, blocks, count, requested_rate_hz, crashed);
 }
 
 static int call_hss_read(JLINK_HSS_Read_Fn fn, void* data, U32 size, bool* crashed) {
@@ -3805,6 +3815,24 @@ static bool self_test_capture_transition() {
   return true;
 }
 
+static U32 self_test_hss_start_frequency_hz = 0;
+
+static int self_test_hss_start(JLINK_HSS_MEM_BLOCK_DESC*, U32, U32 frequency_hz) {
+  self_test_hss_start_frequency_hz = frequency_hz;
+  return 0;
+}
+
+static bool self_test_hss_start_frequency() {
+  JLINK_HSS_MEM_BLOCK_DESC block = {};
+  bool crashed = true;
+  self_test_hss_start_frequency_hz = 0;
+  if (start_hss_capture(self_test_hss_start, &block, 1U, 1U, &crashed) != 0
+      || crashed || self_test_hss_start_frequency_hz != 1U) return false;
+  self_test_hss_start_frequency_hz = 0;
+  return start_hss_capture(self_test_hss_start, &block, 1U, 1000U, &crashed) == 0
+    && !crashed && self_test_hss_start_frequency_hz == 1000U;
+}
+
 static bool self_test_target_state_guard() {
   TargetStateGuardEvidence evidence;
   self_test_target_state_raw = 1;
@@ -3911,6 +3939,10 @@ static int self_test() {
   }
   if (!self_test_capture_transition()) {
     error_json("HSS_SELF_TEST_CAPTURE_TRANSITION_FAILED", "HSS halted-to-running capture transition failed");
+    return 0;
+  }
+  if (!self_test_hss_start_frequency()) {
+    error_json("HSS_SELF_TEST_START_FREQUENCY_FAILED", "JLINK_HSS_Start frequency did not preserve the requested Hz value");
     return 0;
   }
   if (!self_test_memory_session_control()) {
@@ -4386,7 +4418,7 @@ static int self_test() {
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v1-sha256-crc32-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"memorySessionControlValidated\":true,\"memorySessionProtocolValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
+    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"hssStartFrequencyValidated\":true,\"memorySessionControlValidated\":true,\"memorySessionProtocolValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples
@@ -5515,8 +5547,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const U32 bytes_per_sample = block_plan.bytesPerSample;
   const U32 hss_sample_header_bytes = 4;
   const U32 hss_sample_stride_bytes = hss_sample_header_bytes + bytes_per_sample;
-  const U32 period_us = static_cast<U32>((1000000 / requested_rate) > 1 ? (1000000 / requested_rate) : 1);
-  int start_rc = call_hss_start(hss_start, blocks.data(), static_cast<U32>(blocks.size()), period_us, &crashed);
+  int start_rc = start_hss_capture(hss_start, blocks.data(), static_cast<U32>(blocks.size()), requested_rate, &crashed);
   const int64_t hss_start_qpc = qpc_counter();
   stream_lifecycle(capture_id, "hss_start", hss_start_qpc, ",\"returnCode\":" + std::to_string(start_rc) + ",\"crashed\":" + (crashed ? "true" : "false"));
   if (crashed || start_rc < 0) {

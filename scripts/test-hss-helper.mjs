@@ -30,6 +30,7 @@ const response = parseJson(result.stdout, "HSS Helper self-test");
 if (response.status !== "ok"
   || response.command !== "self-test"
   || response.captureTransitionValidated !== true
+  || response.hssStartFrequencyValidated !== true
   || response.memorySessionControlValidated !== true
   || response.memorySessionProtocolValidated !== true) {
   throw new Error(`HSS Helper self-test failed: ${String(response.errorCode ?? response.reason ?? response.status)}`);
