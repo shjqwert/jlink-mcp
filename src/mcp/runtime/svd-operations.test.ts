@@ -113,20 +113,59 @@ test("non-intrusive SVD field RMW failure returns HALT_REQUIRED without writing"
   assert.deepEqual(fixture.probe.actions, ["read:40000000:4"]);
 });
 
+test("write_register refuses an unconfigured peripheral region before issuing a write", async (context) => {
+  const fixture = await createFixture(context, "unconfigured-region", true, false);
+  const result = await fixture.service.writeRegister({ projectRoot: fixture.projectRoot, selector: "GPIO.CTRL", value: 1 });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_REGION_NOT_VERIFIED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(fixture.probe.actions, []);
+});
+
+test("write_register rejects a range that crosses configured peripheral regions", async (context) => {
+  const fixture = await createFixture(context, "cross-region", true);
+  const before = fixture.targets.require(fixture.projectRoot);
+  await fixture.targets.configure({
+    projectRoot: fixture.projectRoot,
+    device: before.device,
+    probeSerial: before.probeSerial,
+    interface: before.interface,
+    speed: before.speed,
+    svdPath: fixture.svdPath,
+    memoryRegions: [
+      { start: 0x40000000, length: 2, kind: "peripheral", writable: true },
+      { start: 0x40000002, length: 2, kind: "peripheral", writable: true },
+    ],
+  });
+  const result = await fixture.service.writeRegister({ projectRoot: fixture.projectRoot, selector: "GPIO.CTRL", value: 1 });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_RANGE_CROSSES_REGION");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(fixture.probe.actions, []);
+});
+
 test("identical SVD content remains path-specific across projects", async (context) => {
   const fixture = await createFixture(context, "cache-project-a", true);
   const projectB = join(fixture.projectRoot, "..", "project-b");
   mkdirSync(projectB, { recursive: true });
   const svdPathB = join(projectB, "device.svd");
   writeFileSync(svdPathB, validSvd(), "utf8");
-  await fixture.targets.configure({ projectRoot: projectB, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, svdPath: svdPathB });
+  await fixture.targets.configure({
+    projectRoot: projectB,
+    device: "TEST",
+    probeSerial: "123456",
+    interface: "SWD",
+    speed: 1000,
+    svdPath: svdPathB,
+    memoryRegions: [{ start: 0x40000000, length: 0x100, kind: "peripheral", writable: true }],
+  });
   const first = await fixture.service.readRegister(fixture.projectRoot, "GPIO.STATUS");
   const second = await fixture.service.readRegister(projectB, "GPIO.STATUS");
   assert.equal((first.data as { svd: { path: string } }).svd.path, fixture.svdPath);
   assert.equal((second.data as { svd: { path: string } }).svd.path, svdPathB);
 });
 
-async function createFixture(context: TestContext, name: string, withSvd: boolean) {
+async function createFixture(context: TestContext, name: string, withSvd: boolean, withMemoryRegions = withSvd) {
   const root = join(process.env.TEMP ?? process.cwd(), `jlink-svd-ops-${name}-${process.pid}-${Date.now()}`);
   const projectRoot = join(root, "project");
   mkdirSync(projectRoot, { recursive: true });
@@ -134,7 +173,15 @@ async function createFixture(context: TestContext, name: string, withSvd: boolea
   const svdPath = join(projectRoot, "device.svd");
   if (withSvd) writeFileSync(svdPath, validSvd(), "utf8");
   const targets = new TargetStore(join(root, "state"));
-  await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, ...(withSvd ? { svdPath } : {}) });
+  await targets.configure({
+    projectRoot,
+    device: "TEST",
+    probeSerial: "123456",
+    interface: "SWD",
+    speed: 1000,
+    ...(withSvd ? { svdPath } : {}),
+    ...(withMemoryRegions ? { memoryRegions: [{ start: 0x40000000, length: 0x100, kind: "peripheral" as const, writable: true }] } : {}),
+  });
   const probe = new MemoryProbe();
   const queue = new ProbeQueue(join(root, "queue"));
   const fixture: { beforeRuntime?: () => void } = {};

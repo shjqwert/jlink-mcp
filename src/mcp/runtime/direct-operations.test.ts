@@ -1171,7 +1171,7 @@ test("write_memory refuses a configured unknown region before issuing a write", 
   assert.equal(targets.require(projectRoot).liveArtifactMatch.source, beforeMatch.source);
 });
 
-test("write_memory refuses a non-writable Flash region before issuing a write", async (context) => {
+test("write_memory refuses a Flash region even when configured writable", async (context) => {
   const { service, probe, targets, projectRoot } = await fixture(context, "write-flash-region");
   const before = targets.require(projectRoot);
   await targets.configure({
@@ -1182,6 +1182,8 @@ test("write_memory refuses a non-writable Flash region before issuing a write", 
     speed: before.speed,
     memoryRegions: [{ start: 0, length: 16, kind: "flash", writable: false }],
   });
+  // TargetStore rejects writable Flash ranges; isolate the direct-operation kind guard for legacy state.
+  targets.require(projectRoot).memoryRegions[0].writable = true;
 
   const result = await service.writeMemory({ projectRoot, address: 0, width: 32, byteCount: 4, dataHex: "01020304" });
 
@@ -1339,6 +1341,117 @@ test("structured writes default to no old read and no readback", async (context)
   assert.equal(result.ok, true);
   assert.equal(result.verification.status, "executed_unverified");
   assert.deepEqual(probe.actions, ["write:20000000:4:4"]);
+});
+
+test("structured write_variable refuses an unconfigured region before issuing a write", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-unconfigured-region");
+  const result = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x10000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "ram",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_REGION_NOT_VERIFIED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
+});
+
+test("structured write_variable refuses a configured unknown region before issuing a write", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "structured-unknown-region");
+  const before = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: before.device,
+    probeSerial: before.probeSerial,
+    interface: before.interface,
+    speed: before.speed,
+    memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "unknown", writable: true }],
+  });
+  const result = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "ram",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_REGION_NOT_VERIFIED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
+});
+
+test("structured write_variable rejects ranges that cross configured regions", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "structured-cross-region");
+  const before = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: before.device,
+    probeSerial: before.probeSerial,
+    interface: before.interface,
+    speed: before.speed,
+    memoryRegions: [
+      { start: 0x20000000, length: 2, kind: "ram", writable: true },
+      { start: 0x20000002, length: 2, kind: "peripheral", writable: true },
+    ],
+  });
+  const result = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "ram",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_RANGE_CROSSES_REGION");
+  assert.equal(result.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
+});
+
+test("structured write_variable rejects RAM/peripheral region conflicts", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "structured-region-conflict");
+  const before = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: before.device,
+    probeSerial: before.probeSerial,
+    interface: before.interface,
+    speed: before.speed,
+    memoryRegions: [
+      { start: 0x20000000, length: 0x1000, kind: "ram", writable: true },
+      { start: 0x40000000, length: 0x100, kind: "peripheral", writable: true },
+    ],
+  });
+  const ramConflict = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x40000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "ram",
+  });
+  const peripheralConflict = await service.structuredWrite({
+    projectRoot,
+    operationTool: "write_variable",
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: "78563412",
+    knownRegion: "peripheral",
+  });
+  assert.equal(ramConflict.error?.code, "SYMBOL_REGION_CONFLICT");
+  assert.equal(ramConflict.error?.writeIssued, false);
+  assert.equal(peripheralConflict.error?.code, "SVD_REGION_CONFLICT");
+  assert.equal(peripheralConflict.error?.writeIssued, false);
+  assert.deepEqual(probe.actions, []);
 });
 
 test("write_variable independent verification uses a second runtime and labels its evidence", async (context) => {
