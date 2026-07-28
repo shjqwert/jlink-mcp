@@ -227,6 +227,73 @@ test("read_memory preserves hidden-state causality when the independent closing 
   assert.equal(queue.getOwner(targets.require(projectRoot).probeSerial), undefined);
 });
 
+test("read_memory fails closed and preserves an initial observation error without an operation final state", async (context) => {
+  const { service, probe, targets, queue, projectRoot } = await fixture(context, "read-memory-retirement-initial-observation-failed");
+  probe.observationRejectOnCall = 1;
+
+  const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_SESSION_RETIREMENT_UNCONFIRMED");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.match(result.error?.message ?? "", /observation transport rejected/);
+  assert.match(result.error?.message ?? "", /target state remained unknown/);
+  assert.deepEqual((result.data as { memorySessionRetirement: unknown }).memorySessionRetirement, {
+    status: "state_unknown",
+    operationTargetState: undefined,
+    targetStateBeforeClose: "running",
+    targetStateAfterReconnect: "running",
+  });
+  assert.equal(queue.getOwner(targets.require(projectRoot).probeSerial), undefined);
+});
+
+test("read_memory preserves an explicit unknown operation final state during session retirement", async (context) => {
+  const { service, probe, targets, queue, projectRoot } = await fixture(context, "read-memory-retirement-explicit-unknown");
+  probe.memory.set(0x20000000, Buffer.from([0x11, 0x22, 0x33, 0x44]));
+  probe.observations.push(
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } },
+    { state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } },
+    { state: "unknown", source: "unavailable", result: { success: false, rawOutput: "", output: "", stateUnknown: true } },
+  );
+
+  const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_OPERATION_STATE_UNKNOWN");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.match(result.error?.message ?? "", /target state remained unknown/);
+  assert.equal((result.data as { memorySessionRetirement: { status: string; operationTargetState?: string } }).memorySessionRetirement.status, "state_unknown");
+  assert.equal((result.data as { memorySessionRetirement: { operationTargetState?: string } }).memorySessionRetirement.operationTargetState, "unknown");
+  assert.equal(queue.getOwner(targets.require(projectRoot).probeSerial), undefined);
+});
+
+test("read_memory fails closed when closeForTarget cannot confirm a session", async (context) => {
+  const { probe, targets, queue, projectRoot } = await fixture(context, "read-memory-retirement-close-undefined");
+  probe.readResult = {
+    success: false,
+    rawOutput: "transport failed",
+    output: "",
+    error: "transport failed",
+    errorCode: ProbeErrorCode.TARGET_UNREACHABLE,
+  };
+  const sessions = {
+    localOwnerForTarget: () => undefined,
+    probeFor: async () => probe,
+    closeForTarget: async () => undefined,
+  } as unknown as MemorySessionManager;
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions, false);
+
+  const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, ProbeErrorCode.TARGET_UNREACHABLE);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.match(result.error?.message ?? "", /transport failed/);
+  assert.match(result.error?.message ?? "", /close did not confirm/);
+  assert.equal((result.data as { memorySessionRetirement: { status: string } }).memorySessionRetirement.status, "close_unconfirmed");
+});
+
 test("read_memory retains its owner fail-closed when session retirement cannot confirm helper exit", async (context) => {
   const root = testDirectory(context, "read-memory-unconfirmed-retirement");
   const projectRoot = join(root, "project");

@@ -1292,7 +1292,7 @@ export class DirectMcuService {
                 throw combineWithMemorySessionRetirement(error, `independent final observation failed: ${errorMessage(observationError)}`);
               }
               const operationTargetState = envelopeTargetState(envelope.after);
-              if (operationTargetState === "unknown" || memorySessionClose.targetStateBeforeClose === "unknown" || afterClose.state === "unknown") {
+              if (operationTargetState === undefined || operationTargetState === "unknown" || memorySessionClose.targetStateBeforeClose === "unknown" || afterClose.state === "unknown") {
                 annotateMemorySessionRetirement(envelope, {
                   status: "state_unknown",
                   operationTargetState,
