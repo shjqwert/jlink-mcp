@@ -53,7 +53,8 @@ function fatalJLinkCommandDiagnostic(raw: string): string | undefined {
     .map((line) => line.trim())
     .find((line) => /^(?:\*+\s*error:\s*)?verification of ramcode failed\b/i.test(line)
       || /^failed to (?:prepare for programming|download ramcode)\b/i.test(line)
-      || /^\*+\s*error:\s*failed to verify\s+@\s+address\s+0x[0-9a-f]+\b/i.test(line));
+      || /^\*+\s*error:\s*failed to verify\s+@\s+address\s+0x[0-9a-f]+\b/i.test(line)
+      || /\bunknown command\.\s*['"]?\?['"]?\s+for help\./i.test(line));
 }
 
 export class JLinkBackend extends ProbeBackend {
@@ -165,7 +166,7 @@ export class JLinkBackend extends ProbeBackend {
           error: processError
             ? `Failed to spawn JLinkExe: ${processError.message}`
             : fatalDiagnostic
-              ? `J-Link reported a fatal programming diagnostic: ${fatalDiagnostic}`
+              ? `J-Link reported a fatal command diagnostic: ${fatalDiagnostic}`
               : stderr || undefined,
           exitCode: code,
           exitSignal: signal,
@@ -174,7 +175,7 @@ export class JLinkBackend extends ProbeBackend {
         if (fatalDiagnostic) {
           result.errorCode = ProbeErrorCode.JLINK_COMMAND_FAILED;
           result.stateUnknown = true;
-          result.suggestedAction = "Treat the requested J-Link programming operation as failed; recover with an explicit verified image before further target use.";
+          result.suggestedAction = "Treat the requested J-Link operation as failed and explicitly verify target state before further target use.";
         }
         // Classify errors from output
         if (!result.success && !fatalDiagnostic) {

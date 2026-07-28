@@ -145,6 +145,22 @@ test("JLinkBackend fails a zero-exit erase when J-Link reports a fatal RAMCode d
   assert.equal(result.stateUnknown, true);
 });
 
+test("JLinkBackend fails a zero-exit raw command when J-Link reports an unknown command", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, "J-Link>Unknown command. '?' for help."),
+  );
+
+  const result = await backend.executeRaw(["verify C:\\firmware\\app.s19"]);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.stateUnknown, true);
+  assert.match(result.error ?? "", /Unknown command/i);
+});
+
 test("JLinkBackend fails a zero-exit flash when J-Link reports an address verify failure", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
