@@ -13,7 +13,7 @@ import {
 } from "../../probe/backend";
 import { repoTempRoot } from "../preflight/temp-preflight";
 import { DirectMcuService, removeFlashSnapshotDirectory, type FlashSnapshotCleanup } from "./direct-operations";
-import { MemorySessionManager, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
+import { MemorySessionError, MemorySessionManager, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore } from "./target-store";
 
@@ -152,8 +152,8 @@ test("read_memory retains bytes but fails when the final target state is unknown
   assert.deepEqual(probe.actions, ["read:20000000:4"]);
 });
 
-test("read_memory reports known target-state drift without marking the final state unknown", async (context) => {
-  const { service, probe, projectRoot } = await fixture(context, "read-memory-known-drift");
+test("read_memory retires its session after known target-state drift without marking the final state unknown", async (context) => {
+  const { service, probe, targets, queue, projectRoot } = await fixture(context, "read-memory-known-drift");
   probe.memory.set(0x20000000, Buffer.from([0x11, 0x22, 0x33, 0x44]));
   probe.observations.push(
     { state: "running", source: "dhcsr", result: ok() },
@@ -164,6 +164,55 @@ test("read_memory reports known target-state drift without marking the final sta
   assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
   assert.equal(result.error?.stateUnknown, false);
   assert.equal((result.data as { dataHex: string }).dataHex, "11223344");
+  assert.equal(queue.getOwner(targets.require(projectRoot).probeSerial), undefined);
+
+  probe.targetState = "halted";
+  const resumed = await service.control("resume", projectRoot);
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.error, undefined);
+});
+
+test("read_memory retains its owner fail-closed when session retirement cannot confirm helper exit", async (context) => {
+  const root = testDirectory(context, "read-memory-unconfirmed-retirement");
+  const projectRoot = join(root, "project");
+  mkdirSync(projectRoot, { recursive: true });
+  const targets = new TargetStore(join(root, "state"));
+  const target = await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
+  const queue = new ProbeQueue(join(root, "queue"));
+  const probe = new FakeProbe();
+  const session = new PreDispatchMemorySession(probe);
+  session.closeError = new MemorySessionError(
+    "MEMORY_SESSION_CLOSE_UNCONFIRMED",
+    "native memory helper did not exit after close",
+    true,
+    true,
+    true,
+    session.pid,
+  );
+  const launcher: MemorySessionLauncher = {
+    async open(_target, onStarted) {
+      onStarted?.(session.pid, session.runtime);
+      return session;
+    },
+  };
+  const sessions = new MemorySessionManager(queue, launcher, 10_000);
+  context.after(async () => {
+    session.closeError = undefined;
+    await sessions.dispose();
+  });
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
+  probe.memory.set(0x20000000, Buffer.from([0x11, 0x22, 0x33, 0x44]));
+  probe.observations.push(
+    { state: "running", source: "dhcsr", result: ok() },
+    { state: "halted", source: "dhcsr", result: ok() },
+  );
+
+  const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "MEMORY_SESSION_CLOSE_UNCONFIRMED");
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
 });
 
 test("failed read_memory preserves failure and final-state evidence", async (context) => {
@@ -1645,13 +1694,11 @@ class UnavailableMemorySessionLauncher implements MemorySessionLauncher {
 }
 
 class FakeMemorySessionLauncher implements MemorySessionLauncher {
-  private readonly session: PreDispatchMemorySession;
-  constructor(probe: ProbeBackend) {
-    this.session = new PreDispatchMemorySession(probe);
-  }
+  constructor(private readonly probe: ProbeBackend) {}
   async open(_target: Parameters<MemorySessionLauncher["open"]>[0], onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
-    onStarted?.(this.session.pid, this.session.runtime);
-    return this.session;
+    const session = new PreDispatchMemorySession(this.probe);
+    onStarted?.(session.pid, session.runtime);
+    return session;
   }
 }
 
@@ -1673,10 +1720,14 @@ class PreDispatchMemorySession implements PersistentMemorySession {
     runtimeSha256: "b".repeat(64),
   };
   private alive = true;
+  closeError?: Error;
   constructor(readonly probe: ProbeBackend) {}
   isAlive(): boolean { return this.alive; }
   isReusable(): boolean { return this.alive; }
-  async close(): Promise<void> { this.alive = false; }
+  async close(): Promise<void> {
+    if (this.closeError) throw this.closeError;
+    this.alive = false;
+  }
   onExit(): () => void { return () => undefined; }
 }
 

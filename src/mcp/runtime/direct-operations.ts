@@ -118,6 +118,7 @@ export type FlashSnapshotCleanup = (snapshotRoot: string) => Promise<Error | und
 
 interface DirectQueueOptions {
   persistentMemorySession?: boolean;
+  closePersistentMemorySessionOnError?: boolean;
   requirePersistentMemorySession?: boolean;
   failClosedWithoutMemorySessionManager?: boolean;
   verificationConnection?: "same_session" | "independent_session";
@@ -293,7 +294,10 @@ export class DirectMcuService {
       }
       if (readFailure) throw readFailure;
       envelope.verification = { status: "observed", method: "probe_read" };
-    }, { persistentMemorySession: true });
+    }, {
+      persistentMemorySession: true,
+      closePersistentMemorySessionOnError: true,
+    });
   }
 
   structuredReadBatch(input: StructuredMemoryReadBatchInput): Promise<OperationEnvelope> {
@@ -1256,7 +1260,14 @@ export class DirectMcuService {
               throw executionError("HIDDEN_STATE_CHANGE", "memory_session_close", `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${afterClose.state}`, { stateUnknown: false });
             }
           }
-          await operation(envelope, current, runtime);
+          try {
+            await operation(envelope, current, runtime);
+          } catch (error) {
+            if (options.closePersistentMemorySessionOnError && persistentProbe) {
+              await this.memorySessions?.closeForTarget(current);
+            }
+            throw error;
+          }
         } finally {
           if (memorySessionClose) {
             envelope.data = {
