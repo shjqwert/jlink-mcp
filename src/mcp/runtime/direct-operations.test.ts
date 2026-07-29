@@ -418,6 +418,32 @@ test("core-register access reports HALT_REQUIRED before issuing any register com
   assert.deepEqual(probe.actions, []);
 });
 
+test("core-register access decodes canonical J-Link register lines ahead of banner values", async (context) => {
+  const cases = [
+    { requested: "PC", reported: "R15 (PC)" },
+    { requested: "R15", reported: "R15 (PC)" },
+    { requested: "SP", reported: "R13 (SP)" },
+    { requested: "R13", reported: "R13 (SP)" },
+    { requested: "LR", reported: "R14" },
+    { requested: "R14", reported: "R14" },
+  ];
+
+  for (const { requested, reported } of cases) {
+    const current = await fixture(context, `core-read-canonical-${requested.toLowerCase()}`);
+    current.probe.targetState = "halted";
+    current.probe.registerReadResult = {
+      success: true,
+      rawOutput: `J-Link ARM V8.84\nS/N: 69401227\n${reported} = 0x20002BD8`,
+      output: "",
+    };
+
+    const result = await current.service.readCoreRegister(current.projectRoot, requested);
+
+    assert.equal(result.ok, true);
+    assert.equal((result.data as { value: number }).value, 0x2000_2bd8);
+  }
+});
+
 test("diagnose_crash collects Cortex-M fault and validated exception-frame evidence without changing state", async (context) => {
   const { service, probe, projectRoot, targets } = await fixture(context, "diagnose-crash");
   await targets.configure({

@@ -9,7 +9,7 @@ The server serializes physical Probe access and reports observed state and side 
 - Timed HSS sequences reject normal variable access after `hss_stop`; failure cleanup remains bounded and preserves the original error.
 - HSS capability discovery restores an originally running target with explicit `JLINKARM_Go` evidence when capability attach unexpectedly halts it, while still reporting the state-change failure.
 - `target_configure.gdbDevice` is now required by `gdb_open`. It separates a validated non-invasive GDB attach profile from the exact `device` retained for Flash/Erase. A failed attach is cleaned up in the owning MCP process without resuming a faulted target.
-- Single core-register access uses J-Link display-name tokens such as `"R15 (PC)"`, `"R14 (LR)"`, and `"R13 (SP)"`.
+- Single core-register access uses the J-Link V8.84-supported tokens `"R15 (PC)"`, `R14`, and `"R13 (SP)"` for PC/R15, LR/R14, and SP/R13 respectively.
 - `write_variable` keeps exact verification as the default and adds an explicit `range` comparator for firmware-consumed dynamic fields. Protocol ACK/Complete must still be checked separately.
 - The v1.1.4 unknown-memory write software gate remains covered; no hardware Flash/Erase result is claimed by this change.
 

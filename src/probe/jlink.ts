@@ -689,7 +689,7 @@ function jlinkCoreRegisterToken(name: string): string {
       return "\"R15 (PC)\"";
     case "LR":
     case "R14":
-      return "\"R14 (LR)\"";
+      return "R14";
     case "SP":
     case "R13":
       return "\"R13 (SP)\"";

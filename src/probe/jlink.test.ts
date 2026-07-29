@@ -126,7 +126,7 @@ test("JLinkBackend resets and halts in-session before noreset flash and erase fo
   ]);
 });
 
-test("JLinkBackend uses J-Link display-name tokens for aliased core registers", async () => {
+test("JLinkBackend uses J-Link-supported tokens for aliased core registers", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
@@ -137,14 +137,19 @@ test("JLinkBackend uses J-Link display-name tokens for aliased core registers", 
   for (const name of ["PC", "R15", "LR", "R14", "SP", "R13"]) {
     assert.equal((await backend.readRegister(name)).success, true);
   }
+  for (const name of ["LR", "R14"]) {
+    assert.equal((await backend.writeCoreRegister(name, 0x1234_5678)).success, true);
+  }
 
   assert.deepEqual(scripts, [
     "exec SetRestartOnClose = 0\nrreg \"R15 (PC)\"\nexit\n",
     "exec SetRestartOnClose = 0\nrreg \"R15 (PC)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nrreg \"R14 (LR)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nrreg \"R14 (LR)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nrreg R14\nexit\n",
     "exec SetRestartOnClose = 0\nrreg \"R13 (SP)\"\nexit\n",
     "exec SetRestartOnClose = 0\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nexit\n",
   ]);
 });
 

@@ -2271,10 +2271,21 @@ function hex32(value: number): string {
 
 function parseRegisterValue(result: CommandResult, name: string): number {
   const text = `${result.rawOutput}\n${result.output}`;
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = text.match(new RegExp(`(?:${escaped})\\s*=\\s*(?:0x)?([0-9a-fA-F]{1,8})`, "i")) ?? text.match(/(?:0x)?([0-9a-fA-F]{8})/);
-  if (!match) throw executionError("REGISTER_DECODE_FAILED", "decode", `could not decode ${name} from Probe output`);
-  return Number.parseInt(match[1], 16) >>> 0;
+  const normalized = name.toUpperCase();
+  const canonical = normalized === "PC" || normalized === "R15"
+    ? "R15 (PC)"
+    : normalized === "SP" || normalized === "R13"
+      ? "R13 (SP)"
+      : normalized === "LR" || normalized === "R14"
+        ? "R14"
+        : normalized;
+  const candidates = canonical === normalized ? [canonical] : [canonical, normalized];
+  for (const candidate of candidates) {
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = text.match(new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*=\\s*(?:0x)?([0-9a-fA-F]{1,8})`, "im"));
+    if (match) return Number.parseInt(match[1], 16) >>> 0;
+  }
+  throw executionError("REGISTER_DECODE_FAILED", "decode", `could not decode ${name} from Probe output`);
 }
 
 function validateUint32(value: number, name: string): void {

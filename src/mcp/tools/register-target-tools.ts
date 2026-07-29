@@ -171,7 +171,7 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
     ...projectRootInput,
     action: z.enum(["read", "read_all", "write"]),
     name: z.string().min(1).max(32).optional().describe(
-      "Supported core name: R followed by an index from 0 through 15, PC, LR, SP, XPSR, CONTROL, PRIMASK, BASEPRI, FAULTMASK, MSP, PSP, MSPLIM, or PSPLIM. PC/R15, LR/R14, and SP/R13 are sent with canonical J-Link display-name tokens.",
+      "Supported core name: R followed by an index from 0 through 15, PC, LR, SP, XPSR, CONTROL, PRIMASK, BASEPRI, FAULTMASK, MSP, PSP, MSPLIM, or PSPLIM. PC/R15 and SP/R13 use J-Link display-name tokens; LR/R14 uses the supported R14 token.",
     ),
     value: uint32.optional(),
     verify: z.boolean().default(false),
