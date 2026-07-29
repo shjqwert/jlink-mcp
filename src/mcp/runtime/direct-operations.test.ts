@@ -11,6 +11,7 @@ import {
   type ProbeMemoryTransactionInput,
   type ProbeMemoryTransactionResult,
   type TargetStateObservation,
+  type TargetStateObservationOptions,
 } from "../../probe/backend";
 import { repoTempRoot } from "../preflight/temp-preflight";
 import { DirectMcuService, removeFlashSnapshotDirectory, type FlashSnapshotCleanup, type MemoryWriteInput } from "./direct-operations";
@@ -577,6 +578,40 @@ test("write_core_register exact verification uses one transaction and retains fi
   assert.equal(result.verification.method, "exact_readback_same_connection");
   assert.equal(result.after.targetState, "halted");
   assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+  assert.deepEqual(probe.observationOptions, [{}, { preserveDebugStateOnClose: true }]);
+});
+
+test("write_core_register raises old-helper final observation failure as an issued unknown-state result", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-old-helper");
+  probe.registerTransactionResult = {
+    command: { success: true, rawOutput: "write echo: R0 = 12345678", output: "", writeIssued: true, stateUnknown: false },
+    readback: { success: true, rawOutput: "R0 = 12345678", output: "", writeIssued: true, stateUnknown: false },
+  };
+  probe.observations.push(
+    { state: "halted", source: "dhcsr", result: ok() },
+    {
+      state: "unknown",
+      source: "unavailable",
+      result: {
+        success: false,
+        rawOutput: "{}",
+        output: "",
+        error: "memory helper did not prove that close-time debug de-initialization was skipped",
+        errorCode: ProbeErrorCode.TARGET_UNREACHABLE,
+        stateUnknown: true,
+      },
+    },
+  );
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_OPERATION_STATE_UNKNOWN");
+  assert.equal(result.error?.stage, "final_observation");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(result.after.targetState, "unknown");
+  assert.deepEqual(probe.observationOptions, [{}, { preserveDebugStateOnClose: true }]);
 });
 
 test("write_core_register fails before mutation when atomic verification is unsupported", async (context) => {
@@ -2110,6 +2145,7 @@ class FakeProbe extends ProbeBackend {
   readMemoryReject?: Error;
   readAccessSizes: Array<1 | 2 | 4 | undefined> = [];
   observations: TargetStateObservation[] = [];
+  observationOptions: TargetStateObservationOptions[] = [];
   observationCalls = 0;
   observationRejectOnCall?: number;
   haltResult?: CommandResult;
@@ -2119,8 +2155,9 @@ class FakeProbe extends ProbeBackend {
   registerTransactionResult?: ProbeCoreRegisterWriteResult;
   disableRegisterTransaction = false;
 
-  override async observeTargetState(): Promise<TargetStateObservation> {
+  override async observeTargetState(options: TargetStateObservationOptions = {}): Promise<TargetStateObservation> {
     this.observationCalls += 1;
+    this.observationOptions.push(options);
     if (this.observationRejectOnCall === this.observationCalls) throw new Error("observation transport rejected");
     const queued = this.observations.shift();
     if (queued) return queued;

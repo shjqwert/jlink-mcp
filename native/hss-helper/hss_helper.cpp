@@ -2417,6 +2417,20 @@ static bool configure_no_restart_on_close(JLINKARM_ExecCommand_Fn arm_exec, bool
   return !*crashed && rc >= 0;
 }
 
+static bool configure_skip_debug_deinit_on_close(
+    JLINKARM_ExecCommand_Fn arm_exec,
+    bool* crashed,
+    int* return_code = nullptr,
+    char* output = nullptr,
+    int output_size = 0) {
+  char local_output[512] = {};
+  char* command_output = output && output_size > 0 ? output : local_output;
+  const int command_output_size = output && output_size > 0 ? output_size : static_cast<int>(sizeof(local_output));
+  const int rc = call_exec(arm_exec, "SetSkipDebugDeInit = 1", command_output, command_output_size, crashed);
+  if (return_code) *return_code = rc;
+  return !*crashed && rc >= 0;
+}
+
 static bool configure_force_attach_target(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed) {
   char out[512] = {};
   const int rc = call_exec(arm_exec, "ForceAttachTarget = 1", out, sizeof(out), crashed);
@@ -2657,6 +2671,7 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
   int access_size = 1;
   const bool capture_old = write_mode && option_utf8(options, L"--capture-old", "false") == "true";
   const bool restore = write_mode && option_utf8(options, L"--restore", "false") == "true";
+  const bool preserve_debug_state_on_close = option_utf8(options, L"--preserve-debug-state-on-close", "false") == "true";
   const std::string expected_target_state = write_mode ? option_utf8(options, L"--expected-target-state", "") : "";
   int verify_reads = 0;
   int verify_interval_ms = 0;
@@ -2780,6 +2795,23 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     FreeLibrary(dll);
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
+  }
+
+  int skip_debug_deinit_rc = -1;
+  char skip_debug_deinit_out[512] = {};
+  if (preserve_debug_state_on_close) {
+    if (!configure_skip_debug_deinit_on_close(
+        arm_exec,
+        &crashed,
+        &skip_debug_deinit_rc,
+        skip_debug_deinit_out,
+        static_cast<int>(sizeof(skip_debug_deinit_out)))) {
+      bool close_crashed = false;
+      call_void0(arm_close, &close_crashed);
+      FreeLibrary(dll);
+      error_json("JLINK_DEBUG_DEINIT_POLICY_FAILED", "JLINKARM_ExecCommand(SetSkipDebugDeInit = 1) failed", dll_utf8, true);
+      return 0;
+    }
   }
 
   char memory_cache_out[512] = {};
@@ -3004,10 +3036,12 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     << ",\"returnCodes\":{\"selectSerial\":" << select_sn_rc
     << ",\"open\":" << open_rc
     << ",\"setRestartOnClose\":" << close_policy_rc
+    << ",\"setSkipDebugDeInit\":" << skip_debug_deinit_rc
     << ",\"device\":" << device_rc
     << ",\"tifSelect\":" << tif_rc
     << ",\"connect\":" << connect_rc
     << "},\"closePolicyOutput\":\"" << escape(close_policy_out)
+    << "\",\"skipDebugDeInitOutput\":\"" << escape(skip_debug_deinit_out)
     << "\",\"execOutput\":\"" << escape(exec_out)
     << "\",\"targetWasHalted\":" << (halted > 0 ? "true" : "false")
     << ",\"targetWasHaltedRaw\":" << halted
@@ -3017,6 +3051,7 @@ static int ram_probe_access(const std::wstring& dll_path, const std::map<std::ws
     << ",\"targetWasHaltedAfterResumeRaw\":" << halted_after_resume
     << ",\"nonIntrusiveAttach\":true"
     << ",\"memoryCacheDisabled\":true"
+    << ",\"debugDeinitSkipped\":" << (preserve_debug_state_on_close ? "true" : "false")
     << ",\"writeReturnCode\":" << write_rc
     << ",\"writeIssued\":" << (write_elements_issued > 0 ? "true" : "false")
     << ",\"writeElementsIssued\":" << write_elements_issued
@@ -3619,7 +3654,9 @@ static U32 self_test_get_wrong_serial() {
 
 static int self_test_exec_success(const char* command, char*, int) {
   const std::string value(command);
-  return value == "SetRestartOnClose = 0" || value == "ForceAttachTarget = 1" ? 0 : -1;
+  return value == "SetRestartOnClose = 0"
+      || value == "SetSkipDebugDeInit = 1"
+      || value == "ForceAttachTarget = 1" ? 0 : -1;
 }
 
 static int self_test_exec_failure(const char*, char*, int) {
@@ -3876,8 +3913,10 @@ static bool self_test_probe_selection_and_close_policy() {
       || verify_exact_jlink_probe(self_test_get_wrong_serial, expected, &crashed, &error_code, &error_reason)
       || error_code != "JLINK_SERIAL_MISMATCH"
       || !configure_no_restart_on_close(self_test_exec_success, &crashed)
+      || !configure_skip_debug_deinit_on_close(self_test_exec_success, &crashed)
       || !configure_force_attach_target(self_test_exec_success, &crashed)
       || configure_no_restart_on_close(self_test_exec_failure, &crashed)
+      || configure_skip_debug_deinit_on_close(self_test_exec_failure, &crashed)
       || configure_force_attach_target(self_test_exec_failure, &crashed)) return false;
   return true;
 }
@@ -3975,7 +4014,7 @@ static int self_test() {
     return 0;
   }
   if (!self_test_probe_selection_and_close_policy()) {
-    error_json("HSS_SELF_TEST_PROBE_SELECTION_FAILED", "exact Probe selection or no-restart close policy boundary failed");
+    error_json("HSS_SELF_TEST_PROBE_SELECTION_FAILED", "exact Probe selection or close policy boundary failed");
     return 0;
   }
   if (!self_test_target_state_guard()) {
@@ -4467,7 +4506,7 @@ static int self_test() {
     << "{\"status\":\"ok\",\"command\":\"self-test\",\"recordFormat\":\"jcap-v1-sha256-crc32-envelope\""
     << ",\"sampleCount\":2,\"samplesSha256\":\"" << raw_sha256
     << "\",\"jcapFirstFrameHex\":\"" << hex_bytes(first_frame) << "\""
-    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"readyJournalValidated\":true,\"hssStartFrequencyValidated\":true,\"memorySessionControlValidated\":true,\"memorySessionProtocolValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
+    << ",\"budgetStopValidated\":true,\"zeroSampleStopValidated\":true,\"failureCloseValidated\":true,\"typedSamplesValidated\":true,\"probeSelectionValidated\":true,\"debugDeinitSkipValidated\":true,\"targetStateGuardValidated\":true,\"captureTransitionValidated\":true,\"readyJournalValidated\":true,\"hssStartFrequencyValidated\":true,\"memorySessionControlValidated\":true,\"memorySessionProtocolValidated\":true,\"qpcTimebaseValidated\":true,\"artifactMatchValidated\":true"
     << ",\"recordSemantics\":{\"normalEmitted\":" << normal_sequence.emittedSamples
     << ",\"gapEmitted\":" << gap_sequence.emittedSamples
     << ",\"duplicateSamples\":" << gap_sequence.duplicateSamples

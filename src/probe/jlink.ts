@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
-import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig, type ProbeCoreRegisterWriteResult, type ProbeMemoryTransactionInput, type ProbeMemoryTransactionResult } from "./backend";
+import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig, type ProbeCoreRegisterWriteResult, type ProbeMemoryTransactionInput, type ProbeMemoryTransactionResult, type TargetStateObservationOptions } from "./backend";
 import { ProcessManager, terminateChildProcess } from "../utils/process-manager";
 import { log, logError } from "../utils/logger";
 import * as path from "path";
@@ -239,7 +239,14 @@ export class JLinkBackend extends ProbeBackend {
     });
   }
 
-  private async accessMemoryNonIntrusive(address: number, length: number, accessSize: 1 | 2 | 4, writeBytes?: Buffer, transaction?: ProbeMemoryTransactionInput): Promise<CommandResult> {
+  private async accessMemoryNonIntrusive(
+    address: number,
+    length: number,
+    accessSize: 1 | 2 | 4,
+    writeBytes?: Buffer,
+    transaction?: ProbeMemoryTransactionInput,
+    preserveDebugStateOnClose = false,
+  ): Promise<CommandResult> {
     if (!Number.isSafeInteger(address) || address < 0 || address > 0xffff_ffff
       || !Number.isSafeInteger(length) || length < 1 || length > 4096
       || address + length > 0x1_0000_0000
@@ -273,6 +280,7 @@ export class JLinkBackend extends ProbeBackend {
     ];
     if (writeBytes) args.push("--bytes-hex", writeBytes.toString("hex"));
     else args.push("--samples", "1", "--interval-ms", "0");
+    if (preserveDebugStateOnClose) args.push("--preserve-debug-state-on-close", "true");
     if (transaction) {
       args.push(
         "--capture-old", String(transaction.captureOld),
@@ -324,6 +332,7 @@ export class JLinkBackend extends ProbeBackend {
           writeReturnCode?: number;
           writeIssued?: boolean;
           memoryCacheDisabled?: boolean;
+          debugDeinitSkipped?: boolean;
           closeFailed?: boolean;
           stateUnknown?: boolean;
           samples?: Array<{ valid?: boolean; bytes?: string }>;
@@ -334,15 +343,18 @@ export class JLinkBackend extends ProbeBackend {
           resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: `memory helper returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`, errorCode: ProbeErrorCode.STATE_DESYNC, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? true : undefined, stateUnknown: true });
           return;
         }
+        const debugClosePolicyMissing = preserveDebugStateOnClose && response.debugDeinitSkipped !== true;
         const operationFailed = writeBytes
           ? response.status !== "ok" || response.writeFailed || response.closeFailed || response.targetWritten !== true
-            || response.memoryCacheDisabled !== true
+            || response.memoryCacheDisabled !== true || debugClosePolicyMissing
           : response.status !== "ok" || response.readFailed || !response.samples?.[0]?.valid
-            || response.memoryCacheDisabled !== true;
+            || response.memoryCacheDisabled !== true || debugClosePolicyMissing;
         if (operationFailed) {
           const identityFailure = response.errorCode === "JLINK_PROBE_IDENTITY_MISMATCH" || response.errorCode === "JLINK_SELECT_SN_FAILED";
           const fallback = response.memoryCacheDisabled !== true
             ? "memory helper did not prove that J-Link DLL caching was disabled"
+            : debugClosePolicyMissing
+              ? "memory helper did not prove that close-time debug de-initialization was skipped"
             : writeBytes ? "JLINKARM_WriteMem failed" : "JLINKARM_ReadMem failed";
           resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: response.reason ?? response.errorCode ?? fallback, errorCode: identityFailure ? ProbeErrorCode.PROBE_IDENTITY_MISMATCH : ProbeErrorCode.TARGET_UNREACHABLE, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? response.writeIssued === true : false, stateUnknown: response.stateUnknown ?? true });
           return;
@@ -436,6 +448,9 @@ export class JLinkBackend extends ProbeBackend {
   async readMemory(address: number, length: number, accessSize: 1 | 2 | 4 = 1): Promise<CommandResult> {
     if (length % accessSize !== 0) return { success: false, rawOutput: "", output: "", error: "memory read length is unaligned", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     return this.accessMemoryNonIntrusive(address, length, accessSize);
+  }
+  protected override async readTargetStateRegister(options: TargetStateObservationOptions): Promise<CommandResult> {
+    return this.accessMemoryNonIntrusive(0xE000EDF0, 4, 4, undefined, undefined, options.preserveDebugStateOnClose === true);
   }
   async writeMemory(address: number, value: number): Promise<CommandResult> {
     const bytes = Buffer.allocUnsafe(4);
@@ -591,7 +606,14 @@ export class JLinkBackend extends ProbeBackend {
       // J-Link V8.84 can buffer all Commander output while an interactive
       // Windows stdin pipe remains open. Submit the complete transaction and
       // close stdin, matching the batch path used by proven direct operations.
-      result = await this.execRaw([writeCommand, readbackCommand], timeoutMs);
+      // Commander normally de-initializes the debug unit when the connection
+      // closes. Preserve the verified core-register state for the next attach;
+      // SetRestartOnClose=0 in execRaw independently keeps the target halted.
+      result = await this.execRaw([
+        "exec SetSkipDebugDeInit = 1",
+        writeCommand,
+        readbackCommand,
+      ], timeoutMs);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to start J-Link core-register transaction";
       return {

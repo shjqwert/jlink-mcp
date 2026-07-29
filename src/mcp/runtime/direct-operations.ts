@@ -1,4 +1,4 @@
-import type { CommandResult, ProbeBackend, ProbeCoreRegisterWriteResult, ProbeMemoryTransactionResult, TargetStateObservation } from "../../probe/backend";
+import type { CommandResult, ProbeBackend, ProbeCoreRegisterWriteResult, ProbeMemoryTransactionResult, TargetStateObservation, TargetStateObservationOptions } from "../../probe/backend";
 import { ProbeErrorCode, decodeFaultRegisters } from "../../probe/backend";
 import { chmodSync, copyFileSync, constants, readFileSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -975,7 +975,7 @@ export class DirectMcuService {
       }
       let after: TargetStateObservation;
       try {
-        after = await observe(runtime.probe);
+        after = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       } catch (error) {
         if (writeError) throw withUnknownTargetState(writeError);
         throw unexpectedPostWriteError(error, "final_observation", "target-state observation failed after core-register write");
@@ -1795,8 +1795,11 @@ function applyQueueMetadata(envelope: OperationEnvelope, metadata: QueueMetadata
   envelope.timestamps.startedAt = metadata.startedAt;
 }
 
-async function observe(probe: ProbeBackend): Promise<TargetStateObservation> {
-  return probe.observeTargetState();
+async function observe(
+  probe: ProbeBackend,
+  options: TargetStateObservationOptions = {},
+): Promise<TargetStateObservation> {
+  return probe.observeTargetState(options);
 }
 
 async function observeAfterMutation(probe: ProbeBackend, operation: string): Promise<TargetStateObservation> {

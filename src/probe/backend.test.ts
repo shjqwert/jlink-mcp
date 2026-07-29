@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ProbeBackend, type CommandResult, type GDBServerInfo } from "./backend";
+import { ProbeBackend, ProbeErrorCode, type CommandResult, type GDBServerInfo } from "./backend";
 import { createProbeBackend } from "./factory";
 import { ProcessManager } from "../utils/process-manager";
 
@@ -57,6 +57,13 @@ test("state and fault decoding fall back to structured helper output when rawOut
   };
   const faults = await probe.readFaultRegisters();
   assert.deepEqual(faults.raw, { cfsr: 1, hfsr: 2, mmfar: 4, bfar: 5 });
+});
+
+test("target-state observation fails closed when debug-state preservation is unsupported", async () => {
+  const state = await new TestProbe().observeTargetState({ preserveDebugStateOnClose: true });
+  assert.equal(state.state, "unknown");
+  assert.equal(state.result.errorCode, ProbeErrorCode.NON_INTRUSIVE_READ_UNAVAILABLE);
+  assert.equal(state.result.stateUnknown, true);
 });
 
 class TestProbe extends ProbeBackend {

@@ -170,13 +170,13 @@ test("JLinkBackend phases same-connection core-register write and readback for a
   }
 
   assert.deepEqual(scripts, [
-    "exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg R0, 0x12345678\nrreg R0\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg R14, 0x12345678\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg R14, 0x12345678\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
   ]);
 });
 
@@ -201,7 +201,53 @@ test("JLinkBackend closes stdin before V8.84 releases buffered transaction outpu
   assert.equal(result.command.writeIssued, true);
   assert.equal(result.readback?.success, true);
   assert.equal(result.readback?.stateUnknown, false);
-  assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n"]);
+  assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg R0, 0x12345678\nrreg R0\nexit\n"]);
+});
+
+test("JLinkBackend preserves a verified register value through final observation and independent read", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-register-lifecycle-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const helper = join(root, "hss_helper.exe");
+  const dll = join(root, "JLink_x64.dll");
+  writeFileSync(helper, "test");
+  writeFileSync(dll, "test");
+  const registerState = { value: "00000000" };
+  const scripts: string[] = [];
+  const helperArgs: string[][] = [];
+  const spawnProcess: JLinkSpawn = (command, args) => {
+    if (command === helper) {
+      helperArgs.push([...args]);
+      const preserve = args.includes("--preserve-debug-state-on-close");
+      if (!preserve) registerState.value = "00000000";
+      return helperProcess(JSON.stringify({
+        status: "ok",
+        probeSerial: 123456,
+        memoryCacheDisabled: true,
+        debugDeinitSkipped: preserve,
+        targetWasHaltedRaw: 1,
+        targetWasHaltedAfterReadRaw: 1,
+        samples: [{ valid: true, bytes: "03000200" }],
+      }));
+    }
+    return registerTransactionProcess(scripts, "match", { registerState });
+  };
+  const backend = new JLinkBackend(
+    { installDir: root, memoryHelperPath: helper, device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    spawnProcess,
+  );
+
+  const result = await backend.writeCoreRegisterTransaction("R0", 0x1357_9bdf);
+  const after = await backend.observeTargetState({ preserveDebugStateOnClose: true });
+  const independent = await backend.readRegister("R0");
+
+  assert.equal(result.command.success, true, JSON.stringify(result.command));
+  assert.equal(result.readback?.success, true, JSON.stringify(result.readback));
+  assert.equal(after.state, "halted", JSON.stringify(after.result));
+  assert.match(independent.rawOutput, /R0\s*=\s*0x13579bdf/i);
+  assert.equal(registerState.value, "13579bdf");
+  assert.match(scripts[0] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*wreg R0[\s\S]*rreg R0[\s\S]*exit/);
+  assert.ok(helperArgs[0]?.includes("--preserve-debug-state-on-close"));
 });
 
 test("JLinkBackend separates V8.84 consecutive-prompt write echo from 0x readback", async () => {
@@ -571,7 +617,17 @@ test("JLinkBackend uses helper bytes and rejects a read that changes target stat
   assert.ok(invocations[0].args.includes(dll));
   assert.deepEqual(invocations[0].args.slice(invocations[0].args.indexOf("--access-size"), invocations[0].args.indexOf("--access-size") + 2), ["--access-size", "4"]);
 
-  response = { ...response, memoryCacheDisabled: false };
+  response = { ...response, targetWasHaltedRaw: 1, targetWasHaltedAfterReadRaw: 1 };
+  const staleHelperObservation = await backend.observeTargetState({ preserveDebugStateOnClose: true });
+  assert.equal(staleHelperObservation.state, "unknown");
+  assert.match(staleHelperObservation.result.error ?? "", /debug de-initialization was skipped/i);
+  assert.equal(staleHelperObservation.result.stateUnknown, true);
+  assert.deepEqual(
+    invocations[1].args.slice(invocations[1].args.indexOf("--preserve-debug-state-on-close")),
+    ["--preserve-debug-state-on-close", "true"],
+  );
+
+  response = { ...response, memoryCacheDisabled: false, targetWasHaltedRaw: 0, targetWasHaltedAfterReadRaw: 0 };
   const cachePolicyMissing = await backend.readMemory(0x20000000, 4, 4);
   assert.equal(cachePolicyMissing.success, false);
   assert.match(cachePolicyMissing.error ?? "", /caching was disabled/i);
@@ -734,7 +790,12 @@ function fakeProcess(signals: Array<NodeJS.Signals | number | undefined>, emitKi
 function registerTransactionProcess(
   scripts: string[],
   mode: "match" | "write_echo_only" | "readback_failure" | "readback_failure_no_echo" | "stderr_fatal" | "batch_silent",
-  options: { initialPrompt?: boolean; realisticStartupChunks?: boolean; respondAfterEof?: boolean } = {},
+  options: {
+    initialPrompt?: boolean;
+    realisticStartupChunks?: boolean;
+    respondAfterEof?: boolean;
+    registerState?: { value: string };
+  } = {},
 ): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
@@ -799,6 +860,9 @@ function registerTransactionProcess(
           ? "O.K.\r\nJ-Link>"
           : `${command}\r\nwrite echo: ${token} = ${requested}\r\nJ-Link>`);
       } else if (command.startsWith("rreg ")) {
+        const readToken = command.slice("rreg ".length).trim();
+        if (!token) token = readToken;
+        const readValue = requested || options.registerState?.value || "00000000";
         if (mode === "readback_failure" || mode === "readback_failure_no_echo") {
           setImmediate(() => {
             child.stdout.write(mode === "readback_failure_no_echo"
@@ -809,11 +873,14 @@ function registerTransactionProcess(
         } else if (mode === "write_echo_only") {
           respond(`${command}\r\nO.K.\r\nJ-Link>`);
         } else {
-          respond(`${command}\r\n${token} = ${requested}\r\nJ-Link>`);
+          respond(`${command}\r\n${token} = 0x${readValue}\r\nJ-Link>`);
         }
       } else if (command === "exit") {
         setImmediate(() => {
           if (mode === "stderr_fatal") child.stderr.write("Unknown command. '?' for help.\n");
+          if (options.registerState && requested && /exec SetSkipDebugDeInit\s*=\s*1/i.test(script)) {
+            options.registerState.value = requested;
+          }
           close(0);
         });
       }
