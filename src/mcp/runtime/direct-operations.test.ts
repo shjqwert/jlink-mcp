@@ -443,7 +443,29 @@ test("core-register access decodes canonical J-Link register lines ahead of bann
 
     assert.equal(result.ok, true);
     assert.equal((result.data as { value: number }).value, 0x2000_2bd8);
+    assert.deepEqual(current.probe.observationOptions, [
+      { preserveDebugStateOnClose: true },
+      { preserveDebugStateOnClose: true },
+    ]);
   }
+});
+
+test("core-register list reads preserve debug state for both target observations", async (context) => {
+  const current = await fixture(context, "core-read-all-preserve-state");
+  current.probe.targetState = "halted";
+  current.probe.registersReadResult = {
+    success: true,
+    rawOutput: "R0 = 00000001, R1 = 00000002",
+    output: "",
+  };
+
+  const result = await current.service.readCoreRegisters(current.projectRoot);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(current.probe.observationOptions, [
+    { preserveDebugStateOnClose: true },
+    { preserveDebugStateOnClose: true },
+  ]);
 });
 
 test("diagnose_crash collects Cortex-M fault and validated exception-frame evidence without changing state", async (context) => {

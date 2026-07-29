@@ -523,13 +523,13 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   async readAllRegisters(): Promise<CommandResult> {
-    return this.executeDirect(["regs"]);
+    return this.executeDirect(["exec SetSkipDebugDeInit = 1", "regs"]);
   }
   async readRegister(name: string): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
       return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
-    return this.executeDirect([`rreg ${jlinkCoreRegisterToken(name)}`]);
+    return this.executeDirect(["exec SetSkipDebugDeInit = 1", `rreg ${jlinkCoreRegisterToken(name)}`]);
   }
   async writeCoreRegister(name: string, value: number): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {

@@ -142,12 +142,12 @@ test("JLinkBackend uses J-Link-supported tokens for aliased core registers", asy
   }
 
   assert.deepEqual(scripts, [
-    "exec SetRestartOnClose = 0\nrreg \"R15 (PC)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nrreg \"R15 (PC)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nrreg R14\nexit\n",
-    "exec SetRestartOnClose = 0\nrreg R14\nexit\n",
-    "exec SetRestartOnClose = 0\nrreg \"R13 (SP)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nrreg \"R13 (SP)\"\nexit\n",
     "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nexit\n",
     "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nexit\n",
   ]);
@@ -240,13 +240,17 @@ test("JLinkBackend preserves a verified register value through final observation
   const result = await backend.writeCoreRegisterTransaction("R0", 0x1357_9bdf);
   const after = await backend.observeTargetState({ preserveDebugStateOnClose: true });
   const independent = await backend.readRegister("R0");
+  const secondIndependent = await backend.readRegister("R0");
 
   assert.equal(result.command.success, true, JSON.stringify(result.command));
   assert.equal(result.readback?.success, true, JSON.stringify(result.readback));
   assert.equal(after.state, "halted", JSON.stringify(after.result));
   assert.match(independent.rawOutput, /R0\s*=\s*0x13579bdf/i);
+  assert.match(secondIndependent.rawOutput, /R0\s*=\s*0x13579bdf/i);
   assert.equal(registerState.value, "13579bdf");
   assert.match(scripts[0] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*wreg R0[\s\S]*rreg R0[\s\S]*exit/);
+  assert.match(scripts[1] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*rreg R0[\s\S]*exit/);
+  assert.match(scripts[2] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*rreg R0[\s\S]*exit/);
   assert.ok(helperArgs[0]?.includes("--preserve-debug-state-on-close"));
 });
 
@@ -878,8 +882,12 @@ function registerTransactionProcess(
       } else if (command === "exit") {
         setImmediate(() => {
           if (mode === "stderr_fatal") child.stderr.write("Unknown command. '?' for help.\n");
-          if (options.registerState && requested && /exec SetSkipDebugDeInit\s*=\s*1/i.test(script)) {
-            options.registerState.value = requested;
+          if (options.registerState) {
+            if (/exec SetSkipDebugDeInit\s*=\s*1/i.test(script)) {
+              if (requested) options.registerState.value = requested;
+            } else {
+              options.registerState.value = "00000000";
+            }
           }
           close(0);
         });

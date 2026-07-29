@@ -783,7 +783,7 @@ export class DirectMcuService {
   readCoreRegister(projectRoot: string, name: string): Promise<OperationEnvelope> {
     try { validateCoreRegister(name); } catch (error) { return Promise.resolve(this.failure(createOperationEnvelope("read_core_register"), error, "validation")); }
     return this.queued("read_core_register", projectRoot, [], async (envelope, _target, runtime) => {
-      const before = await observe(runtime.probe);
+      const before = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       envelope.before = observationData(before);
       requireHaltedCoreAccess(before, "core-register read");
       let result: CommandResult | undefined;
@@ -797,7 +797,7 @@ export class DirectMcuService {
       envelope.data = { name: name.toUpperCase(), command: result ? commandData(result) : null };
       let after: TargetStateObservation;
       try {
-        after = await observe(runtime.probe);
+        after = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       } catch (error) {
         throw readFailure ? readErrorWithUnknownState(readFailure) : unexpectedReadObservationError(error, "core-register read");
       }
@@ -815,7 +815,7 @@ export class DirectMcuService {
 
   readCoreRegisters(projectRoot: string): Promise<OperationEnvelope> {
     return this.queued("read_core_registers", projectRoot, [], async (envelope, _target, runtime) => {
-      const before = await observe(runtime.probe);
+      const before = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       envelope.before = observationData(before);
       requireHaltedCoreAccess(before, "core-register read");
       let result: CommandResult | undefined;
@@ -829,7 +829,7 @@ export class DirectMcuService {
       envelope.data = { command: result ? commandData(result) : null };
       let after: TargetStateObservation;
       try {
-        after = await observe(runtime.probe);
+        after = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       } catch (error) {
         throw readFailure ? readErrorWithUnknownState(readFailure) : unexpectedReadObservationError(error, "core-register-list read");
       }
