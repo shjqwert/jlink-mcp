@@ -170,17 +170,17 @@ test("JLinkBackend phases same-connection core-register write and readback for a
   }
 
   assert.deepEqual(scripts, [
-    "exec SetRestartOnClose = 0\r\nwreg R0, 0x12345678\r\nrreg R0\r\nexit\r\n",
-    "exec SetRestartOnClose = 0\r\nwreg \"R15 (PC)\", 0x12345678\r\nrreg \"R15 (PC)\"\r\nexit\r\n",
-    "exec SetRestartOnClose = 0\r\nwreg \"R15 (PC)\", 0x12345678\r\nrreg \"R15 (PC)\"\r\nexit\r\n",
-    "exec SetRestartOnClose = 0\r\nwreg R14, 0x12345678\r\nrreg R14\r\nexit\r\n",
-    "exec SetRestartOnClose = 0\r\nwreg R14, 0x12345678\r\nrreg R14\r\nexit\r\n",
-    "exec SetRestartOnClose = 0\r\nwreg \"R13 (SP)\", 0x12345678\r\nrreg \"R13 (SP)\"\r\nexit\r\n",
-    "exec SetRestartOnClose = 0\r\nwreg \"R13 (SP)\", 0x12345678\r\nrreg \"R13 (SP)\"\r\nexit\r\n",
+    "exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
   ]);
 });
 
-test("JLinkBackend starts a V8.84 transaction with CRLF input before any output and accepts chunked prompts", async () => {
+test("JLinkBackend closes stdin before V8.84 releases buffered transaction output", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
@@ -188,7 +188,7 @@ test("JLinkBackend starts a V8.84 transaction with CRLF input before any output 
     () => registerTransactionProcess(scripts, "match", {
       initialPrompt: false,
       realisticStartupChunks: true,
-      requireCrLf: true,
+      respondAfterEof: true,
     }),
   );
   const invoke = (backend as unknown as {
@@ -201,35 +201,48 @@ test("JLinkBackend starts a V8.84 transaction with CRLF input before any output 
   assert.equal(result.command.writeIssued, true);
   assert.equal(result.readback?.success, true);
   assert.equal(result.readback?.stateUnknown, false);
-  assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\r\nwreg R0, 0x12345678\r\nrreg R0\r\nexit\r\n"]);
+  assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n"]);
 });
 
-test("JLinkBackend timeout evidence distinguishes policy wait from a sent wreg", async () => {
-  const beforeWrite = new JLinkBackend(
+test("JLinkBackend treats a timeout after submitting the EOF batch as an uncertain write", async () => {
+  const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
-    () => registerTransactionProcess([], "policy_silent", { initialPrompt: false }),
+    () => registerTransactionProcess([], "batch_silent", { initialPrompt: false, respondAfterEof: true }),
   );
-  const invokeBefore = (beforeWrite as unknown as {
+  const invoke = (backend as unknown as {
     execCoreRegisterTransaction(token: string, value: number, timeoutMs: number): Promise<import("./backend").ProbeCoreRegisterWriteResult>;
-  }).execCoreRegisterTransaction.bind(beforeWrite);
-  const policyTimeout = await invokeBefore("R0", 0x1234_5678, 20);
-  assert.equal(policyTimeout.command.errorCode, ProbeErrorCode.TIMEOUT);
-  assert.equal(policyTimeout.command.writeIssued, false);
-  assert.equal(policyTimeout.command.stateUnknown, false);
+  }).execCoreRegisterTransaction.bind(backend);
 
-  const afterWrite = new JLinkBackend(
+  const result = await invoke("R0", 0x1234_5678, 20);
+
+  assert.equal(result.command.errorCode, ProbeErrorCode.TIMEOUT);
+  assert.equal(result.command.writeIssued, true);
+  assert.equal(result.command.stateUnknown, true);
+  assert.equal(result.readback?.success, false);
+  assert.equal(result.readback?.stateUnknown, true);
+});
+
+test("JLinkBackend keeps a failed process spawn unissued", async () => {
+  const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
-    () => registerTransactionProcess([], "write_silent", { initialPrompt: false, realisticStartupChunks: true }),
+    () => {
+      const child = registerTransactionProcess([], "batch_silent", { initialPrompt: false, respondAfterEof: true });
+      setImmediate(() => {
+        child.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }));
+        child.kill();
+      });
+      return child;
+    },
   );
-  const invokeAfter = (afterWrite as unknown as {
-    execCoreRegisterTransaction(token: string, value: number, timeoutMs: number): Promise<import("./backend").ProbeCoreRegisterWriteResult>;
-  }).execCoreRegisterTransaction.bind(afterWrite);
-  const writeTimeout = await invokeAfter("R0", 0x1234_5678, 20);
-  assert.equal(writeTimeout.command.errorCode, ProbeErrorCode.TIMEOUT);
-  assert.equal(writeTimeout.command.writeIssued, true);
-  assert.equal(writeTimeout.command.stateUnknown, true);
+
+  const result = await backend.writeCoreRegisterTransaction("R0", 0x1234_5678);
+
+  assert.equal(result.command.errorCode, ProbeErrorCode.PROBE_NOT_FOUND);
+  assert.equal(result.command.writeIssued, false);
+  assert.equal(result.command.stateUnknown, false);
+  assert.equal(result.readback, undefined);
 });
 
 test("JLinkBackend never promotes write echo to readback and preserves readback failure dispatch", async () => {
@@ -249,12 +262,31 @@ test("JLinkBackend never promotes write echo to readback and preserves readback 
     () => registerTransactionProcess([], "readback_failure"),
   );
   const failed = await failedReadback.writeCoreRegisterTransaction("R0", 0x1234_5678);
-  assert.equal(failed.command.success, false);
+  assert.equal(failed.command.success, true);
   assert.equal(failed.command.writeIssued, true);
-  assert.equal(failed.command.stateUnknown, true);
+  assert.equal(failed.command.stateUnknown, false);
   assert.equal(failed.readback?.success, false);
+  assert.equal(failed.readback?.errorCode, ProbeErrorCode.TARGET_UNREACHABLE);
   assert.equal(failed.readback?.writeIssued, true);
   assert.equal(failed.readback?.stateUnknown, true);
+});
+
+test("JLinkBackend treats a late target failure without command echoes as a possible write", async () => {
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => registerTransactionProcess([], "readback_failure_no_echo"),
+  );
+
+  const result = await backend.writeCoreRegisterTransaction("R0", 0x1234_5678);
+
+  assert.equal(result.command.success, false);
+  assert.equal(result.command.errorCode, ProbeErrorCode.TARGET_UNREACHABLE);
+  assert.equal(result.command.writeIssued, true);
+  assert.equal(result.command.stateUnknown, true);
+  assert.equal(result.readback?.success, false);
+  assert.equal(result.readback?.writeIssued, true);
+  assert.equal(result.readback?.stateUnknown, true);
 });
 
 test("JLinkBackend lets a fatal stderr diagnostic override completed write and readback prompts", async () => {
@@ -644,8 +676,8 @@ function fakeProcess(signals: Array<NodeJS.Signals | number | undefined>, emitKi
 
 function registerTransactionProcess(
   scripts: string[],
-  mode: "match" | "write_echo_only" | "readback_failure" | "stderr_fatal" | "policy_silent" | "write_silent",
-  options: { initialPrompt?: boolean; realisticStartupChunks?: boolean; requireCrLf?: boolean } = {},
+  mode: "match" | "write_echo_only" | "readback_failure" | "readback_failure_no_echo" | "stderr_fatal" | "batch_silent",
+  options: { initialPrompt?: boolean; realisticStartupChunks?: boolean; respondAfterEof?: boolean } = {},
 ): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
@@ -678,29 +710,18 @@ function registerTransactionProcess(
     child.emit("exit", code, null);
     child.emit("close", code, null);
   };
-  const respond = (text: string) => setImmediate(() => child.stdout.write(text));
+  const respond = (text: string) => child.stdout.write(text);
   const respondChunks = (chunks: string[]) => {
-    const remaining = [...chunks];
-    const writeNext = () => {
-      const chunk = remaining.shift();
-      if (chunk === undefined) return;
-      child.stdout.write(chunk);
-      setImmediate(writeNext);
-    };
-    setImmediate(writeNext);
+    for (const chunk of chunks) child.stdout.write(chunk);
   };
-  child.stdin.on("data", (chunk: Buffer) => {
-    const text = chunk.toString();
-    script += text;
-    input += text;
-    const lineEnding = options.requireCrLf ? "\r\n" : "\n";
-    while (input.includes(lineEnding)) {
-      const newline = input.indexOf(lineEnding);
+  const processInput = () => {
+    if (mode === "batch_silent") return;
+    while (input.includes("\n")) {
+      const newline = input.indexOf("\n");
       const command = input.slice(0, newline).trim();
-      input = input.slice(newline + lineEnding.length);
+      input = input.slice(newline + 1);
       if (!command) continue;
       if (command === "exec SetRestartOnClose = 0") {
-        if (mode === "policy_silent") continue;
         if (options.realisticStartupChunks) {
           respondChunks([
             "SEGGER J-Link Commander V8.84\r\n",
@@ -717,17 +738,21 @@ function registerTransactionProcess(
         const match = command.match(/^wreg (.+), 0x([0-9a-f]+)$/i);
         token = match?.[1] ?? "R0";
         requested = match?.[2] ?? "00000000";
-        if (mode !== "write_silent") respond(`write echo: ${token} = ${requested}\nJ-Link>`);
+        respond(mode === "readback_failure_no_echo"
+          ? "O.K.\r\nJ-Link>"
+          : `${command}\r\nwrite echo: ${token} = ${requested}\r\nJ-Link>`);
       } else if (command.startsWith("rreg ")) {
-        if (mode === "readback_failure") {
+        if (mode === "readback_failure" || mode === "readback_failure_no_echo") {
           setImmediate(() => {
-            child.stdout.write("****** Error: Could not read register\n");
+            child.stdout.write(mode === "readback_failure_no_echo"
+              ? "****** Error: Cannot connect to target\r\n"
+              : `${command}\r\n****** Error: Cannot connect to target\r\n`);
             close(1);
           });
         } else if (mode === "write_echo_only") {
-          respond("O.K.\nJ-Link>");
+          respond(`${command}\r\nO.K.\r\nJ-Link>`);
         } else {
-          respond(`${token} = ${requested}\nJ-Link>`);
+          respond(`${command}\r\n${token} = ${requested}\r\nJ-Link>`);
         }
       } else if (command === "exit") {
         setImmediate(() => {
@@ -736,12 +761,19 @@ function registerTransactionProcess(
         });
       }
     }
+  };
+  child.stdin.on("data", (chunk: Buffer) => {
+    const text = chunk.toString();
+    script += text;
+    input += text;
+    if (!options.respondAfterEof) processInput();
   });
+  child.stdin.on("end", processInput);
   child.kill = () => {
     setImmediate(() => close(1));
     return true;
   };
-  if (options.initialPrompt !== false) respond("SEGGER J-Link Commander\nJ-Link>");
+  if (options.initialPrompt !== false && !options.respondAfterEof) respond("SEGGER J-Link Commander\nJ-Link>");
   return child as unknown as ChildProcess;
 }
 

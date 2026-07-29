@@ -59,6 +59,23 @@ function fatalJLinkCommandDiagnostic(raw: string): string | undefined {
       || /\bunknown command\.\s*['"]?\?['"]?\s+for help\./i.test(line));
 }
 
+function jlinkCommandResponse(raw: string, command: string): string | undefined {
+  const normalized = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const prompts = [...normalized.matchAll(/(?:^|\n)J-Link(?:\[\d+\])?>/gi)];
+  const expected = command.trim().replace(/\s+/g, " ").toLowerCase();
+  for (let index = 0; index < prompts.length; index += 1) {
+    const start = prompts[index].index ?? 0;
+    const end = prompts[index + 1]?.index ?? normalized.length;
+    const section = normalized.slice(start, end).replace(/^\n/, "");
+    const firstLine = section.split("\n", 1)[0];
+    const promptEnd = firstLine.indexOf(">");
+    if (promptEnd < 0) continue;
+    const echoed = firstLine.slice(promptEnd + 1).trim().replace(/\s+/g, " ").toLowerCase();
+    if (echoed === expected) return section;
+  }
+  return undefined;
+}
+
 export class JLinkBackend extends ProbeBackend {
   readonly type = "jlink" as const;
   readonly displayName = "SEGGER J-Link";
@@ -550,182 +567,86 @@ export class JLinkBackend extends ProbeBackend {
     }
   }
 
-  private execCoreRegisterTransaction(token: string, value: number, timeoutMs = 30000): Promise<ProbeCoreRegisterWriteResult> {
-    this.connectionGeneration += 1;
-    const args = [
-      "-device", this.config.device,
-      "-if", this.config.interface,
-      "-speed", String(this.config.speed),
-      "-autoconnect", "1",
-      "-ExitOnError", "1",
-      "-NoGui", "1",
-    ];
-    if (this.config.serialNumber) args.push("-SelectEmuBySN", this.config.serialNumber);
+  private async execCoreRegisterTransaction(token: string, value: number, timeoutMs = 30000): Promise<ProbeCoreRegisterWriteResult> {
+    const writeCommand = `wreg ${token}, 0x${value.toString(16)}`;
+    const readbackCommand = `rreg ${token}`;
+    let result: CommandResult;
+    try {
+      // J-Link V8.84 can buffer all Commander output while an interactive
+      // Windows stdin pipe remains open. Submit the complete transaction and
+      // close stdin, matching the batch path used by proven direct operations.
+      result = await this.execRaw([writeCommand, readbackCommand], timeoutMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to start J-Link core-register transaction";
+      return {
+        command: {
+          success: false,
+          rawOutput: "",
+          output: "",
+          error: message,
+          errorCode: ProbeErrorCode.PROBE_NOT_FOUND,
+          writeIssued: false,
+          stateUnknown: false,
+        },
+      };
+    }
 
-    return new Promise((resolve) => {
-      const proc = this.spawnProcess(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
-      let stdout = "";
-      let stderr = "";
-      let phase: "policy" | "write" | "readback" | "exit" = "policy";
-      let phaseStart = 0;
-      let writeRaw = "";
-      let readbackRaw = "";
-      let writeSent = false;
-      let writeCompleted = false;
-      let readbackSent = false;
-      let readbackCompleted = false;
-      let processError: Error | undefined;
-      let inputError: Error | undefined;
-      let timedOut = false;
-      let settled = false;
-      let timeout: NodeJS.Timeout | undefined;
-      const commandLineEnding = "\r\n";
-
-      const failInput = (error: unknown) => {
-        inputError ??= error instanceof Error ? error : new Error(String(error));
-        void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
-      };
-      const writeInput = (text: string): boolean => {
-        try {
-          if (!proc.stdin) throw new Error("J-Link stdin is unavailable");
-          proc.stdin.write(text);
-          return true;
-        } catch (error) {
-          failInput(error);
-          return false;
-        }
-      };
-      const send = (command: string, nextPhase: typeof phase) => {
-        phase = nextPhase;
-        phaseStart = stdout.length;
-        const dispatched = writeInput(`${command}${commandLineEnding}`);
-        if (nextPhase === "write" && dispatched) writeSent = true;
-        if (nextPhase === "readback" && dispatched) readbackSent = true;
-      };
-      const finishInput = () => {
-        phase = "exit";
-        writeInput(`exit${commandLineEnding}`);
-        proc.stdin?.end();
-      };
-      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
-        if (settled) return;
-        settled = true;
-        if (timeout) clearTimeout(timeout);
-        const transportFailure = timedOut
-          ? `J-Link timed out after ${timeoutMs}ms`
-          : processError
-            ? `Failed to spawn JLinkExe: ${processError.message}`
-            : inputError
-              ? `J-Link stdin failed: ${inputError.message}`
-            : code !== 0
-              ? `J-Link exited with code ${code}`
-              : undefined;
-        const wholeDiagnostic = fatalJLinkCommandDiagnostic(`${stdout}\n${stderr}`);
-        const overallFailure = Boolean(transportFailure || wholeDiagnostic);
-        const failureCode = processError
-          ? ProbeErrorCode.PROBE_NOT_FOUND
-          : inputError
-            ? ProbeErrorCode.JLINK_COMMAND_FAILED
-          : /inittarget\(\) returned error|could not connect|cannot connect/i.test(stdout)
-            ? ProbeErrorCode.TARGET_UNREACHABLE
-            : wholeDiagnostic
-              ? ProbeErrorCode.JLINK_COMMAND_FAILED
-              : timedOut
-                ? ProbeErrorCode.TIMEOUT
-                : transportFailure
-                  ? ProbeErrorCode.JLINK_COMMAND_FAILED
-                  : undefined;
-        const failureMessage = transportFailure ?? (wholeDiagnostic ? `J-Link reported a fatal command diagnostic: ${wholeDiagnostic}` : stderr || "J-Link core-register transaction did not complete");
-        const command: CommandResult = writeCompleted && !overallFailure
-          ? {
-            success: true,
-            rawOutput: writeRaw,
-            output: stripBoilerplate(writeRaw),
-            stderr,
-            exitCode: code,
-            exitSignal: signal,
-            writeIssued: true,
-            stateUnknown: false,
-          }
-          : {
-            success: false,
-            rawOutput: writeRaw || stdout,
-            output: stripBoilerplate(writeRaw || stdout),
-            stderr,
-            error: failureMessage,
-            errorCode: failureCode,
-            exitCode: code,
-            exitSignal: signal,
-            writeIssued: writeSent,
-            stateUnknown: writeSent,
-          };
-        const readback: CommandResult | undefined = readbackSent
-          ? readbackCompleted && !overallFailure
-            ? {
-              success: true,
-              rawOutput: readbackRaw,
-              output: stripBoilerplate(readbackRaw),
-              stderr,
-              exitCode: code,
-              exitSignal: signal,
-              writeIssued: true,
-              stateUnknown: false,
-            }
-            : {
-              success: false,
-              rawOutput: readbackRaw,
-              output: stripBoilerplate(readbackRaw),
-              stderr,
-              error: failureMessage,
-              errorCode: failureCode,
-              exitCode: code,
-              exitSignal: signal,
-              writeIssued: true,
-              stateUnknown: true,
-            }
-          : undefined;
-        resolve({ command, readback });
+    const writeRaw = jlinkCommandResponse(result.rawOutput, writeCommand);
+    const readbackRaw = jlinkCommandResponse(result.rawOutput, readbackCommand);
+    const fatalDiagnostic = fatalJLinkCommandDiagnostic(`${result.rawOutput}\n${result.stderr ?? ""}`);
+    const knownPreDispatchFailure = result.errorCode === ProbeErrorCode.PROBE_NOT_FOUND
+      && /^Failed to spawn JLinkExe:/i.test(result.error ?? "");
+    // The complete stdin script (including wreg) is closed before waiting.
+    // A timeout or unclassified vendor failure is therefore an uncertain
+    // mutation unless the vendor proved it failed during attach/spawn.
+    const writeIssued = !knownPreDispatchFailure;
+    const writeCompleted = !fatalDiagnostic
+      && Boolean(writeRaw)
+      && (Boolean(readbackRaw) || result.success);
+    const command: CommandResult = result.success || writeCompleted
+      ? {
+        ...result,
+        success: true,
+        rawOutput: writeRaw ?? result.rawOutput,
+        output: stripBoilerplate(writeRaw ?? result.rawOutput),
+        error: undefined,
+        errorCode: undefined,
+        writeIssued: true,
+        stateUnknown: false,
+      }
+      : {
+        ...result,
+        success: false,
+        rawOutput: writeRaw ?? result.rawOutput,
+        output: stripBoilerplate(writeRaw ?? result.rawOutput),
+        writeIssued,
+        stateUnknown: Boolean(writeIssued || result.stateUnknown),
       };
 
-      proc.stdout?.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString();
-        if (phase === "exit") return;
-        const phaseRaw = stdout.slice(phaseStart);
-        if (!/(?:^|[\r\n])J-Link(?:\[\d+\])?>[ \t]*$/i.test(phaseRaw)) return;
-        if (phase === "policy") {
-          if (fatalJLinkCommandDiagnostic(phaseRaw)) finishInput();
-          else if (/\bO\.K\.|SetRestartOnClose/i.test(phaseRaw)) send(`wreg ${token}, 0x${value.toString(16)}`, "write");
-          else phaseStart = stdout.length; // Ignore a delayed bare startup prompt.
-        } else if (phase === "write") {
-          writeRaw = phaseRaw;
-          if (fatalJLinkCommandDiagnostic(writeRaw)) finishInput();
-          else {
-            writeCompleted = true;
-            send(`rreg ${token}`, "readback");
-          }
-        } else {
-          readbackRaw = phaseRaw;
-          readbackCompleted = !fatalJLinkCommandDiagnostic(readbackRaw);
-          finishInput();
-        }
-      });
-      proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-      proc.stdin?.on("error", failInput);
-      proc.on("error", (error) => {
-        processError = error;
-        this.setState(ProbeState.DISCONNECTED);
-      });
-      proc.on("close", (code, signal) => finish(code, signal));
+    if (!writeIssued) return { command };
 
-      timeout = setTimeout(() => {
-        timedOut = true;
-        void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
-      }, timeoutMs);
-      // V8.84 may not emit an initial prompt while stdin remains open and its
-      // Windows pipe input requires CRLF to dispatch an interactive command.
-      // Start the handshake with only the non-mutating close-policy command.
-      send("exec SetRestartOnClose = 0", "policy");
-    });
+    const readback: CommandResult = result.success && readbackRaw && !fatalDiagnostic
+      ? {
+        ...result,
+        success: true,
+        rawOutput: readbackRaw,
+        output: stripBoilerplate(readbackRaw),
+        error: undefined,
+        errorCode: undefined,
+        writeIssued: true,
+        stateUnknown: false,
+      }
+      : {
+        ...result,
+        success: false,
+        rawOutput: readbackRaw ?? "",
+        output: stripBoilerplate(readbackRaw ?? ""),
+        error: result.error ?? "J-Link same-connection register readback did not complete",
+        errorCode: result.errorCode ?? ProbeErrorCode.JLINK_COMMAND_FAILED,
+        writeIssued: true,
+        stateUnknown: true,
+      };
+    return { command, readback };
   }
 
   // ── GDB Server ───────────────────────────────────────────────────
