@@ -18,6 +18,7 @@ test("GDBClient reports caller timeout and observes client exit before returning
 
   assert.equal(result.success, false);
   assert.equal(result.code, "GDB_COMMAND_TIMEOUT");
+  assert.equal(result.dispatchedCommand, "maintenance hang");
   assert.match(result.error ?? "", /20ms/);
   assert.equal(signals[0], "SIGTERM");
   assert.equal(client.isConnected(), false);
@@ -56,7 +57,7 @@ test("GDBClient accepts an MI prompt with trailing horizontal whitespace", async
   await client.disconnect();
 });
 
-test("GDBClient enables MI async before connecting so commands are accepted while target runs", async () => {
+test("GDBClient uses the native MI breakpoint transaction while the target runs", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const commands: string[] = [];
   const child = createFakeGdbProcess(signals, undefined, false, false, commands);
@@ -68,6 +69,24 @@ test("GDBClient enables MI async before connecting so commands are accepted whil
   const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 50);
   assert.equal(breakpoint.success, true);
   assert.equal(breakpoint.rawOutput, "^done\n(gdb)\n");
+  assert.equal(breakpoint.dispatchedCommand, "-break-insert -- JlinkTestFixtureTask1ms");
+  assert.equal(commands.at(-1), "-break-insert -- JlinkTestFixtureTask1ms");
+  await client.disconnect();
+});
+
+test("GDBClient leaves complex and aliased CLI breakpoint commands exact", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(signals, undefined, false, false, commands));
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+
+  const exactCommands = ["b foo", "break foo if x", 'break "foo bar"', "break foo\\bar"];
+  for (const command of exactCommands) {
+    const result = await client.command(command);
+    assert.equal(result.success, true);
+    assert.equal(result.dispatchedCommand, command);
+  }
+  assert.deepEqual(commands.slice(-exactCommands.length), exactCommands);
   await client.disconnect();
 });
 
@@ -133,6 +152,7 @@ test("GDBClient reports an in-flight process exit with exact exit facts", async 
   const result = await client.command("maintenance crash", 5_000);
   assert.equal(result.success, false);
   assert.equal(result.code, "GDB_PROCESS_EXITED");
+  assert.equal(result.dispatchedCommand, "maintenance crash");
   assert.equal(result.exitCode, 7);
   assert.equal(result.exitSignal, null);
   assert.equal(signals.length, 0);
@@ -360,9 +380,9 @@ function createFakeGdbProcess(
         setImmediate(() => child.stdout.write('~"literal ^error and ^done\\n"\n^done\n(gdb)\n'));
       } else if (command === "continue") {
         setImmediate(() => child.stdout.write('^running\n*running,thread-id="all"\n(gdb)\n'));
-      } else if (command.startsWith("break ") && !miAsyncEnabled) {
-        // Synchronous MI does not process another stdin command while the
-        // remote inferior is running.
+      } else if (command === "break JlinkTestFixtureTask1ms") {
+        // Direct CLI breakpoint compatibility can remain synchronous even
+        // when MI async is enabled, matching the J-Link R5 zero-output hang.
       } else if (command === "show stopped-then-running") {
         setImmediate(() => child.stdout.write('*stopped,reason="breakpoint-hit"\n*running,thread-id="all"\n^done\n(gdb)\n'));
       } else if (command === "show running-then-exited") {

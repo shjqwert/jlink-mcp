@@ -100,13 +100,14 @@ test("failed raw GDB command retains command and partial output facts", async (c
   const fixtureValue = await fixture(context, "gdb-command-failure", true);
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
-  fixtureValue.gdb.commandResult = { success: false, output: "partial output", rawOutput: "^running", error: "timed out", code: "GDB_COMMAND_TIMEOUT", exitCode: 9, exitSignal: null };
+  fixtureValue.gdb.commandResult = { success: false, output: "partial output", rawOutput: "^running", dispatchedCommand: "-break-insert -- task", error: "timed out", code: "GDB_COMMAND_TIMEOUT", exitCode: 9, exitSignal: null };
   const result = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "monitor long-command", 25);
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "GDB_COMMAND_TIMEOUT");
   assert.equal((result.data as { command: string }).command, "monitor long-command");
   assert.equal((result.data as { output: string }).output, "partial output");
   assert.equal((result.data as { rawOutput: string }).rawOutput, "^running");
+  assert.equal((result.data as { dispatchedCommand: string }).dispatchedCommand, "-break-insert -- task");
   assert.equal((result.data as { exitCode: number }).exitCode, 9);
   assert.equal(result.artifact?.match, "unverified");
   assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.status, "unverified");

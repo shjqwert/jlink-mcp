@@ -7,6 +7,8 @@ export interface GDBResponse {
   output: string;
   /** Exact GDB/MI exchange retained for Agent diagnosis. */
   rawOutput?: string;
+  /** Exact command written to the GDB/MI stdin after any compatibility mapping. */
+  dispatchedCommand?: string;
   /** If the target stopped, why (breakpoint, signal, exit, etc.) */
   stopReason?: string;
   error?: string;
@@ -282,8 +284,9 @@ export class GDBClient {
 
     this.stopEvent = null;
     let exchange: GDBCommandExchange;
+    const dispatchedCommand = toMiTransactionCommand(cmd);
     try {
-      exchange = await this.sendCommand(cmd, timeout);
+      exchange = await this.sendCommand(dispatchedCommand, timeout);
     } catch (error) {
       await this.terminateGdbProcess();
       return { success: false, output: "", rawOutput: this.outputBuffer, error: error instanceof Error ? error.message : String(error), code: "GDB_IO_FAILED", ...this.exitFacts() };
@@ -292,11 +295,11 @@ export class GDBClient {
     const observedTargetExecutionState = this.updateTargetExecutionState(rawOutput);
     const output = this.cleanMI(rawOutput);
     if (exchange.processExited) {
-      return { success: false, output, rawOutput, error: "GDB exited while the command was in flight", code: "GDB_PROCESS_EXITED", ...this.exitFacts() };
+      return { success: false, output, rawOutput, dispatchedCommand, error: "GDB exited while the command was in flight", code: "GDB_PROCESS_EXITED", ...this.exitFacts() };
     }
     if (exchange.timedOut) {
       await this.terminateGdbProcess();
-      return { success: false, output, rawOutput, error: `GDB command timed out after ${timeout}ms; the GDB client was terminated before releasing the Probe queue`, code: "GDB_COMMAND_TIMEOUT", ...this.exitFacts() };
+      return { success: false, output, rawOutput, dispatchedCommand, error: `GDB command timed out after ${timeout}ms; the GDB client was terminated before releasing the Probe queue`, code: "GDB_COMMAND_TIMEOUT", ...this.exitFacts() };
     }
 
     // For run commands, check if we got a stop event
@@ -306,6 +309,7 @@ export class GDBClient {
           success: true,
           output,
           rawOutput,
+          dispatchedCommand,
           stopReason: this.stopEvent,
           observedTargetExecutionState,
         };
@@ -316,6 +320,7 @@ export class GDBClient {
           success: true,
           output: `Target is running. Use gdb_wait to poll for stop events.\nLast output: ${output}`,
           rawOutput,
+          dispatchedCommand,
           stopReason: "running",
           observedTargetExecutionState,
         };
@@ -330,6 +335,7 @@ export class GDBClient {
       success,
       output,
       rawOutput,
+      dispatchedCommand,
       error: errorRecord ? decodeMiString(errorMessage ?? "GDB command failed") : undefined,
       stopReason: this.stopEvent || undefined,
       observedTargetExecutionState,
@@ -679,6 +685,11 @@ export class GDBClient {
 
 function hasMiPrompt(raw: string): boolean {
   return /(?:^|\r?\n)\(gdb\)[\t ]*(?=\r?\n|$)/m.test(raw);
+}
+
+function toMiTransactionCommand(command: string): string {
+  const simpleBreakpoint = /^break[ \t]+([^\s"\\]+)$/.exec(command.trim());
+  return simpleBreakpoint ? `-break-insert -- ${simpleBreakpoint[1]}` : command;
 }
 
 function findMiResult(raw: string, kind: "done" | "error" | "running" | "connected" | "exit"): string | undefined {
