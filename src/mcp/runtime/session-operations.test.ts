@@ -346,7 +346,7 @@ test("GDB connect restores the audited RT-06 J-Link attach stop only with explic
     output: "Stopped at prvCheckTasksWaitingTermination()",
     rawOutput: '&"target remote localhost:2331\\n"\r\n'
       + '~"Remote debugging using localhost:2331\\n"\r\n'
-      + '*stopped,frame={addr="0x0001c0c4",func="prvCheckTasksWaitingTermination",args=[],file="D:\\\\FOC_Project\\\\Appl\\\\Source\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",fullname="D:\\\\FOC_Project\\\\Appl\\\\Source\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",line="3665",arch="armv7e-m"},thread-id="1",stopped-threads="all"\r\n'
+      + '*stopped,frame={addr="0x0001c0c4",func="prvCheckTasksWaitingTermination",args=[],file="Z:\\\\fixture\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",fullname="Z:\\\\fixture\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",line="3665",arch="armv7e-m"},thread-id="1",stopped-threads="all"\r\n'
       + "^done\r\n(gdb) \r\n",
     observedTargetExecutionState: "halted",
   };

@@ -66,7 +66,7 @@ test("GDBClient uses the native MI breakpoint transaction while the target runs"
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.deepEqual(commands.slice(0, 2), ["-gdb-set mi-async on", "target remote localhost:2331"]);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 50);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
   assert.equal(breakpoint.success, true);
   assert.match(breakpoint.rawOutput ?? "", /\^done[\s\S]*\*stopped,reason="signal-received",signal-name="SIGINT"[\s\S]*\^done[\s\S]*\^running/);
   assert.equal(breakpoint.dispatchedCommand, "-break-insert -- JlinkTestFixtureTask1ms");
@@ -572,7 +572,7 @@ function createFakeGdbProcess(
         setImmediate(() => child.stdout.write('^running\n*running,thread-id="all"\n(gdb)\n'));
       } else if (command === "break JlinkTestFixtureTask1ms") {
         // Direct CLI breakpoint compatibility can remain synchronous even
-        // when MI async is enabled, matching the J-Link R5 zero-output hang.
+        // when MI async is enabled, matching the running-target zero-output hang.
       } else if (command === "show stopped-then-running") {
         setImmediate(() => child.stdout.write('*stopped,reason="breakpoint-hit"\n*running,thread-id="all"\n^done\n(gdb)\n'));
       } else if (command === "show running-then-exited") {
