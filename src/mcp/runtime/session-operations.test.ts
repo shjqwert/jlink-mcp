@@ -27,7 +27,7 @@ test("GDB Server claims a long-lived owner that excludes direct MCU operations",
   assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
 });
 
-test("raw GDB command is exact and invalidates live Artifact verification", async (context) => {
+test("raw GDB command preserves firmware identity and independently invalidates mutation trust", async (context) => {
   const fixtureValue = await fixture(context, "gdb-command", true);
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
@@ -35,7 +35,11 @@ test("raw GDB command is exact and invalidates live Artifact verification", asyn
   const result = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, command);
   assert.equal(result.ok, true);
   assert.deepEqual(fixtureValue.gdb.commands, [command]);
-  assert.equal(result.artifact?.match, "unverified");
+  assert.equal(result.artifact?.match, "verified");
+  assert.equal(result.artifact?.firmwareIdentity, "verified");
+  assert.equal(result.artifact?.mutationTrust, "unverified");
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.status, "verified");
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveMemoryMutationTrust.source, "gdb_command");
   assert.equal((result.data as { sideEffects: string }).sideEffects, "unknown");
 });
 
@@ -109,8 +113,10 @@ test("failed raw GDB command retains command and partial output facts", async (c
   assert.equal((result.data as { rawOutput: string }).rawOutput, "^running");
   assert.equal((result.data as { dispatchedCommand: string }).dispatchedCommand, "-break-insert -- task");
   assert.equal((result.data as { exitCode: number }).exitCode, 9);
-  assert.equal(result.artifact?.match, "unverified");
-  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.status, "unverified");
+  assert.equal(result.artifact?.match, "verified");
+  assert.equal(result.artifact?.firmwareIdentity, "verified");
+  assert.equal(result.artifact?.mutationTrust, "unverified");
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.status, "verified");
   assert.equal(result.error?.stateUnknown, true);
 
   fixtureValue.gdb.executionState = "running";
@@ -120,6 +126,41 @@ test("failed raw GDB command retains command and partial output facts", async (c
   assert.equal(known.error?.writeIssued, true);
   assert.equal(known.error?.stateUnknown, false);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
+});
+
+test("empty GDB interrupt window preserves firmware identity and explicit cleanup releases a running owner", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-empty-interrupt-window", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+  fixtureValue.gdb.executionState = "running";
+  fixtureValue.gdb.commandResult = {
+    success: false,
+    output: "",
+    rawOutput: "",
+    dispatchedCommand: "-break-insert -- JlinkTestFixtureTask1ms",
+    error: "empty interrupt MI window",
+    code: "GDB_INTERRUPT_EMPTY_WINDOW",
+    observedTargetExecutionState: "running",
+  };
+
+  const command = await fixtureValue.sessions.gdbCommand(
+    fixtureValue.projectRoot,
+    "break JlinkTestFixtureTask1ms",
+    25,
+  );
+
+  assert.equal(command.ok, false);
+  assert.equal(command.error?.code, "GDB_INTERRUPT_EMPTY_WINDOW");
+  assert.equal(command.error?.stateUnknown, false);
+  assert.equal(command.artifact?.firmwareIdentity, "verified");
+  assert.equal(command.artifact?.mutationTrust, "unverified");
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial)?.kind, "gdb");
+
+  const stopped = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+  assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
+  assert.equal((stopped.after as { targetExecutionState: string }).targetExecutionState, "running");
 });
 
 test("gdb_server_stop observes target after a timed-out client exits and safely releases owner", async (context) => {
@@ -187,7 +228,11 @@ test("unexpected GDB Server exit releases its long-lived owner", async (context)
   await waitUntil(() => fixtureValue.queue.getOwner(fixtureValue.target.probeSerial) === undefined);
   assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
   assert.equal(fixtureValue.runtime.gdbOwnerToken, undefined);
-  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.source, "gdb_server_unexpected_exit");
+  const target = fixtureValue.targets.require(fixtureValue.projectRoot);
+  assert.equal(target.liveArtifactMatch.status, "verified");
+  assert.equal(target.liveArtifactMatch.source, "fixture");
+  assert.equal(target.liveMemoryMutationTrust.status, "unverified");
+  assert.equal(target.liveMemoryMutationTrust.source, "gdb_server_unexpected_exit");
 });
 
 test("intentional GDB Server stop preserves verified Artifact evidence", async (context) => {
@@ -279,7 +324,7 @@ test("GDB Server start refuses a halted target before any process side effect", 
   assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
 });
 
-test("GDB Server start invalidates verified Artifact evidence on Probe identity loss", async (context) => {
+test("GDB Server start preserves firmware identity and invalidates mutation trust on Probe identity loss", async (context) => {
   const fixtureValue = await fixture(context, "gdb-start-identity-loss", true);
   await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
   fixtureValue.probe.targetState = "unknown";
@@ -294,8 +339,10 @@ test("GDB Server start invalidates verified Artifact evidence on Probe identity 
   const result = await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "TARGET_STATE_UNKNOWN");
-  assert.equal(result.artifact?.match, "unverified");
-  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.source, "probe_connection_identity_lost");
+  assert.equal(result.artifact?.match, "verified");
+  assert.equal(result.artifact?.mutationTrust, "unverified");
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.source, "fixture");
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveMemoryMutationTrust.source, "probe_connection_identity_lost");
   assert.equal(fixtureValue.probe.serverRunning, false);
 });
 

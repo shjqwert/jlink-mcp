@@ -18,7 +18,18 @@ export interface OperationEnvelope {
   target: null | { projectRoot: string; generation: string; device: string };
   probe: null | { serial: string; interface: string; speed: number; owner?: unknown };
   queueSequence?: number;
-  artifact: null | { generation: string; path: string; match: string; evidenceSource: string; evidenceTimestamp: string };
+  artifact: null | {
+    generation: string;
+    path: string;
+    /** Backward-compatible alias for firmwareIdentity. */
+    match: string;
+    firmwareIdentity: string;
+    mutationTrust: string;
+    evidenceSource: string;
+    evidenceTimestamp: string;
+    mutationTrustSource: string;
+    mutationTrustTimestamp: string;
+  };
   svd: null | { path: string; sha256: string };
   capture: null | Record<string, unknown>;
   before: Record<string, unknown>;
@@ -41,6 +52,11 @@ export class OperationExecutionError extends Error {
 
 export function createOperationEnvelope(tool: string, target?: StoredTarget): OperationEnvelope {
   const requestedAt = new Date().toISOString();
+  const mutationTrust = target?.liveMemoryMutationTrust ?? (target ? {
+    status: "unverified" as const,
+    source: "legacy_state_layer_missing",
+    timestamp: target.configuredAt,
+  } : undefined);
   return {
     ok: false,
     operationId: randomUUID(),
@@ -52,8 +68,12 @@ export function createOperationEnvelope(tool: string, target?: StoredTarget): Op
       generation: target.artifact.generation,
       path: target.artifact.path,
       match: target.liveArtifactMatch.status,
+      firmwareIdentity: target.liveArtifactMatch.status,
+      mutationTrust: mutationTrust!.status,
       evidenceSource: target.liveArtifactMatch.source,
       evidenceTimestamp: target.liveArtifactMatch.timestamp,
+      mutationTrustSource: mutationTrust!.source,
+      mutationTrustTimestamp: mutationTrust!.timestamp,
     } : null,
     svd: target?.svd ? { path: target.svd.path, sha256: target.svd.sha256 } : null,
     capture: null,

@@ -52,6 +52,8 @@ export class GDBClient {
   private outputBuffer = "";
   private pendingResolve: ((response: string, processExited: boolean) => void) | null = null;
   private pendingRequiresPrompt = false;
+  private pendingAcceptsAsyncStop = false;
+  private commandStreamTainted = false;
   private stopEvent: string | null = null;
   private history: string[] = [];
   private maxHistory = 200;
@@ -119,6 +121,7 @@ export class GDBClient {
       this.outputBuffer = "";
       this.stopEvent = null;
       this.lastExit = undefined;
+      this.commandStreamTainted = false;
 
       proc.stdout?.on("data", (data: Buffer) => {
         this.handleOutput(data.toString());
@@ -143,6 +146,7 @@ export class GDBClient {
           const pending = this.pendingResolve;
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
           pending?.(this.outputBuffer, true);
           if (pending) return;
           if (!terminating) finish({ success: false, output: "", error: `Failed to start GDB: ${err.message}. Is ${this.gdbPath} installed?`, ...this.exitFacts() });
@@ -154,6 +158,7 @@ export class GDBClient {
           const pendingOutput = this.outputBuffer;
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
           this.lastExit = { code: proc.exitCode, signal: proc.signalCode, error: err.message };
           if (wasConnected) this.notifyUnexpectedExit(proc);
           void this.terminateGdbProcess().then(() => {
@@ -177,6 +182,7 @@ export class GDBClient {
         const pending = this.pendingResolve;
         this.pendingResolve = null;
         this.pendingRequiresPrompt = false;
+        this.pendingAcceptsAsyncStop = false;
         pending?.(this.outputBuffer, true);
         if (pending) return;
         if (!terminating && !settled) finish({ success: false, output: this.cleanMI(this.outputBuffer), rawOutput: this.outputBuffer, error: `GDB exited before connection completed (code ${code})`, ...this.exitFacts() });
@@ -269,6 +275,15 @@ export class GDBClient {
     if (blocked) return { success: false, output: "", error: blocked };
     if (!this.proc || !this.connected) {
       return { success: false, output: "", error: "GDB not connected. Use gdb_connect first." };
+    }
+    if (this.commandStreamTainted) {
+      return {
+        success: false,
+        output: "",
+        error: "The previous MI transaction ended with an empty response window; explicit disconnect cleanup is required before another command",
+        code: "GDB_CLEANUP_REQUIRED",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
     }
 
     // Throttle rapid commands to avoid overwhelming slow adapters (e.g., ST-Link V2.1)
@@ -379,7 +394,7 @@ export class GDBClient {
 
     let interrupt: GDBCommandExchange;
     try {
-      interrupt = await this.sendCommand("-exec-interrupt --all", remaining());
+      interrupt = await this.sendCommand("-exec-interrupt --all", remaining(), true, true);
     } catch (error) {
       await this.terminateGdbProcess();
       return {
@@ -393,6 +408,24 @@ export class GDBClient {
       };
     }
     if (interrupt.processExited) return processExited("interrupt", interrupt);
+    if (
+      interrupt.timedOut
+      && interrupt.output.trim().length === 0
+      && this.proc
+      && this.connected
+      && this.targetExecutionState === "running"
+    ) {
+      this.commandStreamTainted = true;
+      return {
+        success: false,
+        output: "",
+        rawOutput: "",
+        dispatchedCommand,
+        error: `GDB produced no MI result, prompt, or async stop for exec-interrupt within ${timeout}ms; the live client and last observed running state were preserved for explicit cleanup`,
+        code: "GDB_INTERRUPT_EMPTY_WINDOW",
+        observedTargetExecutionState: "running",
+      };
+    }
     if (interrupt.timedOut) return timedOut("interrupt", interrupt);
     rawParts.push(interrupt.output);
     const interruptError = findMiResult(interrupt.output, "error");
@@ -501,6 +534,7 @@ export class GDBClient {
   private waitForInterruptStop(interruptOutput: string, timeout: number): Promise<GDBCommandExchange> {
     return new Promise((resolve) => {
       const started = Date.now();
+      let asyncStopObservedAt: number | undefined;
       const finish = (timedOut: boolean, processExited = false) => {
         const output = this.outputBuffer;
         this.outputBuffer = "";
@@ -516,9 +550,21 @@ export class GDBClient {
           return;
         }
         const completeOutput = interruptOutput + this.outputBuffer;
-        if ((this.stopEvent || this.targetExecutionState === "halted") && hasMiPromptAfterStop(completeOutput)) {
-          finish(false);
-          return;
+        if (this.stopEvent || this.targetExecutionState === "halted") {
+          if (hasMiPromptAfterStop(completeOutput)) {
+            finish(false);
+            return;
+          }
+          if (hasMiAsyncRecord(completeOutput, "stopped")) {
+            asyncStopObservedAt ??= Date.now();
+            // Some MI transports omit the prompt after a valid async stop.
+            // Keep a short drain window so a delayed prompt cannot satisfy the
+            // next transaction and steal its real result record.
+            if (Date.now() - asyncStopObservedAt >= Math.min(20, timeout)) {
+              finish(false);
+              return;
+            }
+          }
         }
         if (Date.now() - started >= timeout) {
           finish(true);
@@ -647,6 +693,8 @@ export class GDBClient {
     const pending = this.pendingResolve;
     this.pendingResolve = null;
     this.pendingRequiresPrompt = false;
+    this.pendingAcceptsAsyncStop = false;
+    this.commandStreamTainted = false;
     if (pending) pending(this.outputBuffer, true);
     if (proc) {
       await terminateChildProcess(proc, {
@@ -668,10 +716,17 @@ export class GDBClient {
     this.updateTargetExecutionState(this.outputBuffer);
 
     // If someone is waiting for a response, check if we have a prompt
-    if (this.pendingResolve && (this.pendingRequiresPrompt ? hasMiPrompt(this.outputBuffer) : this.isResponseComplete())) {
+    if (
+      this.pendingResolve
+      && (
+        (this.pendingAcceptsAsyncStop && hasMiAsyncRecord(this.outputBuffer, "stopped"))
+        || (this.pendingRequiresPrompt ? hasMiPrompt(this.outputBuffer) : this.isResponseComplete())
+      )
+    ) {
       const resolve = this.pendingResolve;
       this.pendingResolve = null;
       this.pendingRequiresPrompt = false;
+      this.pendingAcceptsAsyncStop = false;
       const response = this.outputBuffer;
       this.outputBuffer = "";
       resolve(response, false);
@@ -705,7 +760,7 @@ export class GDBClient {
     return parts.join(" ");
   }
 
-  private sendCommand(cmd: string, timeout: number, requirePrompt = true): Promise<GDBCommandExchange> {
+  private sendCommand(cmd: string, timeout: number, requirePrompt = true, acceptAsyncStop = false): Promise<GDBCommandExchange> {
     return new Promise((resolve, reject) => {
       if (!this.proc?.stdin) {
         reject("GDB process not available");
@@ -722,12 +777,14 @@ export class GDBClient {
         if (this.pendingResolve === onResponse) {
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
         }
         resolve({ output, timedOut, processExited });
       };
       const onResponse = (output: string, processExited: boolean) => finish(output, false, processExited);
       this.pendingResolve = onResponse;
       this.pendingRequiresPrompt = requirePrompt;
+      this.pendingAcceptsAsyncStop = acceptAsyncStop;
 
       // Record in history
       this.history.push(`> ${cmd}`);
@@ -752,6 +809,7 @@ export class GDBClient {
         if (this.pendingResolve === onResponse) {
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
         }
         reject(error);
       }
@@ -793,6 +851,8 @@ export class GDBClient {
     this.loadedSymbolFile = null;
     this.pendingResolve = null;
     this.pendingRequiresPrompt = false;
+    this.pendingAcceptsAsyncStop = false;
+    this.commandStreamTainted = false;
     if (!proc) return;
     await terminateChildProcess(proc, { terminateWaitMs: 1_000 });
     this.lastExit ??= { code: proc.exitCode, signal: proc.signalCode };

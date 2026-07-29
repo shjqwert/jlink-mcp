@@ -141,6 +141,80 @@ test("GDBClient accepts the documented reasonless SIGINT stop from exec-interrup
   await client.disconnect();
 });
 
+test("GDBClient accepts an async SIGINT stop when exec-interrupt has no synchronous MI result or prompt", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    {
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGINT",thread-id="1"\n',
+      interruptAsyncOnly: true,
+    },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+
+  assert.equal(breakpoint.success, true, JSON.stringify(breakpoint));
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
+  assert.equal(client.isConnected(), true);
+  assert.deepEqual(signals, []);
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- JlinkTestFixtureTask1ms",
+    "-exec-continue --all",
+  ]);
+  await client.disconnect();
+});
+
+test("GDBClient distinguishes an empty interrupt MI window from process loss", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { interruptNoOutput: true },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 50);
+
+  assert.equal(breakpoint.success, false);
+  assert.equal(breakpoint.code, "GDB_INTERRUPT_EMPTY_WINDOW");
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
+  assert.equal(client.isConnected(), true);
+  assert.deepEqual(signals, []);
+  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+  const quarantined = await client.command("info registers");
+  assert.equal(quarantined.success, false);
+  assert.equal(quarantined.code, "GDB_CLEANUP_REQUIRED");
+  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+  const backtrace = await client.backtrace();
+  assert.equal(backtrace.success, false);
+  assert.equal(backtrace.code, "GDB_CLEANUP_REQUIRED");
+  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+  await client.disconnect();
+});
+
 test("GDBClient resumes but fails closed when breakpoint insertion lacks a done result", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const commands: string[] = [];
@@ -486,6 +560,8 @@ function createFakeGdbProcess(
   splitConnectPrompt = false,
   transaction?: {
     interruptStopOutput?: string;
+    interruptAsyncOnly?: boolean;
+    interruptNoOutput?: boolean;
     breakpointInsertOutput?: string;
   },
 ): ChildProcess {
@@ -554,6 +630,15 @@ function createFakeGdbProcess(
         setImmediate(() => child.stdout.write('^running\n*running,thread-id="all"\n(gdb)\n'));
       } else if (command === "-exec-interrupt --all") {
         setImmediate(() => {
+          if (transaction?.interruptNoOutput) return;
+          if (transaction?.interruptAsyncOnly) {
+            if (targetRunning) {
+              targetRunning = false;
+              child.stdout.write(transaction.interruptStopOutput
+                ?? '*stopped,reason="signal-received",signal-name="SIGINT",thread-id="1"\n');
+            }
+            return;
+          }
           child.stdout.write("^done\n(gdb)\n");
           if (targetRunning) {
             setTimeout(() => {

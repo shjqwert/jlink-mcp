@@ -31,6 +31,7 @@ export enum ProbeErrorCode {
   HIDDEN_STATE_CHANGE = "HIDDEN_STATE_CHANGE",
   PROBE_IDENTITY_MISMATCH = "PROBE_IDENTITY_MISMATCH",
   JLINK_COMMAND_FAILED = "JLINK_COMMAND_FAILED",
+  JLINK_VERIFY_MISMATCH = "JLINK_VERIFY_MISMATCH",
 }
 
 export interface CommandResult {
@@ -61,6 +62,8 @@ export interface ProbeCoreRegisterWriteResult {
   /** Same-connection readback result when exact verification was requested. */
   readback?: CommandResult;
 }
+
+export type CoreRegisterPersistenceCapability = "same_connection_only";
 
 export interface MemoryDumpLine {
   address: string;
@@ -374,6 +377,22 @@ export abstract class ProbeBackend {
 
   async writeCoreRegisterTransaction(_name: string, _value: number): Promise<ProbeCoreRegisterWriteResult | undefined> {
     return undefined;
+  }
+
+  getCoreRegisterPersistenceCapability(): CoreRegisterPersistenceCapability {
+    return "same_connection_only";
+  }
+
+  async verifyFirmware(_filePath: string, _baseAddress?: number): Promise<CommandResult> {
+    return {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "firmware Verify-only is not supported by this backend",
+      errorCode: ProbeErrorCode.INVALID_ARGUMENT,
+      writeIssued: false,
+      stateUnknown: false,
+    };
   }
 
   // ── Flash ────────────────────────────────────────────────────────

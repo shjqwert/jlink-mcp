@@ -26,7 +26,7 @@ const repairingCaptureQuery = (description: string): string =>
 export const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   list_devices: "List connected J-Link probes without changing target state.",
   target_configure: "Persist one explicit Target configuration for a project root. Call this before any project-scoped Target, Probe, symbol, HSS, GDB, or RTT tool, and repeat it when the intended target configuration changes.",
-  target_status: configuredTarget("Report persisted Target, Probe, Artifact, SVD, owner, and live state facts."),
+  target_status: configuredTarget("Report persisted Target, Probe, Artifact, SVD, owner, and separated state layers without attaching to observe target execution. Optionally request SEGGER Verify-only for configured flash images."),
   artifact_probe: configuredTarget("Discover and classify bounded Artifact, MAP, and flash-image candidates."),
   symbol_search: configuredTarget("Search the configured Artifact symbol catalog."),
   symbol_resolve: configuredTarget("Resolve one supported typed variable selector."),

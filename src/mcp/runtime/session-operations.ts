@@ -97,7 +97,7 @@ export class SessionOperations {
         runtime.gdbServerTargetExecutionState = "unknown";
         void (async () => {
           try {
-            await this.targets.setArtifactMatch(target.projectRoot, "unverified", "gdb_server_unexpected_exit", {
+            await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_server_unexpected_exit", {
               targetGeneration: target.generation,
               probeSerial: target.probeSerial,
               artifactGeneration: target.artifact?.generation,
@@ -357,7 +357,7 @@ export class SessionOperations {
       runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState ?? "unknown";
       envelope.data = { command, ...result, sideEffects: "unknown" };
       try {
-        const updated = await this.targets.setArtifactMatch(target.projectRoot, "unverified", "gdb_command", {
+        const updated = await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_command", {
           targetGeneration: target.generation,
           probeSerial: target.probeSerial,
           artifactGeneration: target.artifact?.generation,
@@ -579,7 +579,7 @@ export class SessionOperations {
       let finalError = error;
       if (sessionInvalidatesConnectionEvidence(error, envelope)) {
         try {
-          const updated = await this.targets.setArtifactMatch(target.projectRoot, "unverified", "probe_connection_identity_lost", {
+          const updated = await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "probe_connection_identity_lost", {
             targetGeneration: target.generation,
             probeSerial: target.probeSerial,
             artifactGeneration: target.artifact?.generation,
@@ -640,8 +640,12 @@ export class SessionOperations {
       generation: target.artifact.generation,
       path: target.artifact.path,
       match: target.liveArtifactMatch.status,
+      firmwareIdentity: target.liveArtifactMatch.status,
+      mutationTrust: target.liveMemoryMutationTrust.status,
       evidenceSource: target.liveArtifactMatch.source,
       evidenceTimestamp: target.liveArtifactMatch.timestamp,
+      mutationTrustSource: target.liveMemoryMutationTrust.source,
+      mutationTrustTimestamp: target.liveMemoryMutationTrust.timestamp,
     } : null;
   }
 }

@@ -106,6 +106,11 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       for (const removed of removedFields) assert.equal(schema.properties?.[removed], undefined, `${name} must not expose ${removed}`);
     }
     {
+      const properties = tools.find((tool) => tool.name === "target_status")?.inputSchema.properties as Record<string, { default?: unknown; description?: string }>;
+      assert.equal(properties.firmwareVerification?.default, "none");
+      assert.match(properties.firmwareVerification?.description ?? "", /segger_verify_only.*without downloading, erasing, programming/i);
+    }
+    {
       const properties = tools.find((tool) => tool.name === "gdb_open")?.inputSchema.properties as Record<string, { default?: unknown; description?: string }>;
       assert.equal(properties.restoreRunningStateAfterAttach?.default, false);
       assert.match(properties.restoreRunningStateAfterAttach?.description ?? "", /explicitly authorize.*previously running target/i);
@@ -125,6 +130,11 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       assert.equal(properties.verificationConnection?.default, "same_session");
       assert.match(properties.verificationConnection?.description ?? "", /independent_session.*separate runtime/i);
       assert.match(properties.comparator?.description ?? "", /post-write value is verified/i);
+    }
+    {
+      const properties = tools.find((tool) => tool.name === "core_register_access")?.inputSchema.properties as Record<string, { default?: unknown; description?: string }>;
+      assert.equal(properties.verificationConnection?.default, "same_session");
+      assert.match(properties.verificationConnection?.description ?? "", /independent_session.*cross-connection GPR persistence/i);
     }
     {
       const properties = tools.find((tool) => tool.name === "hss_start")?.inputSchema.properties as Record<string, { description?: string }>;

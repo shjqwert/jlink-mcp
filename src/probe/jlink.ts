@@ -572,6 +572,48 @@ export class JLinkBackend extends ProbeBackend {
     if (address === undefined) return { success: false, rawOutput: "", output: "", error: "raw BIN flash requires a base address", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     return this.executeDirect(["r", "halt", `loadfile "${filePath}" 0x${address.toString(16)} noreset`], 180000);
   }
+
+  override async verifyFirmware(filePath: string, baseAddress?: number): Promise<CommandResult> {
+    if (!filePath || /[\0\r\n\"]/.test(filePath)) {
+      return {
+        success: false,
+        rawOutput: "",
+        output: "",
+        error: "invalid firmware Verify-only path",
+        errorCode: ProbeErrorCode.INVALID_ARGUMENT,
+        writeIssued: false,
+        stateUnknown: false,
+      };
+    }
+    const extension = path.extname(filePath).toLowerCase();
+    let command: string;
+    if (extension === ".bin") {
+      if (baseAddress === undefined) {
+        return {
+          success: false,
+          rawOutput: "",
+          output: "",
+          error: "raw BIN Verify-only requires a base address",
+          errorCode: ProbeErrorCode.INVALID_ARGUMENT,
+          writeIssued: false,
+          stateUnknown: false,
+        };
+      }
+      command = `verifybin "${filePath}" 0x${baseAddress.toString(16)}`;
+    } else {
+      command = `verify "${filePath}"`;
+    }
+    const result = await this.execRaw([command], 180000);
+    const mismatch = /failed to verify|verification (?:failed|error)|contents? (?:differ|do not match)|verify failed/i.test(
+      `${result.rawOutput}\n${result.stderr ?? ""}\n${result.error ?? ""}`,
+    );
+    return {
+      ...result,
+      success: mismatch ? false : result.success,
+      errorCode: mismatch ? ProbeErrorCode.JLINK_VERIFY_MISMATCH : result.errorCode,
+      writeIssued: false,
+    };
+  }
   async erase(): Promise<CommandResult> {
     return this.executeDirect(["r", "halt", "erase 0 0 noreset"]);
   }

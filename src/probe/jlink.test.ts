@@ -126,6 +126,60 @@ test("JLinkBackend resets and halts in-session before noreset flash and erase fo
   ]);
 });
 
+test("JLinkBackend firmware Verify-only uses SEGGER read-only commands without reset, halt, load, or erase", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, "O.K.\n"),
+  );
+
+  const hex = await backend.verifyFirmware("C:\\firmware\\app.hex");
+  const bin = await backend.verifyFirmware("C:\\firmware\\app.bin", 0x08000000);
+
+  assert.equal(hex.success, true);
+  assert.equal(hex.writeIssued, false);
+  assert.equal(bin.success, true);
+  assert.equal(bin.writeIssued, false);
+  assert.deepEqual(scripts, [
+    "exec SetRestartOnClose = 0\nverify \"C:\\firmware\\app.hex\"\nexit\n",
+    "exec SetRestartOnClose = 0\nverifybin \"C:\\firmware\\app.bin\" 0x8000000\nexit\n",
+  ]);
+  assert.doesNotMatch(scripts.join("\n"), /(?:^|\n)(?:r|halt|loadfile|erase)(?:\s|$)/i);
+});
+
+test("JLinkBackend firmware Verify-only classifies zero-exit vendor mismatch as read-only mismatch", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, "****** Error: Failed to verify @ address 0x0000C000\nO.K.\n"),
+  );
+
+  const result = await backend.verifyFirmware("C:\\firmware\\app.s19");
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.writeIssued, false);
+  assert.deepEqual(scripts, [
+    "exec SetRestartOnClose = 0\nverify \"C:\\firmware\\app.s19\"\nexit\n",
+  ]);
+});
+
+test("JLinkBackend firmware Verify-only treats zero-exit contents-differ output as failure", async () => {
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], "Contents differ\nO.K.\n"),
+  );
+
+  const result = await backend.verifyFirmware("C:\\firmware\\app.hex");
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.writeIssued, false);
+});
+
 test("JLinkBackend uses J-Link-supported tokens for aliased core registers", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
@@ -204,7 +258,7 @@ test("JLinkBackend closes stdin before V8.84 releases buffered transaction outpu
   assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\nexec SetSkipDebugDeInit = 1\nwreg R0, 0x12345678\nrreg R0\nexit\n"]);
 });
 
-test("JLinkBackend preserves a verified register value through final observation and independent read", async (context) => {
+test("JLinkBackend reports same-connection-only register persistence when a new Commander connection resets GPR state", async (context) => {
   const root = mkdtempSync(join(tmpdir(), "jlink-register-lifecycle-"));
   context.after(() => rmSync(root, { recursive: true, force: true }));
   const helper = join(root, "hss_helper.exe");
@@ -214,6 +268,7 @@ test("JLinkBackend preserves a verified register value through final observation
   const registerState = { value: "00000000" };
   const scripts: string[] = [];
   const helperArgs: string[][] = [];
+  let commanderConnections = 0;
   const spawnProcess: JLinkSpawn = (command, args) => {
     if (command === helper) {
       helperArgs.push([...args]);
@@ -229,6 +284,8 @@ test("JLinkBackend preserves a verified register value through final observation
         samples: [{ valid: true, bytes: "03000200" }],
       }));
     }
+    commanderConnections += 1;
+    if (commanderConnections > 1) registerState.value = "00000000";
     return registerTransactionProcess(scripts, "match", { registerState });
   };
   const backend = new JLinkBackend(
@@ -237,20 +294,20 @@ test("JLinkBackend preserves a verified register value through final observation
     spawnProcess,
   );
 
-  const result = await backend.writeCoreRegisterTransaction("R0", 0x1357_9bdf);
+  const result = await backend.writeCoreRegisterTransaction("R4", 0x1357_9bdf);
   const after = await backend.observeTargetState({ preserveDebugStateOnClose: true });
-  const independent = await backend.readRegister("R0");
-  const secondIndependent = await backend.readRegister("R0");
+  const independent = await backend.readRegister("R4");
+  const secondIndependent = await backend.readRegister("R4");
 
   assert.equal(result.command.success, true, JSON.stringify(result.command));
   assert.equal(result.readback?.success, true, JSON.stringify(result.readback));
   assert.equal(after.state, "halted", JSON.stringify(after.result));
-  assert.match(independent.rawOutput, /R0\s*=\s*0x13579bdf/i);
-  assert.match(secondIndependent.rawOutput, /R0\s*=\s*0x13579bdf/i);
-  assert.equal(registerState.value, "13579bdf");
-  assert.match(scripts[0] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*wreg R0[\s\S]*rreg R0[\s\S]*exit/);
-  assert.match(scripts[1] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*rreg R0[\s\S]*exit/);
-  assert.match(scripts[2] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*rreg R0[\s\S]*exit/);
+  assert.match(independent.rawOutput, /R4\s*=\s*0x00000000/i);
+  assert.match(secondIndependent.rawOutput, /R4\s*=\s*0x00000000/i);
+  assert.equal(backend.getCoreRegisterPersistenceCapability(), "same_connection_only");
+  assert.match(scripts[0] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*wreg R4[\s\S]*rreg R4[\s\S]*exit/);
+  assert.match(scripts[1] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*rreg R4[\s\S]*exit/);
+  assert.match(scripts[2] ?? "", /SetRestartOnClose = 0[\s\S]*SetSkipDebugDeInit = 1[\s\S]*rreg R4[\s\S]*exit/);
   assert.ok(helperArgs[0]?.includes("--preserve-debug-state-on-close"));
 });
 
