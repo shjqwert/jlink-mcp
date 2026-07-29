@@ -48,6 +48,7 @@ export class TargetRuntimeRegistry {
           jlinkExePath: target.jlinkPath?.path,
           gdbServerExePath: target.gdbServerPath?.path,
           device: target.device,
+          gdbDevice: target.gdbDevice,
           serialNumber: target.probeSerial,
           interface: target.interface,
           speed: target.speed,

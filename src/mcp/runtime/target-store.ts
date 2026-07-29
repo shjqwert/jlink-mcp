@@ -72,6 +72,7 @@ export interface StoredTarget {
   flashIdentityVersion?: 1;
   flashIdentity?: string;
   device: string;
+  gdbDevice?: string;
   probeSerial: string;
   interface: TargetInterface;
   speed: number;
@@ -91,6 +92,7 @@ export interface StoredTarget {
 export interface TargetConfigureInput {
   projectRoot: string;
   device: string;
+  gdbDevice?: string;
   probeSerial: string;
   interface: TargetInterface;
   speed: number;
@@ -210,6 +212,7 @@ export class TargetStore {
     const hashMaterial = {
       projectRoot,
       device: input.device,
+      gdbDevice: input.gdbDevice,
       probeSerial,
       interface: input.interface,
       speed: input.speed,
@@ -606,6 +609,9 @@ function validateSrec(filePath: string): void {
 
 function validateConfigureInput(input: TargetConfigureInput): void {
   if (!input.device?.trim() || /[\0\r\n]/.test(input.device)) throw new TargetStoreError("INVALID_DEVICE", "device is required");
+  if (input.gdbDevice !== undefined && (!input.gdbDevice.trim() || /[\0\r\n]/.test(input.gdbDevice))) {
+    throw new TargetStoreError("INVALID_GDB_DEVICE", "gdbDevice must name one explicit J-Link attach profile");
+  }
   try { canonicalProbeSerial(input.probeSerial); }
   catch (error) { throw new TargetStoreError("PROBE_SELECTION_REQUIRED", error instanceof ProbeIdentityError ? error.message : "an unambiguous Probe serial is required"); }
   if (input.interface !== "SWD" && input.interface !== "JTAG") throw new TargetStoreError("INVALID_INTERFACE", "interface must be SWD or JTAG");

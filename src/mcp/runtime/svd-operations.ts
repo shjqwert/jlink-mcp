@@ -170,6 +170,10 @@ function registerComparator(input: VariableComparatorInput, resolved: SvdResolve
     if (fieldWrite) throw new SvdCatalogError("SVD_FIELD_COMPARATOR_UNSUPPORTED", "tolerance verification is not safe for a field read-modify-write; use exact, masked, or observe");
     return { mode: "tolerance", expected: requestedValue, absTolerance: input.absTolerance, relTolerance: input.relTolerance, type, endian };
   }
+  if (input.mode === "range") {
+    if (fieldWrite) throw new SvdCatalogError("SVD_FIELD_COMPARATOR_UNSUPPORTED", "range verification is not safe for a field read-modify-write; use exact, masked, or observe");
+    return { mode: "range", min: input.min, max: input.max, type, endian };
+  }
   if (input.mode === "exact") return fieldWrite ? { mode: "exact" } : { mode: "exact", type, endian };
   if (input.mode === "masked") return fieldWrite ? { mode: "masked", maskHex: input.maskHex } : { mode: "masked", maskHex: input.maskHex, type, endian };
   return {

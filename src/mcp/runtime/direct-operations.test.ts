@@ -638,6 +638,44 @@ test("write_memory rejects a same-connection readback that does not persist", as
   assert.deepEqual(probe.actions, ["transaction:20000000:4:1:0:0:false", "read:20000000:4"]);
 });
 
+test("structured range verification accepts an explicitly bounded running-state consumer value", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-probe-dynamic-range");
+  const requested = Buffer.from("32000000", "hex");
+  const consumed = Buffer.from("00000000", "hex");
+  probe.memory.set(0x20000000, consumed);
+  probe.transactionResult = {
+    command: { ...ok(), writeIssued: true, stateUnknown: false },
+    readbacks: [requested],
+    restoreIssued: false,
+    restoreVerified: false,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: requested.toString("hex"),
+    knownRegion: "ram",
+    verify: true,
+    comparator: { mode: "range", min: 0, max: 50, type: "uint32", endian: "little" },
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(result.verification.method, "range");
+  assert.deepEqual(result.verification.details, {
+    mode: "range",
+    min: 0,
+    max: 50,
+    actual: 0,
+    observationCount: 1,
+    command: (result.data as { readbackCommand: unknown }).readbackCommand,
+    connection: "independent_post_write",
+  });
+});
+
 test("readback mismatch retains the actual memory and core-register values", async (context) => {
   const memory = await fixture(context, "memory-readback-mismatch");
   memory.probe.readResult = { success: true, rawOutput: "20000000 = 04030200", output: "" };
@@ -1569,6 +1607,7 @@ test("structured exact verification rejects a transaction-local value that does 
   });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "READBACK_MISMATCH");
+  assert.match(result.warnings.join("\n"), /firmware intentionally consumes or changes this field/i);
   const data = result.data as { readbackHex: string; transactionReadbackHex: string };
   assert.equal(data.transactionReadbackHex, requested.toString("hex"));
   assert.equal(data.readbackHex, old.toString("hex"));

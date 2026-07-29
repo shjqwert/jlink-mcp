@@ -126,6 +126,37 @@ test("JLinkBackend resets and halts in-session before noreset flash and erase fo
   ]);
 });
 
+test("JLinkBackend uses J-Link display-name tokens for aliased core registers", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts),
+  );
+
+  for (const name of ["PC", "R15", "LR", "R14", "SP", "R13"]) {
+    assert.equal((await backend.readRegister(name)).success, true);
+  }
+
+  assert.deepEqual(scripts, [
+    "exec SetRestartOnClose = 0\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nrreg \"R14 (LR)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nrreg \"R14 (LR)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nrreg \"R13 (SP)\"\nexit\n",
+  ]);
+});
+
+test("JLinkBackend uses the explicit GDB attach profile instead of the Flash device", () => {
+  const backend = new JLinkBackend(
+    { device: "Z20K146M", gdbDevice: "Cortex-M4", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+  );
+  const args = (backend as unknown as { gdbServerArgs(): string[] }).gdbServerArgs();
+  assert.equal(args[args.indexOf("-device") + 1], "Cortex-M4");
+});
+
 test("JLinkBackend fails a zero-exit erase when J-Link reports a fatal RAMCode diagnostic", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(

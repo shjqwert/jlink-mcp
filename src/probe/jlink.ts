@@ -13,6 +13,7 @@ export interface JLinkConfig {
   /** Test/package override; defaults to the bundled native helper. */
   memoryHelperPath?: string;
   device: string;
+  gdbDevice?: string;
   interface: "SWD" | "JTAG";
   speed: number;
   serialNumber?: string;
@@ -84,6 +85,7 @@ export class JLinkBackend extends ProbeBackend {
       gdbServerExePath: config.gdbServerExePath,
       memoryHelperPath: config.memoryHelperPath,
       device,
+      gdbDevice: config.gdbDevice,
       interface: config.interface || "SWD",
       speed: config.speed || 4000,
       serialNumber: config.serialNumber,
@@ -479,13 +481,13 @@ export class JLinkBackend extends ProbeBackend {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
       return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
-    return this.executeDirect([`rreg ${name}`]);
+    return this.executeDirect([`rreg ${jlinkCoreRegisterToken(name)}`]);
   }
   async writeCoreRegister(name: string, value: number): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
       return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
-    return this.executeDirect([`wreg ${name}, 0x${value.toString(16)}`]);
+    return this.executeDirect([`wreg ${jlinkCoreRegisterToken(name)}, 0x${value.toString(16)}`]);
   }
 
   override getConnectionGeneration(): number { return this.connectionGeneration; }
@@ -526,7 +528,7 @@ export class JLinkBackend extends ProbeBackend {
 
   private gdbServerArgs(): string[] {
     const args = [
-      "-device", this.config.device,
+      "-device", this.config.gdbDevice ?? this.config.device,
       "-if", this.config.interface,
       "-speed", String(this.config.speed),
       "-port", String(this.config.gdbPort),
@@ -677,6 +679,22 @@ export class JLinkBackend extends ProbeBackend {
   dispose(): void {
     this.processManager.kill(GDB_SERVER_PROCESS);
     this.setState(ProbeState.DISCONNECTED);
+  }
+}
+
+function jlinkCoreRegisterToken(name: string): string {
+  switch (name.toUpperCase()) {
+    case "PC":
+    case "R15":
+      return "\"R15 (PC)\"";
+    case "LR":
+    case "R14":
+      return "\"R14 (LR)\"";
+    case "SP":
+    case "R13":
+      return "\"R13 (SP)\"";
+    default:
+      return name.toUpperCase();
   }
 }
 

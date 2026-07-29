@@ -66,7 +66,7 @@ test("variable writes require verified Artifact match and default to capture-old
     artifactGeneration: fixture.target.artifact?.generation,
   });
   const written = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9 });
-  assert.equal(written.ok, true);
+  assert.equal(written.ok, true, JSON.stringify(written.error));
   assert.equal(written.verification.status, "verified");
   assert.deepEqual(fixture.probe.actions, ["read:20000000:4", "write:20000000:4", "read:20000000:4"]);
 });
@@ -87,7 +87,7 @@ test("variable writes map exact, tolerance, masked, and observe comparators", as
       artifactGeneration: fixture.target.artifact?.generation,
     });
     const result = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref, value: 9, captureOld: false, verify: true, comparator: item.comparator });
-    assert.equal(result.ok, true, item.name);
+    assert.equal(result.ok, true, `${item.name}: ${JSON.stringify(result.error)}`);
     assert.equal(result.verification.method, item.method, item.name);
     assert.deepEqual(fixture.probe.actions, ["write:20000000:4", "read:20000000:4"], item.name);
   }
@@ -223,7 +223,15 @@ async function createFixture(context: TestContext, name: string) {
   const artifactPath = join(projectRoot, "firmware.elf");
   writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1, 2, 3, 4]));
   const targets = new TargetStore(stateRoot);
-  const target = await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, artifactPath });
+  const target = await targets.configure({
+    projectRoot,
+    device: "TEST",
+    probeSerial: "123456",
+    interface: "SWD",
+    speed: 1000,
+    artifactPath,
+    memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "ram", writable: true }],
+  });
   const probe = new MemoryProbe();
   const queue = new ProbeQueue(join(root, "queue"));
   const direct = new DirectMcuService(targets, queue, async () => ({ probe: probe as unknown as ProbeBackend }));

@@ -57,6 +57,7 @@ export interface MemoryWriteInput extends MemoryReadInput {
 export type NonObserveComparator =
   | { mode: "exact"; type?: HssScalarType; endian?: HssTargetEndian }
   | { mode: "tolerance"; expected: number; absTolerance: number; relTolerance: number; type: HssScalarType; endian: HssTargetEndian }
+  | { mode: "range"; min: number; max: number; type: HssScalarType; endian: HssTargetEndian }
   | { mode: "masked"; maskHex: string; type?: HssScalarType; endian?: HssTargetEndian };
 
 export type ScalarComparator = NonObserveComparator
@@ -1668,7 +1669,12 @@ async function applyProbeMemoryTransaction(
   if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured memory transaction", { writeIssued, stateUnknown: writeIssued });
   if (restoreError) throw restoreError;
   if (mainError) throw mainError;
-  if (verificationError) throw verificationError;
+  if (verificationError) {
+    if (verificationError.detail.code === "READBACK_MISMATCH" && comparator.mode === "exact" && before.state === "running") {
+      envelope.warnings.push("Exact readback remains fail-closed. If firmware intentionally consumes or changes this field while running, use an explicit range/tolerance/observe comparator and verify protocol ACK/Complete separately.");
+    }
+    throw verificationError;
+  }
 }
 
 function verifyTransactionReadbacks(
@@ -1947,6 +1953,13 @@ function validateStructuredComparator(comparator: ScalarComparator, byteCount: n
       throw executionError("COMPARATOR_EXPECTED_MISMATCH", "validation", "tolerance expected value does not encode to the requested write bytes");
     }
   }
+  if (comparator.mode === "range") {
+    if (!Number.isFinite(comparator.min) || !Number.isFinite(comparator.max) || comparator.min > comparator.max) {
+      throw executionError("COMPARATOR_INVALID", "validation", "range bounds must be finite and min must not exceed max");
+    }
+    encodeHssValue(comparator.type, comparator.min, comparator.endian);
+    encodeHssValue(comparator.type, comparator.max, comparator.endian);
+  }
   if (comparator.mode === "masked") {
     if (!/^(?:[0-9a-fA-F]{2})+$/.test(comparator.maskHex) || comparator.maskHex.length !== byteCount * 2) {
       throw executionError("COMPARATOR_INVALID", "validation", "masked comparator requires one mask byte per requested byte");
@@ -2039,6 +2052,13 @@ function compareStructured(actual: Buffer, expected: Buffer, comparator: NonObse
     const mask = Buffer.from(comparator.maskHex, "hex");
     const pass = actual.length === expected.length && actual.every((value, index) => (value & mask[index]) === (expected[index] & mask[index]));
     return { pass, details: { mode: "masked", maskHex: mask.toString("hex"), expectedHex: expected.toString("hex"), actualHex: actual.toString("hex") } };
+  }
+  if (comparator.mode === "range") {
+    const actualValue = decodeHssValue(comparator.type, actual, comparator.endian);
+    return {
+      pass: actualValue >= comparator.min && actualValue <= comparator.max,
+      details: { mode: "range", min: comparator.min, max: comparator.max, actual: actualValue },
+    };
   }
   const actualValue = decodeHssValue(comparator.type, actual, comparator.endian);
   const limit = comparator.absTolerance + comparator.relTolerance * Math.abs(comparator.expected);

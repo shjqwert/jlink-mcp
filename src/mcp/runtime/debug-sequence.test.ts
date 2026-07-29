@@ -330,7 +330,7 @@ test("debug sequence preserves a failed step stateUnknown after successful clean
   assert.deepEqual(fixture.actions, ["plan", "start", "write:1", "write:0", "stop:capture-1"]);
 });
 
-test("debug sequence cleanup does not stop an already stopped capture", async () => {
+test("debug sequence rejects variable access after hss_stop before any target operation", async () => {
   const fixture = sequenceFixture({ failRead: true });
   const result = await fixture.executor.execute({
     projectRoot: "D:\\fixture",
@@ -343,7 +343,9 @@ test("debug sequence cleanup does not stop an already stopped capture", async ()
   });
 
   assert.equal(result.ok, false);
-  assert.deepEqual(fixture.actions, ["plan", "start", "stop:capture-1", "read"]);
+  assert.equal(result.error?.code, "DEBUG_SEQUENCE_INVALID");
+  assert.match(result.error?.message ?? "", /hss_stop must be the final scheduled step/i);
+  assert.deepEqual(fixture.actions, ["plan"]);
 });
 
 function sequenceFixture(options: {

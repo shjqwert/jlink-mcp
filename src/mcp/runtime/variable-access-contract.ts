@@ -16,6 +16,7 @@ export type VariableRefInput = string | LegacyVariableRefInput;
 export type VariableNonObserveComparatorInput =
   | { mode: "exact" }
   | { mode: "tolerance"; absTolerance: number; relTolerance: number }
+  | { mode: "range"; min: number; max: number }
   | { mode: "masked"; maskHex: string };
 
 export type VariableComparatorInput = VariableNonObserveComparatorInput

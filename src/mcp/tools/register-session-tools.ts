@@ -7,7 +7,7 @@ import type { RegisterEnvelopeTool } from "./tool-contract";
 import { actionInputFailure, relabelEnvelope } from "./tool-envelope";
 import { projectRootInput, userConfirmation } from "./tool-schemas";
 
-interface SessionToolServices {
+export interface SessionToolServices {
   targets: TargetStore;
   sessions: SessionOperations;
   direct: DirectMcuService;
@@ -70,7 +70,7 @@ export function registerSessionTools(register: RegisterEnvelopeTool, services: S
     (input) => diagnoseCrash(services, String(input.projectRoot)));
 }
 
-async function gdbOpen(
+export async function gdbOpen(
   services: SessionToolServices,
   projectRoot: string,
   restoreRunningStateAfterAttach: boolean,
@@ -79,6 +79,16 @@ async function gdbOpen(
   try {
     target = services.targets.require(projectRoot);
     if (!target.artifact) return actionInputFailure("gdb_open", "gdb_open requires a configured ELF Artifact for host-side symbols");
+    if (!target.gdbDevice) {
+      return failEnvelope(createOperationEnvelope("gdb_open", target), {
+        code: "GDB_ATTACH_PROFILE_REQUIRED",
+        stage: "precondition",
+        message: "gdb_open requires target_configure.gdbDevice to name an independently validated non-invasive J-Link attach profile; the exact Flash/Erase device is not reused implicitly",
+        retryable: false,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    }
   } catch (error) {
     return failEnvelope(createOperationEnvelope("gdb_open"), {
       code: "TARGET_NOT_CONFIGURED",
@@ -103,7 +113,19 @@ async function gdbOpen(
   envelope.before ??= server.before;
   envelope.data = { server: server.data, client: client.data };
   if (!client.ok) {
-    envelope.warnings.push("GDB Server remains owned after client startup failed; use gdb_close after reviewing the reported target state.");
+    const cleanup = await services.sessions.gdbServerStop(target.projectRoot);
+    envelope.data = { server: server.data, client: client.data, cleanup };
+    envelope.requestedEffects = distinct([...envelope.requestedEffects, ...cleanup.requestedEffects]);
+    envelope.observedEffects = distinct([...envelope.observedEffects, ...cleanup.observedEffects]);
+    if (cleanup.ok) {
+      envelope.warnings.push("GDB attach failed; the client and managed Server were closed without changing the observed target state. The original attach failure remains authoritative.");
+    } else {
+      if (envelope.error && cleanup.error) {
+        envelope.error.writeIssued ||= cleanup.error.writeIssued;
+        envelope.error.stateUnknown ||= cleanup.error.stateUnknown;
+      }
+      envelope.warnings.push(`GDB attach failed and same-process cleanup also failed (${cleanup.error?.code ?? "UNKNOWN_ERROR"}); Probe ownership remains fail-closed when the managed Server is still live.`);
+    }
   }
   return envelope;
 }

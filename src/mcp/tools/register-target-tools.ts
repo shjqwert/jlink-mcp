@@ -40,6 +40,12 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
       relTolerance: z.number().nonnegative().describe("Maximum relative numeric difference."),
     }).describe("Accept a finite numeric value within the configured absolute or relative tolerance."),
     z.object({
+      mode: z.literal("range"),
+      min: z.number().finite().describe("Minimum accepted typed readback value."),
+      max: z.number().finite().describe("Maximum accepted typed readback value."),
+    }).refine(({ min, max }) => min <= max, "min must not exceed max")
+      .describe("Accept an explicitly bounded dynamic readback without weakening the default exact comparator."),
+    z.object({
       mode: z.literal("masked"),
       maskHex: z.string().regex(/^(?:[0-9a-fA-F]{2})+$/).describe("Byte mask applied to requested and observed encoded values before comparison."),
     }).describe("Compare only bits selected by maskHex."),
@@ -59,6 +65,9 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
   register("target_configure", {
     projectRoot: z.string().min(1),
     device: z.string().min(1),
+    gdbDevice: z.string().min(1).optional().describe(
+      "Explicit non-invasive J-Link device/profile used only by GDB Server attach. Keep device as the exact MCU for Flash/Erase; use a validated core-only profile when the exact-device script has attach side effects.",
+    ),
     probeSerial: z.string().min(1),
     interface: z.enum(["SWD", "JTAG"]),
     speed: z.number().int().min(1).max(50_000),
@@ -161,7 +170,9 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
   register("core_register_access", {
     ...projectRootInput,
     action: z.enum(["read", "read_all", "write"]),
-    name: z.string().min(1).max(32).optional(),
+    name: z.string().min(1).max(32).optional().describe(
+      "Supported core name: R followed by an index from 0 through 15, PC, LR, SP, XPSR, CONTROL, PRIMASK, BASEPRI, FAULTMASK, MSP, PSP, MSPLIM, or PSPLIM. PC/R15, LR/R14, and SP/R13 are sent with canonical J-Link display-name tokens.",
+    ),
     value: uint32.optional(),
     verify: z.boolean().default(false),
   }, async (input) => {
