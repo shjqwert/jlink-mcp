@@ -24,6 +24,28 @@ export interface SessionGdbClient {
   disconnect(): Promise<void>;
 }
 
+export interface GdbAttachBoundaryEvidence {
+  preServerObservation: {
+    observedAt: string;
+    state: GDBTargetExecutionState;
+    source: string;
+    command: unknown;
+  };
+  serverReadyObservedAt: string;
+  server: {
+    processId: number;
+    ownerToken: string;
+    targetGeneration: string;
+  };
+  profile: {
+    configuredDevice: string;
+    gdbDevice: string | null;
+    effectiveGdbDevice: string;
+    interface: string;
+    speed: number;
+  };
+}
+
 export interface SessionTargetRuntime {
   probe: ProbeBackend;
   gdb: SessionGdbClient;
@@ -32,6 +54,10 @@ export interface SessionTargetRuntime {
   gdbOwnerExitSubscription?: () => void;
   gdbServerStopping?: boolean;
   gdbServerTargetExecutionState?: GDBTargetExecutionState;
+  gdbAttachBoundaryEvidence?: GdbAttachBoundaryEvidence;
+  gdbInitialAttachBoundaryAvailable?: boolean;
+  gdbClientExitedUnexpectedly?: boolean;
+  gdbPreServerStateExpectationValid?: boolean;
   gdbClientExitSubscription?: () => void;
   onGdbServerExit?: (listener: () => void) => () => void;
 }
@@ -57,6 +83,7 @@ export class SessionOperations {
     return this.queuedWithTarget("gdb_server_start", target, ["start_gdb_server", "acquire_gdb_owner"], localMemoryOwner ? ["memory"] : [], async (envelope, target, runtime, metadata) => {
       const memoryClose = await this.memorySessions?.closeForTarget(target);
       const targetState = await runtime.probe.observeTargetState();
+      const preServerObservedAt = new Date().toISOString();
       if (memoryClose) {
         envelope.data = { memorySessionClose: { targetStateBeforeClose: memoryClose.targetStateBeforeClose, targetStateAfterReconnect: targetState.state } };
         if (memoryClose.targetStateBeforeClose === "unknown" || targetState.state === "unknown") {
@@ -75,6 +102,7 @@ export class SessionOperations {
         await runtime.probe.stopGDBServer();
         throw new SessionError("GDB_SERVER_IDENTITY_UNAVAILABLE", "GDB Server started without a verifiable process identity; it was stopped before Probe ownership was published", false, false);
       }
+      const serverReadyObservedAt = new Date().toISOString();
       let owner: ProbeOwner;
       try {
         owner = this.queue.claimOwner(target.probeSerial, {
@@ -89,12 +117,39 @@ export class SessionOperations {
         throw error;
       }
       runtime.gdbOwnerToken = owner.token;
-      runtime.gdbServerTargetExecutionState = "running";
+      runtime.gdbServerTargetExecutionState = "unknown";
+      runtime.gdbClientExitedUnexpectedly = false;
+      runtime.gdbPreServerStateExpectationValid = true;
+      runtime.gdbAttachBoundaryEvidence = {
+        preServerObservation: {
+          observedAt: preServerObservedAt,
+          state: targetState.state,
+          source: targetState.source,
+          command: targetState.result,
+        },
+        serverReadyObservedAt,
+        server: {
+          processId: Number(status.processId),
+          ownerToken: owner.token,
+          targetGeneration: target.generation,
+        },
+        profile: {
+          configuredDevice: target.device,
+          gdbDevice: target.gdbDevice ?? null,
+          effectiveGdbDevice: target.gdbDevice ?? target.device,
+          interface: target.interface,
+          speed: target.speed,
+        },
+      };
+      runtime.gdbInitialAttachBoundaryAvailable = true;
       runtime.gdbOwnerExitSubscription?.();
       runtime.gdbOwnerExitSubscription = runtime.onGdbServerExit?.(() => {
         if (runtime.gdbOwnerToken !== owner.token) return;
         if (runtime.gdbServerStopping) return;
         runtime.gdbServerTargetExecutionState = "unknown";
+        runtime.gdbAttachBoundaryEvidence = undefined;
+        runtime.gdbInitialAttachBoundaryAvailable = false;
+        runtime.gdbPreServerStateExpectationValid = false;
         void (async () => {
           try {
             await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_server_unexpected_exit", {
@@ -116,6 +171,9 @@ export class SessionOperations {
         runtime.gdbOwnerExitSubscription = undefined;
         if (runtime.gdbOwnerToken === owner.token) this.queue.releaseOwner(target.probeSerial, owner.token);
         runtime.gdbOwnerToken = undefined;
+        runtime.gdbAttachBoundaryEvidence = undefined;
+        runtime.gdbInitialAttachBoundaryAvailable = false;
+        runtime.gdbPreServerStateExpectationValid = false;
         throw new SessionError("GDB_SERVER_EXITED", "GDB Server exited before ownership could be established", true, false);
       }
       envelope.observedEffects.push("gdb_server_started", "gdb_owner_acquired");
@@ -124,6 +182,7 @@ export class SessionOperations {
         message: result.message,
         owner,
         status,
+        attachBoundaryEvidence: runtime.gdbAttachBoundaryEvidence,
       };
       envelope.verification = { status: "observed", method: "process_manager" };
     }, localMemoryOwner);
@@ -143,9 +202,34 @@ export class SessionOperations {
     return this.queuedWithTarget("gdb_server_stop", target, ["stop_gdb_server", "release_gdb_owner"], ["gdb"], async (envelope) => {
       const clientWasConnected = runtime.gdb.isConnected();
       const executionState = clientWasConnected ? runtime.gdb.getTargetExecutionState() : runtime.gdbServerTargetExecutionState ?? "unknown";
-      const recoveringAfterClientExit = !clientWasConnected && executionState === "unknown";
-      envelope.before = { gdbClientConnected: clientWasConnected, targetExecutionState: executionState, gdbServerRunning: runtime.probe.isGDBServerRunning() };
-      if (executionState === "unknown" && !recoveringAfterClientExit) {
+      const recoveringAfterClientExit = !clientWasConnected
+        && executionState === "unknown"
+        && runtime.gdbClientExitedUnexpectedly === true;
+      const attachBoundary = runtime.gdbAttachBoundaryEvidence?.server.ownerToken === owner.token
+        && runtime.gdbAttachBoundaryEvidence.server.targetGeneration === target.generation
+        ? runtime.gdbAttachBoundaryEvidence
+        : undefined;
+      const targetExecutionStateExpectedBeforeClose = executionState !== "unknown"
+        ? executionState
+        : recoveringAfterClientExit
+          ? "unknown"
+          : runtime.gdbPreServerStateExpectationValid
+            ? attachBoundary?.preServerObservation.state ?? "unknown"
+            : "unknown";
+      envelope.before = {
+        gdbClientConnected: clientWasConnected,
+        targetExecutionState: executionState,
+        targetExecutionStateExpectedBeforeClose,
+        expectationSource: executionState !== "unknown"
+          ? "current_gdb_state"
+          : recoveringAfterClientExit
+            ? "unavailable_after_unexpected_client_exit"
+            : attachBoundary && runtime.gdbPreServerStateExpectationValid
+              ? "pre_gdb_server_observation"
+              : "unavailable",
+        gdbServerRunning: runtime.probe.isGDBServerRunning(),
+      };
+      if (targetExecutionStateExpectedBeforeClose === "unknown" && !recoveringAfterClientExit) {
         throw disconnectStateError(executionState, "stopping the GDB Server");
       }
       runtime.gdbServerStopping = true;
@@ -154,6 +238,10 @@ export class SessionOperations {
         runtime.rtt.disconnect();
         const result = await runtime.probe.stopGDBServer();
         if (!result.success) throw new SessionError("GDB_SERVER_STOP_FAILED", result.message, false, true, true);
+        runtime.gdbAttachBoundaryEvidence = undefined;
+        runtime.gdbInitialAttachBoundaryAvailable = false;
+        runtime.gdbClientExitedUnexpectedly = false;
+        runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbOwnerExitSubscription?.();
         runtime.gdbOwnerExitSubscription = undefined;
         if (runtime.gdbOwnerToken === owner.token) {
@@ -170,11 +258,20 @@ export class SessionOperations {
           message: result.message,
           status: runtime.probe.getGDBServerStatus(),
           targetExecutionStateBeforeDisconnect: executionState,
+          targetExecutionStateExpectedBeforeClose,
           targetExecutionStateAfterClose: finalState,
         };
         if (finalState === "unknown") throw new SessionError("POST_OPERATION_STATE_UNKNOWN", "GDB Server stopped, but target state could not be observed afterward", false, true, true);
-        if (!recoveringAfterClientExit && finalState !== executionState) {
-          throw new SessionError("HIDDEN_STATE_CHANGE", `GDB Server close changed target state from ${executionState} to ${finalState}`, false, true, false);
+        if (!recoveringAfterClientExit && finalState !== targetExecutionStateExpectedBeforeClose) {
+          throw new SessionError(
+            "HIDDEN_STATE_CHANGE",
+            executionState === "unknown"
+              ? `target state after GDB Server close was ${finalState}, not the ${targetExecutionStateExpectedBeforeClose} state observed before Server start`
+              : `GDB Server close changed target state from ${executionState} to ${finalState}`,
+            false,
+            true,
+            false,
+          );
         }
         envelope.verification = {
           status: "verified",
@@ -196,12 +293,26 @@ export class SessionOperations {
     if (restoreRunningStateAfterAttach) requestedEffects.push("restore_running_state_after_attach");
     return this.withGdbOwner("gdb_connect", projectRoot, requestedEffects, async (envelope, target, runtime) => {
       const executionStateBeforeConnect = runtime.gdbServerTargetExecutionState ?? "unknown";
+      const serverStatus = runtime.probe.getGDBServerStatus();
+      const attachBoundary = runtime.gdbInitialAttachBoundaryAvailable
+        && runtime.gdbAttachBoundaryEvidence
+        && runtime.gdbAttachBoundaryEvidence.server.ownerToken === runtime.gdbOwnerToken
+        && runtime.gdbAttachBoundaryEvidence.server.targetGeneration === target.generation
+        && runtime.gdbAttachBoundaryEvidence.server.processId === serverStatus.processId
+        && serverStatus.running
+        ? runtime.gdbAttachBoundaryEvidence
+        : undefined;
+      const targetExecutionStateExpectedAfterAttach = executionStateBeforeConnect === "running"
+        ? "running"
+        : attachBoundary?.preServerObservation.state ?? "unknown";
       envelope.before = {
         ...(envelope.before as Record<string, unknown>),
         targetExecutionState: executionStateBeforeConnect,
+        targetExecutionStateExpectedAfterAttach,
+        expectationSource: attachBoundary ? "pre_gdb_server_observation" : "current_gdb_state",
         gdbClientConnected: runtime.gdb.isConnected(),
       };
-      if (executionStateBeforeConnect !== "running") {
+      if (targetExecutionStateExpectedAfterAttach !== "running") {
         throw disconnectStateError(executionStateBeforeConnect, "connecting the GDB client");
       }
       const explicitSymbols = symbolFile ? canonicalSymbolFile(symbolFile) : undefined;
@@ -219,11 +330,21 @@ export class SessionOperations {
           throw new SessionError("ARTIFACT_STALE", "configured Artifact content changed; run target_configure again before loading symbols", false, false);
         }
       }
+      runtime.gdbInitialAttachBoundaryAvailable = false;
+      runtime.gdbClientExitedUnexpectedly = false;
       const result = await runtime.gdb.connect("localhost", target.ports.gdb, explicitSymbols);
-      envelope.data = { ...result, symbolFile: explicitSymbols ?? null };
+      const firstGdbFrameObservedAt = new Date().toISOString();
+      envelope.data = {
+        ...result,
+        symbolFile: explicitSymbols ?? null,
+        targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+        targetExecutionStateExpectedAfterAttach,
+        attachBoundaryEvidence: attachBoundary ?? null,
+      };
       const executionStateAfterConnect = runtime.gdb.getTargetExecutionState();
       runtime.gdbServerTargetExecutionState = executionStateAfterConnect;
       if (!result.success) throw gdbError(result, "gdb_connect", true);
+      runtime.gdbPreServerStateExpectationValid = false;
       if (explicitSymbols && target.artifact) {
         let liveArtifact: ReturnType<typeof inspectArtifactFile> | undefined;
         try { liveArtifact = inspectArtifactFile(target.projectRoot, explicitSymbols); } catch { /* handled below as stale */ }
@@ -237,8 +358,12 @@ export class SessionOperations {
           const executionState = executionStateAfterConnect;
           runtime.gdbServerTargetExecutionState = executionState;
           envelope.observedEffects.push("gdb_client_connected", "artifact_became_stale_during_symbol_load");
-          if (executionState !== executionStateBeforeConnect) {
-            envelope.observedEffects.push(`unexpected_target_state_change:${executionStateBeforeConnect}->${executionState}`);
+          if (executionState !== targetExecutionStateExpectedAfterAttach) {
+            envelope.observedEffects.push(
+              executionStateBeforeConnect === "unknown"
+                ? `unexpected_target_state_observation:expected_${targetExecutionStateExpectedAfterAttach}->${executionState}`
+                : `unexpected_target_state_change:${executionStateBeforeConnect}->${executionState}`,
+            );
           }
           if (executionState === "running") {
             await runtime.gdb.disconnect();
@@ -249,6 +374,7 @@ export class SessionOperations {
             ...result,
             symbolFile: explicitSymbols,
             targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+            targetExecutionStateExpectedAfterAttach,
             targetExecutionStateAfterConnect: executionState,
             targetExecutionState: executionState,
             gdbClientConnected: runtime.gdb.isConnected(),
@@ -260,20 +386,28 @@ export class SessionOperations {
           throw new SessionError("ARTIFACT_STALE", message, false, true, executionState === "unknown");
         }
       }
-      if (executionStateAfterConnect !== executionStateBeforeConnect) {
+      if (executionStateAfterConnect !== targetExecutionStateExpectedAfterAttach) {
         if (executionStateAfterConnect === "halted" && gdbAttachReportedFault(result)) {
           envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target", "target_fault_observed");
           envelope.data = {
             ...result,
             symbolFile: explicitSymbols ?? null,
             targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+            targetExecutionStateExpectedAfterAttach,
             targetExecutionStateAfterConnect: executionStateAfterConnect,
             gdbClientConnected: runtime.gdb.isConnected(),
             cleanup: "client_retained_and_fault_not_resumed",
+            attachBoundaryEvidence: attachBoundary ?? null,
+            firstGdbFrame: {
+              observedAt: firstGdbFrameObservedAt,
+              classification: "fault_handler",
+              causalAttribution: "indeterminate",
+              observationWindow: "after_pre_server_observation_through_first_gdb_frame",
+            },
           };
           throw new SessionError(
-            "TARGET_FAULTED_DURING_GDB_ATTACH",
-            "GDB attached to a target stopped in a fault handler; the client remains connected and the target was not resumed",
+            "TARGET_FAULT_OBSERVED_AT_FIRST_GDB_FRAME",
+            "The first GDB frame shows a target stopped in a fault handler. Available evidence cannot determine whether it faulted before or during the managed GDB Server attach; the client remains connected and the target was not resumed",
             false,
             true,
             false,
@@ -282,7 +416,7 @@ export class SessionOperations {
         const attachStopClassification = gdbAttachStopClassification(result);
         if (restoreRunningStateAfterAttach
             && executionStateAfterConnect === "halted"
-            && executionStateBeforeConnect === "running"
+            && targetExecutionStateExpectedAfterAttach === "running"
             && attachStopClassification) {
           envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target");
           const restore = await runtime.gdb.command("continue");
@@ -292,6 +426,7 @@ export class SessionOperations {
             ...result,
             symbolFile: explicitSymbols ?? null,
             targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+            targetExecutionStateExpectedAfterAttach,
             targetExecutionStateAfterConnect: executionStateAfterConnect,
             targetExecutionStateAfterRestore: executionStateAfterRestore,
             attachStopClassification,
@@ -317,11 +452,17 @@ export class SessionOperations {
           envelope.verification = { status: "verified", method: "gdb_attach_response_and_explicit_continue" };
           return;
         }
-        envelope.observedEffects.push("gdb_client_connected", `unexpected_target_state_change:${executionStateBeforeConnect}->${executionStateAfterConnect}`);
+        envelope.observedEffects.push(
+          "gdb_client_connected",
+          executionStateBeforeConnect === "unknown"
+            ? `unexpected_target_state_observation:expected_${targetExecutionStateExpectedAfterAttach}->${executionStateAfterConnect}`
+            : `unexpected_target_state_change:${executionStateBeforeConnect}->${executionStateAfterConnect}`,
+        );
         envelope.data = {
           ...result,
           symbolFile: explicitSymbols ?? null,
           targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+          targetExecutionStateExpectedAfterAttach,
           targetExecutionStateAfterConnect: executionStateAfterConnect,
           restoreRunningStateAfterAttachAuthorized: restoreRunningStateAfterAttach,
           gdbClientConnected: runtime.gdb.isConnected(),
@@ -329,7 +470,9 @@ export class SessionOperations {
         };
         throw new SessionError(
           "HIDDEN_STATE_CHANGE",
-          `connecting the GDB client changed target state from ${executionStateBeforeConnect} to ${executionStateAfterConnect}; the client remains connected to avoid another implicit state change`,
+          executionStateBeforeConnect === "unknown"
+            ? `the first GDB observation was ${executionStateAfterConnect}, not the ${targetExecutionStateExpectedAfterAttach} state expected from pre-Server evidence; the client remains connected to avoid an implicit state change`
+            : `connecting the GDB client changed target state from ${executionStateBeforeConnect} to ${executionStateAfterConnect}; the client remains connected to avoid another implicit state change`,
           false,
           true,
           executionStateAfterConnect === "unknown",
@@ -341,6 +484,7 @@ export class SessionOperations {
         ...result,
         symbolFile: explicitSymbols ?? null,
         targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+        targetExecutionStateExpectedAfterAttach,
         targetExecutionStateAfterConnect: executionStateAfterConnect,
       };
       envelope.verification = { status: "observed", method: "gdb_response" };
@@ -355,6 +499,7 @@ export class SessionOperations {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
       const result = await runtime.gdb.command(command, timeoutMs);
       runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState ?? "unknown";
+      runtime.gdbPreServerStateExpectationValid = false;
       envelope.data = { command, ...result, sideEffects: "unknown" };
       try {
         const updated = await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_command", {
@@ -603,6 +748,9 @@ export class SessionOperations {
     if (!runtime.gdbClientExitSubscription && runtime.gdb.onUnexpectedExit) {
       runtime.gdbClientExitSubscription = runtime.gdb.onUnexpectedExit(() => {
         runtime.gdbServerTargetExecutionState = "unknown";
+        runtime.gdbInitialAttachBoundaryAvailable = false;
+        runtime.gdbClientExitedUnexpectedly = true;
+        runtime.gdbPreServerStateExpectationValid = false;
       });
     }
     return runtime;

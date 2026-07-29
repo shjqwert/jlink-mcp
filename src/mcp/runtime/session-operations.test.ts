@@ -8,7 +8,7 @@ import { RTTClient } from "../../rtt/rtt-client";
 import { DirectMcuService } from "./direct-operations";
 import { MemorySessionManager } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
-import { SessionOperations, type SessionGdbClient } from "./session-operations";
+import { SessionOperations, type GdbAttachBoundaryEvidence, type SessionGdbClient } from "./session-operations";
 import { TargetStore } from "./target-store";
 
 test("GDB Server claims a long-lived owner that excludes direct MCU operations", async (context) => {
@@ -166,9 +166,7 @@ test("empty GDB interrupt window preserves firmware identity and explicit cleanu
 test("gdb_server_stop observes target after a timed-out client exits and safely releases owner", async (context) => {
   const fixtureValue = await fixture(context, "gdb-timeout-close-recovery");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
-  fixtureValue.gdb.connected = false;
-  fixtureValue.gdb.executionState = "unknown";
-  fixtureValue.runtime.gdbServerTargetExecutionState = "unknown";
+  fixtureValue.gdb.triggerUnexpectedExit();
   fixtureValue.probe.targetState = "running";
   fixtureValue.probe.rejectObservationWhileServerRunning = true;
 
@@ -182,6 +180,32 @@ test("gdb_server_stop observes target after a timed-out client exits and safely 
   assert.equal(fixtureValue.runtime.gdbOwnerToken, undefined);
   assert.equal(stopped.verification.method, "gdb_server_cleanup_and_post_server_probe_observation");
   assert.match(stopped.warnings.join("\n"), /pre-close target state was unknown/i);
+});
+
+test("gdb_server_stop compares pre-Server evidence when no client ever connected", async (context) => {
+  for (const item of [
+    { name: "preserved", finalState: "running" as const, ok: true, code: undefined },
+    { name: "changed", finalState: "halted" as const, ok: false, code: "HIDDEN_STATE_CHANGE" },
+  ]) {
+    const fixtureValue = await fixture(context, `gdb-stop-before-client-${item.name}`);
+    fixtureValue.gdb.connected = false;
+    await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+    assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
+    fixtureValue.probe.targetState = item.finalState;
+
+    const stopped = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+
+    assert.equal(stopped.ok, item.ok, item.name);
+    assert.equal(stopped.error?.code, item.code, item.name);
+    assert.equal((stopped.before as { targetExecutionState: string }).targetExecutionState, "unknown", item.name);
+    assert.equal(
+      (stopped.before as { targetExecutionStateExpectedBeforeClose: string }).targetExecutionStateExpectedBeforeClose,
+      "running",
+      item.name,
+    );
+    assert.equal((stopped.after as { targetExecutionState: string }).targetExecutionState, item.finalState, item.name);
+    assert.doesNotMatch(stopped.warnings.join("\n"), /client exited before close/i, item.name);
+  }
 });
 
 test("queued GDB request rejects an owner replaced while waiting", async (context) => {
@@ -228,6 +252,8 @@ test("unexpected GDB Server exit releases its long-lived owner", async (context)
   await waitUntil(() => fixtureValue.queue.getOwner(fixtureValue.target.probeSerial) === undefined);
   assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
   assert.equal(fixtureValue.runtime.gdbOwnerToken, undefined);
+  assert.equal(fixtureValue.runtime.gdbAttachBoundaryEvidence, undefined);
+  assert.equal(fixtureValue.runtime.gdbInitialAttachBoundaryAvailable, false);
   const target = fixtureValue.targets.require(fixtureValue.projectRoot);
   assert.equal(target.liveArtifactMatch.status, "verified");
   assert.equal(target.liveArtifactMatch.source, "fixture");
@@ -425,8 +451,9 @@ test("GDB connect keeps the audited RT-06 J-Link attach stop halted without expl
 });
 
 test("GDB connect retains and reports a fault-handler stop without resuming it", async (context) => {
-  const fixtureValue = await fixture(context, "gdb-connect-fault-handler");
-  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  const fixtureValue = await fixture(context, "gdb-connect-fault-handler", false, "Cortex-M4");
+  const started = await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
   fixtureValue.gdb.executionState = "halted";
   fixtureValue.gdb.connectResult = {
     success: true,
@@ -436,11 +463,55 @@ test("GDB connect retains and reports a fault-handler stop without resuming it",
   };
   const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, false);
-  assert.equal(result.error?.code, "TARGET_FAULTED_DURING_GDB_ATTACH");
+  assert.equal(result.error?.code, "TARGET_FAULT_OBSERVED_AT_FIRST_GDB_FRAME");
   assert.equal(result.error?.writeIssued, true);
   assert.equal(result.error?.stateUnknown, false);
   assert.deepEqual(fixtureValue.gdb.commands, []);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+  const startBoundary = (started.data as {
+    attachBoundaryEvidence: {
+      preServerObservation: { state: string; source: string; observedAt: string };
+      serverReadyObservedAt: string;
+      server: { processId: number; ownerToken: string; targetGeneration: string };
+      profile: { configuredDevice: string; gdbDevice: string; effectiveGdbDevice: string };
+    };
+  }).attachBoundaryEvidence;
+  assert.equal(startBoundary.preServerObservation.state, "running");
+  assert.equal(startBoundary.preServerObservation.source, "dhcsr");
+  assert.match(startBoundary.preServerObservation.observedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(startBoundary.serverReadyObservedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(startBoundary.server.processId, process.pid);
+  assert.equal(startBoundary.server.ownerToken, fixtureValue.runtime.gdbOwnerToken);
+  assert.equal(startBoundary.server.targetGeneration, fixtureValue.target.generation);
+  assert.equal(startBoundary.profile.configuredDevice, "TEST");
+  assert.equal(startBoundary.profile.gdbDevice, "Cortex-M4");
+  assert.equal(startBoundary.profile.effectiveGdbDevice, "Cortex-M4");
+  const faultEvidence = (result.data as {
+    attachBoundaryEvidence: typeof startBoundary;
+    firstGdbFrame: {
+      observedAt: string;
+      classification: string;
+      causalAttribution: string;
+      observationWindow: string;
+    };
+  });
+  assert.deepEqual(faultEvidence.attachBoundaryEvidence, startBoundary);
+  assert.equal((result.data as { targetExecutionStateBeforeConnect: string }).targetExecutionStateBeforeConnect, "unknown");
+  assert.equal((result.data as { targetExecutionStateExpectedAfterAttach: string }).targetExecutionStateExpectedAfterAttach, "running");
+  assert.equal(faultEvidence.firstGdbFrame.classification, "fault_handler");
+  assert.equal(faultEvidence.firstGdbFrame.causalAttribution, "indeterminate");
+  assert.equal(
+    faultEvidence.firstGdbFrame.observationWindow,
+    "after_pre_server_observation_through_first_gdb_frame",
+  );
+  assert.match(faultEvidence.firstGdbFrame.observedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(result.error?.message ?? "", /cannot determine whether.*before or during.*Server attach/i);
+
+  fixtureValue.probe.targetState = "halted";
+  const stopped = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+  assert.equal(stopped.ok, true);
+  assert.equal(fixtureValue.runtime.gdbAttachBoundaryEvidence, undefined);
+  assert.equal(fixtureValue.runtime.gdbInitialAttachBoundaryAvailable, false);
 });
 
 test("GDB connect keeps an unclassified attach stop halted", async (context) => {
@@ -551,9 +622,14 @@ test("a failed first GDB connect invalidates cached running state", async (conte
   assert.equal(first.ok, false);
   assert.equal(first.error?.stateUnknown, true);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
+  assert.equal(fixtureValue.runtime.gdbInitialAttachBoundaryAvailable, false);
   const second = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot);
   assert.equal(second.error?.code, "TARGET_STATE_UNKNOWN");
   assert.equal(fixtureValue.gdb.connectCalls, 1);
+  fixtureValue.probe.targetState = "halted";
+  const cleanup = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+  assert.equal(cleanup.ok, false);
+  assert.equal(cleanup.error?.code, "HIDDEN_STATE_CHANGE");
 });
 
 test("HSS owner returns CAPTURE_ACTIVE without disturbing the owner", async (context) => {
@@ -605,7 +681,7 @@ test("memory owner blocks every GDB operation with MEMORY_SESSION_ACTIVE and own
   fixtureValue.queue.releaseOwner(fixtureValue.target.probeSerial, owner.token);
 });
 
-async function fixture(context: TestContext, name: string, withArtifact = false) {
+async function fixture(context: TestContext, name: string, withArtifact = false, gdbDevice?: string) {
   const root = testDirectory(context, name);
   const projectRoot = join(root, "project");
   mkdirSync(projectRoot, { recursive: true });
@@ -614,6 +690,7 @@ async function fixture(context: TestContext, name: string, withArtifact = false)
   const target = await targets.configure({
     projectRoot,
     device: "TEST",
+    gdbDevice,
     probeSerial: "123456",
     interface: "SWD",
     speed: 1000,
@@ -631,6 +708,10 @@ async function fixture(context: TestContext, name: string, withArtifact = false)
     gdbOwnerToken: undefined as string | undefined,
     gdbOwnerExitSubscription: undefined as (() => void) | undefined,
     gdbServerTargetExecutionState: undefined as GDBTargetExecutionState | undefined,
+    gdbAttachBoundaryEvidence: undefined as GdbAttachBoundaryEvidence | undefined,
+    gdbInitialAttachBoundaryAvailable: false,
+    gdbClientExitedUnexpectedly: false,
+    gdbPreServerStateExpectationValid: false,
     onGdbServerExit: (listener: () => void) => {
       gdbServerExitListener = listener;
       return () => { if (gdbServerExitListener === listener) gdbServerExitListener = undefined; };
