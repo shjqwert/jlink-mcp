@@ -153,6 +153,95 @@ test("JLinkBackend uses J-Link-supported tokens for aliased core registers", asy
   ]);
 });
 
+test("JLinkBackend phases same-connection core-register write and readback for all aliases", async () => {
+  const scripts: string[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => registerTransactionProcess(scripts, "match"),
+  );
+
+  for (const name of ["R0", "PC", "R15", "LR", "R14", "SP", "R13"]) {
+    const transaction = await backend.writeCoreRegisterTransaction(name, 0x1234_5678);
+    assert.equal(transaction.command.success, true, name);
+    assert.equal(transaction.command.writeIssued, true, name);
+    assert.equal(transaction.readback?.success, true, name);
+    assert.doesNotMatch(transaction.readback?.rawOutput ?? "", /wreg|write echo/i, name);
+  }
+
+  assert.deepEqual(scripts, [
+    "exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
+  ]);
+});
+
+test("JLinkBackend never promotes write echo to readback and preserves readback failure dispatch", async () => {
+  const echoOnly = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => registerTransactionProcess([], "write_echo_only"),
+  );
+  const missing = await echoOnly.writeCoreRegisterTransaction("R0", 0x1234_5678);
+  assert.equal(missing.command.success, true);
+  assert.equal(missing.readback?.success, true);
+  assert.doesNotMatch(missing.readback?.rawOutput ?? "", /R0\s*=/i);
+
+  const failedReadback = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => registerTransactionProcess([], "readback_failure"),
+  );
+  const failed = await failedReadback.writeCoreRegisterTransaction("R0", 0x1234_5678);
+  assert.equal(failed.command.success, false);
+  assert.equal(failed.command.writeIssued, true);
+  assert.equal(failed.command.stateUnknown, true);
+  assert.equal(failed.readback?.success, false);
+  assert.equal(failed.readback?.writeIssued, true);
+  assert.equal(failed.readback?.stateUnknown, true);
+});
+
+test("JLinkBackend lets a fatal stderr diagnostic override completed write and readback prompts", async () => {
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => registerTransactionProcess([], "stderr_fatal"),
+  );
+
+  const result = await backend.writeCoreRegisterTransaction("R0", 0x1234_5678);
+
+  assert.equal(result.command.success, false);
+  assert.equal(result.command.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.command.writeIssued, true);
+  assert.equal(result.command.stateUnknown, true);
+  assert.equal(result.readback?.success, false);
+  assert.equal(result.readback?.stateUnknown, true);
+});
+
+test("JLinkBackend reports a busy core-register transaction as unissued without spawning", async () => {
+  let spawns = 0;
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => {
+      spawns += 1;
+      return registerTransactionProcess([], "match");
+    },
+  );
+  assert.equal(backend.acquireExclusive("fixture-owner"), true);
+
+  const result = await backend.writeCoreRegisterTransaction("R0", 0x1234_5678);
+
+  assert.equal(result.command.errorCode, ProbeErrorCode.PROBE_BUSY);
+  assert.equal(result.command.writeIssued, false);
+  assert.equal(result.command.stateUnknown, false);
+  assert.equal(spawns, 0);
+});
+
 test("JLinkBackend uses the explicit GDB attach profile instead of the Flash device", () => {
   const backend = new JLinkBackend(
     { device: "Z20K146M", gdbDevice: "Cortex-M4", serialNumber: "123456", interface: "SWD", speed: 1000 },
@@ -498,6 +587,85 @@ function fakeProcess(signals: Array<NodeJS.Signals | number | undefined>, emitKi
     }
     return true;
   };
+  return child as unknown as ChildProcess;
+}
+
+function registerTransactionProcess(
+  scripts: string[],
+  mode: "match" | "write_echo_only" | "readback_failure" | "stderr_fatal",
+): ChildProcess {
+  type MutableChild = EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+    stdin: PassThrough;
+    pid: number;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill(signal?: NodeJS.Signals | number): boolean;
+  };
+  const child = new EventEmitter() as MutableChild;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.stdin = new PassThrough();
+  child.pid = process.pid;
+  child.exitCode = null;
+  child.signalCode = null;
+  let script = "";
+  let input = "";
+  let token = "";
+  let requested = "";
+  let closed = false;
+  const close = (code: number) => {
+    if (closed) return;
+    closed = true;
+    scripts.push(script);
+    child.stdout.end();
+    child.stderr.end();
+    child.exitCode = code;
+    child.emit("exit", code, null);
+    child.emit("close", code, null);
+  };
+  const respond = (text: string) => setImmediate(() => child.stdout.write(text));
+  child.stdin.on("data", (chunk: Buffer) => {
+    const text = chunk.toString();
+    script += text;
+    input += text;
+    while (input.includes("\n")) {
+      const newline = input.indexOf("\n");
+      const command = input.slice(0, newline).trim();
+      input = input.slice(newline + 1);
+      if (!command) continue;
+      if (command === "exec SetRestartOnClose = 0") {
+        respond("O.K.\nJ-Link>");
+      } else if (command.startsWith("wreg ")) {
+        const match = command.match(/^wreg (.+), 0x([0-9a-f]+)$/i);
+        token = match?.[1] ?? "R0";
+        requested = match?.[2] ?? "00000000";
+        respond(`write echo: ${token} = ${requested}\nJ-Link>`);
+      } else if (command.startsWith("rreg ")) {
+        if (mode === "readback_failure") {
+          setImmediate(() => {
+            child.stdout.write("****** Error: Could not read register\n");
+            close(1);
+          });
+        } else if (mode === "write_echo_only") {
+          respond("O.K.\nJ-Link>");
+        } else {
+          respond(`${token} = ${requested}\nJ-Link>`);
+        }
+      } else if (command === "exit") {
+        setImmediate(() => {
+          if (mode === "stderr_fatal") child.stderr.write("Unknown command. '?' for help.\n");
+          close(0);
+        });
+      }
+    }
+  });
+  child.kill = () => {
+    setImmediate(() => close(1));
+    return true;
+  };
+  respond("SEGGER J-Link Commander\nJ-Link>");
   return child as unknown as ChildProcess;
 }
 

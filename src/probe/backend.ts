@@ -56,6 +56,12 @@ export interface CommandResult {
   stateUnknown?: boolean;
 }
 
+export interface ProbeCoreRegisterWriteResult {
+  command: CommandResult;
+  /** Same-connection readback result when exact verification was requested. */
+  readback?: CommandResult;
+}
+
 export interface MemoryDumpLine {
   address: string;
   hex: string;
@@ -342,6 +348,10 @@ export abstract class ProbeBackend {
 
   async writeCoreRegister(_name: string, _value: number): Promise<CommandResult> {
     return { success: false, rawOutput: "", output: "", error: "core-register writes are not supported by this backend", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+  }
+
+  async writeCoreRegisterTransaction(_name: string, _value: number): Promise<ProbeCoreRegisterWriteResult | undefined> {
+    return undefined;
   }
 
   // ── Flash ────────────────────────────────────────────────────────

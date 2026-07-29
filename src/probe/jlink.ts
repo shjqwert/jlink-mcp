@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
-import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig, type ProbeMemoryTransactionInput, type ProbeMemoryTransactionResult } from "./backend";
+import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig, type ProbeCoreRegisterWriteResult, type ProbeMemoryTransactionInput, type ProbeMemoryTransactionResult } from "./backend";
 import { ProcessManager, terminateChildProcess } from "../utils/process-manager";
 import { log, logError } from "../utils/logger";
 import * as path from "path";
@@ -490,6 +490,32 @@ export class JLinkBackend extends ProbeBackend {
     return this.executeDirect([`wreg ${jlinkCoreRegisterToken(name)}, 0x${value.toString(16)}`]);
   }
 
+  override async writeCoreRegisterTransaction(name: string, value: number): Promise<ProbeCoreRegisterWriteResult> {
+    if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
+      return {
+        command: { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT, writeIssued: false },
+      };
+    }
+    if (!this.beginHardwareOperation()) {
+      return {
+        command: {
+          success: false,
+          rawOutput: "",
+          output: `Probe is exclusively owned by ${this.getExclusiveOwner()}`,
+          error: "Capture owns the probe",
+          errorCode: ProbeErrorCode.PROBE_BUSY,
+          writeIssued: false,
+          stateUnknown: false,
+        },
+      };
+    }
+    try {
+      return await this.acquireLock(() => this.execCoreRegisterTransaction(jlinkCoreRegisterToken(name), value));
+    } finally {
+      this.endHardwareOperation();
+    }
+  }
+
   override getConnectionGeneration(): number { return this.connectionGeneration; }
 
   async flash(filePath: string, baseAddress?: number): Promise<CommandResult> {
@@ -522,6 +548,160 @@ export class JLinkBackend extends ProbeBackend {
     } finally {
       this.endHardwareOperation();
     }
+  }
+
+  private execCoreRegisterTransaction(token: string, value: number, timeoutMs = 30000): Promise<ProbeCoreRegisterWriteResult> {
+    this.connectionGeneration += 1;
+    const args = [
+      "-device", this.config.device,
+      "-if", this.config.interface,
+      "-speed", String(this.config.speed),
+      "-autoconnect", "1",
+      "-ExitOnError", "1",
+      "-NoGui", "1",
+    ];
+    if (this.config.serialNumber) args.push("-SelectEmuBySN", this.config.serialNumber);
+
+    return new Promise((resolve) => {
+      const proc = this.spawnProcess(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      let phase: "startup" | "policy" | "write" | "readback" | "exit" = "startup";
+      let phaseStart = 0;
+      let writeRaw = "";
+      let readbackRaw = "";
+      let writeSent = false;
+      let writeCompleted = false;
+      let readbackSent = false;
+      let readbackCompleted = false;
+      let processError: Error | undefined;
+      let timedOut = false;
+      let settled = false;
+      let timeout: NodeJS.Timeout | undefined;
+
+      const send = (command: string, nextPhase: typeof phase) => {
+        phase = nextPhase;
+        phaseStart = stdout.length;
+        if (nextPhase === "write") writeSent = true;
+        if (nextPhase === "readback") readbackSent = true;
+        proc.stdin?.write(`${command}\n`);
+      };
+      const finishInput = () => {
+        phase = "exit";
+        proc.stdin?.write("exit\n");
+        proc.stdin?.end();
+      };
+      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        const transportFailure = timedOut
+          ? `J-Link timed out after ${timeoutMs}ms`
+          : processError
+            ? `Failed to spawn JLinkExe: ${processError.message}`
+            : code !== 0
+              ? `J-Link exited with code ${code}`
+              : undefined;
+        const wholeDiagnostic = fatalJLinkCommandDiagnostic(`${stdout}\n${stderr}`);
+        const overallFailure = Boolean(transportFailure || wholeDiagnostic);
+        const failureCode = processError
+          ? ProbeErrorCode.PROBE_NOT_FOUND
+          : /inittarget\(\) returned error|could not connect|cannot connect/i.test(stdout)
+            ? ProbeErrorCode.TARGET_UNREACHABLE
+            : wholeDiagnostic
+              ? ProbeErrorCode.JLINK_COMMAND_FAILED
+              : timedOut
+                ? ProbeErrorCode.TIMEOUT
+                : transportFailure
+                  ? ProbeErrorCode.JLINK_COMMAND_FAILED
+                  : undefined;
+        const failureMessage = transportFailure ?? (wholeDiagnostic ? `J-Link reported a fatal command diagnostic: ${wholeDiagnostic}` : stderr || "J-Link core-register transaction did not complete");
+        const command: CommandResult = writeCompleted && !overallFailure
+          ? {
+            success: true,
+            rawOutput: writeRaw,
+            output: stripBoilerplate(writeRaw),
+            stderr,
+            exitCode: code,
+            exitSignal: signal,
+            writeIssued: true,
+            stateUnknown: false,
+          }
+          : {
+            success: false,
+            rawOutput: writeRaw || stdout,
+            output: stripBoilerplate(writeRaw || stdout),
+            stderr,
+            error: failureMessage,
+            errorCode: failureCode,
+            exitCode: code,
+            exitSignal: signal,
+            writeIssued: writeSent,
+            stateUnknown: writeSent,
+          };
+        const readback: CommandResult | undefined = readbackSent
+          ? readbackCompleted && !overallFailure
+            ? {
+              success: true,
+              rawOutput: readbackRaw,
+              output: stripBoilerplate(readbackRaw),
+              stderr,
+              exitCode: code,
+              exitSignal: signal,
+              writeIssued: true,
+              stateUnknown: false,
+            }
+            : {
+              success: false,
+              rawOutput: readbackRaw,
+              output: stripBoilerplate(readbackRaw),
+              stderr,
+              error: failureMessage,
+              errorCode: failureCode,
+              exitCode: code,
+              exitSignal: signal,
+              writeIssued: true,
+              stateUnknown: true,
+            }
+          : undefined;
+        resolve({ command, readback });
+      };
+
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        if (phase === "exit") return;
+        const phaseRaw = stdout.slice(phaseStart);
+        if (!/(?:^|\r?\n)J-Link(?:\[\d+\])?>\s*$/i.test(phaseRaw)) return;
+        if (phase === "startup") {
+          send("exec SetRestartOnClose = 0", "policy");
+        } else if (phase === "policy") {
+          if (fatalJLinkCommandDiagnostic(phaseRaw)) finishInput();
+          else send(`wreg ${token}, 0x${value.toString(16)}`, "write");
+        } else if (phase === "write") {
+          writeRaw = phaseRaw;
+          if (fatalJLinkCommandDiagnostic(writeRaw)) finishInput();
+          else {
+            writeCompleted = true;
+            send(`rreg ${token}`, "readback");
+          }
+        } else {
+          readbackRaw = phaseRaw;
+          readbackCompleted = !fatalJLinkCommandDiagnostic(readbackRaw);
+          finishInput();
+        }
+      });
+      proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      proc.on("error", (error) => {
+        processError = error;
+        this.setState(ProbeState.DISCONNECTED);
+      });
+      proc.on("close", (code, signal) => finish(code, signal));
+
+      timeout = setTimeout(() => {
+        timedOut = true;
+        void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
+      }, timeoutMs);
+    });
   }
 
   // ── GDB Server ───────────────────────────────────────────────────

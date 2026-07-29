@@ -1,4 +1,4 @@
-import type { CommandResult, ProbeBackend, ProbeMemoryTransactionResult, TargetStateObservation } from "../../probe/backend";
+import type { CommandResult, ProbeBackend, ProbeCoreRegisterWriteResult, ProbeMemoryTransactionResult, TargetStateObservation } from "../../probe/backend";
 import { ProbeErrorCode, decodeFaultRegisters } from "../../probe/backend";
 import { chmodSync, copyFileSync, constants, readFileSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -910,24 +910,58 @@ export class DirectMcuService {
       envelope.before = observationData(before);
       requireHaltedCoreAccess(before, "core-register write");
       let result: CommandResult;
+      let transaction: ProbeCoreRegisterWriteResult | undefined;
+      let writeError: OperationExecutionError | undefined;
       try {
-        result = await runtime.probe.writeCoreRegister(input.name, input.value);
+        if (input.verify) {
+          transaction = await runtime.probe.writeCoreRegisterTransaction(input.name, input.value);
+          if (!transaction) {
+            throw executionError(
+              "CORE_REGISTER_ATOMIC_VERIFY_UNSUPPORTED",
+              "precondition",
+              "core-register exact verification requires a backend that writes and reads back in one Probe connection",
+              { writeIssued: false, stateUnknown: false },
+            );
+          }
+          result = transaction.command;
+        } else {
+          result = await runtime.probe.writeCoreRegister(input.name, input.value);
+        }
       } catch (error) {
-        envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback: undefined, command: null };
-        throw unexpectedPostWriteError(error, "write", "core-register write backend rejected after command dispatch");
+        if (error instanceof OperationExecutionError && !error.detail.writeIssued) throw error;
+        writeError = unexpectedPostWriteError(error, "write", "core-register write backend rejected after command dispatch");
+        result = {
+          success: false,
+          rawOutput: "",
+          output: "",
+          error: writeError.message,
+          errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+          writeIssued: true,
+          stateUnknown: true,
+        };
       }
       envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback: undefined, command: commandData(result) };
-      if (!result.success) {
-        const issued = result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
-        throw commandError(result, "write", issued, issued);
+      if (!result.success && !writeError) {
+        const issued = result.writeIssued ?? result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
+        writeError = commandError(result, "write", issued, result.stateUnknown ?? issued);
+        if (!issued) throw writeError;
+      } else {
+        envelope.observedEffects.push("core_register_write_issued");
       }
-      envelope.observedEffects.push("core_register_write_issued");
       let readback: number | undefined;
       let readbackCommand: Record<string, unknown> | undefined;
       let verificationError: OperationExecutionError | undefined;
-      if (input.verify) {
+      if (input.verify && !writeError) {
         try {
-          const verify = await runtime.probe.readRegister(input.name);
+          const verify = transaction?.readback;
+          if (!verify) {
+            throw executionError(
+              "READBACK_FAILED",
+              "readback",
+              "core-register backend did not return same-connection readback evidence",
+              { writeIssued: true, stateUnknown: true },
+            );
+          }
           readbackCommand = commandData(verify);
           envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback: undefined, command: commandData(result), readbackCommand };
           if (!verify.success) throw commandError(verify, "readback", true, true);
@@ -950,10 +984,18 @@ export class DirectMcuService {
       if (before.state !== after.state) envelope.observedEffects.push(`target_state_changed_during_core_write:${before.state}->${after.state}`);
       envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback, command: commandData(result), readbackCommand };
       envelope.verification = input.verify
-        ? verificationError
-          ? { status: "failed", method: "exact_readback", details: verificationError.detail }
-          : { status: "verified", method: "exact_readback" }
-        : { status: "executed_unverified" };
+        ? writeError || verificationError
+          ? { status: "failed", method: "exact_readback", details: (writeError ?? verificationError)!.detail }
+          : { status: "verified", method: "exact_readback_same_connection" }
+        : writeError
+          ? { status: "failed", method: "write_command", details: writeError.detail }
+          : { status: "executed_unverified" };
+      if (writeError) {
+        if (after.state === "unknown" && !writeError.detail.stateUnknown) {
+          writeError = normalizePostWriteError(writeError, writeError.detail.code, writeError.detail.stage, writeError.detail.message, true);
+        }
+        throw writeError;
+      }
       if (verificationError) {
         if (after.state === "unknown" && !verificationError.detail.stateUnknown) {
           verificationError = normalizePostWriteError(verificationError, verificationError.detail.code, verificationError.detail.stage, verificationError.detail.message, true);
