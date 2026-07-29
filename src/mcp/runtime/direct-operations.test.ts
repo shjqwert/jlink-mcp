@@ -7,9 +7,11 @@ import {
   ProbeErrorCode,
   type CommandResult,
   type GDBServerInfo,
+  type ProbeCoreRegisterWriteResult,
   type ProbeMemoryTransactionInput,
   type ProbeMemoryTransactionResult,
   type TargetStateObservation,
+  type TargetStateObservationOptions,
 } from "../../probe/backend";
 import { repoTempRoot } from "../preflight/temp-preflight";
 import { DirectMcuService, removeFlashSnapshotDirectory, type FlashSnapshotCleanup, type MemoryWriteInput } from "./direct-operations";
@@ -418,6 +420,54 @@ test("core-register access reports HALT_REQUIRED before issuing any register com
   assert.deepEqual(probe.actions, []);
 });
 
+test("core-register access decodes canonical J-Link register lines ahead of banner values", async (context) => {
+  const cases = [
+    { requested: "PC", reported: "R15 (PC)" },
+    { requested: "R15", reported: "R15 (PC)" },
+    { requested: "SP", reported: "R13 (SP)" },
+    { requested: "R13", reported: "R13 (SP)" },
+    { requested: "LR", reported: "R14" },
+    { requested: "R14", reported: "R14" },
+  ];
+
+  for (const { requested, reported } of cases) {
+    const current = await fixture(context, `core-read-canonical-${requested.toLowerCase()}`);
+    current.probe.targetState = "halted";
+    current.probe.registerReadResult = {
+      success: true,
+      rawOutput: `J-Link ARM V8.84\nS/N: 69401227\n${reported} = 0x20002BD8`,
+      output: "",
+    };
+
+    const result = await current.service.readCoreRegister(current.projectRoot, requested);
+
+    assert.equal(result.ok, true);
+    assert.equal((result.data as { value: number }).value, 0x2000_2bd8);
+    assert.deepEqual(current.probe.observationOptions, [
+      { preserveDebugStateOnClose: true },
+      { preserveDebugStateOnClose: true },
+    ]);
+  }
+});
+
+test("core-register list reads preserve debug state for both target observations", async (context) => {
+  const current = await fixture(context, "core-read-all-preserve-state");
+  current.probe.targetState = "halted";
+  current.probe.registersReadResult = {
+    success: true,
+    rawOutput: "R0 = 00000001, R1 = 00000002",
+    output: "",
+  };
+
+  const result = await current.service.readCoreRegisters(current.projectRoot);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(current.probe.observationOptions, [
+    { preserveDebugStateOnClose: true },
+    { preserveDebugStateOnClose: true },
+  ]);
+});
+
 test("diagnose_crash collects Cortex-M fault and validated exception-frame evidence without changing state", async (context) => {
   const { service, probe, projectRoot, targets } = await fixture(context, "diagnose-crash");
   await targets.configure({
@@ -526,6 +576,191 @@ test("write_core_register fails when the target no longer remains halted", async
   assert.equal(result.error?.writeIssued, true);
   assert.equal(result.error?.stateUnknown, false);
   assert.ok(probe.actions.includes("write-register:PC:8192"));
+});
+
+test("write_core_register exact verification uses one transaction and retains final halted-state evidence", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-same-connection");
+  probe.targetState = "halted";
+  const command = {
+    success: true,
+    rawOutput: "write echo: R0 = 12345678",
+    output: "",
+    writeIssued: true,
+    stateUnknown: false,
+  };
+  probe.registerTransactionResult = {
+    command,
+    readback: { success: true, rawOutput: "R0 = 12345678", output: "", writeIssued: true, stateUnknown: false },
+  };
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal((result.data as { readback: number }).readback, 0x1234_5678);
+  assert.equal(result.verification.method, "exact_readback_same_connection");
+  assert.equal(result.after.targetState, "halted");
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+  assert.deepEqual(probe.observationOptions, [{}, { preserveDebugStateOnClose: true }]);
+});
+
+test("write_core_register raises old-helper final observation failure as an issued unknown-state result", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-old-helper");
+  probe.registerTransactionResult = {
+    command: { success: true, rawOutput: "write echo: R0 = 12345678", output: "", writeIssued: true, stateUnknown: false },
+    readback: { success: true, rawOutput: "R0 = 12345678", output: "", writeIssued: true, stateUnknown: false },
+  };
+  probe.observations.push(
+    { state: "halted", source: "dhcsr", result: ok() },
+    {
+      state: "unknown",
+      source: "unavailable",
+      result: {
+        success: false,
+        rawOutput: "{}",
+        output: "",
+        error: "memory helper did not prove that close-time debug de-initialization was skipped",
+        errorCode: ProbeErrorCode.TARGET_UNREACHABLE,
+        stateUnknown: true,
+      },
+    },
+  );
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "POST_OPERATION_STATE_UNKNOWN");
+  assert.equal(result.error?.stage, "final_observation");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(result.after.targetState, "unknown");
+  assert.deepEqual(probe.observationOptions, [{}, { preserveDebugStateOnClose: true }]);
+});
+
+test("write_core_register fails before mutation when atomic verification is unsupported", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-atomic-unsupported");
+  probe.targetState = "halted";
+  probe.disableRegisterTransaction = true;
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, "CORE_REGISTER_ATOMIC_VERIFY_UNSUPPORTED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.deepEqual(probe.actions, ["write-register-transaction-unsupported:R0:305419896"]);
+});
+
+test("write_core_register preserves issued readback failure and still observes final target state", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-readback-failure");
+  probe.targetState = "halted";
+  probe.registerTransactionResult = {
+    command: { success: true, rawOutput: "write echo: R0 = 12345678", output: "", writeIssued: true, stateUnknown: false },
+    readback: {
+      success: false,
+      rawOutput: "Could not read register",
+      output: "",
+      error: "Could not read register",
+      errorCode: ProbeErrorCode.TARGET_UNREACHABLE,
+      writeIssued: true,
+      stateUnknown: true,
+    },
+  };
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, ProbeErrorCode.TARGET_UNREACHABLE);
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(result.after.targetState, "halted");
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+});
+
+test("write_core_register observes final state after an issued transaction failure", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-issued-failure");
+  probe.targetState = "halted";
+  probe.registerTransactionResult = {
+    command: {
+      success: false,
+      rawOutput: "transport closed after wreg dispatch",
+      output: "",
+      error: "transport closed after wreg dispatch",
+      errorCode: ProbeErrorCode.TIMEOUT,
+      writeIssued: true,
+      stateUnknown: true,
+    },
+  };
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, ProbeErrorCode.TIMEOUT);
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(result.after.targetState, "halted");
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+});
+
+test("write_core_register observes final state after an unissued transaction timeout", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-unissued-timeout");
+  probe.targetState = "halted";
+  probe.registerTransactionResult = {
+    command: {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "J-Link timed out before interactive command dispatch",
+      errorCode: ProbeErrorCode.TIMEOUT,
+      writeIssued: false,
+      stateUnknown: false,
+    },
+  };
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, ProbeErrorCode.TIMEOUT);
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.after.targetState, "halted");
+  assert.equal(probe.observationCalls, 2);
+  assert.deepEqual(result.observedEffects, []);
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+});
+
+test("write_core_register preserves unissued evidence when final observation also fails", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-unissued-observation-failure");
+  probe.targetState = "halted";
+  probe.observationRejectOnCall = 2;
+  probe.registerTransactionResult = {
+    command: {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "J-Link timed out before interactive command dispatch",
+      errorCode: ProbeErrorCode.TIMEOUT,
+      writeIssued: false,
+      stateUnknown: false,
+    },
+  };
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, ProbeErrorCode.TIMEOUT);
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(probe.observationCalls, 2);
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+});
+
+test("write_core_register observes final state when the transaction backend throws after possible dispatch", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-transaction-throw");
+  probe.targetState = "halted";
+  probe.writeRegisterReject = new Error("fixture transport rejected after possible dispatch");
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, "PROBE_COMMAND_REJECTED");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(result.after.targetState, "halted");
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
 });
 
 test("write_memory refuses an unconfigured region before issuing a write", async (context) => {
@@ -638,6 +873,44 @@ test("write_memory rejects a same-connection readback that does not persist", as
   assert.deepEqual(probe.actions, ["transaction:20000000:4:1:0:0:false", "read:20000000:4"]);
 });
 
+test("structured range verification accepts an explicitly bounded running-state consumer value", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "structured-probe-dynamic-range");
+  const requested = Buffer.from("32000000", "hex");
+  const consumed = Buffer.from("00000000", "hex");
+  probe.memory.set(0x20000000, consumed);
+  probe.transactionResult = {
+    command: { ...ok(), writeIssued: true, stateUnknown: false },
+    readbacks: [requested],
+    restoreIssued: false,
+    restoreVerified: false,
+    targetStateBefore: "running",
+    targetStateAfter: "running",
+  };
+
+  const result = await service.structuredWrite({
+    projectRoot,
+    address: 0x20000000,
+    width: 32,
+    byteCount: 4,
+    dataHex: requested.toString("hex"),
+    knownRegion: "ram",
+    verify: true,
+    comparator: { mode: "range", min: 0, max: 50, type: "uint32", endian: "little" },
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(result.verification.method, "range");
+  assert.deepEqual(result.verification.details, {
+    mode: "range",
+    min: 0,
+    max: 50,
+    actual: 0,
+    observationCount: 1,
+    command: (result.data as { readbackCommand: unknown }).readbackCommand,
+    connection: "independent_post_write",
+  });
+});
+
 test("readback mismatch retains the actual memory and core-register values", async (context) => {
   const memory = await fixture(context, "memory-readback-mismatch");
   memory.probe.readResult = { success: true, rawOutput: "20000000 = 04030200", output: "" };
@@ -649,11 +922,18 @@ test("readback mismatch retains the actual memory and core-register values", asy
 
   const register = await fixture(context, "register-readback-mismatch");
   register.probe.targetState = "halted";
+  register.probe.registerTransactionResult = {
+    command: { success: true, rawOutput: "write echo: R15 (PC) = 00002000", output: "", writeIssued: true },
+    readback: { success: true, rawOutput: "R15 (PC) = 00001000", output: "", writeIssued: true },
+  };
   const registerResult = await register.service.writeCoreRegister({ projectRoot: register.projectRoot, name: "PC", value: 0x2000, verify: true });
   assert.equal(registerResult.ok, false);
   assert.equal(registerResult.error?.code, "READBACK_MISMATCH");
+  assert.equal(registerResult.error?.writeIssued, true);
+  assert.equal(registerResult.error?.stateUnknown, false);
   assert.equal((registerResult.data as { readback: number }).readback, 0x1000);
   assert.equal(registerResult.after.targetState, "halted");
+  assert.deepEqual(register.probe.actions, ["write-register-transaction:PC:8192"]);
 });
 
 test("post-write readback decode failures retain issued and unknown-state facts", async (context) => {
@@ -686,7 +966,10 @@ test("post-write readback decode failures retain issued and unknown-state facts"
 
   const register = await fixture(context, "register-readback-decode");
   register.probe.targetState = "halted";
-  register.probe.registerReadResult = { success: true, rawOutput: "no register value", output: "" };
+  register.probe.registerTransactionResult = {
+    command: { success: true, rawOutput: "no register value", output: "", writeIssued: true },
+    readback: { success: true, rawOutput: "no register value", output: "", writeIssued: true },
+  };
   const registerResult = await register.service.writeCoreRegister({ projectRoot: register.projectRoot, name: "PC", value: 0x2000, verify: true });
   assert.equal(registerResult.ok, false);
   assert.equal(registerResult.error?.code, "REGISTER_DECODE_FAILED");
@@ -712,6 +995,8 @@ test("mutating backend rejection is reported as an issued uncertain outcome", as
   assert.equal(registerResult.error?.code, "PROBE_COMMAND_REJECTED");
   assert.equal(registerResult.error?.writeIssued, true);
   assert.equal(registerResult.error?.stateUnknown, true);
+  assert.equal(registerResult.verification.status, "failed");
+  assert.equal(registerResult.verification.method, "write_command");
 });
 
 test("write_memory honors explicit Native write dispatch evidence", async (context) => {
@@ -1569,6 +1854,7 @@ test("structured exact verification rejects a transaction-local value that does 
   });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "READBACK_MISMATCH");
+  assert.match(result.warnings.join("\n"), /firmware intentionally consumes or changes this field/i);
   const data = result.data as { readbackHex: string; transactionReadbackHex: string };
   assert.equal(data.transactionReadbackHex, requested.toString("hex"));
   assert.equal(data.readbackHex, old.toString("hex"));
@@ -1881,15 +2167,19 @@ class FakeProbe extends ProbeBackend {
   readMemoryReject?: Error;
   readAccessSizes: Array<1 | 2 | 4 | undefined> = [];
   observations: TargetStateObservation[] = [];
+  observationOptions: TargetStateObservationOptions[] = [];
   observationCalls = 0;
   observationRejectOnCall?: number;
   haltResult?: CommandResult;
   haltReject?: Error;
   transactionInput?: ProbeMemoryTransactionInput;
   transactionResult?: ProbeMemoryTransactionResult;
+  registerTransactionResult?: ProbeCoreRegisterWriteResult;
+  disableRegisterTransaction = false;
 
-  override async observeTargetState(): Promise<TargetStateObservation> {
+  override async observeTargetState(options: TargetStateObservationOptions = {}): Promise<TargetStateObservation> {
     this.observationCalls += 1;
+    this.observationOptions.push(options);
     if (this.observationRejectOnCall === this.observationCalls) throw new Error("observation transport rejected");
     const queued = this.observations.shift();
     if (queued) return queued;
@@ -1951,6 +2241,18 @@ class FakeProbe extends ProbeBackend {
     this.actions.push(`write-register:${name}:${value}`);
     if (this.writeRegisterReject) throw this.writeRegisterReject;
     return ok();
+  }
+  override async writeCoreRegisterTransaction(name: string, value: number): Promise<ProbeCoreRegisterWriteResult | undefined> {
+    if (this.disableRegisterTransaction) {
+      this.actions.push(`write-register-transaction-unsupported:${name}:${value}`);
+      return undefined;
+    }
+    this.actions.push(`write-register-transaction:${name}:${value}`);
+    if (this.writeRegisterReject) throw this.writeRegisterReject;
+    return this.registerTransactionResult ?? {
+      command: { success: true, rawOutput: `write echo: ${name} = ${value.toString(16).padStart(8, "0")}`, output: "", writeIssued: true },
+      readback: this.registerReadResult ?? { success: true, rawOutput: `${name} = 00001000`, output: "" },
+    };
   }
   async flash(filePath: string, baseAddress?: number): Promise<CommandResult> {
     this.flashPaths.push(filePath);

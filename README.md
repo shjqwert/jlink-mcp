@@ -4,6 +4,15 @@ Standalone MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
 The server serializes physical Probe access and reports observed state and side effects. It does not infer a Target from an environment default: configure each canonical `projectRoot` with `target_configure` before target operations.
 
+## v1.1.5 development changes
+
+- Timed HSS sequences reject normal variable access after `hss_stop`; failure cleanup remains bounded and preserves the original error.
+- HSS capability discovery restores an originally running target with explicit `JLINKARM_Go` evidence when capability attach unexpectedly halts it, while still reporting the state-change failure.
+- `target_configure.gdbDevice` is now required by `gdb_open`. It separates a validated non-invasive GDB attach profile from the exact `device` retained for Flash/Erase. A failed attach is cleaned up in the owning MCP process without resuming a faulted target.
+- Single core-register access uses the J-Link V8.84-supported tokens `"R15 (PC)"`, `R14`, and `"R13 (SP)"` for PC/R15, LR/R14, and SP/R13 respectively.
+- `write_variable` keeps exact verification as the default and adds an explicit `range` comparator for firmware-consumed dynamic fields. Protocol ACK/Complete must still be checked separately.
+- The v1.1.4 unknown-memory write software gate remains covered; no hardware Flash/Erase result is claimed by this change.
+
 ## Install the current stable v1.1.4 release
 
 - Windows x64 with Node.js 22 or 24.
@@ -57,7 +66,7 @@ npm run test:release-install
 `build:release` produces a statically linked Windows x64 HSS Helper, verifies its product and
 protocol versions, runs its self-test, and builds the Node entry points. `pack:release` runs the
 complete release gate, then creates the installable npm archive, portable ZIP, and SHA-256 manifest
-under `release/v1.1.4/`. The package is marked private to prevent accidental npm Registry
+under `release/v1.1.5/`. The package is marked private to prevent accidental npm Registry
 publication; release artifacts are distributed only through GitHub Releases.
 
 ## Portable MCP configuration
@@ -105,7 +114,7 @@ Only the read-only `rtt://output`, `probe://gdb-server-log`, and `probe://status
 - Typed variable and HSS requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
 - HSS is capped at ten synchronized capture variables, 1 kHz, and 60 seconds. Optional `writeVariables` are resolved before start and do not consume capture slots; sampled variables remain writable for compatibility.
 - Call `hss_start` with `dryRun=true` to obtain capability, configured link speed, and capacity diagnostics without starting a Helper or creating a capture. The server reports requested and effective rates without automatically changing SWD speed or sample rate; falling below 95% is diagnostic, not by itself a corrupt-capture verdict.
-- HSS capability, dry-run, start, and stop preserve the observed target execution state. An unexpected change from halted to running is restored with an explicit halt and the operation still fails; an initially running target is never resumed automatically to repair a mismatch.
+- HSS capability, dry-run, start, and stop preserve the observed target execution state. Native capability discovery restores an unexpected attach-time transition in the same connection with explicit Halt/Go evidence and still fails the operation; later ambiguous state changes remain fail-closed.
 - `debug_sequence_execute` synchronously runs a prevalidated 1–30 second sequence of 2–32 HSS and typed-variable operations. It uses absolute monotonic timing and only executes declared RAM restore/HSS stop cleanup actions after failure, cancellation, or timeout.
 - Use `read_variable` or `write_variable` for one variable operation. Use `debug_sequence_execute` only when multiple operations require fixed intervals over at least one second; the Agent waits until the complete sequence result is returned.
 - Peripheral register access requires a configured, validated SVD. There is no inferred raw-memory substitute.

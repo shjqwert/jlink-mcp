@@ -56,6 +56,12 @@ export interface CommandResult {
   stateUnknown?: boolean;
 }
 
+export interface ProbeCoreRegisterWriteResult {
+  command: CommandResult;
+  /** Same-connection readback result when exact verification was requested. */
+  readback?: CommandResult;
+}
+
 export interface MemoryDumpLine {
   address: string;
   hex: string;
@@ -94,6 +100,14 @@ export interface TargetStateObservation {
   state: "running" | "halted" | "unknown";
   source: "dhcsr" | "unavailable";
   result: CommandResult;
+}
+
+export interface TargetStateObservationOptions {
+  /**
+   * Keep the target debug unit initialized when the observation connection
+   * closes. Use only when a preceding operation must preserve core state.
+   */
+  preserveDebugStateOnClose?: boolean;
 }
 
 export interface ProbeMemoryTransactionInput {
@@ -311,8 +325,22 @@ export abstract class ProbeBackend {
     return undefined;
   }
 
-  async observeTargetState(): Promise<TargetStateObservation> {
-    const result = await this.readMemory(0xE000EDF0, 4, 4);
+  protected async readTargetStateRegister(options: TargetStateObservationOptions): Promise<CommandResult> {
+    if (options.preserveDebugStateOnClose) {
+      return {
+        success: false,
+        rawOutput: "",
+        output: "",
+        error: "probe backend cannot preserve debug state across the target-state observation connection",
+        errorCode: ProbeErrorCode.NON_INTRUSIVE_READ_UNAVAILABLE,
+        stateUnknown: true,
+      };
+    }
+    return this.readMemory(0xE000EDF0, 4, 4);
+  }
+
+  async observeTargetState(options: TargetStateObservationOptions = {}): Promise<TargetStateObservation> {
+    const result = await this.readTargetStateRegister(options);
     if (!result.success) return { state: "unknown", source: "unavailable", result };
     const rawDump = this.parseMemoryDump(result.rawOutput);
     const dump = rawDump.length > 0 ? rawDump : this.parseMemoryDump(result.output);
@@ -342,6 +370,10 @@ export abstract class ProbeBackend {
 
   async writeCoreRegister(_name: string, _value: number): Promise<CommandResult> {
     return { success: false, rawOutput: "", output: "", error: "core-register writes are not supported by this backend", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
+  }
+
+  async writeCoreRegisterTransaction(_name: string, _value: number): Promise<ProbeCoreRegisterWriteResult | undefined> {
+    return undefined;
   }
 
   // ── Flash ────────────────────────────────────────────────────────

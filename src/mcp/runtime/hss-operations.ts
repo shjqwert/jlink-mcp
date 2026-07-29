@@ -263,7 +263,9 @@ export class HssOperations implements CaptureVariableAccess {
         capability.reason ?? "HSS capability changed or obscured target state",
         false,
         false,
-        capability.errorCode !== "HSS_TARGET_STATE_CHANGED",
+        capability.observed?.stateUnknown === true || capability.errorCode !== "HSS_TARGET_STATE_CHANGED",
+        undefined,
+        capability.observed,
       );
     }
     return { capability: capability!, targetStateBefore: before, targetStateAfter: after };
@@ -1898,7 +1900,10 @@ export class HssOperations implements CaptureVariableAccess {
   }
 
   private failure(envelope: OperationEnvelope, error: unknown, stage: string): OperationEnvelope {
-    if (error instanceof HssOperationError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: error.writeIssued, stateUnknown: error.stateUnknown });
+    if (error instanceof HssOperationError) {
+      if (error.evidence) envelope.data = { helperEvidence: error.evidence };
+      return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: error.writeIssued, stateUnknown: error.stateUnknown });
+    }
     if (error instanceof HssAdapterError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
     if (error instanceof TargetStoreError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: false, writeIssued: false, stateUnknown: false });
     if (error instanceof MemorySessionError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
@@ -1933,6 +1938,7 @@ class HssOperationError extends Error {
     readonly writeIssued = false,
     readonly stateUnknown = false,
     readonly captureEvidence?: { captureId: string; packageDir: string },
+    readonly evidence?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "HssOperationError";
@@ -2074,6 +2080,13 @@ function compare(actual: Buffer, expected: Buffer, comparator: NonObserveCompara
     const mask = Buffer.from(comparator.maskHex, "hex");
     const pass = actual.length === expected.length && mask.length === expected.length && actual.every((value, index) => (value & mask[index]) === (expected[index] & mask[index]));
     return { pass, details: { mode: "masked", maskHex: comparator.maskHex, expectedHex: expected.toString("hex"), actualHex: actual.toString("hex") } };
+  }
+  if (comparator.mode === "range") {
+    const actualValue = decodeHssValue(comparator.type, actual, comparator.endian);
+    return {
+      pass: actualValue >= comparator.min && actualValue <= comparator.max,
+      details: { mode: "range", min: comparator.min, max: comparator.max, actual: actualValue },
+    };
   }
   const actualValue = decodeHssValue(comparator.type, actual, comparator.endian);
   const difference = Math.abs(actualValue - comparator.expected);

@@ -100,13 +100,14 @@ test("failed raw GDB command retains command and partial output facts", async (c
   const fixtureValue = await fixture(context, "gdb-command-failure", true);
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
-  fixtureValue.gdb.commandResult = { success: false, output: "partial output", rawOutput: "^running", error: "timed out", code: "GDB_COMMAND_TIMEOUT", exitCode: 9, exitSignal: null };
+  fixtureValue.gdb.commandResult = { success: false, output: "partial output", rawOutput: "^running", dispatchedCommand: "-break-insert -- task", error: "timed out", code: "GDB_COMMAND_TIMEOUT", exitCode: 9, exitSignal: null };
   const result = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "monitor long-command", 25);
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "GDB_COMMAND_TIMEOUT");
   assert.equal((result.data as { command: string }).command, "monitor long-command");
   assert.equal((result.data as { output: string }).output, "partial output");
   assert.equal((result.data as { rawOutput: string }).rawOutput, "^running");
+  assert.equal((result.data as { dispatchedCommand: string }).dispatchedCommand, "-break-insert -- task");
   assert.equal((result.data as { exitCode: number }).exitCode, 9);
   assert.equal(result.artifact?.match, "unverified");
   assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.status, "unverified");
@@ -119,6 +120,27 @@ test("failed raw GDB command retains command and partial output facts", async (c
   assert.equal(known.error?.writeIssued, true);
   assert.equal(known.error?.stateUnknown, false);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
+});
+
+test("gdb_server_stop observes target after a timed-out client exits and safely releases owner", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-timeout-close-recovery");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.connected = false;
+  fixtureValue.gdb.executionState = "unknown";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "unknown";
+  fixtureValue.probe.targetState = "running";
+  fixtureValue.probe.rejectObservationWhileServerRunning = true;
+
+  const stopped = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.before.targetExecutionState, "unknown");
+  assert.equal(stopped.after.targetExecutionState, "running");
+  assert.equal(fixtureValue.probe.serverRunning, false);
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
+  assert.equal(fixtureValue.runtime.gdbOwnerToken, undefined);
+  assert.equal(stopped.verification.method, "gdb_server_cleanup_and_post_server_probe_observation");
+  assert.match(stopped.warnings.join("\n"), /pre-close target state was unknown/i);
 });
 
 test("queued GDB request rejects an owner replaced while waiting", async (context) => {
@@ -324,7 +346,7 @@ test("GDB connect restores the audited RT-06 J-Link attach stop only with explic
     output: "Stopped at prvCheckTasksWaitingTermination()",
     rawOutput: '&"target remote localhost:2331\\n"\r\n'
       + '~"Remote debugging using localhost:2331\\n"\r\n'
-      + '*stopped,frame={addr="0x0001c0c4",func="prvCheckTasksWaitingTermination",args=[],file="D:\\\\FOC_Project\\\\Appl\\\\Source\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",fullname="D:\\\\FOC_Project\\\\Appl\\\\Source\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",line="3665",arch="armv7e-m"},thread-id="1",stopped-threads="all"\r\n'
+      + '*stopped,frame={addr="0x0001c0c4",func="prvCheckTasksWaitingTermination",args=[],file="Z:\\\\fixture\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",fullname="Z:\\\\fixture\\\\RTOS\\\\FreeRTOS\\\\Source\\\\tasks.c",line="3665",arch="armv7e-m"},thread-id="1",stopped-threads="all"\r\n'
       + "^done\r\n(gdb) \r\n",
     observedTargetExecutionState: "halted",
   };
@@ -630,7 +652,9 @@ class SessionProbe extends ProbeBackend {
   targetState: "running" | "halted" | "unknown" = "running";
   targetStateResult?: CommandResult;
   stopHook?: () => void;
+  rejectObservationWhileServerRunning = false;
   override async observeTargetState(): Promise<TargetStateObservation> {
+    if (this.rejectObservationWhileServerRunning && this.serverRunning) throw new Error("Probe is owned by GDB Server");
     return { state: this.targetState, source: this.targetState === "unknown" ? "unavailable" : "dhcsr", result: this.targetStateResult ?? ok() };
   }
   async getDeviceInfo(): Promise<CommandResult> { return ok(); }

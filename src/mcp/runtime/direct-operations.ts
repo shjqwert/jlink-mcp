@@ -1,4 +1,4 @@
-import type { CommandResult, ProbeBackend, ProbeMemoryTransactionResult, TargetStateObservation } from "../../probe/backend";
+import type { CommandResult, ProbeBackend, ProbeCoreRegisterWriteResult, ProbeMemoryTransactionResult, TargetStateObservation, TargetStateObservationOptions } from "../../probe/backend";
 import { ProbeErrorCode, decodeFaultRegisters } from "../../probe/backend";
 import { chmodSync, copyFileSync, constants, readFileSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
@@ -57,6 +57,7 @@ export interface MemoryWriteInput extends MemoryReadInput {
 export type NonObserveComparator =
   | { mode: "exact"; type?: HssScalarType; endian?: HssTargetEndian }
   | { mode: "tolerance"; expected: number; absTolerance: number; relTolerance: number; type: HssScalarType; endian: HssTargetEndian }
+  | { mode: "range"; min: number; max: number; type: HssScalarType; endian: HssTargetEndian }
   | { mode: "masked"; maskHex: string; type?: HssScalarType; endian?: HssTargetEndian };
 
 export type ScalarComparator = NonObserveComparator
@@ -782,7 +783,7 @@ export class DirectMcuService {
   readCoreRegister(projectRoot: string, name: string): Promise<OperationEnvelope> {
     try { validateCoreRegister(name); } catch (error) { return Promise.resolve(this.failure(createOperationEnvelope("read_core_register"), error, "validation")); }
     return this.queued("read_core_register", projectRoot, [], async (envelope, _target, runtime) => {
-      const before = await observe(runtime.probe);
+      const before = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       envelope.before = observationData(before);
       requireHaltedCoreAccess(before, "core-register read");
       let result: CommandResult | undefined;
@@ -796,7 +797,7 @@ export class DirectMcuService {
       envelope.data = { name: name.toUpperCase(), command: result ? commandData(result) : null };
       let after: TargetStateObservation;
       try {
-        after = await observe(runtime.probe);
+        after = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       } catch (error) {
         throw readFailure ? readErrorWithUnknownState(readFailure) : unexpectedReadObservationError(error, "core-register read");
       }
@@ -814,7 +815,7 @@ export class DirectMcuService {
 
   readCoreRegisters(projectRoot: string): Promise<OperationEnvelope> {
     return this.queued("read_core_registers", projectRoot, [], async (envelope, _target, runtime) => {
-      const before = await observe(runtime.probe);
+      const before = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       envelope.before = observationData(before);
       requireHaltedCoreAccess(before, "core-register read");
       let result: CommandResult | undefined;
@@ -828,7 +829,7 @@ export class DirectMcuService {
       envelope.data = { command: result ? commandData(result) : null };
       let after: TargetStateObservation;
       try {
-        after = await observe(runtime.probe);
+        after = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       } catch (error) {
         throw readFailure ? readErrorWithUnknownState(readFailure) : unexpectedReadObservationError(error, "core-register-list read");
       }
@@ -909,24 +910,57 @@ export class DirectMcuService {
       envelope.before = observationData(before);
       requireHaltedCoreAccess(before, "core-register write");
       let result: CommandResult;
+      let transaction: ProbeCoreRegisterWriteResult | undefined;
+      let writeError: OperationExecutionError | undefined;
       try {
-        result = await runtime.probe.writeCoreRegister(input.name, input.value);
+        if (input.verify) {
+          transaction = await runtime.probe.writeCoreRegisterTransaction(input.name, input.value);
+          if (!transaction) {
+            throw executionError(
+              "CORE_REGISTER_ATOMIC_VERIFY_UNSUPPORTED",
+              "precondition",
+              "core-register exact verification requires a backend that writes and reads back in one Probe connection",
+              { writeIssued: false, stateUnknown: false },
+            );
+          }
+          result = transaction.command;
+        } else {
+          result = await runtime.probe.writeCoreRegister(input.name, input.value);
+        }
       } catch (error) {
-        envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback: undefined, command: null };
-        throw unexpectedPostWriteError(error, "write", "core-register write backend rejected after command dispatch");
+        if (error instanceof OperationExecutionError && !error.detail.writeIssued) throw error;
+        writeError = unexpectedPostWriteError(error, "write", "core-register write backend rejected after command dispatch");
+        result = {
+          success: false,
+          rawOutput: "",
+          output: "",
+          error: writeError.message,
+          errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+          writeIssued: true,
+          stateUnknown: true,
+        };
       }
       envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback: undefined, command: commandData(result) };
-      if (!result.success) {
-        const issued = result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
-        throw commandError(result, "write", issued, issued);
+      if (!result.success && !writeError) {
+        const issued = result.writeIssued ?? result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
+        writeError = commandError(result, "write", issued, result.stateUnknown ?? issued);
+      } else {
+        envelope.observedEffects.push("core_register_write_issued");
       }
-      envelope.observedEffects.push("core_register_write_issued");
       let readback: number | undefined;
       let readbackCommand: Record<string, unknown> | undefined;
       let verificationError: OperationExecutionError | undefined;
-      if (input.verify) {
+      if (input.verify && !writeError) {
         try {
-          const verify = await runtime.probe.readRegister(input.name);
+          const verify = transaction?.readback;
+          if (!verify) {
+            throw executionError(
+              "READBACK_FAILED",
+              "readback",
+              "core-register backend did not return same-connection readback evidence",
+              { writeIssued: true, stateUnknown: true },
+            );
+          }
           readbackCommand = commandData(verify);
           envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback: undefined, command: commandData(result), readbackCommand };
           if (!verify.success) throw commandError(verify, "readback", true, true);
@@ -941,18 +975,27 @@ export class DirectMcuService {
       }
       let after: TargetStateObservation;
       try {
-        after = await observe(runtime.probe);
+        after = await observe(runtime.probe, { preserveDebugStateOnClose: true });
       } catch (error) {
+        if (writeError) throw withUnknownTargetState(writeError);
         throw unexpectedPostWriteError(error, "final_observation", "target-state observation failed after core-register write");
       }
       envelope.after = observationData(after);
       if (before.state !== after.state) envelope.observedEffects.push(`target_state_changed_during_core_write:${before.state}->${after.state}`);
       envelope.data = { name: input.name.toUpperCase(), requested: input.value, readback, command: commandData(result), readbackCommand };
       envelope.verification = input.verify
-        ? verificationError
-          ? { status: "failed", method: "exact_readback", details: verificationError.detail }
-          : { status: "verified", method: "exact_readback" }
-        : { status: "executed_unverified" };
+        ? writeError || verificationError
+          ? { status: "failed", method: "exact_readback", details: (writeError ?? verificationError)!.detail }
+          : { status: "verified", method: "exact_readback_same_connection" }
+        : writeError
+          ? { status: "failed", method: "write_command", details: writeError.detail }
+          : { status: "executed_unverified" };
+      if (writeError) {
+        if (after.state === "unknown" && !writeError.detail.stateUnknown) {
+          writeError = withUnknownTargetState(writeError);
+        }
+        throw writeError;
+      }
       if (verificationError) {
         if (after.state === "unknown" && !verificationError.detail.stateUnknown) {
           verificationError = normalizePostWriteError(verificationError, verificationError.detail.code, verificationError.detail.stage, verificationError.detail.message, true);
@@ -1668,7 +1711,12 @@ async function applyProbeMemoryTransaction(
   if (after.state === "unknown") throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", "target state could not be observed after structured memory transaction", { writeIssued, stateUnknown: writeIssued });
   if (restoreError) throw restoreError;
   if (mainError) throw mainError;
-  if (verificationError) throw verificationError;
+  if (verificationError) {
+    if (verificationError.detail.code === "READBACK_MISMATCH" && comparator.mode === "exact" && before.state === "running") {
+      envelope.warnings.push("Exact readback remains fail-closed. If firmware intentionally consumes or changes this field while running, use an explicit range/tolerance/observe comparator and verify protocol ACK/Complete separately.");
+    }
+    throw verificationError;
+  }
 }
 
 function verifyTransactionReadbacks(
@@ -1747,8 +1795,11 @@ function applyQueueMetadata(envelope: OperationEnvelope, metadata: QueueMetadata
   envelope.timestamps.startedAt = metadata.startedAt;
 }
 
-async function observe(probe: ProbeBackend): Promise<TargetStateObservation> {
-  return probe.observeTargetState();
+async function observe(
+  probe: ProbeBackend,
+  options: TargetStateObservationOptions = {},
+): Promise<TargetStateObservation> {
+  return probe.observeTargetState(options);
 }
 
 async function observeAfterMutation(probe: ProbeBackend, operation: string): Promise<TargetStateObservation> {
@@ -1799,6 +1850,14 @@ function normalizePostWriteError(
   return executionError(fallbackCode, fallbackStage, error instanceof Error ? error.message : fallbackMessage, {
     writeIssued: true,
     stateUnknown,
+  });
+}
+
+function withUnknownTargetState(error: OperationExecutionError): OperationExecutionError {
+  return executionError(error.detail.code, error.detail.stage, error.detail.message, {
+    retryable: error.detail.retryable,
+    writeIssued: error.detail.writeIssued,
+    stateUnknown: true,
   });
 }
 
@@ -1947,6 +2006,13 @@ function validateStructuredComparator(comparator: ScalarComparator, byteCount: n
       throw executionError("COMPARATOR_EXPECTED_MISMATCH", "validation", "tolerance expected value does not encode to the requested write bytes");
     }
   }
+  if (comparator.mode === "range") {
+    if (!Number.isFinite(comparator.min) || !Number.isFinite(comparator.max) || comparator.min > comparator.max) {
+      throw executionError("COMPARATOR_INVALID", "validation", "range bounds must be finite and min must not exceed max");
+    }
+    encodeHssValue(comparator.type, comparator.min, comparator.endian);
+    encodeHssValue(comparator.type, comparator.max, comparator.endian);
+  }
   if (comparator.mode === "masked") {
     if (!/^(?:[0-9a-fA-F]{2})+$/.test(comparator.maskHex) || comparator.maskHex.length !== byteCount * 2) {
       throw executionError("COMPARATOR_INVALID", "validation", "masked comparator requires one mask byte per requested byte");
@@ -2039,6 +2105,13 @@ function compareStructured(actual: Buffer, expected: Buffer, comparator: NonObse
     const mask = Buffer.from(comparator.maskHex, "hex");
     const pass = actual.length === expected.length && actual.every((value, index) => (value & mask[index]) === (expected[index] & mask[index]));
     return { pass, details: { mode: "masked", maskHex: mask.toString("hex"), expectedHex: expected.toString("hex"), actualHex: actual.toString("hex") } };
+  }
+  if (comparator.mode === "range") {
+    const actualValue = decodeHssValue(comparator.type, actual, comparator.endian);
+    return {
+      pass: actualValue >= comparator.min && actualValue <= comparator.max,
+      details: { mode: "range", min: comparator.min, max: comparator.max, actual: actualValue },
+    };
   }
   const actualValue = decodeHssValue(comparator.type, actual, comparator.endian);
   const limit = comparator.absTolerance + comparator.relTolerance * Math.abs(comparator.expected);
@@ -2251,10 +2324,21 @@ function hex32(value: number): string {
 
 function parseRegisterValue(result: CommandResult, name: string): number {
   const text = `${result.rawOutput}\n${result.output}`;
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = text.match(new RegExp(`(?:${escaped})\\s*=\\s*(?:0x)?([0-9a-fA-F]{1,8})`, "i")) ?? text.match(/(?:0x)?([0-9a-fA-F]{8})/);
-  if (!match) throw executionError("REGISTER_DECODE_FAILED", "decode", `could not decode ${name} from Probe output`);
-  return Number.parseInt(match[1], 16) >>> 0;
+  const normalized = name.toUpperCase();
+  const canonical = normalized === "PC" || normalized === "R15"
+    ? "R15 (PC)"
+    : normalized === "SP" || normalized === "R13"
+      ? "R13 (SP)"
+      : normalized === "LR" || normalized === "R14"
+        ? "R14"
+        : normalized;
+  const candidates = canonical === normalized ? [canonical] : [canonical, normalized];
+  for (const candidate of candidates) {
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = text.match(new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*=\\s*(?:0x)?([0-9a-fA-F]{1,8})`, "im"));
+    if (match) return Number.parseInt(match[1], 16) >>> 0;
+  }
+  throw executionError("REGISTER_DECODE_FAILED", "decode", `could not decode ${name} from Probe output`);
 }
 
 function validateUint32(value: number, name: string): void {

@@ -12,7 +12,7 @@ const portableRoot = resolve(stageRoot, `jlink-mcp-v${version}-windows-x64`);
 const portableZip = resolve(releaseDir, `jlink-mcp-v${version}-windows-x64.zip`);
 const sumsFile = resolve(releaseDir, "SHA256SUMS.txt");
 
-if (version !== "1.1.4") throw new Error(`release package requires version 1.1.4, found ${version}`);
+if (version !== "1.1.5") throw new Error(`release package requires version 1.1.5, found ${version}`);
 if (existsSync(releaseDir)) {
   throw new Error(`release output already exists; preserve or move it before rebuilding: ${releaseDir}`);
 }

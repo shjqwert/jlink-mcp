@@ -503,6 +503,37 @@ test("HSS never resumes an initially running target to repair a state mismatch",
   }
 });
 
+test("HSS surfaces native running-state restoration evidence after capability failure", async () => {
+  const fixture = await createFixture();
+  try {
+    fixture.adapter.targetState = "running";
+    fixture.adapter.capabilityFailure = {
+      code: "HSS_TARGET_STATE_CHANGED",
+      reason: "capability attach halted the target before restoration",
+      observed: {
+        initialTargetStateRaw: 0,
+        observedTargetStateRaw: 1,
+        finalTargetStateRaw: 0,
+        restorationAttempted: true,
+        resumeIssued: true,
+        restored: true,
+        stateUnknown: false,
+      },
+    };
+
+    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
+    const helperEvidence = (dryRun.data as { helperEvidence?: Record<string, unknown> })?.helperEvidence;
+    assert.equal(dryRun.error?.code, "HSS_TARGET_STATE_CHANGED");
+    assert.equal(dryRun.error?.stateUnknown, false);
+    assert.equal(helperEvidence?.resumeIssued, true);
+    assert.equal(helperEvidence?.restored, true);
+    assert.equal(helperEvidence?.finalTargetStateRaw, 0);
+    assert.equal(fixture.adapter.targetState, "running");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("HSS planning warns about a high estimated load without rejecting or changing the requested rate", async () => {
   const fixture = await createFixture("uint32", false, 1_000);
   try {
@@ -1106,6 +1137,7 @@ class FakeHssAdapter implements HssHelperAdapter {
   terminateCount = 0;
   targetState: HssTargetState = "running";
   capabilityStateAfter?: HssTargetState;
+  capabilityFailure?: { code: string; reason: string; observed: Record<string, unknown> };
   stopStateAfter?: HssTargetState;
   restoreCount = 0;
   resumeCount = 0;
@@ -1126,6 +1158,16 @@ class FakeHssAdapter implements HssHelperAdapter {
 
   async capability(_target: StoredTarget, runtime?: HssRuntimeFacts): Promise<HssCapabilityFacts> {
     if (this.capabilityStateAfter) this.targetState = this.capabilityStateAfter;
+    if (this.capabilityFailure) {
+      return {
+        ...(runtime ?? await this.inspectRuntime()),
+        available: false,
+        effective: HSS_EFFECTIVE_LIMITS,
+        errorCode: this.capabilityFailure.code,
+        reason: this.capabilityFailure.reason,
+        observed: structuredClone(this.capabilityFailure.observed),
+      };
+    }
     return { ...(runtime ?? await this.inspectRuntime()), available: true, hardware: { maxBlocks: 10, maxFreq: this.maxFreq, flags: 0, raw: [10, this.maxFreq, 0] }, effective: HSS_EFFECTIVE_LIMITS, observed: { fake: true } };
   }
 

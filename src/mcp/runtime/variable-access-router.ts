@@ -174,6 +174,7 @@ function variableComparator(input: VariableComparatorInput, resolved: ResolvedSy
   const typed = { type: resolved.type, endian: resolved.endian };
   if (input.mode === "exact") return { mode: "exact", ...typed };
   if (input.mode === "tolerance") return { mode: "tolerance", expected: requestedValue, absTolerance: input.absTolerance, relTolerance: input.relTolerance, ...typed };
+  if (input.mode === "range") return { mode: "range", min: input.min, max: input.max, ...typed };
   if (input.mode === "masked") return { mode: "masked", maskHex: input.maskHex, ...typed };
   return {
     mode: "observe",

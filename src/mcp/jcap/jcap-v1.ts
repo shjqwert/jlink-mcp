@@ -159,8 +159,8 @@ interface MetaRow { key: string; value: string }
 interface CountRow { count: number }
 interface IntegrityRow { integrity_check: string }
 interface SourceRow { file: string; sha256: string; bytes: number; valid_bytes: number; diagnostic: string | null }
-interface ValueRow { sample_index: number; tick: string; status_flags: number; variable: string; value: number }
-interface SampleRow { sample_index: number; tick: string; status_flags: number }
+interface ValueRow { sample_index: number; tick: string; raw_tick: string; status_flags: number; variable: string; value: number }
+interface SampleRow { sample_index: number; tick: string; raw_tick: string; status_flags: number }
 interface EventRow { event_id: string; event_sequence: number; type: string; tick: string; json: string }
 interface IndexValueRow extends ValueRow { tick_key: string }
 interface IndexSampleRow extends SampleRow { tick_key: string }
@@ -647,14 +647,14 @@ export async function rebuildJcapV1IndexWithinLease(packageDir: string): Promise
         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE provenance (capture_id TEXT PRIMARY KEY, json TEXT NOT NULL);
         CREATE TABLE raw_sources (file TEXT PRIMARY KEY, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, valid_bytes INTEGER NOT NULL, diagnostic TEXT);
-        CREATE TABLE samples (sample_index INTEGER PRIMARY KEY, tick TEXT NOT NULL, tick_key TEXT NOT NULL, status_flags INTEGER NOT NULL);
-        CREATE TABLE sample_values (sample_index INTEGER NOT NULL, tick TEXT NOT NULL, tick_key TEXT NOT NULL, status_flags INTEGER NOT NULL, variable TEXT NOT NULL, value REAL NOT NULL, PRIMARY KEY(sample_index, variable));
+        CREATE TABLE samples (sample_index INTEGER PRIMARY KEY, tick TEXT NOT NULL, raw_tick TEXT NOT NULL, tick_key TEXT NOT NULL, status_flags INTEGER NOT NULL);
+        CREATE TABLE sample_values (sample_index INTEGER NOT NULL, tick TEXT NOT NULL, raw_tick TEXT NOT NULL, tick_key TEXT NOT NULL, status_flags INTEGER NOT NULL, variable TEXT NOT NULL, value REAL NOT NULL, PRIMARY KEY(sample_index, variable));
         CREATE INDEX sample_values_window ON sample_values(variable, tick_key, sample_index);
         CREATE TABLE events (event_id TEXT PRIMARY KEY, event_sequence INTEGER UNIQUE NOT NULL, type TEXT NOT NULL, tick TEXT NOT NULL, tick_key TEXT NOT NULL, json TEXT NOT NULL);
         CREATE INDEX events_window ON events(tick_key, event_sequence);
       `);
       const metadata: Record<string, string> = {
-        schema_version: "1",
+        schema_version: "2",
         format_version: String(JCAP_FORMAT_VERSION),
         format_status: JCAP_STATUS,
         capture_id: raw.metadata.captureId,
@@ -679,14 +679,15 @@ export async function rebuildJcapV1IndexWithinLease(packageDir: string): Promise
         await run(database, "INSERT INTO raw_sources(file,sha256,bytes,valid_bytes,diagnostic) VALUES(?,?,?,?,?)", [source.file, source.sha256, source.bytes, source.validBytes, diagnostic ? JSON.stringify(diagnostic) : null]);
       }
       const inferredDroppedBefore = inferredDroppedBeforeSampleIndexes(raw.events);
-      for (const sample of raw.samples) {
-        const tickKey = u64Key(sample.tick);
+      const indexedSamples = normalizeSamplesForIndex(raw.metadata, raw.samples);
+      for (const { sample, tick, rawTick } of indexedSamples) {
+        const tickKey = u64Key(tick);
         const statusFlags = sample.statusFlags | (inferredDroppedBefore.has(sample.sampleIndex) ? HSS_STATUS_FLAGS.dropped_before_this_sample : 0);
-        await run(database, "INSERT INTO samples(sample_index,tick,tick_key,status_flags) VALUES(?,?,?,?)", [sample.sampleIndex, sample.tick, tickKey, statusFlags]);
-        for (const [variable, value] of Object.entries(sample.values)) await run(database, "INSERT INTO sample_values(sample_index,tick,tick_key,status_flags,variable,value) VALUES(?,?,?,?,?,?)", [sample.sampleIndex, sample.tick, tickKey, statusFlags, variable, value]);
+        await run(database, "INSERT INTO samples(sample_index,tick,raw_tick,tick_key,status_flags) VALUES(?,?,?,?,?)", [sample.sampleIndex, tick, rawTick, tickKey, statusFlags]);
+        for (const [variable, value] of Object.entries(sample.values)) await run(database, "INSERT INTO sample_values(sample_index,tick,raw_tick,tick_key,status_flags,variable,value) VALUES(?,?,?,?,?,?,?)", [sample.sampleIndex, tick, rawTick, tickKey, statusFlags, variable, value]);
       }
       for (const event of raw.events) {
-        const indexedEvent = resolveEventForIndex(event, raw.samples);
+        const indexedEvent = resolveEventForIndex(event, indexedSamples);
         await run(database, "INSERT INTO events(event_id,event_sequence,type,tick,tick_key,json) VALUES(?,?,?,?,?,?)", [event.eventId, event.eventSequence, event.type, event.tick, u64Key(event.tick), JSON.stringify(indexedEvent)]);
       }
       await run(database, "INSERT INTO meta(key,value) VALUES(?,?)", ["index_content_sha256", await indexContentSha256(database)]);
@@ -759,7 +760,7 @@ export async function verifyJcapV1Index(packageDir: string): Promise<{ captureSt
     const integrity = await get<IntegrityRow>(database, "PRAGMA integrity_check");
     const meta = Object.fromEntries((await all<MetaRow>(database, "SELECT key,value FROM meta")).map((row) => [row.key, row.value]));
     const captureState = meta.capture_state as JcapV1CaptureState;
-    if (integrity?.integrity_check !== "ok" || meta.schema_version !== "1" || meta.format_version !== "1" || meta.format_status !== JCAP_STATUS || meta.capture_id !== metadata.captureId || meta.index_status !== "ready" || meta.quality_status !== metadata.qualityStatus || meta.quality_source !== metadata.qualitySource || !isCaptureState(captureState) || captureState !== metadata.state) return { captureState: metadata.state, indexStatus: "rebuild_required" };
+    if (integrity?.integrity_check !== "ok" || meta.schema_version !== "2" || meta.format_version !== "1" || meta.format_status !== JCAP_STATUS || meta.capture_id !== metadata.captureId || meta.index_status !== "ready" || meta.quality_status !== metadata.qualityStatus || meta.quality_source !== metadata.qualitySource || !isCaptureState(captureState) || captureState !== metadata.state) return { captureState: metadata.state, indexStatus: "rebuild_required" };
     const sources = await all<SourceRow>(database, "SELECT file,sha256,bytes,valid_bytes,diagnostic FROM raw_sources");
     const expectedSources = new Set(["raw/samples.bin", "raw/events.bin"]);
     if (sources.length !== expectedSources.size || sources.some((source) => !expectedSources.delete(source.file))) return { captureState, indexStatus: "rebuild_required" };
@@ -894,9 +895,10 @@ export async function jcapCaptureEventWindow(input: { packageDir: string; eventI
     const end = center + after;
     const related = await all<EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events WHERE tick_key BETWEEN ? AND ? ORDER BY event_sequence LIMIT ?", [u64Key(start.toString()), u64Key(end.toString()), LIMITS.eventCount + 1]);
     if (related.length > LIMITS.eventCount) throw new JcapBoundsError("event count limit exceeded");
-    const nearest = await nearestSample(database, center);
+    const coverage = await sampleCoverage(database, start, end);
+    const nearest = coverage.status === "covered" ? await nearestSample(database, center, start, end) : undefined;
     const series = input.variables.length ? await jcapCaptureSeries({ packageDir: root, variables: input.variables, startTick: start.toString(), endTick: end.toString(), bucketCount: input.bucketCount }) : { series: [], bucketCount: input.bucketCount, startTick: start.toString(), endTick: end.toString() };
-    return bounded({ captureState: status.captureState, indexStatus: status.indexStatus, event: JSON.parse(event.json), relatedEvents: related.map((row) => JSON.parse(row.json)), nearestSample: nearest, series }, LIMITS.eventBytes);
+    return bounded({ captureState: status.captureState, indexStatus: status.indexStatus, event: JSON.parse(event.json), relatedEvents: related.map((row) => JSON.parse(row.json)), sampleCoverage: coverage, nearestSample: nearest, series }, LIMITS.eventBytes);
   } finally {
     await closeDatabase(database);
   }
@@ -1401,17 +1403,66 @@ function validScalarHex(value: unknown, size: number): value is string {
   return typeof value === "string" && new RegExp(`^[0-9a-f]{${size * 2}}$`, "i").test(value);
 }
 
-function resolveEventForIndex(event: JcapV1Event, samples: readonly JcapV1Sample[]): JcapV1Event {
+interface IndexedSample {
+  sample: JcapV1Sample;
+  tick: string;
+  rawTick: string;
+  normalized: boolean;
+}
+
+function normalizeSamplesForIndex(metadata: JcapV1Metadata, samples: readonly JcapV1Sample[]): IndexedSample[] {
+  if (metadata.backend !== "jlink-hss" || metadata.requestedRateHz === 1_000 || samples.length === 0) {
+    return samples.map((sample) => ({ sample, tick: sample.tick, rawTick: sample.tick, normalized: false }));
+  }
+  const deltas = samples.slice(1).map((sample, index) => BigInt(sample.tick) - BigInt(samples[index].tick));
+  if (deltas.some((delta) => delta < 0n)) throw new JcapIntegrityError("JCAP_SAMPLE_TICK_REGRESSION", "sample tick regressed during index normalization");
+  const positiveDeltas = deltas.filter((delta) => delta > 0n);
+  if (positiveDeltas.length === 0) {
+    if (samples.length > 1) throw new JcapIntegrityError("JCAP_SAMPLE_TIMEBASE_AMBIGUOUS", "low-rate J-Link HSS samples do not provide a positive tick cadence");
+    return samples.map((sample) => ({ sample, tick: sample.tick, rawTick: sample.tick, normalized: false }));
+  }
+  const oneMillisecond = 1_000_000n;
+  const expectedInterval = 1_000_000_000n / BigInt(metadata.requestedRateHz);
+  const clearlyLegacyOrdinalTicks = expectedInterval >= 2n * oneMillisecond
+    && positiveDeltas.some((delta) => delta === oneMillisecond)
+    && positiveDeltas.every((delta) => delta % oneMillisecond === 0n && delta < expectedInterval);
+  const clearlyRateScaledTicks = positiveDeltas.every((delta) => {
+    const slots = (delta * BigInt(metadata.requestedRateHz) + 500_000_000n) / 1_000_000_000n;
+    if (slots < 1n) return false;
+    const expected = slots * 1_000_000_000n / BigInt(metadata.requestedRateHz);
+    const error = delta > expected ? delta - expected : expected - delta;
+    return error < oneMillisecond;
+  });
+  if (!clearlyLegacyOrdinalTicks) {
+    if (!clearlyRateScaledTicks) throw new JcapIntegrityError("JCAP_SAMPLE_TIMEBASE_AMBIGUOUS", "low-rate J-Link HSS sample ticks cannot be safely normalized");
+    return samples.map((sample) => ({ sample, tick: sample.tick, rawTick: sample.tick, normalized: false }));
+  }
+  const first = BigInt(samples[0].tick);
+  const rate = BigInt(metadata.requestedRateHz);
+  return samples.map((sample) => {
+    const raw = BigInt(sample.tick);
+    if (raw < first) throw new JcapIntegrityError("JCAP_SAMPLE_TICK_REGRESSION", "sample tick regressed during index normalization");
+    const tick = first + (raw - first) * 1_000n / rate;
+    if (tick > U64_MAX) throw new JcapBoundsError("normalized sample tick exceeds u64");
+    return { sample, tick: tick.toString(), rawTick: sample.tick, normalized: tick.toString() !== sample.tick };
+  });
+}
+
+function resolveEventForIndex(event: JcapV1Event, samples: readonly IndexedSample[]): JcapV1Event {
   if (event.type !== "variable_write") return event;
   const start = BigInt(event.operationStartTick as string);
   const end = BigInt(event.operationEndTick as string);
   const before = [...samples].reverse().find((sample) => BigInt(sample.tick) <= start);
   const after = samples.find((sample) => BigInt(sample.tick) >= end);
-  const beforeReference = before ? { sampleIndex: before.sampleIndex, tick: before.tick } : null;
-  const afterReference = after ? { sampleIndex: after.sampleIndex, tick: after.tick } : null;
+  const normalized = samples.some((sample) => sample.normalized);
+  const overlapsSamples = samples.length > 0
+    && end >= BigInt(samples[0].tick)
+    && start <= BigInt(samples[samples.length - 1].tick);
+  const beforeReference = before ? { sampleIndex: before.sample.sampleIndex, tick: before.tick, ...(before.normalized ? { rawTick: before.rawTick } : {}) } : null;
+  const afterReference = after ? { sampleIndex: after.sample.sampleIndex, tick: after.tick, ...(after.normalized ? { rawTick: after.rawTick } : {}) } : null;
   return {
     ...event,
-    sampleAlignment: { method: "terminal_raw_nearest", status: "resolved" },
+    sampleAlignment: { method: normalized ? "capture_rate_normalized_index" : "terminal_raw_nearest", status: overlapsSamples ? "resolved" : "outside_sample_range" },
     neighbors: { before: beforeReference, after: afterReference },
     previousSample: beforeReference,
     nextSample: afterReference,
@@ -1631,13 +1682,29 @@ async function captureListItem(entry: JcapV1CaptureLocation): Promise<Record<str
   };
 }
 
-async function nearestSample(database: sqlite3.Database, tick: bigint): Promise<SampleRow | undefined> {
+async function nearestSample(database: sqlite3.Database, tick: bigint, start: bigint, end: bigint): Promise<SampleRow | undefined> {
   const key = u64Key(tick.toString());
-  const before = await get<SampleRow>(database, "SELECT sample_index,tick,status_flags FROM samples WHERE tick_key<=? ORDER BY tick_key DESC,sample_index DESC LIMIT 1", [key]);
-  const after = await get<SampleRow>(database, "SELECT sample_index,tick,status_flags FROM samples WHERE tick_key>=? ORDER BY tick_key,sample_index LIMIT 1", [key]);
+  const startKey = u64Key(start.toString());
+  const endKey = u64Key(end.toString());
+  const before = await get<SampleRow>(database, "SELECT sample_index,tick,raw_tick,status_flags FROM samples WHERE tick_key BETWEEN ? AND ? AND tick_key<=? ORDER BY tick_key DESC,sample_index DESC LIMIT 1", [startKey, endKey, key]);
+  const after = await get<SampleRow>(database, "SELECT sample_index,tick,raw_tick,status_flags FROM samples WHERE tick_key BETWEEN ? AND ? AND tick_key>=? ORDER BY tick_key,sample_index LIMIT 1", [startKey, endKey, key]);
   if (!before) return after;
   if (!after) return before;
   return tick - BigInt(before.tick) <= BigInt(after.tick) - tick ? before : after;
+}
+
+async function sampleCoverage(database: sqlite3.Database, start: bigint, end: bigint): Promise<Record<string, unknown>> {
+  const bounds = await get<{ start_tick: string | null; end_tick: string | null }>(database, "SELECT MIN(tick_key) AS start_tick,MAX(tick_key) AS end_tick FROM samples");
+  if (!bounds?.start_tick || !bounds.end_tick) return { status: "no_samples", startTick: null, endTick: null };
+  const sampleStart = BigInt(bounds.start_tick);
+  const sampleEnd = BigInt(bounds.end_tick);
+  const outside = end < sampleStart || start > sampleEnd;
+  const inWindow = outside ? undefined : await get<CountRow>(database, "SELECT COUNT(*) AS count FROM samples WHERE tick_key BETWEEN ? AND ?", [u64Key(start.toString()), u64Key(end.toString())]);
+  return {
+    status: outside ? "outside_sample_range" : (inWindow?.count ?? 0) > 0 ? "covered" : "no_samples_in_window",
+    startTick: sampleStart.toString(),
+    endTick: sampleEnd.toString(),
+  };
 }
 
 function csv(value: string): string {
@@ -1683,11 +1750,11 @@ async function indexContentSha256(database: sqlite3.Database): Promise<string> {
     hash.update(":");
     hash.update(encoded);
   };
-  add(["jcap-v1-index-content", 1]);
+  add(["jcap-v1-index-content", 2]);
   await each<{ capture_id: string; json: string }>(database, "SELECT capture_id,json FROM provenance ORDER BY capture_id", [], (row) => add(["provenance", row.capture_id, row.json]));
   await each<SourceRow>(database, "SELECT file,sha256,bytes,valid_bytes,diagnostic FROM raw_sources ORDER BY file", [], (row) => add(["raw_source", row.file, row.sha256, row.bytes, row.valid_bytes, row.diagnostic]));
-  await each<IndexSampleRow>(database, "SELECT sample_index,tick,tick_key,status_flags FROM samples ORDER BY sample_index", [], (row) => add(["sample", row.sample_index, row.tick, row.tick_key, row.status_flags]));
-  await each<IndexValueRow>(database, "SELECT sample_index,tick,tick_key,status_flags,variable,value FROM sample_values ORDER BY sample_index,variable", [], (row) => add(["sample_value", row.sample_index, row.tick, row.tick_key, row.status_flags, row.variable, row.value]));
+  await each<IndexSampleRow>(database, "SELECT sample_index,tick,raw_tick,tick_key,status_flags FROM samples ORDER BY sample_index", [], (row) => add(["sample", row.sample_index, row.tick, row.raw_tick, row.tick_key, row.status_flags]));
+  await each<IndexValueRow>(database, "SELECT sample_index,tick,raw_tick,tick_key,status_flags,variable,value FROM sample_values ORDER BY sample_index,variable", [], (row) => add(["sample_value", row.sample_index, row.tick, row.raw_tick, row.tick_key, row.status_flags, row.variable, row.value]));
   await each<IndexEventRow>(database, "SELECT event_id,event_sequence,type,tick,tick_key,json FROM events ORDER BY event_sequence", [], (row) => add(["event", row.event_id, row.event_sequence, row.type, row.tick, row.tick_key, row.json]));
   return hash.digest("hex");
 }
@@ -1697,8 +1764,8 @@ async function validIndexSchema(database: sqlite3.Database): Promise<boolean> {
     meta: ["key", "value"],
     provenance: ["capture_id", "json"],
     raw_sources: ["file", "sha256", "bytes", "valid_bytes", "diagnostic"],
-    samples: ["sample_index", "tick", "tick_key", "status_flags"],
-    sample_values: ["sample_index", "tick", "tick_key", "status_flags", "variable", "value"],
+    samples: ["sample_index", "tick", "raw_tick", "tick_key", "status_flags"],
+    sample_values: ["sample_index", "tick", "raw_tick", "tick_key", "status_flags", "variable", "value"],
     events: ["event_id", "event_sequence", "type", "tick", "tick_key", "json"],
   };
   for (const [table, expected] of Object.entries(required)) {

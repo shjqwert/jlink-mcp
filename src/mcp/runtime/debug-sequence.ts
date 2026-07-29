@@ -234,6 +234,9 @@ export class DebugSequenceExecutor {
         captureIntervals.push(activeCaptureInterval);
       } else if (step.action === "hss_stop") {
         if (!activeCapturePlanned) throw new Error("hss_stop requires a preceding sequence hss_start");
+        if (index !== input.steps.length - 1) {
+          throw new Error("hss_stop must be the final scheduled step so later variable access cannot escape the sequence-owned HSS session");
+        }
         if (activeCaptureInterval) activeCaptureInterval.stopIndex = index;
         activeCapturePlanned = false;
         activeCaptureDescriptors = undefined;

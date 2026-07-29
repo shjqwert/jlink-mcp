@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
-import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig, type ProbeMemoryTransactionInput, type ProbeMemoryTransactionResult } from "./backend";
+import { ProbeBackend, ProbeState, ProbeErrorCode, CommandResult, GDBServerInfo, CaptureProbeConfig, type ProbeCoreRegisterWriteResult, type ProbeMemoryTransactionInput, type ProbeMemoryTransactionResult, type TargetStateObservationOptions } from "./backend";
 import { ProcessManager, terminateChildProcess } from "../utils/process-manager";
 import { log, logError } from "../utils/logger";
 import * as path from "path";
@@ -13,6 +13,7 @@ export interface JLinkConfig {
   /** Test/package override; defaults to the bundled native helper. */
   memoryHelperPath?: string;
   device: string;
+  gdbDevice?: string;
   interface: "SWD" | "JTAG";
   speed: number;
   serialNumber?: string;
@@ -58,6 +59,39 @@ function fatalJLinkCommandDiagnostic(raw: string): string | undefined {
       || /\bunknown command\.\s*['"]?\?['"]?\s+for help\./i.test(line));
 }
 
+function jlinkCommandResponse(raw: string, command: string): string | undefined {
+  const normalized = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const prompts = [...normalized.matchAll(/(?:^|\n)J-Link(?:\[\d+\])?>/gi)];
+  const expected = command.trim().replace(/\s+/g, " ").toLowerCase();
+  for (let index = 0; index < prompts.length; index += 1) {
+    const start = prompts[index].index ?? 0;
+    const end = prompts[index + 1]?.index ?? normalized.length;
+    const section = normalized.slice(start, end).replace(/^\n/, "");
+    const firstLine = section.split("\n", 1)[0];
+    const promptEnd = firstLine.indexOf(">");
+    if (promptEnd < 0) continue;
+    const echoed = firstLine.slice(promptEnd + 1).trim().replace(/\s+/g, " ").toLowerCase();
+    if (echoed === expected) return section;
+  }
+  return undefined;
+}
+
+function jlinkRegisterReadbackAfterWriteEcho(raw: string, token: string): string | undefined {
+  const normalized = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const registerName = token.startsWith("\"") && token.endsWith("\"") ? token.slice(1, -1) : token;
+  const escaped = registerName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const assignment = new RegExp(
+    `(?:^|\\n)((?:J-Link(?:\\[\\d+\\])?>)+[ \\t]*${escaped}[ \\t]*=[ \\t]*(0x)?[0-9a-f]{1,8}\\b[^\\n]*)`,
+    "gi",
+  );
+  let writeEchoSeen = false;
+  for (const match of normalized.matchAll(assignment)) {
+    if (!match[2]) writeEchoSeen = true;
+    else if (writeEchoSeen) return match[1];
+  }
+  return undefined;
+}
+
 export class JLinkBackend extends ProbeBackend {
   readonly type = "jlink" as const;
   readonly displayName = "SEGGER J-Link";
@@ -84,6 +118,7 @@ export class JLinkBackend extends ProbeBackend {
       gdbServerExePath: config.gdbServerExePath,
       memoryHelperPath: config.memoryHelperPath,
       device,
+      gdbDevice: config.gdbDevice,
       interface: config.interface || "SWD",
       speed: config.speed || 4000,
       serialNumber: config.serialNumber,
@@ -204,7 +239,14 @@ export class JLinkBackend extends ProbeBackend {
     });
   }
 
-  private async accessMemoryNonIntrusive(address: number, length: number, accessSize: 1 | 2 | 4, writeBytes?: Buffer, transaction?: ProbeMemoryTransactionInput): Promise<CommandResult> {
+  private async accessMemoryNonIntrusive(
+    address: number,
+    length: number,
+    accessSize: 1 | 2 | 4,
+    writeBytes?: Buffer,
+    transaction?: ProbeMemoryTransactionInput,
+    preserveDebugStateOnClose = false,
+  ): Promise<CommandResult> {
     if (!Number.isSafeInteger(address) || address < 0 || address > 0xffff_ffff
       || !Number.isSafeInteger(length) || length < 1 || length > 4096
       || address + length > 0x1_0000_0000
@@ -238,6 +280,7 @@ export class JLinkBackend extends ProbeBackend {
     ];
     if (writeBytes) args.push("--bytes-hex", writeBytes.toString("hex"));
     else args.push("--samples", "1", "--interval-ms", "0");
+    if (preserveDebugStateOnClose) args.push("--preserve-debug-state-on-close", "true");
     if (transaction) {
       args.push(
         "--capture-old", String(transaction.captureOld),
@@ -289,6 +332,7 @@ export class JLinkBackend extends ProbeBackend {
           writeReturnCode?: number;
           writeIssued?: boolean;
           memoryCacheDisabled?: boolean;
+          debugDeinitSkipped?: boolean;
           closeFailed?: boolean;
           stateUnknown?: boolean;
           samples?: Array<{ valid?: boolean; bytes?: string }>;
@@ -299,15 +343,18 @@ export class JLinkBackend extends ProbeBackend {
           resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: `memory helper returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`, errorCode: ProbeErrorCode.STATE_DESYNC, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? true : undefined, stateUnknown: true });
           return;
         }
+        const debugClosePolicyMissing = preserveDebugStateOnClose && response.debugDeinitSkipped !== true;
         const operationFailed = writeBytes
           ? response.status !== "ok" || response.writeFailed || response.closeFailed || response.targetWritten !== true
-            || response.memoryCacheDisabled !== true
+            || response.memoryCacheDisabled !== true || debugClosePolicyMissing
           : response.status !== "ok" || response.readFailed || !response.samples?.[0]?.valid
-            || response.memoryCacheDisabled !== true;
+            || response.memoryCacheDisabled !== true || debugClosePolicyMissing;
         if (operationFailed) {
           const identityFailure = response.errorCode === "JLINK_PROBE_IDENTITY_MISMATCH" || response.errorCode === "JLINK_SELECT_SN_FAILED";
           const fallback = response.memoryCacheDisabled !== true
             ? "memory helper did not prove that J-Link DLL caching was disabled"
+            : debugClosePolicyMissing
+              ? "memory helper did not prove that close-time debug de-initialization was skipped"
             : writeBytes ? "JLINKARM_WriteMem failed" : "JLINKARM_ReadMem failed";
           resolveResult({ success: false, rawOutput: stdout, output: "", stderr, error: response.reason ?? response.errorCode ?? fallback, errorCode: identityFailure ? ProbeErrorCode.PROBE_IDENTITY_MISMATCH : ProbeErrorCode.TARGET_UNREACHABLE, exitCode: code, exitSignal: signal, writeIssued: writeBytes ? response.writeIssued === true : false, stateUnknown: response.stateUnknown ?? true });
           return;
@@ -402,6 +449,9 @@ export class JLinkBackend extends ProbeBackend {
     if (length % accessSize !== 0) return { success: false, rawOutput: "", output: "", error: "memory read length is unaligned", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     return this.accessMemoryNonIntrusive(address, length, accessSize);
   }
+  protected override async readTargetStateRegister(options: TargetStateObservationOptions): Promise<CommandResult> {
+    return this.accessMemoryNonIntrusive(0xE000EDF0, 4, 4, undefined, undefined, options.preserveDebugStateOnClose === true);
+  }
   async writeMemory(address: number, value: number): Promise<CommandResult> {
     const bytes = Buffer.allocUnsafe(4);
     bytes.writeUInt32LE(value >>> 0);
@@ -473,19 +523,45 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   async readAllRegisters(): Promise<CommandResult> {
-    return this.executeDirect(["regs"]);
+    return this.executeDirect(["exec SetSkipDebugDeInit = 1", "regs"]);
   }
   async readRegister(name: string): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
       return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
-    return this.executeDirect([`rreg ${name}`]);
+    return this.executeDirect(["exec SetSkipDebugDeInit = 1", `rreg ${jlinkCoreRegisterToken(name)}`]);
   }
   async writeCoreRegister(name: string, value: number): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
       return { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT };
     }
-    return this.executeDirect([`wreg ${name}, 0x${value.toString(16)}`]);
+    return this.executeDirect([`wreg ${jlinkCoreRegisterToken(name)}, 0x${value.toString(16)}`]);
+  }
+
+  override async writeCoreRegisterTransaction(name: string, value: number): Promise<ProbeCoreRegisterWriteResult> {
+    if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
+      return {
+        command: { success: false, rawOutput: "", output: "unknown or non-core register", error: "unknown or non-core register", errorCode: ProbeErrorCode.INVALID_ARGUMENT, writeIssued: false },
+      };
+    }
+    if (!this.beginHardwareOperation()) {
+      return {
+        command: {
+          success: false,
+          rawOutput: "",
+          output: `Probe is exclusively owned by ${this.getExclusiveOwner()}`,
+          error: "Capture owns the probe",
+          errorCode: ProbeErrorCode.PROBE_BUSY,
+          writeIssued: false,
+          stateUnknown: false,
+        },
+      };
+    }
+    try {
+      return await this.acquireLock(() => this.execCoreRegisterTransaction(jlinkCoreRegisterToken(name), value));
+    } finally {
+      this.endHardwareOperation();
+    }
   }
 
   override getConnectionGeneration(): number { return this.connectionGeneration; }
@@ -522,11 +598,101 @@ export class JLinkBackend extends ProbeBackend {
     }
   }
 
+  private async execCoreRegisterTransaction(token: string, value: number, timeoutMs = 30000): Promise<ProbeCoreRegisterWriteResult> {
+    const writeCommand = `wreg ${token}, 0x${value.toString(16)}`;
+    const readbackCommand = `rreg ${token}`;
+    let result: CommandResult;
+    try {
+      // J-Link V8.84 can buffer all Commander output while an interactive
+      // Windows stdin pipe remains open. Submit the complete transaction and
+      // close stdin, matching the batch path used by proven direct operations.
+      // Commander normally de-initializes the debug unit when the connection
+      // closes. Preserve the verified core-register state for the next attach;
+      // SetRestartOnClose=0 in execRaw independently keeps the target halted.
+      result = await this.execRaw([
+        "exec SetSkipDebugDeInit = 1",
+        writeCommand,
+        readbackCommand,
+      ], timeoutMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to start J-Link core-register transaction";
+      return {
+        command: {
+          success: false,
+          rawOutput: "",
+          output: "",
+          error: message,
+          errorCode: ProbeErrorCode.PROBE_NOT_FOUND,
+          writeIssued: false,
+          stateUnknown: false,
+        },
+      };
+    }
+
+    const writeRaw = jlinkCommandResponse(result.rawOutput, writeCommand);
+    const readbackRaw = jlinkCommandResponse(result.rawOutput, readbackCommand)
+      ?? jlinkRegisterReadbackAfterWriteEcho(result.rawOutput, token);
+    const fatalDiagnostic = fatalJLinkCommandDiagnostic(`${result.rawOutput}\n${result.stderr ?? ""}`);
+    const knownPreDispatchFailure = result.errorCode === ProbeErrorCode.PROBE_NOT_FOUND
+      && /^Failed to spawn JLinkExe:/i.test(result.error ?? "");
+    // The complete stdin script (including wreg) is closed before waiting.
+    // A timeout or unclassified vendor failure is therefore an uncertain
+    // mutation unless the vendor proved it failed during attach/spawn.
+    const writeIssued = !knownPreDispatchFailure;
+    const writeCompleted = !fatalDiagnostic
+      && Boolean(writeRaw)
+      && (Boolean(readbackRaw) || result.success);
+    const command: CommandResult = result.success || writeCompleted
+      ? {
+        ...result,
+        success: true,
+        rawOutput: writeRaw ?? result.rawOutput,
+        output: stripBoilerplate(writeRaw ?? result.rawOutput),
+        error: undefined,
+        errorCode: undefined,
+        writeIssued: true,
+        stateUnknown: false,
+      }
+      : {
+        ...result,
+        success: false,
+        rawOutput: writeRaw ?? result.rawOutput,
+        output: stripBoilerplate(writeRaw ?? result.rawOutput),
+        writeIssued,
+        stateUnknown: Boolean(writeIssued || result.stateUnknown),
+      };
+
+    if (!writeIssued) return { command };
+
+    const readback: CommandResult = result.success && readbackRaw && !fatalDiagnostic
+      ? {
+        ...result,
+        success: true,
+        rawOutput: readbackRaw,
+        output: stripBoilerplate(readbackRaw),
+        error: undefined,
+        errorCode: undefined,
+        writeIssued: true,
+        stateUnknown: false,
+      }
+      : {
+        ...result,
+        success: false,
+        rawOutput: readbackRaw ?? "",
+        output: stripBoilerplate(readbackRaw ?? ""),
+        error: result.error ?? "J-Link same-connection register readback did not complete",
+        errorCode: result.errorCode ?? ProbeErrorCode.JLINK_COMMAND_FAILED,
+        writeIssued: true,
+        stateUnknown: true,
+      };
+    return { command, readback };
+  }
+
   // ── GDB Server ───────────────────────────────────────────────────
 
   private gdbServerArgs(): string[] {
     const args = [
-      "-device", this.config.device,
+      "-device", this.config.gdbDevice ?? this.config.device,
       "-if", this.config.interface,
       "-speed", String(this.config.speed),
       "-port", String(this.config.gdbPort),
@@ -677,6 +843,22 @@ export class JLinkBackend extends ProbeBackend {
   dispose(): void {
     this.processManager.kill(GDB_SERVER_PROCESS);
     this.setState(ProbeState.DISCONNECTED);
+  }
+}
+
+function jlinkCoreRegisterToken(name: string): string {
+  switch (name.toUpperCase()) {
+    case "PC":
+    case "R15":
+      return "\"R15 (PC)\"";
+    case "LR":
+    case "R14":
+      return "R14";
+    case "SP":
+    case "R13":
+      return "\"R13 (SP)\"";
+    default:
+      return name.toUpperCase();
   }
 }
 

@@ -217,7 +217,14 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       if (observed.status !== "ok") {
         const code = String(observed.errorCode ?? "HSS_CAPABILITY_FAILED");
         if (code === "HSS_TARGET_STATE_CHANGED" || code === "HSS_TARGET_STATE_RESTORE_FAILED" || code === "HSS_TARGET_STATE_OBSERVE_FAILED") {
-          throw new HssAdapterError(code, String(observed.reason ?? "HSS capability changed or obscured target state"), false, observed.stateUnknown === true);
+          return {
+            ...runtime,
+            available: false,
+            effective: HSS_EFFECTIVE_LIMITS,
+            errorCode: code,
+            reason: String(observed.reason ?? "HSS capability changed or obscured target state"),
+            observed: sanitizeObserved(observed),
+          };
         }
         return {
           ...runtime,

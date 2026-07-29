@@ -5,6 +5,12 @@ const workspace = resolve(process.cwd());
 const sourceRoots = ["src", "scripts", "native"].map((path) => resolve(workspace, path));
 const extensions = new Set([".ts", ".mjs", ".js", ".cpp", ".h", ".json"]);
 const excluded = new Set(["scripts/scan-legacy-control-plane.mjs", "scripts/check-agent-guidance.mjs"]);
+const armRegisterFiles = new Set([
+  "src/jlink/commander.ts",
+  "src/probe/backend.ts",
+  "src/probe/jlink.test.ts",
+  "src/mcp/runtime/direct-operations.test.ts",
+]);
 const forbidden = [
   /approval-broker/i,
   /approvalBroker/,
@@ -34,7 +40,7 @@ for (const file of sourceRoots.flatMap(walk)) {
   for (const pattern of forbidden) {
     if (pattern.test(content)) findings.push(`${name}: ${pattern}`);
   }
-  if (/\bR[0-5]\b/.test(content) && !["src/jlink/commander.ts", "src/probe/backend.ts"].includes(name)) {
+  if (/\bR[0-5]\b/.test(content) && !armRegisterFiles.has(name)) {
     findings.push(`${name}: legacy R0-R5 identifier`);
   }
 }

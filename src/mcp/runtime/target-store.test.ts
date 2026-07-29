@@ -10,7 +10,7 @@ test("TargetStore persists canonical project configuration and advances generati
   const projectRoot = join(root, "project");
   mkdirSync(projectRoot, { recursive: true });
   const store = new TargetStore(join(root, "state"));
-  const input = { projectRoot, device: "TEST-MCU", probeSerial: "123456", interface: "SWD" as const, speed: 4000 };
+  const input = { projectRoot, device: "TEST-MCU", gdbDevice: "Cortex-M4", probeSerial: "123456", interface: "SWD" as const, speed: 4000 };
 
   const first = await store.configure(input);
   const second = await store.configure(input);
@@ -19,6 +19,7 @@ test("TargetStore persists canonical project configuration and advances generati
   assert.notEqual(first.generation, second.generation);
   assert.equal(first.configurationHash, second.configurationHash);
   assert.equal(reloaded.generation, second.generation);
+  assert.equal(reloaded.gdbDevice, "Cortex-M4");
   assert.equal(reloaded.liveArtifactMatch.status, "unverified");
   assert.equal(reloaded.liveArtifactMatch.source, "target_configure");
   assert.match(readFileSync(store.filePath, "utf8"), /"formatVersion": 1/);

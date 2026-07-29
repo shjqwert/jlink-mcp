@@ -55,7 +55,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
   try {
     await client.connect(transport);
     assert.equal(client.getServerVersion()?.name, "jlink-mcp");
-    assert.equal(client.getServerVersion()?.version, "1.1.4");
+    assert.equal(client.getServerVersion()?.version, "1.1.5");
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
     const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -111,6 +111,11 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       assert.match(properties.restoreRunningStateAfterAttach?.description ?? "", /explicitly authorize.*previously running target/i);
       assert.match(properties.restoreRunningStateAfterAttach?.description ?? "", /reasonless stop cannot distinguish.*BKPT.*watchpoint.*fault/i);
       assert.match(properties.restoreRunningStateAfterAttach?.description ?? "", /independently verifying healthy running state/i);
+    }
+    {
+      const properties = tools.find((tool) => tool.name === "target_configure")?.inputSchema.properties as Record<string, { description?: string }>;
+      assert.match(properties.gdbDevice?.description ?? "", /non-invasive J-Link device\/profile/i);
+      assert.match(properties.gdbDevice?.description ?? "", /Flash\/Erase/i);
     }
     {
       const properties = tools.find((tool) => tool.name === "write_variable")?.inputSchema.properties as Record<string, { default?: unknown; description?: string }>;

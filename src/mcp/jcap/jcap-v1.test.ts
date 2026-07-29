@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readd
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import sqlite3 from "sqlite3";
 import {
   JcapV1Writer,
   appendJcapV1Sample,
@@ -66,6 +67,19 @@ function metadata(id = captureId, state: JcapV1Metadata["state"] = "active", dur
   return { ...value, state };
 }
 
+function nativeMetadata(id: string, requestedRateHz: number): JcapV1Metadata {
+  const base = metadata(id, "active", 60, requestedRateHz);
+  return {
+    ...base,
+    backend: "jlink-hss",
+    provenance: {
+      ...base.provenance,
+      backend: "jlink-hss",
+      runtime: { ...base.provenance.runtime, helperProtocolVersion: 3, helperSha256: "d".repeat(64), runtimeSha256: "f".repeat(64) },
+    },
+  };
+}
+
 function fullShapeMetadata(id = captureId): JcapV1Metadata {
   return createJcapV1Metadata({
     captureId: id,
@@ -102,6 +116,45 @@ function stableSummary(value: Record<string, unknown>): Record<string, unknown> 
   const copy = structuredClone(value);
   if (copy.metadata && typeof copy.metadata === "object" && !Array.isArray(copy.metadata)) delete (copy.metadata as Record<string, unknown>).updatedAt;
   return copy;
+}
+
+function updateIndexSchemaVersion(databaseFile: string, version: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const database = new sqlite3.Database(databaseFile, (openError) => {
+      if (openError) return reject(openError);
+      database.run("UPDATE meta SET value=? WHERE key='schema_version'", [version], (runError) => {
+        database.close((closeError) => runError || closeError ? reject(runError ?? closeError) : resolve());
+      });
+    });
+  });
+}
+
+function rewriteRawSampleTick(databaseFile: string, sampleIndex: number, tick: string): void {
+  const lines = readFileSync(databaseFile, "utf8").split("\n");
+  for (let index = 0; index + 1 < lines.length; index += 2) {
+    const payload = JSON.parse(lines[index + 1]) as JcapV1Sample;
+    if (payload.sampleIndex !== sampleIndex) continue;
+    payload.tick = tick;
+    const payloadBytes = Buffer.from(JSON.stringify(payload), "utf8");
+    const header = JSON.parse(lines[index]) as Record<string, unknown>;
+    header.payloadBytes = payloadBytes.length;
+    header.payloadSha256 = createHash("sha256").update(payloadBytes).digest("hex");
+    header.payloadCrc32 = crc32HexForTest(payloadBytes);
+    lines[index] = JSON.stringify(header);
+    lines[index + 1] = payloadBytes.toString("utf8");
+    writeFileSync(databaseFile, lines.join("\n"), "utf8");
+    return;
+  }
+  throw new Error(`sample ${sampleIndex} was not found`);
+}
+
+function crc32HexForTest(value: Buffer): string {
+  let crc = 0xffff_ffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb8_8320 : 0);
+  }
+  return ((crc ^ 0xffff_ffff) >>> 0).toString(16).padStart(8, "0");
 }
 
 function writeLegacyV0Signature(packageDir: string): void {
@@ -360,6 +413,169 @@ test("JCAP v1 finalizes exactly four durable files and round-trips bounded queri
     const bounded = await query.series({ captureId, variables: Array.from({ length: 33 }, (_, index) => `v${index}`), startTick: "0", endTick: "1", bucketCount: 1 });
     assert.equal(bounded.ok, false);
     assert.equal(bounded.error?.code, "JCAP_BOUNDS");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("JCAP v1 rebuild normalizes legacy low-rate HSS sample ticks without changing Raw", async () => {
+  const root = workspace();
+  const id = "43000000-0000-4000-8000-000000000017";
+  const packageDir = path.join(root, "captures", `${id}.jcap`);
+  const captureMetadata = nativeMetadata(id, 100);
+  const descriptor = captureMetadata.variables[0];
+  const rawSamples: JcapV1Sample[] = [
+    { sampleIndex: 0, tick: "5714963700", statusFlags: 1, values: { counter: 0xa5a55a5a, feedback: 1 } },
+    { sampleIndex: 1, tick: "5715963700", statusFlags: 1, values: { counter: 0xa5a55a5a, feedback: 2 } },
+    { sampleIndex: 2, tick: "5716963700", statusFlags: 1, values: { counter: 0x55aa55aa, feedback: 3 } },
+    { sampleIndex: 3, tick: "5717963700", statusFlags: 1, values: { counter: 0x55aa55aa, feedback: 4 } },
+    { sampleIndex: 4, tick: "5718963700", statusFlags: 1, values: { counter: 0xa5a55a5a, feedback: 5 } },
+    { sampleIndex: 5, tick: "5719963700", statusFlags: 1, values: { counter: 0xa5a55a5a, feedback: 6 } },
+  ];
+  const writeEvent = {
+    eventId: eventId(17), eventSequence: 1, type: "variable_write" as const, tick: "5740000000",
+    logicalIdentity: descriptor.logicalIdentity, selector: descriptor.logicalIdentity, descriptor,
+    startedAt: "2026-07-29T01:41:40.687Z", endedAt: "2026-07-29T01:41:40.839Z",
+    operationStartTick: "5739000000", operationEndTick: "5740000000", timingSource: "helper_qpc",
+    writeAttempted: true, writeIssued: true, stateUnknown: false,
+    old: { state: "captured", value: 0xa5a55a5a, bytesHex: "5a5aa5a5" },
+    requested: { value: 0x55aa55aa, bytesHex: "aa55aa55" },
+    readback: { state: "observed", value: 0x55aa55aa, bytesHex: "aa55aa55" },
+    restore: { state: "restored", attempted: true, writeIssued: true, stateUnknown: false, readback: 0xa5a55a5a, readbackHex: "5a5aa5a5" },
+    verification: { state: "verified" },
+    sampleAlignment: { method: "terminal_raw_nearest", status: "derive_on_rebuild" },
+    outcome: "completed", error: null,
+  };
+  try {
+    const writer = new JcapV1Writer({ packageDir, metadata: captureMetadata });
+    writer.appendEvent({ eventId: eventId(16), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" });
+    for (const sample of rawSamples) assert.equal(writer.appendSample(sample), true);
+    writer.appendEvent(writeEvent);
+    writer.appendEvent({ ...writeEvent, eventId: eventId(18), eventSequence: 2, tick: "8000000000", operationStartTick: "7999000000", operationEndTick: "8000000000" });
+    writer.appendEvent({ eventId: eventId(19), eventSequence: 3, type: "lifecycle", tick: "8000000000", state: "finalizing" });
+    writer.appendEvent({ eventId: eventId(20), eventSequence: 4, type: "lifecycle", tick: "8000000000", state: "stopped" });
+    writer.close();
+    finalizeJcapV1Metadata(packageDir, "stopped");
+    const beforeHashes = rawHashes(packageDir);
+
+    await rebuildJcapV1Index(packageDir);
+    assert.deepEqual(rawHashes(packageDir), beforeHashes);
+    const summary = await jcapCaptureSummary(packageDir);
+    assert.equal(summary.startTick, "5714963700");
+    assert.equal(summary.endTick, "5764963700");
+
+    const window = await jcapCaptureEventWindow({ packageDir, eventId: eventId(17), variables: ["counter"], beforeMs: 20, afterMs: 20, bucketCount: 4 });
+    assert.deepEqual(window.sampleCoverage, { status: "covered", startTick: "5714963700", endTick: "5764963700" });
+    assert.equal((window.event as Record<string, unknown>).tick, "5740000000");
+    assert.deepEqual((window.event as Record<string, unknown>).sampleAlignment, { method: "capture_rate_normalized_index", status: "resolved" });
+    assert.deepEqual(
+      ((window.series as Record<string, unknown>).series as Array<Record<string, unknown>>).map((bucket) => bucket.last),
+      [0xa5a55a5a, 0x55aa55aa, 0x55aa55aa, 0xa5a55a5a],
+    );
+    assert.notEqual((window.nearestSample as Record<string, unknown>).tick, (window.nearestSample as Record<string, unknown>).raw_tick);
+
+    const emptyInside = await jcapCaptureEventWindow({ packageDir, eventId: eventId(17), variables: ["counter"], beforeMs: 0, afterMs: 0, bucketCount: 1 });
+    assert.deepEqual(emptyInside.sampleCoverage, { status: "no_samples_in_window", startTick: "5714963700", endTick: "5764963700" });
+    assert.equal(emptyInside.nearestSample, undefined);
+    assert.deepEqual((emptyInside.series as Record<string, unknown>).series, []);
+
+    const outside = await jcapCaptureEventWindow({ packageDir, eventId: eventId(18), variables: ["counter"], beforeMs: 0, afterMs: 0, bucketCount: 1 });
+    assert.deepEqual(outside.sampleCoverage, { status: "outside_sample_range", startTick: "5714963700", endTick: "5764963700" });
+    assert.deepEqual((outside.event as Record<string, unknown>).sampleAlignment, { method: "capture_rate_normalized_index", status: "outside_sample_range" });
+    assert.equal(outside.nearestSample, undefined);
+    assert.deepEqual((outside.series as Record<string, unknown>).series, []);
+    assert.deepEqual(rawHashes(packageDir), beforeHashes);
+
+    await updateIndexSchemaVersion(path.join(packageDir, "capture.db"), "1");
+    const repaired = dataOf(await new CaptureQueryOperations(root).summary(id));
+    assert.equal(repaired.indexRebuilt, true);
+    assert.equal(repaired.endTick, "5764963700");
+    assert.deepEqual(rawHashes(packageDir), beforeHashes);
+
+    const correctId = "43000000-0000-4000-8000-000000000021";
+    const correctPackage = path.join(root, "captures", `${correctId}.jcap`);
+    const correctMetadata = nativeMetadata(correctId, 100);
+    const correctWriter = new JcapV1Writer({ packageDir: correctPackage, metadata: correctMetadata });
+    correctWriter.appendEvent({ eventId: eventId(21), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" });
+    for (const [sampleIndex, tick] of ["5714963700", "5724963700", "5734963700"].entries()) {
+      assert.equal(correctWriter.appendSample({ sampleIndex, tick, statusFlags: 1, values: { counter: sampleIndex, feedback: sampleIndex } }), true);
+    }
+    correctWriter.appendEvent({ eventId: eventId(22), eventSequence: 1, type: "lifecycle", tick: "5734963700", state: "finalizing" });
+    correctWriter.appendEvent({ eventId: eventId(23), eventSequence: 2, type: "lifecycle", tick: "5734963700", state: "stopped" });
+    correctWriter.close();
+    finalizeJcapV1Metadata(correctPackage, "stopped");
+    await rebuildJcapV1Index(correctPackage);
+    const correctSummary = await jcapCaptureSummary(correctPackage);
+    assert.equal(correctSummary.startTick, "5714963700");
+    assert.equal(correctSummary.endTick, "5734963700");
+
+    // Hardware capture d04b... has Raw SHA-256 d4001896.../87aeab7a... and
+    // cadence {0 ms duplicates, 1 ms ordinal steps, sparse 2 ms gaps}.
+    const duplicateId = "43000000-0000-4000-8000-000000000030";
+    const duplicatePackage = path.join(root, "captures", `${duplicateId}.jcap`);
+    const duplicateTicks = ["5714963700", "5715963700", "5715963700", "5717963700", "5718963700", "5719963700"];
+    writeJcapV1Raw({
+      packageDir: duplicatePackage,
+      metadata: nativeMetadata(duplicateId, 100),
+      samples: duplicateTicks.map((tick, sampleIndex) => ({ sampleIndex, tick, statusFlags: 1, values: { counter: sampleIndex, feedback: sampleIndex } })),
+      events: [
+        { eventId: eventId(30), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(31), eventSequence: 1, type: "lifecycle", tick: duplicateTicks.at(-1)!, state: "finalizing" },
+        { eventId: eventId(32), eventSequence: 2, type: "lifecycle", tick: duplicateTicks.at(-1)!, state: "stopped" },
+      ],
+    });
+    finalizeJcapV1Metadata(duplicatePackage, "stopped");
+    const duplicateRawHashes = rawHashes(duplicatePackage);
+    await rebuildJcapV1Index(duplicatePackage);
+    assert.deepEqual(rawHashes(duplicatePackage), duplicateRawHashes);
+    const duplicateSummary = await jcapCaptureSummary(duplicatePackage);
+    assert.equal(duplicateSummary.startTick, "5714963700");
+    assert.equal(duplicateSummary.endTick, "5764963700");
+
+    const regressionId = "43000000-0000-4000-8000-000000000033";
+    const regressionPackage = path.join(root, "captures", `${regressionId}.jcap`);
+    const regressionRaw = writeJcapV1Raw({
+      packageDir: regressionPackage,
+      metadata: nativeMetadata(regressionId, 100),
+      samples: ["5714963700", "5715963700", "5717963700", "5718963700"].map((tick, sampleIndex) => ({
+        sampleIndex, tick, statusFlags: 1, values: { counter: sampleIndex, feedback: sampleIndex },
+      })),
+      events: [
+        { eventId: eventId(33), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(34), eventSequence: 1, type: "lifecycle", tick: "5718963700", state: "finalizing" },
+        { eventId: eventId(35), eventSequence: 2, type: "lifecycle", tick: "5718963700", state: "stopped" },
+      ],
+    });
+    rewriteRawSampleTick(regressionRaw.samplesFile, 3, "5716963700");
+    finalizeJcapV1Metadata(regressionPackage, "stopped");
+    const regressionHashes = rawHashes(regressionPackage);
+    await assert.rejects(
+      () => rebuildJcapV1Index(regressionPackage),
+      /Raw corruption|sample tick regressed/,
+    );
+    assert.deepEqual(rawHashes(regressionPackage), regressionHashes);
+
+    for (const [ambiguousId, ticks] of [
+      ["43000000-0000-4000-8000-000000000024", ["5714963700", "5715963700", "5725963700"]],
+      ["43000000-0000-4000-8000-000000000027", ["5714963700", "5714963700", "5714963700"]],
+    ] as const) {
+      const ambiguousPackage = path.join(root, "captures", `${ambiguousId}.jcap`);
+      writeJcapV1Raw({
+        packageDir: ambiguousPackage,
+        metadata: nativeMetadata(ambiguousId, 100),
+        samples: ticks.map((tick, sampleIndex) => ({ sampleIndex, tick, statusFlags: 1, values: { counter: sampleIndex, feedback: sampleIndex } })),
+        events: [
+          { eventId: eventId(24 + Number(ambiguousId.endsWith("27")) * 3), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+          { eventId: eventId(25 + Number(ambiguousId.endsWith("27")) * 3), eventSequence: 1, type: "lifecycle", tick: ticks.at(-1)!, state: "finalizing" },
+          { eventId: eventId(26 + Number(ambiguousId.endsWith("27")) * 3), eventSequence: 2, type: "lifecycle", tick: ticks.at(-1)!, state: "stopped" },
+        ],
+      });
+      finalizeJcapV1Metadata(ambiguousPackage, "stopped");
+      await assert.rejects(
+        () => rebuildJcapV1Index(ambiguousPackage),
+        (error: unknown) => (error as { message?: string }).message?.includes("low-rate J-Link HSS") === true,
+      );
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
