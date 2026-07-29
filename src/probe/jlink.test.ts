@@ -204,6 +204,63 @@ test("JLinkBackend closes stdin before V8.84 releases buffered transaction outpu
   assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n"]);
 });
 
+test("JLinkBackend separates V8.84 consecutive-prompt write echo from 0x readback", async () => {
+  const transcript = [
+    "SEGGER J-Link Commander V8.84",
+    "J-Link>J-Link>R0 = 13579BDF",
+    "J-Link>R0 = 0x13579BDF",
+    "J-Link>",
+  ].join("\r\n");
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], transcript),
+  );
+
+  const result = await backend.writeCoreRegisterTransaction("R0", 0x1357_9bdf);
+
+  assert.equal(result.command.success, true, JSON.stringify(result.command));
+  assert.equal(result.command.writeIssued, true);
+  assert.equal(result.readback?.success, true, JSON.stringify(result.readback));
+  assert.match(result.readback?.rawOutput ?? "", /R0\s*=\s*0x13579BDF/i);
+  assert.doesNotMatch(result.readback?.rawOutput ?? "", /R0\s*=\s*13579BDF/i);
+
+  const writeEchoOnly = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], "J-Link>J-Link>R0 = 13579BDF\r\nJ-Link>"),
+  );
+  const missing = await writeEchoOnly.writeCoreRegisterTransaction("R0", 0x1357_9bdf);
+  assert.equal(missing.command.success, true);
+  assert.equal(missing.readback?.success, false);
+  assert.equal(missing.readback?.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+
+  const prefixedAssignmentOnly = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], "J-Link>R0 = 0x13579BDF\r\nJ-Link>"),
+  );
+  const ambiguous = await prefixedAssignmentOnly.writeCoreRegisterTransaction("R0", 0x1357_9bdf);
+  assert.equal(ambiguous.command.success, true);
+  assert.equal(ambiguous.readback?.success, false);
+  assert.equal(ambiguous.readback?.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+
+  const unpromptedAssignments = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], [
+      "SetupTarget note",
+      "R0 = 13579BDF",
+      "unrelated diagnostic",
+      "R0 = 0x13579BDF",
+    ].join("\r\n")),
+  );
+  const untrusted = await unpromptedAssignments.writeCoreRegisterTransaction("R0", 0x1357_9bdf);
+  assert.equal(untrusted.command.success, true);
+  assert.equal(untrusted.readback?.success, false);
+  assert.equal(untrusted.readback?.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+});
+
 test("JLinkBackend treats a timeout after submitting the EOF batch as an uncertain write", async () => {
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },

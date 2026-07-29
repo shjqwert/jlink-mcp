@@ -76,6 +76,22 @@ function jlinkCommandResponse(raw: string, command: string): string | undefined 
   return undefined;
 }
 
+function jlinkRegisterReadbackAfterWriteEcho(raw: string, token: string): string | undefined {
+  const normalized = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const registerName = token.startsWith("\"") && token.endsWith("\"") ? token.slice(1, -1) : token;
+  const escaped = registerName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const assignment = new RegExp(
+    `(?:^|\\n)((?:J-Link(?:\\[\\d+\\])?>)+[ \\t]*${escaped}[ \\t]*=[ \\t]*(0x)?[0-9a-f]{1,8}\\b[^\\n]*)`,
+    "gi",
+  );
+  let writeEchoSeen = false;
+  for (const match of normalized.matchAll(assignment)) {
+    if (!match[2]) writeEchoSeen = true;
+    else if (writeEchoSeen) return match[1];
+  }
+  return undefined;
+}
+
 export class JLinkBackend extends ProbeBackend {
   readonly type = "jlink" as const;
   readonly displayName = "SEGGER J-Link";
@@ -592,7 +608,8 @@ export class JLinkBackend extends ProbeBackend {
     }
 
     const writeRaw = jlinkCommandResponse(result.rawOutput, writeCommand);
-    const readbackRaw = jlinkCommandResponse(result.rawOutput, readbackCommand);
+    const readbackRaw = jlinkCommandResponse(result.rawOutput, readbackCommand)
+      ?? jlinkRegisterReadbackAfterWriteEcho(result.rawOutput, token);
     const fatalDiagnostic = fatalJLinkCommandDiagnostic(`${result.rawOutput}\n${result.stderr ?? ""}`);
     const knownPreDispatchFailure = result.errorCode === ProbeErrorCode.PROBE_NOT_FOUND
       && /^Failed to spawn JLinkExe:/i.test(result.error ?? "");
