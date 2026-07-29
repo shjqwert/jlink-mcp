@@ -129,6 +129,34 @@ function updateIndexSchemaVersion(databaseFile: string, version: string): Promis
   });
 }
 
+function rewriteRawSampleTick(databaseFile: string, sampleIndex: number, tick: string): void {
+  const lines = readFileSync(databaseFile, "utf8").split("\n");
+  for (let index = 0; index + 1 < lines.length; index += 2) {
+    const payload = JSON.parse(lines[index + 1]) as JcapV1Sample;
+    if (payload.sampleIndex !== sampleIndex) continue;
+    payload.tick = tick;
+    const payloadBytes = Buffer.from(JSON.stringify(payload), "utf8");
+    const header = JSON.parse(lines[index]) as Record<string, unknown>;
+    header.payloadBytes = payloadBytes.length;
+    header.payloadSha256 = createHash("sha256").update(payloadBytes).digest("hex");
+    header.payloadCrc32 = crc32HexForTest(payloadBytes);
+    lines[index] = JSON.stringify(header);
+    lines[index + 1] = payloadBytes.toString("utf8");
+    writeFileSync(databaseFile, lines.join("\n"), "utf8");
+    return;
+  }
+  throw new Error(`sample ${sampleIndex} was not found`);
+}
+
+function crc32HexForTest(value: Buffer): string {
+  let crc = 0xffff_ffff;
+  for (const byte of value) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb8_8320 : 0);
+  }
+  return ((crc ^ 0xffff_ffff) >>> 0).toString(16).padStart(8, "0");
+}
+
 function writeLegacyV0Signature(packageDir: string): void {
   const rawDir = path.join(packageDir, "raw");
   mkdirSync(rawDir, { recursive: true });
@@ -480,6 +508,52 @@ test("JCAP v1 rebuild normalizes legacy low-rate HSS sample ticks without changi
     const correctSummary = await jcapCaptureSummary(correctPackage);
     assert.equal(correctSummary.startTick, "5714963700");
     assert.equal(correctSummary.endTick, "5734963700");
+
+    // Hardware capture d04b... has Raw SHA-256 d4001896.../87aeab7a... and
+    // cadence {0 ms duplicates, 1 ms ordinal steps, sparse 2 ms gaps}.
+    const duplicateId = "43000000-0000-4000-8000-000000000030";
+    const duplicatePackage = path.join(root, "captures", `${duplicateId}.jcap`);
+    const duplicateTicks = ["5714963700", "5715963700", "5715963700", "5717963700", "5718963700", "5719963700"];
+    writeJcapV1Raw({
+      packageDir: duplicatePackage,
+      metadata: nativeMetadata(duplicateId, 100),
+      samples: duplicateTicks.map((tick, sampleIndex) => ({ sampleIndex, tick, statusFlags: 1, values: { counter: sampleIndex, feedback: sampleIndex } })),
+      events: [
+        { eventId: eventId(30), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(31), eventSequence: 1, type: "lifecycle", tick: duplicateTicks.at(-1)!, state: "finalizing" },
+        { eventId: eventId(32), eventSequence: 2, type: "lifecycle", tick: duplicateTicks.at(-1)!, state: "stopped" },
+      ],
+    });
+    finalizeJcapV1Metadata(duplicatePackage, "stopped");
+    const duplicateRawHashes = rawHashes(duplicatePackage);
+    await rebuildJcapV1Index(duplicatePackage);
+    assert.deepEqual(rawHashes(duplicatePackage), duplicateRawHashes);
+    const duplicateSummary = await jcapCaptureSummary(duplicatePackage);
+    assert.equal(duplicateSummary.startTick, "5714963700");
+    assert.equal(duplicateSummary.endTick, "5764963700");
+
+    const regressionId = "43000000-0000-4000-8000-000000000033";
+    const regressionPackage = path.join(root, "captures", `${regressionId}.jcap`);
+    const regressionRaw = writeJcapV1Raw({
+      packageDir: regressionPackage,
+      metadata: nativeMetadata(regressionId, 100),
+      samples: ["5714963700", "5715963700", "5717963700", "5718963700"].map((tick, sampleIndex) => ({
+        sampleIndex, tick, statusFlags: 1, values: { counter: sampleIndex, feedback: sampleIndex },
+      })),
+      events: [
+        { eventId: eventId(33), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" },
+        { eventId: eventId(34), eventSequence: 1, type: "lifecycle", tick: "5718963700", state: "finalizing" },
+        { eventId: eventId(35), eventSequence: 2, type: "lifecycle", tick: "5718963700", state: "stopped" },
+      ],
+    });
+    rewriteRawSampleTick(regressionRaw.samplesFile, 3, "5716963700");
+    finalizeJcapV1Metadata(regressionPackage, "stopped");
+    const regressionHashes = rawHashes(regressionPackage);
+    await assert.rejects(
+      () => rebuildJcapV1Index(regressionPackage),
+      /Raw corruption|sample tick regressed/,
+    );
+    assert.deepEqual(rawHashes(regressionPackage), regressionHashes);
 
     for (const [ambiguousId, ticks] of [
       ["43000000-0000-4000-8000-000000000024", ["5714963700", "5715963700", "5725963700"]],

@@ -1414,7 +1414,9 @@ function normalizeSamplesForIndex(metadata: JcapV1Metadata, samples: readonly Jc
   if (metadata.backend !== "jlink-hss" || metadata.requestedRateHz === 1_000 || samples.length === 0) {
     return samples.map((sample) => ({ sample, tick: sample.tick, rawTick: sample.tick, normalized: false }));
   }
-  const positiveDeltas = samples.slice(1).map((sample, index) => BigInt(sample.tick) - BigInt(samples[index].tick)).filter((delta) => delta > 0n);
+  const deltas = samples.slice(1).map((sample, index) => BigInt(sample.tick) - BigInt(samples[index].tick));
+  if (deltas.some((delta) => delta < 0n)) throw new JcapIntegrityError("JCAP_SAMPLE_TICK_REGRESSION", "sample tick regressed during index normalization");
+  const positiveDeltas = deltas.filter((delta) => delta > 0n);
   if (positiveDeltas.length === 0) {
     if (samples.length > 1) throw new JcapIntegrityError("JCAP_SAMPLE_TIMEBASE_AMBIGUOUS", "low-rate J-Link HSS samples do not provide a positive tick cadence");
     return samples.map((sample) => ({ sample, tick: sample.tick, rawTick: sample.tick, normalized: false }));
@@ -1422,7 +1424,8 @@ function normalizeSamplesForIndex(metadata: JcapV1Metadata, samples: readonly Jc
   const oneMillisecond = 1_000_000n;
   const expectedInterval = 1_000_000_000n / BigInt(metadata.requestedRateHz);
   const clearlyLegacyOrdinalTicks = expectedInterval >= 2n * oneMillisecond
-    && positiveDeltas.every((delta) => delta === oneMillisecond);
+    && positiveDeltas.some((delta) => delta === oneMillisecond)
+    && positiveDeltas.every((delta) => delta % oneMillisecond === 0n && delta < expectedInterval);
   const clearlyRateScaledTicks = positiveDeltas.every((delta) => {
     const slots = (delta * BigInt(metadata.requestedRateHz) + 500_000_000n) / 1_000_000_000n;
     if (slots < 1n) return false;
