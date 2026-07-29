@@ -143,8 +143,9 @@ export class SessionOperations {
     return this.queuedWithTarget("gdb_server_stop", target, ["stop_gdb_server", "release_gdb_owner"], ["gdb"], async (envelope) => {
       const clientWasConnected = runtime.gdb.isConnected();
       const executionState = clientWasConnected ? runtime.gdb.getTargetExecutionState() : runtime.gdbServerTargetExecutionState ?? "unknown";
+      const recoveringAfterClientExit = !clientWasConnected && executionState === "unknown";
       envelope.before = { gdbClientConnected: clientWasConnected, targetExecutionState: executionState, gdbServerRunning: runtime.probe.isGDBServerRunning() };
-      if (executionState === "unknown") {
+      if (executionState === "unknown" && !recoveringAfterClientExit) {
         throw disconnectStateError(executionState, "stopping the GDB Server");
       }
       runtime.gdbServerStopping = true;
@@ -172,10 +173,18 @@ export class SessionOperations {
           targetExecutionStateAfterClose: finalState,
         };
         if (finalState === "unknown") throw new SessionError("POST_OPERATION_STATE_UNKNOWN", "GDB Server stopped, but target state could not be observed afterward", false, true, true);
-        if (finalState !== executionState) {
+        if (!recoveringAfterClientExit && finalState !== executionState) {
           throw new SessionError("HIDDEN_STATE_CHANGE", `GDB Server close changed target state from ${executionState} to ${finalState}`, false, true, false);
         }
-        envelope.verification = { status: "verified", method: "gdb_state_before_close_and_post_server_probe_observation" };
+        envelope.verification = {
+          status: "verified",
+          method: recoveringAfterClientExit
+            ? "gdb_server_cleanup_and_post_server_probe_observation"
+            : "gdb_state_before_close_and_post_server_probe_observation",
+        };
+        if (recoveringAfterClientExit) {
+          envelope.warnings.push("The GDB client exited before close, so pre-close target state was unknown; only the final post-server Probe observation is verified.");
+        }
       } finally {
         runtime.gdbServerStopping = false;
       }

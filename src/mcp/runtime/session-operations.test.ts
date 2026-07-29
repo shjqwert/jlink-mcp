@@ -121,6 +121,27 @@ test("failed raw GDB command retains command and partial output facts", async (c
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
 });
 
+test("gdb_server_stop observes target after a timed-out client exits and safely releases owner", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-timeout-close-recovery");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.connected = false;
+  fixtureValue.gdb.executionState = "unknown";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "unknown";
+  fixtureValue.probe.targetState = "running";
+  fixtureValue.probe.rejectObservationWhileServerRunning = true;
+
+  const stopped = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.before.targetExecutionState, "unknown");
+  assert.equal(stopped.after.targetExecutionState, "running");
+  assert.equal(fixtureValue.probe.serverRunning, false);
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
+  assert.equal(fixtureValue.runtime.gdbOwnerToken, undefined);
+  assert.equal(stopped.verification.method, "gdb_server_cleanup_and_post_server_probe_observation");
+  assert.match(stopped.warnings.join("\n"), /pre-close target state was unknown/i);
+});
+
 test("queued GDB request rejects an owner replaced while waiting", async (context) => {
   const fixtureValue = await fixture(context, "gdb-owner-race");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
@@ -630,7 +651,9 @@ class SessionProbe extends ProbeBackend {
   targetState: "running" | "halted" | "unknown" = "running";
   targetStateResult?: CommandResult;
   stopHook?: () => void;
+  rejectObservationWhileServerRunning = false;
   override async observeTargetState(): Promise<TargetStateObservation> {
+    if (this.rejectObservationWhileServerRunning && this.serverRunning) throw new Error("Probe is owned by GDB Server");
     return { state: this.targetState, source: this.targetState === "unknown" ? "unavailable" : "dhcsr", result: this.targetStateResult ?? ok() };
   }
   async getDeviceInfo(): Promise<CommandResult> { return ok(); }

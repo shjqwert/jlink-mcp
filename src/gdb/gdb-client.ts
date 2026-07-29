@@ -49,6 +49,7 @@ export class GDBClient {
   private connected = false;
   private outputBuffer = "";
   private pendingResolve: ((response: string, processExited: boolean) => void) | null = null;
+  private pendingRequiresPrompt = false;
   private stopEvent: string | null = null;
   private history: string[] = [];
   private maxHistory = 200;
@@ -139,7 +140,9 @@ export class GDBClient {
           if (this.proc === proc) this.proc = null;
           const pending = this.pendingResolve;
           this.pendingResolve = null;
+          this.pendingRequiresPrompt = false;
           pending?.(this.outputBuffer, true);
+          if (pending) return;
           if (!terminating) finish({ success: false, output: "", error: `Failed to start GDB: ${err.message}. Is ${this.gdbPath} installed?`, ...this.exitFacts() });
           return;
         }
@@ -148,10 +151,12 @@ export class GDBClient {
           const pending = this.pendingResolve;
           const pendingOutput = this.outputBuffer;
           this.pendingResolve = null;
+          this.pendingRequiresPrompt = false;
           this.lastExit = { code: proc.exitCode, signal: proc.signalCode, error: err.message };
           if (wasConnected) this.notifyUnexpectedExit(proc);
           void this.terminateGdbProcess().then(() => {
             pending?.(pendingOutput, true);
+            if (pending) return;
             finish({ success: false, output: "", error: `GDB process error: ${err.message}`, ...this.exitFacts() });
           });
         }
@@ -169,7 +174,9 @@ export class GDBClient {
         if (this.proc === proc) this.proc = null;
         const pending = this.pendingResolve;
         this.pendingResolve = null;
+        this.pendingRequiresPrompt = false;
         pending?.(this.outputBuffer, true);
+        if (pending) return;
         if (!terminating && !settled) finish({ success: false, output: this.cleanMI(this.outputBuffer), rawOutput: this.outputBuffer, error: `GDB exited before connection completed (code ${code})`, ...this.exitFacts() });
       });
 
@@ -181,7 +188,28 @@ export class GDBClient {
         startupTimeout = undefined;
         this.outputBuffer = "";
         this.connectionGeneration += 1;
-        void this.sendCommand(`target remote ${host}:${port}`, 15_000).then(async (exchange) => {
+        void (async () => {
+          const asyncExchange = await this.sendCommand("-gdb-set mi-async on", 15_000, true);
+          const asyncOutput = asyncExchange.output;
+          const asyncCleanOutput = this.cleanMI(asyncOutput);
+          if (asyncExchange.processExited) {
+            finish({ success: false, output: asyncCleanOutput, rawOutput: asyncOutput, error: "GDB exited while enabling MI asynchronous command processing", code: "GDB_PROCESS_EXITED", ...this.exitFacts() });
+            return;
+          }
+          if (asyncExchange.timedOut) {
+            terminating = true;
+            await this.terminateGdbProcess();
+            finish({ success: false, output: asyncCleanOutput, rawOutput: asyncOutput, error: "GDB timed out while enabling MI asynchronous command processing", code: "GDB_COMMAND_TIMEOUT", ...this.exitFacts() });
+            return;
+          }
+          if (!hasMiResult(asyncOutput, "done") || findMiResult(asyncOutput, "error")) {
+            terminating = true;
+            await this.terminateGdbProcess();
+            finish({ success: false, output: asyncCleanOutput, rawOutput: asyncOutput, error: "GDB does not support the MI asynchronous mode required for commands while the target is running", code: "GDB_MI_ASYNC_UNAVAILABLE", ...this.exitFacts() });
+            return;
+          }
+
+          const exchange = await this.sendCommand(`target remote ${host}:${port}`, 15_000);
           const connectResult = exchange.output;
           const cleanOutput = this.cleanMI(connectResult);
           const miError = /(?:^|\n)\^error(?:,|\r?$)/m.test(connectResult);
@@ -203,7 +231,7 @@ export class GDBClient {
             await this.terminateGdbProcess();
             finish({ success: false, output: cleanOutput, rawOutput: connectResult, error: "Failed to connect to GDB server", ...this.exitFacts() });
           }
-        }).catch(async (error) => {
+        })().catch(async (error) => {
           terminating = true;
           await this.terminateGdbProcess();
           finish({ success: false, output: "", error: error instanceof Error ? error.message : String(error), ...this.exitFacts() });
@@ -424,6 +452,7 @@ export class GDBClient {
     this.targetExecutionState = "unknown";
     const pending = this.pendingResolve;
     this.pendingResolve = null;
+    this.pendingRequiresPrompt = false;
     if (pending) pending(this.outputBuffer, true);
     if (proc) {
       await terminateChildProcess(proc, {
@@ -445,9 +474,10 @@ export class GDBClient {
     this.updateTargetExecutionState(this.outputBuffer);
 
     // If someone is waiting for a response, check if we have a prompt
-    if (this.pendingResolve && this.isResponseComplete()) {
+    if (this.pendingResolve && (this.pendingRequiresPrompt ? hasMiPrompt(this.outputBuffer) : this.isResponseComplete())) {
       const resolve = this.pendingResolve;
       this.pendingResolve = null;
+      this.pendingRequiresPrompt = false;
       const response = this.outputBuffer;
       this.outputBuffer = "";
       resolve(response, false);
@@ -481,7 +511,7 @@ export class GDBClient {
     return parts.join(" ");
   }
 
-  private sendCommand(cmd: string, timeout: number): Promise<GDBCommandExchange> {
+  private sendCommand(cmd: string, timeout: number, requirePrompt = true): Promise<GDBCommandExchange> {
     return new Promise((resolve, reject) => {
       if (!this.proc?.stdin) {
         reject("GDB process not available");
@@ -495,11 +525,15 @@ export class GDBClient {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutHandle);
-        if (this.pendingResolve === onResponse) this.pendingResolve = null;
+        if (this.pendingResolve === onResponse) {
+          this.pendingResolve = null;
+          this.pendingRequiresPrompt = false;
+        }
         resolve({ output, timedOut, processExited });
       };
       const onResponse = (output: string, processExited: boolean) => finish(output, false, processExited);
       this.pendingResolve = onResponse;
+      this.pendingRequiresPrompt = requirePrompt;
 
       // Record in history
       this.history.push(`> ${cmd}`);
@@ -521,7 +555,10 @@ export class GDBClient {
         this.proc.stdin.write(cmd + "\n");
       } catch (error) {
         clearTimeout(timeoutHandle);
-        if (this.pendingResolve === onResponse) this.pendingResolve = null;
+        if (this.pendingResolve === onResponse) {
+          this.pendingResolve = null;
+          this.pendingRequiresPrompt = false;
+        }
         reject(error);
       }
     });
@@ -561,6 +598,7 @@ export class GDBClient {
     this.connectedEndpoint = null;
     this.loadedSymbolFile = null;
     this.pendingResolve = null;
+    this.pendingRequiresPrompt = false;
     if (!proc) return;
     await terminateChildProcess(proc, { terminateWaitMs: 1_000 });
     this.lastExit ??= { code: proc.exitCode, signal: proc.signalCode };

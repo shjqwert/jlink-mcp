@@ -56,6 +56,65 @@ test("GDBClient accepts an MI prompt with trailing horizontal whitespace", async
   await client.disconnect();
 });
 
+test("GDBClient enables MI async before connecting so commands are accepted while target runs", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const child = createFakeGdbProcess(signals, undefined, false, false, commands);
+  const client = new GDBClient("fake-gdb", undefined, () => child);
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.deepEqual(commands.slice(0, 2), ["-gdb-set mi-async on", "target remote localhost:2331"]);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 50);
+  assert.equal(breakpoint.success, true);
+  assert.equal(breakpoint.rawOutput, "^done\n(gdb)\n");
+  await client.disconnect();
+});
+
+test("GDBClient preserves process-exit evidence while enabling MI async", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals, undefined, false, false, undefined, false, "(gdb)\n", true,
+  ));
+
+  const result = await client.connect("localhost", 2331);
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, "GDB_PROCESS_EXITED");
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.exitSignal, null);
+});
+
+test("GDBClient preserves live process-error evidence while enabling MI async", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals, undefined, false, false, undefined, false, "(gdb)\n", false, true,
+  ));
+
+  const result = await client.connect("localhost", 2331);
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, "GDB_PROCESS_EXITED");
+  assert.equal(result.exitError, "simulated async handshake process error");
+  assert.equal(signals[0], "SIGTERM");
+});
+
+test("GDBClient consumes a split remote prompt before dispatching the first running-state command", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals, undefined, false, false, commands, false, "(gdb)\n", false, false, true,
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+
+  assert.equal(breakpoint.success, true);
+  assert.equal(breakpoint.rawOutput, "^done\n(gdb)\n");
+  await client.disconnect();
+});
+
 test("GDBClient ignores kill-error as exit and waits for the real exit event", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(signals, undefined, true));
@@ -236,6 +295,9 @@ function createFakeGdbProcess(
   commands?: string[],
   emitLiveErrorOnCommand = false,
   initialPrompt = "(gdb)\n",
+  exitOnMiAsync = false,
+  errorOnMiAsync = false,
+  splitConnectPrompt = false,
 ): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
@@ -253,12 +315,39 @@ function createFakeGdbProcess(
   child.signalCode = null;
   child.pid = process.pid;
   let terminationScheduled = false;
+  let miAsyncEnabled = false;
   child.stdin = new Writable({
     write(chunk, _encoding, callback) {
       const command = chunk.toString().trim();
       commands?.push(command);
-      if (command.startsWith("target remote")) {
-        setImmediate(() => child.stdout.write(connectOutput));
+      if (command === "-gdb-set mi-async on") {
+        if (errorOnMiAsync) {
+          setImmediate(() => child.emit("error", new Error("simulated async handshake process error")));
+          callback();
+          return;
+        }
+        if (exitOnMiAsync) {
+          setImmediate(() => {
+            child.exitCode = 7;
+            child.emit("exit", 7, null);
+          });
+          callback();
+          return;
+        }
+        miAsyncEnabled = true;
+        setImmediate(() => {
+          child.stdout.write("^done\n");
+          setTimeout(() => child.stdout.write("(gdb)\n"), 5);
+        });
+      } else if (command.startsWith("target remote")) {
+        setImmediate(() => {
+          if (!splitConnectPrompt) {
+            child.stdout.write(connectOutput);
+            return;
+          }
+          child.stdout.write(connectOutput.replace(/\(gdb\)[^\r\n]*(?:\r?\n)?$/, ""));
+          setTimeout(() => child.stdout.write("(gdb)\n"), 20);
+        });
       } else if (emitLiveErrorOnCommand) {
         setImmediate(() => child.emit("error", new Error("simulated live process error")));
       } else if (exitOnCommand) {
@@ -271,6 +360,9 @@ function createFakeGdbProcess(
         setImmediate(() => child.stdout.write('~"literal ^error and ^done\\n"\n^done\n(gdb)\n'));
       } else if (command === "continue") {
         setImmediate(() => child.stdout.write('^running\n*running,thread-id="all"\n(gdb)\n'));
+      } else if (command.startsWith("break ") && !miAsyncEnabled) {
+        // Synchronous MI does not process another stdin command while the
+        // remote inferior is running.
       } else if (command === "show stopped-then-running") {
         setImmediate(() => child.stdout.write('*stopped,reason="breakpoint-hit"\n*running,thread-id="all"\n^done\n(gdb)\n'));
       } else if (command === "show running-then-exited") {
