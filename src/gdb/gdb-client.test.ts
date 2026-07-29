@@ -68,10 +68,172 @@ test("GDBClient uses the native MI breakpoint transaction while the target runs"
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
   const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 50);
   assert.equal(breakpoint.success, true);
-  assert.equal(breakpoint.rawOutput, "^done\n(gdb)\n");
+  assert.match(breakpoint.rawOutput ?? "", /\^done[\s\S]*\*stopped,reason="signal-received",signal-name="SIGINT"[\s\S]*\^done[\s\S]*\^running/);
   assert.equal(breakpoint.dispatchedCommand, "-break-insert -- JlinkTestFixtureTask1ms");
-  assert.equal(commands.at(-1), "-break-insert -- JlinkTestFixtureTask1ms");
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- JlinkTestFixtureTask1ms",
+    "-exec-continue --all",
+  ]);
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
   await client.disconnect();
+});
+
+test("GDBClient refuses breakpoint insertion and auto-resume after a non-SIGINT stop", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGSEGV",thread-id="1"\n' },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+
+  assert.equal(breakpoint.success, false);
+  assert.equal(breakpoint.code, "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE");
+  assert.equal(breakpoint.observedTargetExecutionState, "halted");
+  assert.match(breakpoint.stopReason ?? "", /SIGSEGV/);
+  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+  assert.equal(client.isConnected(), true);
+  assert.deepEqual(signals, []);
+  await client.disconnect();
+});
+
+test("GDBClient accepts the documented reasonless SIGINT stop from exec-interrupt", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { interruptStopOutput: '*stopped,signal-name="SIGINT",thread-id="1"\n' },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+
+  assert.equal(breakpoint.success, true);
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- JlinkTestFixtureTask1ms",
+    "-exec-continue --all",
+  ]);
+  await client.disconnect();
+});
+
+test("GDBClient resumes but fails closed when breakpoint insertion lacks a done result", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { breakpointInsertOutput: "(gdb)\n" },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+
+  assert.equal(breakpoint.success, false);
+  assert.equal(breakpoint.code, "GDB_BREAKPOINT_RESULT_MISSING");
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- JlinkTestFixtureTask1ms",
+    "-exec-continue --all",
+  ]);
+  assert.equal(client.isConnected(), true);
+  await client.disconnect();
+});
+
+test("GDBClient restores running state after a rejected breakpoint command", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { breakpointInsertOutput: '^error,msg="No symbol"\n(gdb)\n' },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break MissingSymbol", 100);
+
+  assert.equal(breakpoint.success, false);
+  assert.equal(breakpoint.code, "GDB_BREAKPOINT_COMMAND_FAILED");
+  assert.equal(breakpoint.error, "No symbol");
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- MissingSymbol",
+    "-exec-continue --all",
+  ]);
+  await client.disconnect();
+});
+
+test("GDBClient terminates after a breakpoint phase timeout and never auto-resumes", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { breakpointInsertOutput: "" },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 50);
+
+  assert.equal(breakpoint.success, false);
+  assert.equal(breakpoint.code, "GDB_COMMAND_TIMEOUT");
+  assert.match(breakpoint.rawOutput ?? "", /SIGINT/);
+  assert.deepEqual(commands.slice(-2), ["-exec-interrupt --all", "-break-insert -- JlinkTestFixtureTask1ms"]);
+  assert.equal(client.isConnected(), false);
+  assert.equal(signals[0], "SIGTERM");
 });
 
 test("GDBClient leaves complex and aliased CLI breakpoint commands exact", async () => {
@@ -130,7 +292,11 @@ test("GDBClient consumes a split remote prompt before dispatching the first runn
   const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
 
   assert.equal(breakpoint.success, true);
-  assert.equal(breakpoint.rawOutput, "^done\n(gdb)\n");
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- JlinkTestFixtureTask1ms",
+    "-exec-continue --all",
+  ]);
   await client.disconnect();
 });
 
@@ -318,6 +484,10 @@ function createFakeGdbProcess(
   exitOnMiAsync = false,
   errorOnMiAsync = false,
   splitConnectPrompt = false,
+  transaction?: {
+    interruptStopOutput?: string;
+    breakpointInsertOutput?: string;
+  },
 ): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
@@ -336,6 +506,7 @@ function createFakeGdbProcess(
   child.pid = process.pid;
   let terminationScheduled = false;
   let miAsyncEnabled = false;
+  let targetRunning = false;
   child.stdin = new Writable({
     write(chunk, _encoding, callback) {
       const command = chunk.toString().trim();
@@ -379,6 +550,25 @@ function createFakeGdbProcess(
       } else if (command === "show literal-mi-text") {
         setImmediate(() => child.stdout.write('~"literal ^error and ^done\\n"\n^done\n(gdb)\n'));
       } else if (command === "continue") {
+        targetRunning = true;
+        setImmediate(() => child.stdout.write('^running\n*running,thread-id="all"\n(gdb)\n'));
+      } else if (command === "-exec-interrupt --all") {
+        setImmediate(() => {
+          child.stdout.write("^done\n(gdb)\n");
+          if (targetRunning) {
+            setTimeout(() => {
+              targetRunning = false;
+              child.stdout.write(transaction?.interruptStopOutput
+                ?? '*stopped,reason="signal-received",signal-name="SIGINT",thread-id="1"\n');
+              setImmediate(() => child.stdout.write("(gdb)\n"));
+            }, 5);
+          }
+        });
+      } else if (command.startsWith("-break-insert -- ")) {
+        const output = transaction?.breakpointInsertOutput ?? "^done\n(gdb)\n";
+        if (!targetRunning && output) setTimeout(() => child.stdout.write(output), 5);
+      } else if (command === "-exec-continue --all") {
+        targetRunning = true;
         setImmediate(() => child.stdout.write('^running\n*running,thread-id="all"\n(gdb)\n'));
       } else if (command === "break JlinkTestFixtureTask1ms") {
         // Direct CLI breakpoint compatibility can remain synchronous even

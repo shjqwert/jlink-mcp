@@ -285,6 +285,9 @@ export class GDBClient {
     this.stopEvent = null;
     let exchange: GDBCommandExchange;
     const dispatchedCommand = toMiTransactionCommand(cmd);
+    if (this.targetExecutionState === "running" && isMiBreakpointInsert(dispatchedCommand)) {
+      return this.insertBreakpointWhileRunning(dispatchedCommand, timeout);
+    }
     try {
       exchange = await this.sendCommand(dispatchedCommand, timeout);
     } catch (error) {
@@ -340,6 +343,191 @@ export class GDBClient {
       stopReason: this.stopEvent || undefined,
       observedTargetExecutionState,
     };
+  }
+
+  private async insertBreakpointWhileRunning(dispatchedCommand: string, timeout: number): Promise<GDBResponse> {
+    const deadline = Date.now() + timeout;
+    const remaining = () => Math.max(1, deadline - Date.now());
+    const rawParts: string[] = [];
+    const timedOut = async (phase: string, exchange: GDBCommandExchange): Promise<GDBResponse> => {
+      rawParts.push(exchange.output);
+      await this.terminateGdbProcess();
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        error: `GDB breakpoint transaction timed out during ${phase} after ${timeout}ms; the GDB client was terminated before releasing the Probe queue`,
+        code: "GDB_COMMAND_TIMEOUT",
+        ...this.exitFacts(),
+      };
+    };
+    const processExited = (phase: string, exchange: GDBCommandExchange): GDBResponse => {
+      rawParts.push(exchange.output);
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        error: `GDB exited during the ${phase} phase of the running-target breakpoint transaction`,
+        code: "GDB_PROCESS_EXITED",
+        ...this.exitFacts(),
+      };
+    };
+
+    let interrupt: GDBCommandExchange;
+    try {
+      interrupt = await this.sendCommand("-exec-interrupt --all", remaining());
+    } catch (error) {
+      await this.terminateGdbProcess();
+      return {
+        success: false,
+        output: "",
+        rawOutput: this.outputBuffer,
+        dispatchedCommand,
+        error: error instanceof Error ? error.message : String(error),
+        code: "GDB_IO_FAILED",
+        ...this.exitFacts(),
+      };
+    }
+    if (interrupt.processExited) return processExited("interrupt", interrupt);
+    if (interrupt.timedOut) return timedOut("interrupt", interrupt);
+    rawParts.push(interrupt.output);
+    const interruptError = findMiResult(interrupt.output, "error");
+    if (interruptError) {
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        error: miErrorMessage(interruptError),
+        code: "GDB_BREAKPOINT_TRANSACTION_INTERRUPT_FAILED",
+        observedTargetExecutionState: "running",
+      };
+    }
+
+    const stopped = await this.waitForInterruptStop(interrupt.output, remaining());
+    rawParts.push(stopped.output);
+    if (stopped.processExited) return processExited("interrupt observation", { ...stopped, output: "" });
+    if (stopped.timedOut) return timedOut("interrupt observation", { ...stopped, output: "" });
+    const interruptEvidence = rawParts.join("");
+    if (!hasIntentionalInterruptStop(interruptEvidence)) {
+      return {
+        success: false,
+        output: this.cleanMI(interruptEvidence),
+        rawOutput: interruptEvidence,
+        dispatchedCommand,
+        stopReason: this.stopEvent ?? undefined,
+        error: "target stopped for a reason other than the requested SIGINT; breakpoint insertion and automatic resume were refused",
+        code: "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
+    }
+
+    let breakpoint: GDBCommandExchange;
+    try {
+      breakpoint = await this.sendCommand(dispatchedCommand, remaining());
+    } catch (error) {
+      await this.terminateGdbProcess();
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        error: error instanceof Error ? error.message : String(error),
+        code: "GDB_IO_FAILED",
+        ...this.exitFacts(),
+      };
+    }
+    if (breakpoint.processExited) return processExited("breakpoint insertion", breakpoint);
+    if (breakpoint.timedOut) return timedOut("breakpoint insertion", breakpoint);
+    rawParts.push(breakpoint.output);
+    const breakpointError = findMiResult(breakpoint.output, "error");
+    const breakpointDone = hasMiResult(breakpoint.output, "done");
+
+    let resume: GDBCommandExchange;
+    try {
+      resume = await this.sendCommand("-exec-continue --all", remaining());
+    } catch (error) {
+      await this.terminateGdbProcess();
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        error: error instanceof Error ? error.message : String(error),
+        code: "GDB_IO_FAILED",
+        ...this.exitFacts(),
+      };
+    }
+    if (resume.processExited) return processExited("resume", resume);
+    if (resume.timedOut) return timedOut("resume", resume);
+    rawParts.push(resume.output);
+    const rawOutput = rawParts.join("");
+    const resumeError = findMiResult(resume.output, "error");
+    const resumed = !resumeError && (hasMiResult(resume.output, "running") || hasMiAsyncRecord(resume.output, "running"));
+    if (!resumed) {
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        stopReason: this.stopEvent ?? undefined,
+        error: resumeError ? miErrorMessage(resumeError) : "GDB did not prove that the interrupted target resumed",
+        code: "GDB_BREAKPOINT_TRANSACTION_RESUME_FAILED",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
+    }
+    return {
+      success: !breakpointError && breakpointDone,
+      output: this.cleanMI(rawOutput),
+      rawOutput,
+      dispatchedCommand,
+      error: breakpointError
+        ? miErrorMessage(breakpointError)
+        : breakpointDone ? undefined : "GDB did not return a done result for breakpoint insertion",
+      code: breakpointError
+        ? "GDB_BREAKPOINT_COMMAND_FAILED"
+        : breakpointDone ? undefined : "GDB_BREAKPOINT_RESULT_MISSING",
+      observedTargetExecutionState: "running",
+    };
+  }
+
+  private waitForInterruptStop(interruptOutput: string, timeout: number): Promise<GDBCommandExchange> {
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const finish = (timedOut: boolean, processExited = false) => {
+        const output = this.outputBuffer;
+        this.outputBuffer = "";
+        resolve({ output, timedOut, processExited });
+      };
+      const check = () => {
+        if (!this.proc || !this.connected) {
+          finish(false, true);
+          return;
+        }
+        if (this.targetExecutionState === "unknown") {
+          finish(false);
+          return;
+        }
+        const completeOutput = interruptOutput + this.outputBuffer;
+        if ((this.stopEvent || this.targetExecutionState === "halted") && hasMiPromptAfterStop(completeOutput)) {
+          finish(false);
+          return;
+        }
+        if (Date.now() - started >= timeout) {
+          finish(true);
+          return;
+        }
+        setTimeout(check, 5);
+      };
+      check();
+    });
   }
 
   /**
@@ -692,6 +880,26 @@ function toMiTransactionCommand(command: string): string {
   return simpleBreakpoint ? `-break-insert -- ${simpleBreakpoint[1]}` : command;
 }
 
+function isMiBreakpointInsert(command: string): boolean {
+  return /^-break-insert -- [^\s"\\]+$/.test(command);
+}
+
+function hasIntentionalInterruptStop(raw: string): boolean {
+  const stops = raw.split(/\r?\n/).filter((line) => /^\*stopped(?=,|$)/.test(line));
+  if (stops.length !== 1 || !/(?:^|,)signal-name="SIGINT"(?:,|$)/.test(stops[0])) return false;
+  const reason = stops[0].match(/(?:^|,)reason="([^"]*)"(?:,|$)/)?.[1];
+  return reason === undefined || reason === "signal-received";
+}
+
+function hasMiPromptAfterStop(raw: string): boolean {
+  const lines = raw.split(/\r?\n/);
+  let lastStop = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^\*stopped(?=,|$)/.test(lines[index])) lastStop = index;
+  }
+  return lastStop >= 0 && lines.slice(lastStop + 1).some((line) => /^\(gdb\)[\t ]*$/.test(line));
+}
+
 function findMiResult(raw: string, kind: "done" | "error" | "running" | "connected" | "exit"): string | undefined {
   return raw.match(new RegExp(`(?:^|\\r?\\n)(\\^${kind}(?:,[^\\r\\n]*)?)(?=\\r?\\n|$)`, "m"))?.[1];
 }
@@ -710,4 +918,9 @@ function hasMiAsyncRecord(raw: string, kind: "stopped" | "running"): boolean {
 
 function decodeMiString(value: string): string {
   return value.replace(/\\"/g, '"').replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\\\/g, "\\");
+}
+
+function miErrorMessage(errorRecord: string): string {
+  const encoded = errorRecord.match(/(?:^|,)msg="((?:\\.|[^"])*)"/)?.[1];
+  return decodeMiString(encoded ?? "GDB command failed");
 }
