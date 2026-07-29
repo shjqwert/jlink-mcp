@@ -4,6 +4,7 @@ import { ProcessManager, terminateChildProcess } from "../utils/process-manager"
 import { log, logError } from "../utils/logger";
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
 import { findJLinkInstallDir } from "../utils/config";
 
 export interface JLinkConfig {
@@ -144,7 +145,7 @@ export class JLinkBackend extends ProbeBackend {
    * Raw JLinkExe execution. Does NOT include preflight/locking.
    * Public methods add only in-process exclusion and the requested command.
    */
-  private async execRaw(commands: string[], timeoutMs = 30000): Promise<CommandResult> {
+  private async execRaw(commands: string[], timeoutMs = 30000, options: { exitOnError?: boolean } = {}): Promise<CommandResult> {
     this.connectionGeneration += 1;
     const autoConnect = commands.length > 0
       && commands.every((command) => PROBE_ONLY_RAW_COMMANDS.has(command.trim().toLowerCase()))
@@ -155,7 +156,7 @@ export class JLinkBackend extends ProbeBackend {
       "-if", this.config.interface,
       "-speed", String(this.config.speed),
       "-autoconnect", autoConnect,
-      "-ExitOnError", "1",
+      "-ExitOnError", options.exitOnError === false ? "0" : "1",
       "-NoGui", "1",
     ];
     if (this.config.serialNumber) {
@@ -585,34 +586,55 @@ export class JLinkBackend extends ProbeBackend {
         stateUnknown: false,
       };
     }
-    const extension = path.extname(filePath).toLowerCase();
-    let command: string;
-    if (extension === ".bin") {
-      if (baseAddress === undefined) {
+    let prepared: PreparedVerifyBins;
+    try {
+      prepared = prepareVerifyBins(filePath, baseAddress);
+    } catch (error) {
+      return {
+        success: false,
+        rawOutput: "",
+        output: "",
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: ProbeErrorCode.INVALID_ARGUMENT,
+        writeIssued: false,
+        stateUnknown: false,
+      };
+    }
+    try {
+      // Commander has no generic Verify command. VerifyBin is the documented
+      // read-only comparison primitive. Keep ExitOnError disabled so the final
+      // halt runs after both a match and a mismatch before the session closes.
+      const commands = [
+        "halt",
+        ...prepared.bins.map((item) => `VerifyBin "${item.path}" 0x${item.address.toString(16)}`),
+        "halt",
+      ];
+      const result = await this.execRaw(commands, 180000, { exitOnError: false });
+      const diagnostics = `${result.rawOutput}\n${result.stderr ?? ""}\n${result.error ?? ""}`;
+      const failureDiagnostic = verifyOnlyFailureDiagnostic(diagnostics);
+      if (failureDiagnostic) {
         return {
+          ...result,
           success: false,
-          rawOutput: "",
-          output: "",
-          error: "raw BIN Verify-only requires a base address",
-          errorCode: ProbeErrorCode.INVALID_ARGUMENT,
+          error: `SEGGER VerifyBin failed: ${failureDiagnostic}`,
+          errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
           writeIssued: false,
-          stateUnknown: false,
+          stateUnknown: true,
         };
       }
-      command = `verifybin "${filePath}" 0x${baseAddress.toString(16)}`;
-    } else {
-      command = `verify "${filePath}"`;
+      const mismatch = verifyOnlyMismatchDiagnostic(diagnostics);
+      return {
+        ...result,
+        success: mismatch ? false : result.success,
+        error: mismatch ? "SEGGER VerifyBin reported a content mismatch" : result.error,
+        errorCode: mismatch ? ProbeErrorCode.JLINK_VERIFY_MISMATCH : result.errorCode,
+        writeIssued: false,
+        stateUnknown: mismatch ? false : result.stateUnknown,
+        suggestedAction: mismatch ? "The target firmware does not match the configured image." : result.suggestedAction,
+      };
+    } finally {
+      prepared.cleanup();
     }
-    const result = await this.execRaw([command], 180000);
-    const mismatch = /failed to verify|verification (?:failed|error)|contents? (?:differ|do not match)|verify failed/i.test(
-      `${result.rawOutput}\n${result.stderr ?? ""}\n${result.error ?? ""}`,
-    );
-    return {
-      ...result,
-      success: mismatch ? false : result.success,
-      errorCode: mismatch ? ProbeErrorCode.JLINK_VERIFY_MISMATCH : result.errorCode,
-      writeIssued: false,
-    };
   }
   async erase(): Promise<CommandResult> {
     return this.executeDirect(["r", "halt", "erase 0 0 noreset"]);
@@ -886,6 +908,163 @@ export class JLinkBackend extends ProbeBackend {
     this.processManager.kill(GDB_SERVER_PROCESS);
     this.setState(ProbeState.DISCONNECTED);
   }
+}
+
+interface VerifySegment {
+  address: number;
+  data: Buffer;
+}
+
+function verifyOnlyFailureDiagnostic(raw: string): string | undefined {
+  return verifyOnlyDiagnosticLines(raw)
+    .find((line) => (
+      /^(?:\*+\s*)?error:/i.test(line)
+      || /^(?:could not|cannot|failed to)\s+(?:read|access|connect|halt)\b/i.test(line)
+      || /\bunknown command\.\s*['"]?\?['"]?\s+for help\./i.test(line)
+    ) && !isVerifyOnlyMismatchLine(line));
+}
+
+function verifyOnlyMismatchDiagnostic(raw: string): boolean {
+  return verifyOnlyDiagnosticLines(raw).some(isVerifyOnlyMismatchLine);
+}
+
+function verifyOnlyDiagnosticLines(raw: string): string[] {
+  return raw.split(/\r?\n/)
+    .map((line) => line.trim().replace(/^(?:J-Link>\s*)+/i, "").trim())
+    .filter(Boolean);
+}
+
+function isVerifyOnlyMismatchLine(line: string): boolean {
+  return /(?:failed to verify|verify failed)\s+@\s+address\s+0x[0-9a-f]+\b/i.test(line)
+    || /contents?\s+(?:differ|do not match)\b/i.test(line);
+}
+
+interface PreparedVerifyBins {
+  bins: Array<{ path: string; address: number }>;
+  cleanup(): void;
+}
+
+function prepareVerifyBins(filePath: string, baseAddress?: number): PreparedVerifyBins {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".bin") {
+    if (!Number.isSafeInteger(baseAddress) || baseAddress === undefined || baseAddress < 0 || baseAddress > 0xffff_ffff) {
+      throw new Error("raw BIN Verify-only requires an unsigned 32-bit base address");
+    }
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size <= 0) throw new Error("raw BIN Verify-only requires a non-empty regular file");
+    if (baseAddress + stats.size > 0x1_0000_0000) throw new Error("raw BIN data exceeds the 32-bit target address space");
+    return { bins: [{ path: filePath, address: baseAddress }], cleanup: () => undefined };
+  }
+
+  const source = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+  const segments = extension === ".hex" || extension === ".ihex"
+    ? parseIntelHexVerifySegments(source)
+    : [".srec", ".s19", ".s28", ".s37", ".mot"].includes(extension)
+      ? parseSrecVerifySegments(source)
+      : undefined;
+  if (!segments) throw new Error("firmware Verify-only supports Intel HEX, S-record, or raw BIN inputs only");
+  if (segments.length === 0) throw new Error("firmware Verify-only input contains no data records");
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jlink-verify-"));
+  try {
+    const bins = segments.map((segment, index) => {
+      const binPath = path.join(root, `segment-${index}.bin`);
+      fs.writeFileSync(binPath, segment.data, { flag: "wx" });
+      fs.chmodSync(binPath, 0o400);
+      return { path: binPath, address: segment.address };
+    });
+    return {
+      bins,
+      cleanup: () => {
+        try { fs.rmSync(root, { recursive: true, force: true }); }
+        catch (error) { logError(`J-Link Verify-only staging cleanup failed for ${root}`, error); }
+      },
+    };
+  } catch (error) {
+    fs.rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function parseSrecVerifySegments(source: string): VerifySegment[] {
+  const records: VerifySegment[] = [];
+  let terminationSeen = false;
+  for (const line of source.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+    if (terminationSeen) throw new Error("S-record contains data after its termination record");
+    const match = line.match(/^S([0-9])([0-9A-Fa-f]+)$/);
+    if (!match || match[2].length % 2 !== 0) throw new Error("S-record contains an invalid record");
+    const type = Number(match[1]);
+    if (type === 4) throw new Error("S-record type S4 is reserved");
+    const bytes = Buffer.from(match[2], "hex");
+    const addressBytes = [0, 1, 5, 9].includes(type) ? 2 : [2, 6, 8].includes(type) ? 3 : 4;
+    if (bytes.length < addressBytes + 2 || bytes[0] !== bytes.length - 1) throw new Error("S-record length is invalid");
+    if ((bytes.reduce((sum, value) => sum + value, 0) & 0xff) !== 0xff) throw new Error("S-record checksum validation failed");
+    if ([1, 2, 3].includes(type)) {
+      const address = bytes.subarray(1, 1 + addressBytes).readUIntBE(0, addressBytes);
+      const data = bytes.subarray(1 + addressBytes, -1);
+      if (address + data.length > 0x1_0000_0000) throw new Error("S-record data exceeds the 32-bit target address space");
+      if (data.length > 0) records.push({ address, data: Buffer.from(data) });
+    }
+    if ([7, 8, 9].includes(type)) terminationSeen = true;
+  }
+  if (!terminationSeen) throw new Error("S-record termination record is missing");
+  return mergeVerifySegments(records);
+}
+
+function parseIntelHexVerifySegments(source: string): VerifySegment[] {
+  const records: VerifySegment[] = [];
+  let base = 0;
+  let eofSeen = false;
+  for (const line of source.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+    if (eofSeen || !/^:[0-9A-Fa-f]+$/.test(line) || (line.length - 1) % 2 !== 0) throw new Error("Intel HEX contains an invalid record");
+    const bytes = Buffer.from(line.slice(1), "hex");
+    if (bytes.length < 5 || bytes.length !== bytes[0] + 5) throw new Error("Intel HEX record length is invalid");
+    if (bytes.reduce((sum, value) => (sum + value) & 0xff, 0) !== 0) throw new Error("Intel HEX checksum validation failed");
+    const offset = bytes.readUInt16BE(1);
+    const type = bytes[3];
+    const data = bytes.subarray(4, -1);
+    if (type === 0) {
+      const address = base + offset;
+      if (address > 0xffff_ffff || address + data.length > 0x1_0000_0000) throw new Error("Intel HEX data address exceeds the 32-bit target address space");
+      if (data.length > 0) records.push({ address, data: Buffer.from(data) });
+    } else if (type === 1) {
+      if (data.length !== 0 || offset !== 0) throw new Error("Intel HEX EOF record is invalid");
+      eofSeen = true;
+    } else if (type === 2) {
+      if (data.length !== 2 || offset !== 0) throw new Error("Intel HEX segment-address record is invalid");
+      base = data.readUInt16BE(0) << 4;
+    } else if (type === 4) {
+      if (data.length !== 2 || offset !== 0) throw new Error("Intel HEX linear-address record is invalid");
+      base = data.readUInt16BE(0) * 0x1_0000;
+    } else if ([3, 5].includes(type)) {
+      if (data.length !== 4 || offset !== 0) throw new Error("Intel HEX start-address record is invalid");
+    } else {
+      throw new Error(`Intel HEX record type ${type} is unsupported`);
+    }
+  }
+  if (!eofSeen) throw new Error("Intel HEX EOF record is missing");
+  return mergeVerifySegments(records);
+}
+
+function mergeVerifySegments(records: VerifySegment[]): VerifySegment[] {
+  const sorted = [...records].sort((left, right) => left.address - right.address);
+  const groups: Array<{ address: number; length: number; chunks: Buffer[] }> = [];
+  for (const record of sorted) {
+    const previous = groups.at(-1);
+    if (!previous) {
+      groups.push({ address: record.address, length: record.data.length, chunks: [record.data] });
+      continue;
+    }
+    const previousEnd = previous.address + previous.length;
+    if (record.address < previousEnd) throw new Error("firmware Verify-only input contains overlapping data records");
+    if (record.address === previousEnd) {
+      previous.chunks.push(record.data);
+      previous.length += record.data.length;
+    } else {
+      groups.push({ address: record.address, length: record.data.length, chunks: [record.data] });
+    }
+  }
+  return groups.map((group) => ({ address: group.address, data: Buffer.concat(group.chunks, group.length) }));
 }
 
 function jlinkCoreRegisterToken(name: string): string {

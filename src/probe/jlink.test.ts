@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { findJLinkInstallDir, getConfig, selectJLinkInstallDir } from "../utils/config";
 import { ProcessManager } from "../utils/process-manager";
 import { ProbeErrorCode, type CommandResult } from "./backend";
@@ -126,29 +126,138 @@ test("JLinkBackend resets and halts in-session before noreset flash and erase fo
   ]);
 });
 
-test("JLinkBackend firmware Verify-only uses SEGGER read-only commands without reset, halt, load, or erase", async () => {
+test("JLinkBackend firmware Verify-only converts S-record data to VerifyBin and restores halted state", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-srec-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const srec = join(root, "app.s19");
+  writeFileSync(srec, "S3090000C000010203042C\nS3090000C0040506070818\nS7050000C0003A\n", "ascii");
   const scripts: string[] = [];
+  const commandArgs: string[][] = [];
+  const verifiedBytes: Buffer[] = [];
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
-    () => successfulProcess(scripts, "O.K.\n"),
+    (_command, args) => {
+      commandArgs.push([...args]);
+      return successfulProcess(scripts, "O.K.\n", "", (script) => {
+        const pathMatch = script.match(/VerifyBin "([^"]+)" 0xc000/i);
+        if (pathMatch) verifiedBytes.push(readFileSync(pathMatch[1]));
+      });
+    },
   );
 
-  const hex = await backend.verifyFirmware("C:\\firmware\\app.hex");
-  const bin = await backend.verifyFirmware("C:\\firmware\\app.bin", 0x08000000);
+  const result = await backend.verifyFirmware(srec);
 
-  assert.equal(hex.success, true);
-  assert.equal(hex.writeIssued, false);
-  assert.equal(bin.success, true);
-  assert.equal(bin.writeIssued, false);
-  assert.deepEqual(scripts, [
-    "exec SetRestartOnClose = 0\nverify \"C:\\firmware\\app.hex\"\nexit\n",
-    "exec SetRestartOnClose = 0\nverifybin \"C:\\firmware\\app.bin\" 0x8000000\nexit\n",
-  ]);
-  assert.doesNotMatch(scripts.join("\n"), /(?:^|\n)(?:r|halt|loadfile|erase)(?:\s|$)/i);
+  assert.equal(result.success, true);
+  assert.equal(result.writeIssued, false);
+  assert.deepEqual(verifiedBytes, [Buffer.from([1, 2, 3, 4, 5, 6, 7, 8])]);
+  assert.match(scripts[0], /^exec SetRestartOnClose = 0\nhalt\nVerifyBin "[^"]+" 0xc000\nhalt\nexit\n$/);
+  assert.doesNotMatch(scripts[0], /(?:^|\n)(?:verify|loadfile|erase|r)(?:\s|$)/i);
+  assert.equal(commandArgs[0][commandArgs[0].indexOf("-ExitOnError") + 1], "0");
 });
 
-test("JLinkBackend firmware Verify-only classifies zero-exit vendor mismatch as read-only mismatch", async () => {
+test("JLinkBackend firmware Verify-only rejects S-record data that crosses the 32-bit address space before spawn", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-srec-overflow-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const srec = join(root, "overflow.s19");
+  writeFileSync(srec, "S307FFFFFFFF0102F9\nS70500000000FA\n", "ascii");
+  let spawnCount = 0;
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => {
+      spawnCount += 1;
+      return successfulProcess([]);
+    },
+  );
+
+  const result = await backend.verifyFirmware(srec);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.INVALID_ARGUMENT);
+  assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, false);
+  assert.match(result.error ?? "", /32-bit target address space/i);
+  assert.equal(spawnCount, 0);
+});
+
+test("JLinkBackend firmware Verify-only rejects malformed Intel HEX start-address records before spawn", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-hex-control-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const hex = join(root, "invalid.hex");
+  writeFileSync(hex, ":020000040800F2\n:0400100001020304E2\n:0400010500000000F6\n:00000001FF\n", "ascii");
+  let spawnCount = 0;
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => {
+      spawnCount += 1;
+      return successfulProcess([]);
+    },
+  );
+
+  const result = await backend.verifyFirmware(hex);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.INVALID_ARGUMENT);
+  assert.equal(result.writeIssued, false);
+  assert.match(result.error ?? "", /start-address record is invalid/i);
+  assert.equal(spawnCount, 0);
+});
+
+test("JLinkBackend firmware Verify-only converts extended-address Intel HEX to VerifyBin", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-hex-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const hex = join(root, "app.hex");
+  writeFileSync(hex, ":020000040800F2\n:0400100001020304E2\n:00000001FF\n", "ascii");
+  const scripts: string[] = [];
+  const verifiedBytes: Buffer[] = [];
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess(scripts, "O.K.\n", "", (script) => {
+      const pathMatch = script.match(/VerifyBin "([^"]+)" 0x8000010/i);
+      if (pathMatch) verifiedBytes.push(readFileSync(pathMatch[1]));
+    }),
+  );
+
+  const result = await backend.verifyFirmware(hex);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(verifiedBytes, [Buffer.from([1, 2, 3, 4])]);
+  assert.match(scripts[0], /\nhalt\nVerifyBin "[^"]+" 0x8000010\nhalt\n/);
+});
+
+test("JLinkBackend firmware Verify-only rejects Intel HEX checksum, EOF, and overlap errors before spawn", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-hex-invalid-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const cases = [
+    [":020000040800F2\n:0400100001020304E3\n:00000001FF\n", /checksum/i],
+    [":020000040800F2\n:0400100001020304E2\n", /EOF/i],
+    [":020000040800F2\n:0400100001020304E2\n:0400120005060708D0\n:00000001FF\n", /overlapping/i],
+  ] as const;
+  let spawnCount = 0;
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => {
+      spawnCount += 1;
+      return successfulProcess([]);
+    },
+  );
+
+  for (const [index, [contents, expected]] of cases.entries()) {
+    const file = join(root, `invalid-${index}.hex`);
+    writeFileSync(file, contents, "ascii");
+    const result = await backend.verifyFirmware(file);
+    assert.equal(result.success, false);
+    assert.equal(result.errorCode, ProbeErrorCode.INVALID_ARGUMENT);
+    assert.match(result.error ?? "", expected);
+  }
+  assert.equal(spawnCount, 0);
+});
+
+test("JLinkBackend firmware Verify-only classifies zero-exit vendor mismatch as read-only mismatch", async (context) => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
@@ -156,28 +265,101 @@ test("JLinkBackend firmware Verify-only classifies zero-exit vendor mismatch as 
     () => successfulProcess(scripts, "****** Error: Failed to verify @ address 0x0000C000\nO.K.\n"),
   );
 
-  const result = await backend.verifyFirmware("C:\\firmware\\app.s19");
+  const bin = temporaryFirmwareBin(context, "mismatch");
+  const result = await backend.verifyFirmware(bin, 0x0000c000);
 
   assert.equal(result.success, false);
   assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
   assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, false);
+  assert.match(result.error ?? "", /content mismatch/i);
   assert.deepEqual(scripts, [
-    "exec SetRestartOnClose = 0\nverify \"C:\\firmware\\app.s19\"\nexit\n",
+    `exec SetRestartOnClose = 0\nhalt\nVerifyBin "${bin}" 0xc000\nhalt\nexit\n`,
   ]);
 });
 
-test("JLinkBackend firmware Verify-only treats zero-exit contents-differ output as failure", async () => {
+test("JLinkBackend firmware Verify-only treats zero-exit contents-differ output as failure", async (context) => {
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
     () => successfulProcess([], "Contents differ\nO.K.\n"),
   );
 
-  const result = await backend.verifyFirmware("C:\\firmware\\app.hex");
+  const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "contents-differ"), 0x0000c000);
 
   assert.equal(result.success, false);
   assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
   assert.equal(result.writeIssued, false);
+});
+
+test("JLinkBackend firmware Verify-only classifies zero-exit reverse verify-failed wording as mismatch", async (context) => {
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], "J-Link>Verify failed @ address 0x0000C000\nO.K.\n"),
+  );
+
+  const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "reverse-mismatch"), 0x0000c000);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.stateUnknown, false);
+  assert.equal(result.writeIssued, false);
+});
+
+test("JLinkBackend firmware Verify-only fails closed on a zero-exit memory-read error", async (context) => {
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], "J-Link>J-Link>Could not read memory at 0x0000C000\nO.K.\n"),
+  );
+
+  const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "read-error"), 0x0000c000);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, true);
+  assert.match(result.error ?? "", /could not read memory/i);
+});
+
+test("JLinkBackend firmware Verify-only does not classify a verification read error as content mismatch", async (context) => {
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], "J-Link>****** Error: Verification error: Could not read memory\nO.K.\n"),
+  );
+
+  const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "verification-read-error"), 0x0000c000);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.notEqual(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.stateUnknown, true);
+});
+
+test("JLinkBackend firmware Verify-only rejects raw BIN data that crosses the 32-bit address space before spawn", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-bin-overflow-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, "overflow.bin");
+  writeFileSync(bin, Buffer.from([1, 2]));
+  let spawnCount = 0;
+  const backend = new JLinkBackend(
+    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => {
+      spawnCount += 1;
+      return successfulProcess([]);
+    },
+  );
+
+  const result = await backend.verifyFirmware(bin, 0xffff_ffff);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.INVALID_ARGUMENT);
+  assert.equal(result.writeIssued, false);
+  assert.match(result.error ?? "", /32-bit target address space/i);
+  assert.equal(spawnCount, 0);
 });
 
 test("JLinkBackend uses J-Link-supported tokens for aliased core registers", async () => {
@@ -966,7 +1148,15 @@ function registerTransactionProcess(
   return child as unknown as ChildProcess;
 }
 
-function successfulProcess(scripts: string[], stdout = "", stderr = ""): ChildProcess {
+function temporaryFirmwareBin(context: TestContext, name: string): string {
+  const root = mkdtempSync(join(tmpdir(), `jlink-verify-${name}-test-`));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = join(root, "app.bin");
+  writeFileSync(file, Buffer.from([1, 2, 3, 4]));
+  return file;
+}
+
+function successfulProcess(scripts: string[], stdout = "", stderr = "", onScript?: (script: string) => void): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
     stderr: PassThrough;
@@ -987,6 +1177,7 @@ function successfulProcess(scripts: string[], stdout = "", stderr = ""): ChildPr
   child.stdin.on("data", (chunk: Buffer) => { script += chunk.toString(); });
   child.stdin.on("end", () => {
     scripts.push(script);
+    onScript?.(script);
     setImmediate(() => {
       if (stdout) child.stdout.write(stdout);
       child.stdout.end();
