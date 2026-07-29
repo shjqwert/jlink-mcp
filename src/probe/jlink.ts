@@ -575,20 +575,36 @@ export class JLinkBackend extends ProbeBackend {
       let readbackSent = false;
       let readbackCompleted = false;
       let processError: Error | undefined;
+      let inputError: Error | undefined;
       let timedOut = false;
       let settled = false;
       let timeout: NodeJS.Timeout | undefined;
+      const commandLineEnding = "\r\n";
 
+      const failInput = (error: unknown) => {
+        inputError ??= error instanceof Error ? error : new Error(String(error));
+        void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
+      };
+      const writeInput = (text: string): boolean => {
+        try {
+          if (!proc.stdin) throw new Error("J-Link stdin is unavailable");
+          proc.stdin.write(text);
+          return true;
+        } catch (error) {
+          failInput(error);
+          return false;
+        }
+      };
       const send = (command: string, nextPhase: typeof phase) => {
         phase = nextPhase;
         phaseStart = stdout.length;
-        if (nextPhase === "write") writeSent = true;
-        if (nextPhase === "readback") readbackSent = true;
-        proc.stdin?.write(`${command}\n`);
+        const dispatched = writeInput(`${command}${commandLineEnding}`);
+        if (nextPhase === "write" && dispatched) writeSent = true;
+        if (nextPhase === "readback" && dispatched) readbackSent = true;
       };
       const finishInput = () => {
         phase = "exit";
-        proc.stdin?.write("exit\n");
+        writeInput(`exit${commandLineEnding}`);
         proc.stdin?.end();
       };
       const finish = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -599,6 +615,8 @@ export class JLinkBackend extends ProbeBackend {
           ? `J-Link timed out after ${timeoutMs}ms`
           : processError
             ? `Failed to spawn JLinkExe: ${processError.message}`
+            : inputError
+              ? `J-Link stdin failed: ${inputError.message}`
             : code !== 0
               ? `J-Link exited with code ${code}`
               : undefined;
@@ -606,6 +624,8 @@ export class JLinkBackend extends ProbeBackend {
         const overallFailure = Boolean(transportFailure || wholeDiagnostic);
         const failureCode = processError
           ? ProbeErrorCode.PROBE_NOT_FOUND
+          : inputError
+            ? ProbeErrorCode.JLINK_COMMAND_FAILED
           : /inittarget\(\) returned error|could not connect|cannot connect/i.test(stdout)
             ? ProbeErrorCode.TARGET_UNREACHABLE
             : wholeDiagnostic
@@ -690,6 +710,7 @@ export class JLinkBackend extends ProbeBackend {
         }
       });
       proc.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      proc.stdin?.on("error", failInput);
       proc.on("error", (error) => {
         processError = error;
         this.setState(ProbeState.DISCONNECTED);
@@ -700,8 +721,9 @@ export class JLinkBackend extends ProbeBackend {
         timedOut = true;
         void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
       }, timeoutMs);
-      // V8.84 may not emit an initial prompt while stdin remains open. Issue
-      // only the non-mutating close-policy command to start the handshake.
+      // V8.84 may not emit an initial prompt while stdin remains open and its
+      // Windows pipe input requires CRLF to dispatch an interactive command.
+      // Start the handshake with only the non-mutating close-policy command.
       send("exec SetRestartOnClose = 0", "policy");
     });
   }

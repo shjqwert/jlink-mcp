@@ -641,6 +641,57 @@ test("write_core_register observes final state after an issued transaction failu
   assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
 });
 
+test("write_core_register observes final state after an unissued transaction timeout", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-unissued-timeout");
+  probe.targetState = "halted";
+  probe.registerTransactionResult = {
+    command: {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "J-Link timed out before interactive command dispatch",
+      errorCode: ProbeErrorCode.TIMEOUT,
+      writeIssued: false,
+      stateUnknown: false,
+    },
+  };
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, ProbeErrorCode.TIMEOUT);
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.after.targetState, "halted");
+  assert.equal(probe.observationCalls, 2);
+  assert.deepEqual(result.observedEffects, []);
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+});
+
+test("write_core_register preserves unissued evidence when final observation also fails", async (context) => {
+  const { service, probe, projectRoot } = await fixture(context, "core-write-unissued-observation-failure");
+  probe.targetState = "halted";
+  probe.observationRejectOnCall = 2;
+  probe.registerTransactionResult = {
+    command: {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "J-Link timed out before interactive command dispatch",
+      errorCode: ProbeErrorCode.TIMEOUT,
+      writeIssued: false,
+      stateUnknown: false,
+    },
+  };
+
+  const result = await service.writeCoreRegister({ projectRoot, name: "R0", value: 0x1234_5678, verify: true });
+
+  assert.equal(result.error?.code, ProbeErrorCode.TIMEOUT);
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(probe.observationCalls, 2);
+  assert.deepEqual(probe.actions, ["write-register-transaction:R0:305419896"]);
+});
+
 test("write_core_register observes final state when the transaction backend throws after possible dispatch", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "core-write-transaction-throw");
   probe.targetState = "halted";

@@ -944,7 +944,6 @@ export class DirectMcuService {
       if (!result.success && !writeError) {
         const issued = result.writeIssued ?? result.errorCode !== ProbeErrorCode.PROBE_NOT_FOUND;
         writeError = commandError(result, "write", issued, result.stateUnknown ?? issued);
-        if (!issued) throw writeError;
       } else {
         envelope.observedEffects.push("core_register_write_issued");
       }
@@ -978,6 +977,7 @@ export class DirectMcuService {
       try {
         after = await observe(runtime.probe);
       } catch (error) {
+        if (writeError) throw withUnknownTargetState(writeError);
         throw unexpectedPostWriteError(error, "final_observation", "target-state observation failed after core-register write");
       }
       envelope.after = observationData(after);
@@ -992,7 +992,7 @@ export class DirectMcuService {
           : { status: "executed_unverified" };
       if (writeError) {
         if (after.state === "unknown" && !writeError.detail.stateUnknown) {
-          writeError = normalizePostWriteError(writeError, writeError.detail.code, writeError.detail.stage, writeError.detail.message, true);
+          writeError = withUnknownTargetState(writeError);
         }
         throw writeError;
       }
@@ -1847,6 +1847,14 @@ function normalizePostWriteError(
   return executionError(fallbackCode, fallbackStage, error instanceof Error ? error.message : fallbackMessage, {
     writeIssued: true,
     stateUnknown,
+  });
+}
+
+function withUnknownTargetState(error: OperationExecutionError): OperationExecutionError {
+  return executionError(error.detail.code, error.detail.stage, error.detail.message, {
+    retryable: error.detail.retryable,
+    writeIssued: error.detail.writeIssued,
+    stateUnknown: true,
   });
 }
 

@@ -170,31 +170,38 @@ test("JLinkBackend phases same-connection core-register write and readback for a
   }
 
   assert.deepEqual(scripts, [
-    "exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R15 (PC)\", 0x12345678\nrreg \"R15 (PC)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg R14, 0x12345678\nrreg R14\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
-    "exec SetRestartOnClose = 0\nwreg \"R13 (SP)\", 0x12345678\nrreg \"R13 (SP)\"\nexit\n",
+    "exec SetRestartOnClose = 0\r\nwreg R0, 0x12345678\r\nrreg R0\r\nexit\r\n",
+    "exec SetRestartOnClose = 0\r\nwreg \"R15 (PC)\", 0x12345678\r\nrreg \"R15 (PC)\"\r\nexit\r\n",
+    "exec SetRestartOnClose = 0\r\nwreg \"R15 (PC)\", 0x12345678\r\nrreg \"R15 (PC)\"\r\nexit\r\n",
+    "exec SetRestartOnClose = 0\r\nwreg R14, 0x12345678\r\nrreg R14\r\nexit\r\n",
+    "exec SetRestartOnClose = 0\r\nwreg R14, 0x12345678\r\nrreg R14\r\nexit\r\n",
+    "exec SetRestartOnClose = 0\r\nwreg \"R13 (SP)\", 0x12345678\r\nrreg \"R13 (SP)\"\r\nexit\r\n",
+    "exec SetRestartOnClose = 0\r\nwreg \"R13 (SP)\", 0x12345678\r\nrreg \"R13 (SP)\"\r\nexit\r\n",
   ]);
 });
 
-test("JLinkBackend starts a V8.84 transaction without an initial prompt and accepts chunked CRLF prompts", async () => {
+test("JLinkBackend starts a V8.84 transaction with CRLF input before any output and accepts chunked prompts", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
-    () => registerTransactionProcess(scripts, "match", { initialPrompt: false, realisticStartupChunks: true }),
+    () => registerTransactionProcess(scripts, "match", {
+      initialPrompt: false,
+      realisticStartupChunks: true,
+      requireCrLf: true,
+    }),
   );
+  const invoke = (backend as unknown as {
+    execCoreRegisterTransaction(token: string, value: number, timeoutMs: number): Promise<import("./backend").ProbeCoreRegisterWriteResult>;
+  }).execCoreRegisterTransaction.bind(backend);
 
-  const result = await backend.writeCoreRegisterTransaction("R0", 0x1234_5678);
+  const result = await invoke("R0", 0x1234_5678, 200);
 
   assert.equal(result.command.success, true, JSON.stringify(result.command));
   assert.equal(result.command.writeIssued, true);
   assert.equal(result.readback?.success, true);
   assert.equal(result.readback?.stateUnknown, false);
-  assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\nwreg R0, 0x12345678\nrreg R0\nexit\n"]);
+  assert.deepEqual(scripts, ["exec SetRestartOnClose = 0\r\nwreg R0, 0x12345678\r\nrreg R0\r\nexit\r\n"]);
 });
 
 test("JLinkBackend timeout evidence distinguishes policy wait from a sent wreg", async () => {
@@ -638,7 +645,7 @@ function fakeProcess(signals: Array<NodeJS.Signals | number | undefined>, emitKi
 function registerTransactionProcess(
   scripts: string[],
   mode: "match" | "write_echo_only" | "readback_failure" | "stderr_fatal" | "policy_silent" | "write_silent",
-  options: { initialPrompt?: boolean; realisticStartupChunks?: boolean } = {},
+  options: { initialPrompt?: boolean; realisticStartupChunks?: boolean; requireCrLf?: boolean } = {},
 ): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
@@ -686,10 +693,11 @@ function registerTransactionProcess(
     const text = chunk.toString();
     script += text;
     input += text;
-    while (input.includes("\n")) {
-      const newline = input.indexOf("\n");
+    const lineEnding = options.requireCrLf ? "\r\n" : "\n";
+    while (input.includes(lineEnding)) {
+      const newline = input.indexOf(lineEnding);
       const command = input.slice(0, newline).trim();
-      input = input.slice(newline + 1);
+      input = input.slice(newline + lineEnding.length);
       if (!command) continue;
       if (command === "exec SetRestartOnClose = 0") {
         if (mode === "policy_silent") continue;
