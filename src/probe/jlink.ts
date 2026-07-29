@@ -566,7 +566,7 @@ export class JLinkBackend extends ProbeBackend {
       const proc = this.spawnProcess(this.jlinkExe, args, { stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
-      let phase: "startup" | "policy" | "write" | "readback" | "exit" = "startup";
+      let phase: "policy" | "write" | "readback" | "exit" = "policy";
       let phaseStart = 0;
       let writeRaw = "";
       let readbackRaw = "";
@@ -671,12 +671,11 @@ export class JLinkBackend extends ProbeBackend {
         stdout += chunk.toString();
         if (phase === "exit") return;
         const phaseRaw = stdout.slice(phaseStart);
-        if (!/(?:^|\r?\n)J-Link(?:\[\d+\])?>\s*$/i.test(phaseRaw)) return;
-        if (phase === "startup") {
-          send("exec SetRestartOnClose = 0", "policy");
-        } else if (phase === "policy") {
+        if (!/(?:^|[\r\n])J-Link(?:\[\d+\])?>[ \t]*$/i.test(phaseRaw)) return;
+        if (phase === "policy") {
           if (fatalJLinkCommandDiagnostic(phaseRaw)) finishInput();
-          else send(`wreg ${token}, 0x${value.toString(16)}`, "write");
+          else if (/\bO\.K\.|SetRestartOnClose/i.test(phaseRaw)) send(`wreg ${token}, 0x${value.toString(16)}`, "write");
+          else phaseStart = stdout.length; // Ignore a delayed bare startup prompt.
         } else if (phase === "write") {
           writeRaw = phaseRaw;
           if (fatalJLinkCommandDiagnostic(writeRaw)) finishInput();
@@ -701,6 +700,9 @@ export class JLinkBackend extends ProbeBackend {
         timedOut = true;
         void terminateChildProcess(proc, { terminateWaitMs: 1_000 });
       }, timeoutMs);
+      // V8.84 may not emit an initial prompt while stdin remains open. Issue
+      // only the non-mutating close-policy command to start the handshake.
+      send("exec SetRestartOnClose = 0", "policy");
     });
   }
 
