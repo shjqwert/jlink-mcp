@@ -771,7 +771,7 @@ test("JLinkBackend permits a zero-exit flash with the nonfatal target-RAM PC dia
   assert.notEqual(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
 });
 
-test("JLinkBackend GDB Server arguments disable implicit reset, halt, and single-run exit", () => {
+test("JLinkBackend GDB Server arguments use valueless compatibility flags", () => {
   const backend = new JLinkBackend(
     { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
@@ -782,6 +782,11 @@ test("JLinkBackend GDB Server arguments disable implicit reset, halt, and single
   assert.ok(args.includes("-noir"));
   assert.ok(args.includes("-nosinglerun"));
   assert.equal(args.includes("-singlerun"), false);
+  for (const option of ["-LocalhostOnly", "-NoGui"]) {
+    const optionIndex = args.indexOf(option);
+    assert.notEqual(optionIndex, -1);
+    assert.match(args[optionIndex + 1] ?? "", /^-/);
+  }
   assert.deepEqual(args.slice(-2), ["-select", "USB=123456"]);
 });
 

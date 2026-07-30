@@ -762,7 +762,7 @@ export class JLinkBackend extends ProbeBackend {
       "-port", String(this.config.gdbPort),
       "-RTTTelnetPort", String(this.config.rttTelnetPort),
       "-SWOPort", String(this.config.swoTelnetPort),
-      "-vd", "-noreset", "-nohalt", "-noir", "-LocalhostOnly", "1", "-nosinglerun", "-NoGui", "1",
+      "-vd", "-noreset", "-nohalt", "-noir", "-LocalhostOnly", "-nosinglerun", "-NoGui",
     ];
     if (this.config.serialNumber) args.push("-select", `USB=${this.config.serialNumber}`);
     return args;
