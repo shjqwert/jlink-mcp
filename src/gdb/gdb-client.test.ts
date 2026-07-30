@@ -98,7 +98,7 @@ test("GDBClient refuses breakpoint insertion and auto-resume after a non-SIGINT 
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
   assert.equal(breakpoint.success, false);
   assert.equal(breakpoint.code, "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE");
@@ -129,7 +129,7 @@ test("GDBClient accepts the documented reasonless SIGINT stop from exec-interrup
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
   assert.equal(breakpoint.success, true);
   assert.equal(breakpoint.observedTargetExecutionState, "running");
@@ -153,7 +153,7 @@ test("GDBClient disconnect uses the MI exit command and observes graceful proces
   assert.deepEqual(signals, []);
 });
 
-test("GDBClient accepts the standard un-tokened SIGTRAP stop isolated after an MI interrupt result", async () => {
+test("GDBClient refuses an un-tokened SIGTRAP stop whose interrupt causality is unproven", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const commands: string[] = [];
   const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
@@ -175,19 +175,17 @@ test("GDBClient accepts the standard un-tokened SIGTRAP stop isolated after an M
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
-  assert.equal(breakpoint.success, true, JSON.stringify(breakpoint));
-  assert.equal(breakpoint.observedTargetExecutionState, "running");
+  assert.equal(breakpoint.success, false, JSON.stringify(breakpoint));
+  assert.equal(breakpoint.code, "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE");
+  assert.equal(breakpoint.observedTargetExecutionState, "halted");
   const interruptToken = breakpoint.rawOutput?.match(/(?:^|\n)(\d+)\^done(?:\r?\n)/)?.[1];
   const stoppedToken = breakpoint.rawOutput?.match(/(?:^|\n)(\d+)\*stopped,[^\r\n]*signal-name="SIGTRAP"/)?.[1];
   assert.ok(interruptToken);
   assert.equal(stoppedToken, undefined);
-  assert.deepEqual(commands.slice(-3), [
-    "-exec-interrupt --all",
-    "-break-insert -- JlinkTestFixtureTask1ms",
-    "-exec-continue --all",
-  ]);
+  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+  assert.equal(commands.filter((command) => command === "-exec-continue --all").length, 1);
   await client.disconnect();
 });
 
@@ -213,7 +211,7 @@ test("GDBClient drains and rejects a stop that predates the MI interrupt transac
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
   assert.equal(breakpoint.success, false, JSON.stringify({ breakpoint, commands }));
   assert.equal(breakpoint.code, "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE");
@@ -281,7 +279,7 @@ test("GDBClient rejects every incomplete SIGTRAP interrupt isolation", async (t)
 
       assert.equal((await client.connect("localhost", 2331)).success, true);
       assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
-      const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+      const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
       assert.equal(breakpoint.success, false);
       assert.equal(breakpoint.code, "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE");
@@ -314,7 +312,7 @@ test("GDBClient accepts an async SIGINT stop when exec-interrupt has no synchron
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
   assert.equal(breakpoint.success, true, JSON.stringify(breakpoint));
   assert.equal(breakpoint.observedTargetExecutionState, "running");
@@ -385,7 +383,7 @@ test("GDBClient resumes but fails closed when breakpoint insertion lacks a done 
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
   assert.equal(breakpoint.success, false);
   assert.equal(breakpoint.code, "GDB_BREAKPOINT_RESULT_MISSING");
@@ -418,7 +416,7 @@ test("GDBClient restores running state after a rejected breakpoint command", asy
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break MissingSymbol", 100);
+  const breakpoint = await client.command("break MissingSymbol", 1000);
 
   assert.equal(breakpoint.success, false);
   assert.equal(breakpoint.code, "GDB_BREAKPOINT_COMMAND_FAILED");
@@ -451,7 +449,7 @@ test("GDBClient terminates after a breakpoint phase timeout and never auto-resum
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 50);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
   assert.equal(breakpoint.success, false);
   assert.equal(breakpoint.code, "GDB_COMMAND_TIMEOUT");
@@ -514,7 +512,7 @@ test("GDBClient consumes a split remote prompt before dispatching the first runn
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
-  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
   assert.equal(breakpoint.success, true);
   assert.deepEqual(commands.slice(-3), [

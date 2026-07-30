@@ -1130,11 +1130,9 @@ function hasIsolatedRemoteInterruptStop(
   const stop = stops[0];
   if (interruptDoneIndex < 0 || stop.index <= interruptDoneIndex) return false;
   const stopHasExpectedExecutionToken = stop.line.startsWith(`${executionToken}*stopped`);
-  // GDB/MI async records normally omit tokens. The bounded pre-dispatch drain
-  // and single in-flight command isolate this un-tokened stop to the window
-  // opened by the tokenized interrupt result.
-  const stopIsStandardUnTokenedAsync = stop.line.startsWith("*stopped");
-  if (!stopHasExpectedExecutionToken && !stopIsStandardUnTokenedAsync) return false;
+  // Temporal ordering after interrupt ^done cannot prove that an un-tokened
+  // async stop was caused by this transaction rather than a real target stop.
+  if (!stopHasExpectedExecutionToken) return false;
   if (!/(?:^|,)reason="signal-received"(?:,|$)/.test(stop.line)) return false;
   if (!/(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(stop.line)) return false;
   return /(?:^|,)stopped-threads="all"(?:,|$)/.test(stop.line);
