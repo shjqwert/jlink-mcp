@@ -639,8 +639,17 @@ test("GDBClient typed breakpoint commands preserve known halted state without we
   assert.equal(deleted.preservedTargetExecutionState, "halted");
   assert.equal(deleted.commandDispatched, true);
   assert.equal(client.getTargetExecutionState(), "halted");
+
+  const cleared = await client.clearAllBreakpoints();
+  assert.equal(cleared.success, true);
+  assert.equal(cleared.observedTargetExecutionState, undefined);
+  assert.equal(cleared.preservedTargetExecutionState, "halted");
+  assert.equal(cleared.commandDispatched, true);
+  assert.equal(cleared.dispatchedCommand, '-interpreter-exec console "monitor clrbp"');
+  assert.equal(client.getTargetExecutionState(), "halted");
   assert.ok(commands.some((command) => command.includes("info breakpoints")));
   assert.ok(commands.some((command) => command.includes("-break-delete 1")));
+  assert.ok(commands.some((command) => command.includes('-interpreter-exec console "monitor clrbp"')));
 
   const inserted = await client.command("break OsUserConfig.c:60");
   assert.equal(inserted.success, true);

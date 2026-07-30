@@ -1,5 +1,5 @@
 import { dirname } from "node:path";
-import { GDBClient, type GDBTargetExecutionState } from "../../gdb/gdb-client";
+import { GDBClient, type GDBResponse, type GDBTargetExecutionState } from "../../gdb/gdb-client";
 import { createProbeBackend } from "../../probe/factory";
 import type { ProbeBackend } from "../../probe/backend";
 import { RTTClient } from "../../rtt/rtt-client";
@@ -26,6 +26,8 @@ export interface TargetRuntime {
     breakpointDeleteDispatched?: boolean;
     emptyBreakpointListObserved?: boolean;
   };
+  gdbFlashBreakpointCleanupRequired?: boolean;
+  gdbFlashBreakpointCleanupEvidence?: GDBResponse;
   gdbClientExitSubscription?: () => void;
   onGdbServerExit(listener: () => void): () => void;
 }
@@ -105,6 +107,7 @@ export class TargetRuntimeRegistry {
 
   canSafelyDispose(runtime: TargetRuntime): boolean {
     if (!runtime.probe.isGDBServerRunning()) return true;
+    if (runtime.gdbFlashBreakpointCleanupRequired && !runtime.gdbFlashBreakpointCleanupEvidence) return false;
     const state = runtime.gdb.isConnected()
       ? runtime.gdb.getTargetExecutionState()
       : runtime.gdbServerTargetExecutionState ?? "unknown";

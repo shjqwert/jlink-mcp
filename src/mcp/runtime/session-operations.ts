@@ -18,6 +18,7 @@ export interface SessionGdbClient {
   command(command: string, timeout?: number): Promise<GDBResponse>;
   listBreakpoints(timeout?: number): Promise<GDBResponse>;
   deleteBreakpoint(breakpointId: number, timeout?: number): Promise<GDBResponse>;
+  clearAllBreakpoints(timeout?: number): Promise<GDBResponse>;
   wait(timeout?: number): Promise<GDBResponse>;
   backtrace(full?: boolean): Promise<GDBResponse>;
   isConnected(): boolean;
@@ -70,6 +71,8 @@ export interface SessionTargetRuntime {
     breakpointDeleteDispatched?: boolean;
     emptyBreakpointListObserved?: boolean;
   };
+  gdbFlashBreakpointCleanupRequired?: boolean;
+  gdbFlashBreakpointCleanupEvidence?: GDBResponse;
   gdbPreServerStateExpectationValid?: boolean;
   gdbClientExitSubscription?: () => void;
   onGdbServerExit?: (listener: () => void) => () => void;
@@ -134,6 +137,8 @@ export class SessionOperations {
       runtime.gdbClientExitedUnexpectedly = false;
       runtime.gdbServerNaturalExitRequired = false;
       runtime.gdbManagedBreakpointLifecycle = undefined;
+      runtime.gdbFlashBreakpointCleanupRequired = false;
+      runtime.gdbFlashBreakpointCleanupEvidence = undefined;
       runtime.gdbPreServerStateExpectationValid = true;
       const serverOutputAtReady = runtime.probe.getGDBServerOutput(200);
       runtime.gdbAttachBoundaryEvidence = {
@@ -220,7 +225,7 @@ export class SessionOperations {
         code: "GDB_OWNER_PROCESS_MISMATCH", stage: "ownership", message: "GDB Server is owned by another live MCP process", retryable: false, writeIssued: false, stateUnknown: false,
       });
     }
-    return this.queuedWithTarget("gdb_server_stop", target, ["stop_gdb_server", "release_gdb_owner"], ["gdb"], async (envelope) => {
+    return this.queuedWithTarget("gdb_server_stop", target, ["clear_gdb_server_breakpoints", "stop_gdb_server", "release_gdb_owner"], ["gdb"], async (envelope) => {
       const clientWasConnected = runtime.gdb.isConnected();
       const executionState = clientWasConnected ? runtime.gdb.getTargetExecutionState() : runtime.gdbServerTargetExecutionState ?? "unknown";
       const recoveringAfterClientExit = !clientWasConnected
@@ -265,6 +270,7 @@ export class SessionOperations {
       const closeIntent = waitForSingleRunExit
         ? "disconnect_client_and_allow_single_run_exit"
         : "stop_server_without_client_connection";
+      const flashBreakpointCleanupRequired = runtime.gdbFlashBreakpointCleanupRequired === true;
       envelope.before = {
         gdbClientConnected: clientWasConnected,
         targetExecutionState: executionState,
@@ -277,8 +283,77 @@ export class SessionOperations {
       if (targetExecutionStateExpectedBeforeClose === "unknown" && !recoveringAfterClientExit) {
         throw disconnectStateError(executionState, "stopping the GDB Server");
       }
+      if (
+        flashBreakpointCleanupRequired
+        && !runtime.gdbFlashBreakpointCleanupEvidence
+        && (!clientWasConnected || executionState !== "halted")
+      ) {
+        throw new SessionError(
+          executionState === "unknown" ? "TARGET_STATE_UNKNOWN" : "HALT_REQUIRED",
+          "pending J-Link FlashBP cleanup requires the managed GDB client to remain connected with the target halted",
+          false,
+          false,
+          executionState === "unknown",
+        );
+      }
       runtime.gdbServerStopping = true;
       try {
+        let flashBreakpointCleanup = runtime.gdbFlashBreakpointCleanupEvidence;
+        if (flashBreakpointCleanupRequired && !flashBreakpointCleanup) {
+          try {
+            flashBreakpointCleanup = await runtime.gdb.clearAllBreakpoints();
+          } catch (error) {
+            runtime.gdbServerTargetExecutionState = "unknown";
+            throw new SessionError(
+              "GDB_FLASH_BREAKPOINT_CLEANUP_FAILED",
+              error instanceof Error ? error.message : String(error),
+              false,
+              true,
+              true,
+            );
+          }
+          const executionStateAfterCleanup = runtime.gdb.getTargetExecutionState();
+          runtime.gdbServerTargetExecutionState = executionStateAfterCleanup;
+          envelope.data = {
+            flashBreakpointCleanup,
+            targetExecutionStateAfterFlashBreakpointCleanup: executionStateAfterCleanup,
+          };
+          if (executionStateAfterCleanup !== "halted") {
+            throw new SessionError(
+              "HIDDEN_STATE_CHANGE",
+              `clearing all J-Link GDB Server breakpoints changed target state from halted to ${executionStateAfterCleanup}`,
+              false,
+              flashBreakpointCleanup.commandDispatched === true,
+              executionStateAfterCleanup === "unknown",
+            );
+          }
+          if (!flashBreakpointCleanup.success) {
+            throw new SessionError(
+              "GDB_FLASH_BREAKPOINT_CLEANUP_FAILED",
+              flashBreakpointCleanup.error ?? "J-Link GDB Server did not confirm that all pending breakpoints were removed",
+              false,
+              flashBreakpointCleanup.commandDispatched === true,
+              false,
+            );
+          }
+          if (
+            flashBreakpointCleanup.commandDispatched !== true
+            || (
+              flashBreakpointCleanup.observedTargetExecutionState !== "halted"
+              && flashBreakpointCleanup.preservedTargetExecutionState !== "halted"
+            )
+          ) {
+            throw new SessionError(
+              "GDB_FLASH_BREAKPOINT_CLEANUP_UNCONFIRMED",
+              "J-Link GDB Server breakpoint cleanup returned without halted-state preservation evidence",
+              false,
+              flashBreakpointCleanup.commandDispatched === true,
+              false,
+            );
+          }
+          runtime.gdbFlashBreakpointCleanupEvidence = flashBreakpointCleanup;
+          envelope.observedEffects.push("gdb_server_breakpoints_cleared");
+        }
         await runtime.gdb.disconnect();
         runtime.rtt.disconnect();
         let serverExitObservation: Awaited<ReturnType<ProbeBackend["waitForGDBServerExit"]>> | undefined;
@@ -311,6 +386,8 @@ export class SessionOperations {
         runtime.gdbClientExitedUnexpectedly = false;
         runtime.gdbServerNaturalExitRequired = false;
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbFlashBreakpointCleanupRequired = false;
+        runtime.gdbFlashBreakpointCleanupEvidence = undefined;
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbOwnerExitSubscription?.();
         runtime.gdbOwnerExitSubscription = undefined;
@@ -334,6 +411,7 @@ export class SessionOperations {
           closeStateExpectationSource,
           closeIntent,
           managedBreakpointLifecycle: managedBreakpointLifecycle ?? null,
+          flashBreakpointCleanup: flashBreakpointCleanup ?? null,
           serverExitMode: waitForSingleRunExit
             ? "single_run_after_gdb_disconnect"
             : "explicit_stop_without_gdb_connection",
@@ -359,7 +437,9 @@ export class SessionOperations {
         envelope.verification = {
           status: "verified",
           method: managedBreakpointDetachResumeExpected
-            ? "managed_breakpoint_lifecycle_single_run_detach_and_post_server_probe_observation"
+            ? "managed_breakpoint_explicit_server_clear_single_run_detach_and_post_server_probe_observation"
+            : flashBreakpointCleanup
+              ? "gdb_explicit_server_breakpoint_clear_and_post_server_probe_observation"
             : waitForSingleRunExit
               ? "gdb_single_run_exit_and_post_server_probe_observation"
               : "gdb_state_before_close_and_post_server_probe_observation",
@@ -589,6 +669,10 @@ export class SessionOperations {
       const result = await runtime.gdb.command(command, timeoutMs);
       const breakpointInsertionDispatched = result.commandDispatched === true
         && result.dispatchedCommand?.startsWith("-break-insert ") === true;
+      if (breakpointInsertionDispatched) {
+        runtime.gdbFlashBreakpointCleanupRequired = true;
+        runtime.gdbFlashBreakpointCleanupEvidence = undefined;
+      }
       runtime.gdbManagedBreakpointLifecycle = undefined;
       runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState ?? "unknown";
       runtime.gdbPreServerStateExpectationValid = false;

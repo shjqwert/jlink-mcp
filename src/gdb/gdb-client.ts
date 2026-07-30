@@ -293,6 +293,14 @@ export class GDBClient {
     return this.commandPreservingKnownState(`-break-delete ${breakpointId}`, timeout, "halted");
   }
 
+  async clearAllBreakpoints(timeout: number = 15000): Promise<GDBResponse> {
+    return this.commandPreservingKnownState(
+      '-interpreter-exec console "monitor clrbp"',
+      timeout,
+      "halted",
+    );
+  }
+
   private async commandPreservingKnownState(
     command: string,
     timeout: number,
