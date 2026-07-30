@@ -106,6 +106,25 @@ export class MemorySessionManager {
         this.queue.releaseOwner(target.probeSerial, owner.token);
         return undefined;
       }
+      try {
+        owner = this.queue.updateOwnerResource(target.probeSerial, owner.token, session.pid, {
+          backend: "native_memory_session",
+          phase: "native_memory_session_active",
+          runtime: {
+            helperSha256: session.runtime.helperSha256,
+            runtimeSha256: session.runtime.runtimeSha256,
+          },
+        });
+      } catch {
+        try { await session.close(); }
+        catch (closeError) {
+          if (closeError instanceof MemorySessionError && !closeError.retainOwner) {
+            throw new MemorySessionError("MEMORY_SESSION_OWNER_UPDATE_FAILED", "native memory helper ownership could not be marked active after confirmed process exit", true, true, false, session.pid);
+          }
+          throw new MemorySessionError("MEMORY_SESSION_STARTUP_EXIT_UNCONFIRMED", "native memory helper became ready but ownership activation failed and process exit was not confirmed", true, true, true, session.pid);
+        }
+        throw new MemorySessionError("MEMORY_SESSION_OWNER_UPDATE_FAILED", "native memory helper ownership could not be marked active after confirmed process exit", true, true, false, session.pid);
+      }
       const active: ActiveSession = {
         target: { projectRoot: target.projectRoot, probeSerial: target.probeSerial, generation: target.generation },
         owner,
@@ -161,6 +180,35 @@ export class MemorySessionManager {
       throw new MemorySessionError("MEMORY_SESSION_ACTIVE", "local persistent memory session ownership cannot be verified; Probe access remains blocked", true, true);
     }
     return owner;
+  }
+
+  async retireIfUnusableForTarget(target: Pick<StoredTarget, "projectRoot" | "probeSerial" | "generation">): Promise<boolean> {
+    const assertOwnerReleased = () => {
+      const owner = this.queue.getOwner(target.probeSerial);
+      if (
+        owner?.kind === "memory"
+        && owner.projectRoot === target.projectRoot
+        && owner.targetGeneration === target.generation
+      ) {
+        throw new MemorySessionError(
+          "MEMORY_SESSION_OWNER_RELEASE_UNCONFIRMED",
+          "native memory helper retirement did not prove Probe Owner release",
+          true,
+          true,
+          true,
+          owner.resourcePid,
+        );
+      }
+    };
+    const active = this.active;
+    if (!active) {
+      assertOwnerReleased();
+      return true;
+    }
+    if (!sameTarget(active.target, target) || active.session.isReusable()) return false;
+    await this.closeActive(active);
+    assertOwnerReleased();
+    return true;
   }
 
   async closeForTarget(target: Pick<StoredTarget, "projectRoot" | "probeSerial" | "generation">): Promise<MemorySessionCloseResult | undefined> {

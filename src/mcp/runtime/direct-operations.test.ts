@@ -140,6 +140,25 @@ test("control failure preserves explicit native dispatch and target-state eviden
   assert.equal(issued.error?.stateUnknown, false);
 });
 
+test("control timeout retires an unusable memory session before returning without a recovery connection", async (context) => {
+  const { probe, targets, queue, projectRoot } = await fixture(context, "control-timeout-retires-owner");
+  const launcher = new PoisonedControlSessionLauncher();
+  const sessions = new MemorySessionManager(queue, launcher, 10_000);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
+  launcher.probe.targetState = "halted";
+
+  const result = await service.control("resume", projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "PROBE_BUSY");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(launcher.session.closeCalls, 1);
+  assert.equal(queue.getOwner("123456"), undefined);
+  assert.deepEqual(launcher.probe.actions, ["resume"]);
+  assert.deepEqual(probe.actions, []);
+});
+
 test("read_memory preserves running state and returns decoded bytes", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "read-memory");
   probe.targetState = "running";
@@ -2505,6 +2524,23 @@ class PreDispatchMemorySessionLauncher implements MemorySessionLauncher {
   }
 }
 
+class PoisonedControlSessionLauncher implements MemorySessionLauncher {
+  readonly probe: PoisonedControlProbe;
+  readonly session: PreDispatchMemorySession;
+
+  constructor() {
+    let session!: PreDispatchMemorySession;
+    this.probe = new PoisonedControlProbe(() => { session.reusable = false; });
+    session = new PreDispatchMemorySession(this.probe);
+    this.session = session;
+  }
+
+  async open(_target: Parameters<MemorySessionLauncher["open"]>[0], onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    onStarted?.(this.session.pid, this.session.runtime);
+    return this.session;
+  }
+}
+
 class PreDispatchMemorySession implements PersistentMemorySession {
   readonly pid = process.pid;
   readonly runtime: MemorySessionRuntimeFacts = {
@@ -2514,15 +2550,35 @@ class PreDispatchMemorySession implements PersistentMemorySession {
     runtimeSha256: "b".repeat(64),
   };
   private alive = true;
+  reusable = true;
+  closeCalls = 0;
   closeError?: Error;
   constructor(readonly probe: ProbeBackend) {}
   isAlive(): boolean { return this.alive; }
-  isReusable(): boolean { return this.alive; }
+  isReusable(): boolean { return this.alive && this.reusable; }
   async close(): Promise<void> {
+    this.closeCalls += 1;
     if (this.closeError) throw this.closeError;
     this.alive = false;
   }
   onExit(): () => void { return () => undefined; }
+}
+
+class PoisonedControlProbe extends FakeProbe {
+  constructor(private readonly poison: () => void) { super(); }
+  override async resume(): Promise<CommandResult> {
+    this.actions.push("resume");
+    this.poison();
+    return {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "native memory session did not respond before its timeout",
+      errorCode: ProbeErrorCode.PROBE_BUSY,
+      writeIssued: true,
+      stateUnknown: true,
+    };
+  }
 }
 
 class PreDispatchProbe extends FakeProbe {

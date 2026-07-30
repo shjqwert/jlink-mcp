@@ -1483,7 +1483,22 @@ export class DirectMcuService {
           try {
             await operation(envelope, current, runtime);
           } catch (error) {
-            if (options.closePersistentMemorySessionOnError && persistentProbe) {
+            let unusableSessionRetired = false;
+            if (persistentProbe && typeof this.memorySessions?.retireIfUnusableForTarget === "function") {
+              try {
+                unusableSessionRetired = await this.memorySessions?.retireIfUnusableForTarget(current) ?? false;
+              } catch (closeError) {
+                annotateMemorySessionRetirement(envelope, {
+                  status: "close_failed",
+                  error: errorMessage(closeError),
+                });
+                throw combineWithMemorySessionRetirement(error, `close failed: ${errorMessage(closeError)}`);
+              }
+              if (unusableSessionRetired) {
+                annotateMemorySessionRetirement(envelope, { status: "unusable_session_retired" });
+              }
+            }
+            if (options.closePersistentMemorySessionOnError && persistentProbe && !unusableSessionRetired) {
               let memorySessionClose: MemorySessionCloseResult | undefined;
               try {
                 memorySessionClose = await this.memorySessions?.closeForTarget(current);
