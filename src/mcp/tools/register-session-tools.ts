@@ -107,14 +107,15 @@ export async function gdbOpen(
     target.artifact.path,
     restoreRunningStateAfterAttach,
   );
+  const clientData = client.data;
   const envelope = relabelEnvelope(client, "gdb_open");
   envelope.requestedEffects = distinct([...server.requestedEffects, ...client.requestedEffects]);
   envelope.observedEffects = distinct([...server.observedEffects, ...client.observedEffects]);
   envelope.before ??= server.before;
-  envelope.data = { server: server.data, client: client.data };
+  envelope.data = { server: server.data, client: clientData };
   if (!client.ok) {
     const cleanup = await services.sessions.gdbServerStop(target.projectRoot);
-    envelope.data = { server: server.data, client: client.data, cleanup };
+    envelope.data = { server: server.data, client: clientData, cleanup };
     envelope.requestedEffects = distinct([...envelope.requestedEffects, ...cleanup.requestedEffects]);
     envelope.observedEffects = distinct([...envelope.observedEffects, ...cleanup.observedEffects]);
     if (cleanup.ok) {

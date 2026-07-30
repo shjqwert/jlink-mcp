@@ -454,6 +454,12 @@ test("GDB connect retains and reports a fault-handler stop without resuming it",
   const fixtureValue = await fixture(context, "gdb-connect-fault-handler", false, "Cortex-M4");
   const started = await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
+  fixtureValue.gdb.connectHook = () => {
+    fixtureValue.probe.gdbOutput.push(
+      "GDB client connected",
+      "Target halted (PC = 0x000222EE): HardFault_Handler",
+    );
+  };
   fixtureValue.gdb.executionState = "halted";
   fixtureValue.gdb.connectResult = {
     success: true,
@@ -474,6 +480,9 @@ test("GDB connect retains and reports a fault-handler stop without resuming it",
       serverReadyObservedAt: string;
       server: { processId: number; ownerToken: string; targetGeneration: string };
       profile: { configuredDevice: string; gdbDevice: string; effectiveGdbDevice: string };
+      serverOutputAtReady: string[];
+      serverReadinessEvidence: string;
+      targetExecutionStateAtServerReady: string;
     };
   }).attachBoundaryEvidence;
   assert.equal(startBoundary.preServerObservation.state, "running");
@@ -486,8 +495,15 @@ test("GDB connect retains and reports a fault-handler stop without resuming it",
   assert.equal(startBoundary.profile.configuredDevice, "TEST");
   assert.equal(startBoundary.profile.gdbDevice, "Cortex-M4");
   assert.equal(startBoundary.profile.effectiveGdbDevice, "Cortex-M4");
+  assert.deepEqual(startBoundary.serverOutputAtReady, [
+    "Listening on TCP/IP port 2331",
+    "Waiting for GDB connection...",
+  ]);
+  assert.equal(startBoundary.serverReadinessEvidence, "waiting_for_gdb_client");
+  assert.equal(startBoundary.targetExecutionStateAtServerReady, "not_observed");
   const faultEvidence = (result.data as {
     attachBoundaryEvidence: typeof startBoundary;
+    serverOutputAtClientResponse: string[];
     firstGdbFrame: {
       observedAt: string;
       classification: string;
@@ -496,6 +512,11 @@ test("GDB connect retains and reports a fault-handler stop without resuming it",
     };
   });
   assert.deepEqual(faultEvidence.attachBoundaryEvidence, startBoundary);
+  assert.deepEqual(faultEvidence.serverOutputAtClientResponse, [
+    ...startBoundary.serverOutputAtReady,
+    "GDB client connected",
+    "Target halted (PC = 0x000222EE): HardFault_Handler",
+  ]);
   assert.equal((result.data as { targetExecutionStateBeforeConnect: string }).targetExecutionStateBeforeConnect, "unknown");
   assert.equal((result.data as { targetExecutionStateExpectedAfterAttach: string }).targetExecutionStateExpectedAfterAttach, "running");
   assert.equal(faultEvidence.firstGdbFrame.classification, "fault_handler");
@@ -781,6 +802,7 @@ class SessionProbe extends ProbeBackend {
   targetStateResult?: CommandResult;
   stopHook?: () => void;
   rejectObservationWhileServerRunning = false;
+  gdbOutput: string[] = [];
   override async observeTargetState(): Promise<TargetStateObservation> {
     if (this.rejectObservationWhileServerRunning && this.serverRunning) throw new Error("Probe is owned by GDB Server");
     return { state: this.targetState, source: this.targetState === "unknown" ? "unavailable" : "dhcsr", result: this.targetStateResult ?? ok() };
@@ -798,11 +820,15 @@ class SessionProbe extends ProbeBackend {
   async erase(): Promise<CommandResult> { return ok(); }
   async setBreakpoint(): Promise<CommandResult> { return ok(); }
   async clearBreakpoints(): Promise<CommandResult> { return ok(); }
-  async startGDBServer(): Promise<{ success: boolean; message: string }> { this.serverRunning = true; return { success: true, message: "started" }; }
+  async startGDBServer(): Promise<{ success: boolean; message: string }> {
+    this.serverRunning = true;
+    this.gdbOutput = ["Listening on TCP/IP port 2331", "Waiting for GDB connection..."];
+    return { success: true, message: "started" };
+  }
   async stopGDBServer(): Promise<{ success: boolean; message: string }> { this.stopHook?.(); this.serverRunning = false; return { success: true, message: "stopped" }; }
   isGDBServerRunning(): boolean { return this.serverRunning; }
   getGDBServerStatus(): GDBServerInfo { return { running: this.serverRunning, processId: this.serverRunning ? process.pid : undefined, gdbPort: 2331, rttTelnetPort: 19021 }; }
-  getGDBServerOutput(): string[] { return []; }
+  getGDBServerOutput(lines = 50): string[] { return this.gdbOutput.slice(-lines); }
   async executeRaw(): Promise<CommandResult> { return ok(); }
   isDeviceConfigured(): boolean { return true; }
   getDeviceName(): string { return "TEST"; }

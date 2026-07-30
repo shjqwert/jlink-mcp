@@ -37,6 +37,9 @@ export interface GdbAttachBoundaryEvidence {
     ownerToken: string;
     targetGeneration: string;
   };
+  serverOutputAtReady: string[];
+  serverReadinessEvidence: "waiting_for_gdb_client" | "listener_only" | "unclassified";
+  targetExecutionStateAtServerReady: "not_observed";
   profile: {
     configuredDevice: string;
     gdbDevice: string | null;
@@ -120,6 +123,7 @@ export class SessionOperations {
       runtime.gdbServerTargetExecutionState = "unknown";
       runtime.gdbClientExitedUnexpectedly = false;
       runtime.gdbPreServerStateExpectationValid = true;
+      const serverOutputAtReady = runtime.probe.getGDBServerOutput(200);
       runtime.gdbAttachBoundaryEvidence = {
         preServerObservation: {
           observedAt: preServerObservedAt,
@@ -133,6 +137,9 @@ export class SessionOperations {
           ownerToken: owner.token,
           targetGeneration: target.generation,
         },
+        serverOutputAtReady,
+        serverReadinessEvidence: classifyGdbServerReadiness(serverOutputAtReady),
+        targetExecutionStateAtServerReady: "not_observed",
         profile: {
           configuredDevice: target.device,
           gdbDevice: target.gdbDevice ?? null,
@@ -334,12 +341,14 @@ export class SessionOperations {
       runtime.gdbClientExitedUnexpectedly = false;
       const result = await runtime.gdb.connect("localhost", target.ports.gdb, explicitSymbols);
       const firstGdbFrameObservedAt = new Date().toISOString();
+      const serverOutputAtClientResponse = runtime.probe.getGDBServerOutput(200);
       envelope.data = {
         ...result,
         symbolFile: explicitSymbols ?? null,
         targetExecutionStateBeforeConnect: executionStateBeforeConnect,
         targetExecutionStateExpectedAfterAttach,
         attachBoundaryEvidence: attachBoundary ?? null,
+        serverOutputAtClientResponse,
       };
       const executionStateAfterConnect = runtime.gdb.getTargetExecutionState();
       runtime.gdbServerTargetExecutionState = executionStateAfterConnect;
@@ -398,6 +407,7 @@ export class SessionOperations {
             gdbClientConnected: runtime.gdb.isConnected(),
             cleanup: "client_retained_and_fault_not_resumed",
             attachBoundaryEvidence: attachBoundary ?? null,
+            serverOutputAtClientResponse,
             firstGdbFrame: {
               observedAt: firstGdbFrameObservedAt,
               classification: "fault_handler",
@@ -800,6 +810,17 @@ export class SessionOperations {
 
 function gdbAttachReportedFault(result: { output?: string; rawOutput?: string }): boolean {
   return /\b(?:HardFault|MemManage|BusFault|UsageFault|NMI)_Handler\b/i.test(`${result.output ?? ""}\n${result.rawOutput ?? ""}`);
+}
+
+function classifyGdbServerReadiness(
+  output: readonly string[],
+): GdbAttachBoundaryEvidence["serverReadinessEvidence"] {
+  const text = output.join("\n");
+  if (/Waiting for (?:GDB )?connection|Waiting for connection from GDB/i.test(text)) {
+    return "waiting_for_gdb_client";
+  }
+  if (/Listening on TCP\/IP port/i.test(text)) return "listener_only";
+  return "unclassified";
 }
 
 function gdbAttachStopClassification(

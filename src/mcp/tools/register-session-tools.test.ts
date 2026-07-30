@@ -31,6 +31,12 @@ test("gdb_open preserves an attach fault while closing the same-process client a
     stateUnknown: false,
   });
   clientFailure.observedEffects.push("gdb_client_connected", "target_fault_observed");
+  clientFailure.data = {
+    serverOutputAtClientResponse: [
+      "Waiting for GDB connection...",
+      "Target halted: HardFault_Handler",
+    ],
+  };
   const stopped = finishEnvelope(createOperationEnvelope("gdb_server_stop"), true);
   stopped.observedEffects.push("gdb_client_disconnected", "gdb_server_stopped", "gdb_owner_released");
 
@@ -47,6 +53,17 @@ test("gdb_open preserves an attach fault while closing the same-process client a
   assert.equal(stops, 1);
   assert.match(result.warnings.join("\n"), /managed Server were closed/i);
   assert.ok(result.observedEffects.includes("gdb_owner_released"));
+  const data = result.data as {
+    client: {
+      serverOutputAtClientResponse: string[];
+      client?: unknown;
+    };
+  };
+  assert.deepEqual(data.client.serverOutputAtClientResponse, [
+    "Waiting for GDB connection...",
+    "Target halted: HardFault_Handler",
+  ]);
+  assert.equal(data.client.client, undefined);
 });
 
 test("gdb_open preserves the attach fault but promotes failed cleanup state uncertainty", async () => {
