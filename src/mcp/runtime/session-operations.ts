@@ -62,6 +62,7 @@ export interface SessionTargetRuntime {
   gdbAttachBoundaryEvidence?: GdbAttachBoundaryEvidence;
   gdbInitialAttachBoundaryAvailable?: boolean;
   gdbClientExitedUnexpectedly?: boolean;
+  gdbServerNaturalExitRequired?: boolean;
   gdbPreServerStateExpectationValid?: boolean;
   gdbClientExitSubscription?: () => void;
   onGdbServerExit?: (listener: () => void) => () => void;
@@ -124,6 +125,7 @@ export class SessionOperations {
       runtime.gdbOwnerToken = owner.token;
       runtime.gdbServerTargetExecutionState = "unknown";
       runtime.gdbClientExitedUnexpectedly = false;
+      runtime.gdbServerNaturalExitRequired = false;
       runtime.gdbPreServerStateExpectationValid = true;
       const serverOutputAtReady = runtime.probe.getGDBServerOutput(200);
       runtime.gdbAttachBoundaryEvidence = {
@@ -159,6 +161,7 @@ export class SessionOperations {
         runtime.gdbAttachBoundaryEvidence = undefined;
         runtime.gdbInitialAttachBoundaryAvailable = false;
         runtime.gdbPreServerStateExpectationValid = false;
+        runtime.gdbServerNaturalExitRequired = false;
         void (async () => {
           try {
             await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_server_unexpected_exit", {
@@ -214,6 +217,10 @@ export class SessionOperations {
       const recoveringAfterClientExit = !clientWasConnected
         && executionState === "unknown"
         && runtime.gdbClientExitedUnexpectedly === true;
+      if (clientWasConnected || runtime.gdbClientExitedUnexpectedly === true) {
+        runtime.gdbServerNaturalExitRequired = true;
+      }
+      const waitForSingleRunExit = runtime.gdbServerNaturalExitRequired === true;
       const attachBoundary = runtime.gdbAttachBoundaryEvidence?.server.ownerToken === owner.token
         && runtime.gdbAttachBoundaryEvidence.server.targetGeneration === target.generation
         ? runtime.gdbAttachBoundaryEvidence
@@ -245,11 +252,35 @@ export class SessionOperations {
       try {
         await runtime.gdb.disconnect();
         runtime.rtt.disconnect();
+        let serverExitObservation: Awaited<ReturnType<ProbeBackend["waitForGDBServerExit"]>> | undefined;
+        if (waitForSingleRunExit) {
+          serverExitObservation = await runtime.probe.waitForGDBServerExit(3_000);
+          envelope.data = { serverExitObservation };
+          if (!serverExitObservation.exited) {
+            throw new SessionError(
+              "GDB_SERVER_GRACEFUL_EXIT_TIMEOUT",
+              "GDB Server did not exit naturally after the GDB connection closed; forced termination was not attempted because breakpoint cleanup is unconfirmed",
+              false,
+              true,
+              true,
+            );
+          }
+          if (!serverExitObservation.clean) {
+            throw new SessionError(
+              "GDB_SERVER_GRACEFUL_EXIT_UNCONFIRMED",
+              "GDB Server exited without a clean single-run exit; breakpoint cleanup is unconfirmed and ownership remains fail-closed",
+              false,
+              true,
+              true,
+            );
+          }
+        }
         const result = await runtime.probe.stopGDBServer();
         if (!result.success) throw new SessionError("GDB_SERVER_STOP_FAILED", result.message, false, true, true);
         runtime.gdbAttachBoundaryEvidence = undefined;
         runtime.gdbInitialAttachBoundaryAvailable = false;
         runtime.gdbClientExitedUnexpectedly = false;
+        runtime.gdbServerNaturalExitRequired = false;
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbOwnerExitSubscription?.();
         runtime.gdbOwnerExitSubscription = undefined;
@@ -269,6 +300,10 @@ export class SessionOperations {
           targetExecutionStateBeforeDisconnect: executionState,
           targetExecutionStateExpectedBeforeClose,
           targetExecutionStateAfterClose: finalState,
+          serverExitMode: waitForSingleRunExit
+            ? "single_run_after_gdb_disconnect"
+            : "explicit_stop_without_gdb_connection",
+          serverExitObservation: serverExitObservation ?? null,
         };
         if (finalState === "unknown") throw new SessionError("POST_OPERATION_STATE_UNKNOWN", "GDB Server stopped, but target state could not be observed afterward", false, true, true);
         if (!recoveringAfterClientExit && finalState !== targetExecutionStateExpectedBeforeClose) {
@@ -284,8 +319,8 @@ export class SessionOperations {
         }
         envelope.verification = {
           status: "verified",
-          method: recoveringAfterClientExit
-            ? "gdb_server_cleanup_and_post_server_probe_observation"
+          method: waitForSingleRunExit
+            ? "gdb_single_run_exit_and_post_server_probe_observation"
             : "gdb_state_before_close_and_post_server_probe_observation",
         };
         if (recoveringAfterClientExit) {
@@ -510,10 +545,22 @@ export class SessionOperations {
     return this.withGdbOwner("gdb_command", projectRoot, ["raw_gdb_command", "unknown_side_effects"], async (envelope, target, runtime) => {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
       const result = await runtime.gdb.command(command, timeoutMs);
+      const breakpointInsertionDispatched = result.commandDispatched === true
+        && result.dispatchedCommand?.startsWith("-break-insert ") === true;
       runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState ?? "unknown";
       runtime.gdbPreServerStateExpectationValid = false;
-      envelope.data = { command, ...result, sideEffects: "unknown" };
+      const sideEffects = breakpointInsertionDispatched
+        ? "breakpoint_configuration_and_possible_firmware_overlay"
+        : "unknown";
+      envelope.data = { command, ...result, sideEffects };
       try {
+        if (breakpointInsertionDispatched) {
+          await this.targets.setArtifactMatch(target.projectRoot, "unverified", "gdb_breakpoint_insert", {
+            targetGeneration: target.generation,
+            probeSerial: target.probeSerial,
+            artifactGeneration: target.artifact?.generation,
+          });
+        }
         const updated = await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_command", {
           targetGeneration: target.generation,
           probeSerial: target.probeSerial,
@@ -526,9 +573,12 @@ export class SessionOperations {
       }
       if (!result.success) throw gdbError(result, "gdb_command", true, runtime.gdbServerTargetExecutionState === "unknown");
       envelope.observedEffects.push("raw_gdb_command_issued", "side_effects_unknown");
-      envelope.data = { command, ...result, sideEffects: "unknown" };
+      envelope.data = { command, ...result, sideEffects };
       envelope.verification = { status: "executed_unverified" };
       envelope.warnings.push("Raw GDB command semantics are not interpreted; side effects are unknown.");
+      if (breakpointInsertionDispatched) {
+        envelope.warnings.push("Managed breakpoint insertion may use J-Link FlashBP; firmware identity remains unverified until a later explicit Verify-only operation succeeds after GDB cleanup.");
+      }
       envelope.artifact = this.artifactSummary(this.targets.require(target.projectRoot));
     });
   }

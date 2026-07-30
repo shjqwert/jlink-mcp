@@ -18,6 +18,7 @@ export interface TargetRuntime {
   gdbOwnerExitSubscription?: () => void;
   gdbServerStopping?: boolean;
   gdbServerTargetExecutionState?: GDBTargetExecutionState;
+  gdbServerNaturalExitRequired?: boolean;
   gdbClientExitSubscription?: () => void;
   onGdbServerExit(listener: () => void): () => void;
 }
@@ -105,9 +106,17 @@ export class TargetRuntimeRegistry {
 
   private async disposeRuntime(runtime: TargetRuntime): Promise<boolean> {
     if (!this.canSafelyDispose(runtime)) return false;
+    const clientWasConnected = runtime.gdb.isConnected();
+    if (clientWasConnected) runtime.gdbServerNaturalExitRequired = true;
     runtime.rtt.disconnect();
     await runtime.gdb.disconnect();
-    await runtime.processManager.killAndWait("jlink-gdb-server");
+    if (runtime.gdbServerNaturalExitRequired) {
+      const serverExit = await runtime.probe.waitForGDBServerExit(3_000);
+      if (!serverExit.clean) return false;
+      runtime.gdbServerNaturalExitRequired = false;
+    }
+    const stopped = await runtime.probe.stopGDBServer();
+    if (!stopped.success) return false;
     runtime.gdbOwnerExitSubscription?.();
     runtime.gdbOwnerExitSubscription = undefined;
     runtime.gdbClientExitSubscription?.();

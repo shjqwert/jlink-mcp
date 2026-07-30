@@ -273,9 +273,13 @@ export class GDBClient {
     if (!this.proc || !this.connected) {
       return { success: false, output: "", error: "GDB is not connected", code: "GDB_NOT_CONNECTED" };
     }
-    const result = await this.commandInternal(cmd, timeout);
+    let commandDispatched = false;
+    const result = await this.commandInternal(cmd, timeout, () => { commandDispatched = true; });
     if (!result.observedTargetExecutionState) this.targetExecutionState = "unknown";
-    return result;
+    return {
+      ...result,
+      commandDispatched: commandDispatched || result.commandDispatched === true,
+    };
   }
 
   async listBreakpoints(timeout: number = 15000): Promise<GDBResponse> {
@@ -418,6 +422,7 @@ export class GDBClient {
     const deadline = Date.now() + timeout;
     const remaining = () => Math.max(1, deadline - Date.now());
     const rawParts: string[] = [];
+    let breakpointCommandDispatched = false;
     const timedOut = async (phase: string, exchange: GDBCommandExchange): Promise<GDBResponse> => {
       rawParts.push(exchange.output);
       await this.terminateGdbProcess();
@@ -460,6 +465,7 @@ export class GDBClient {
         output: this.cleanMI(rawOutput),
         rawOutput,
         dispatchedCommand,
+        commandDispatched: breakpointCommandDispatched,
         stopReason: this.stopEvent ?? undefined,
         error: "target stopped before exec-interrupt was dispatched; breakpoint insertion and automatic resume were refused",
         code: "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE",
@@ -513,6 +519,7 @@ export class GDBClient {
         output: this.cleanMI(rawOutput),
         rawOutput,
         dispatchedCommand,
+        commandDispatched: breakpointCommandDispatched,
         error: miErrorMessage(interruptError),
         code: "GDB_BREAKPOINT_TRANSACTION_INTERRUPT_FAILED",
         observedTargetExecutionState: "running",
@@ -542,6 +549,7 @@ export class GDBClient {
 
     let breakpoint: GDBCommandExchange;
     try {
+      breakpointCommandDispatched = true;
       breakpoint = await this.sendCommand(dispatchedCommand, remaining());
     } catch (error) {
       await this.terminateGdbProcess();
@@ -551,6 +559,7 @@ export class GDBClient {
         output: this.cleanMI(rawOutput),
         rawOutput,
         dispatchedCommand,
+        commandDispatched: true,
         error: error instanceof Error ? error.message : String(error),
         code: "GDB_IO_FAILED",
         ...this.exitFacts(),
@@ -603,6 +612,7 @@ export class GDBClient {
       output: this.cleanMI(rawOutput),
       rawOutput,
       dispatchedCommand,
+      commandDispatched: true,
       error: breakpointError
         ? miErrorMessage(breakpointError)
         : breakpointDone ? undefined : "GDB did not return a done result for breakpoint insertion",
@@ -814,7 +824,7 @@ export class GDBClient {
     if (pending) pending(this.outputBuffer, true);
     if (proc) {
       await terminateChildProcess(proc, {
-        gracefulRequest: () => { proc.stdin?.write("quit\n"); },
+        gracefulRequest: () => { proc.stdin?.write("-gdb-exit\n"); },
         gracefulWaitMs: 1_000,
         terminateWaitMs: 1_000,
       });

@@ -80,6 +80,15 @@ export interface GDBServerInfo {
   rttTelnetPort: number;
 }
 
+export interface GDBServerExitObservation {
+  found: boolean;
+  exited: boolean;
+  clean: boolean;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  error?: string;
+}
+
 export interface ProbeStatus {
   state: ProbeState;
   probeType: ProbeType;
@@ -411,6 +420,15 @@ export abstract class ProbeBackend {
 
   abstract startGDBServer(): Promise<{ success: boolean; message: string }>;
   abstract stopGDBServer(): Promise<{ success: boolean; message: string }>;
+  async waitForGDBServerExit(_timeoutMs = 3000): Promise<GDBServerExitObservation> {
+    return {
+      found: false,
+      exited: !this.isGDBServerRunning(),
+      clean: false,
+      exitCode: null,
+      signal: null,
+    };
+  }
   abstract isGDBServerRunning(): boolean;
   abstract getGDBServerStatus(): GDBServerInfo;
   abstract getGDBServerOutput(lines?: number): string[];

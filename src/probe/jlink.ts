@@ -770,7 +770,7 @@ export class JLinkBackend extends ProbeBackend {
       "-port", String(this.config.gdbPort),
       "-RTTTelnetPort", String(this.config.rttTelnetPort),
       "-SWOPort", String(this.config.swoTelnetPort),
-      "-vd", "-noreset", "-nohalt", "-noir", "-LocalhostOnly", "-nosinglerun", "-NoGui",
+      "-vd", "-noreset", "-nohalt", "-noir", "-LocalhostOnly", "-singlerun", "-NoGui",
     ];
     if (this.config.serialNumber) args.push("-select", `USB=${this.config.serialNumber}`);
     return args;
@@ -825,6 +825,18 @@ export class JLinkBackend extends ProbeBackend {
     this.rttConnected = false;
     if (stopped.found) this.setState(ProbeState.PROBE_CONNECTED);
     return { success: true, message: stopped.found ? "GDB Server stopped" : "GDB Server was not running" };
+  }
+
+  override async waitForGDBServerExit(timeoutMs = 3000) {
+    const observation = await this.processManager.waitForExit(GDB_SERVER_PROCESS, timeoutMs);
+    return {
+      ...observation,
+      clean: observation.exited
+        && observation.found
+        && observation.exitCode === 0
+        && observation.signal === null
+        && !observation.error,
+    };
   }
 
   isGDBServerRunning(): boolean { return !!this.processManager.get(GDB_SERVER_PROCESS); }

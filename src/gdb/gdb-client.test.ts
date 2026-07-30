@@ -141,6 +141,18 @@ test("GDBClient accepts the documented reasonless SIGINT stop from exec-interrup
   await client.disconnect();
 });
 
+test("GDBClient disconnect uses the MI exit command and observes graceful process exit", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(signals, undefined, false, false, commands));
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+
+  await client.disconnect();
+
+  assert.equal(commands.at(-1), "-gdb-exit");
+  assert.deepEqual(signals, []);
+});
+
 test("GDBClient accepts the standard un-tokened SIGTRAP stop isolated after an MI interrupt result", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const commands: string[] = [];
@@ -630,6 +642,11 @@ test("GDBClient typed breakpoint commands preserve known halted state without we
   assert.ok(commands.some((command) => command.includes("info breakpoints")));
   assert.ok(commands.some((command) => command.includes("-break-delete 1")));
 
+  const inserted = await client.command("break OsUserConfig.c:60");
+  assert.equal(inserted.success, true);
+  assert.equal(inserted.dispatchedCommand, "-break-insert -- OsUserConfig.c:60");
+  assert.equal(inserted.commandDispatched, true);
+
   const raw = await client.command("info breakpoints");
   assert.equal(raw.success, true);
   assert.equal(raw.preservedTargetExecutionState, undefined);
@@ -638,6 +655,21 @@ test("GDBClient typed breakpoint commands preserve known halted state without we
   assert.equal(rejectedDelete.success, false);
   assert.equal(rejectedDelete.code, "TARGET_STATE_UNKNOWN");
   assert.equal(rejectedDelete.commandDispatched, false);
+  await client.disconnect();
+});
+
+test("GDBClient reports a pre-dispatch guard rejection without breakpoint issue", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  let blocked: string | null = null;
+  const client = new GDBClient("fake-gdb", () => blocked, () => createFakeGdbProcess(signals));
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  blocked = "hardware access blocked";
+
+  const result = await client.command("break OsUserConfig.c:60");
+
+  assert.equal(result.success, false);
+  assert.equal(result.commandDispatched, false);
+  assert.equal(result.dispatchedCommand, undefined);
   await client.disconnect();
 });
 
@@ -865,6 +897,11 @@ function createFakeGdbProcess(
         setImmediate(() => child.stdout.write('*stopped,reason="breakpoint-hit"\n*running,thread-id="all"\n^done\n(gdb)\n'));
       } else if (command === "show running-then-exited") {
         setImmediate(() => child.stdout.write('*running,thread-id="all"\n=thread-group-exited,id="i1"\n^done\n(gdb)\n'));
+      } else if (command === "-gdb-exit") {
+        setImmediate(() => {
+          child.exitCode = 0;
+          child.emit("exit", 0, null);
+        });
       } else if (command && command !== "maintenance hang" && command !== "quit") {
         setImmediate(() => child.stdout.write("^done\n(gdb)\n"));
       }

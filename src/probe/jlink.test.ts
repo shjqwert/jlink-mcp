@@ -795,14 +795,57 @@ test("JLinkBackend GDB Server arguments use valueless compatibility flags", () =
   assert.ok(args.includes("-noreset"));
   assert.ok(args.includes("-nohalt"));
   assert.ok(args.includes("-noir"));
-  assert.ok(args.includes("-nosinglerun"));
-  assert.equal(args.includes("-singlerun"), false);
+  assert.ok(args.includes("-singlerun"));
+  assert.equal(args.includes("-nosinglerun"), false);
   for (const option of ["-LocalhostOnly", "-NoGui"]) {
     const optionIndex = args.indexOf(option);
     assert.notEqual(optionIndex, -1);
     assert.match(args[optionIndex + 1] ?? "", /^-/);
   }
   assert.deepEqual(args.slice(-2), ["-select", "USB=123456"]);
+});
+
+test("ProcessManager preserves natural child exit facts for GDB Server cleanup", async () => {
+  const manager = new ProcessManager();
+  manager.spawn("clean-exit", process.execPath, ["-e", "setTimeout(() => process.exit(0), 20)"]);
+  const clean = await manager.waitForExit("clean-exit", 2_000);
+  assert.deepEqual(clean, { found: true, exited: true, exitCode: 0, signal: null });
+
+  const failedExit = new Promise<void>((resolve) => {
+    const listener = (name: string) => {
+      if (name !== "failed-exit") return;
+      manager.off("processExit", listener);
+      resolve();
+    };
+    manager.on("processExit", listener);
+  });
+  manager.spawn("failed-exit", process.execPath, ["-e", "setTimeout(() => process.exit(3), 20)"]);
+  await failedExit;
+  const failed = await manager.waitForExit("failed-exit", 2_000);
+  assert.deepEqual(failed, { found: true, exited: true, exitCode: 3, signal: null });
+});
+
+test("ProcessManager waits for Node exit facts after the OS process is already gone", async () => {
+  const manager = new ProcessManager();
+  const child = new EventEmitter() as ChildProcess;
+  Object.assign(child, {
+    pid: 2_147_483_647,
+    exitCode: null,
+    signalCode: null,
+    kill: () => true,
+  });
+  (manager as unknown as { processes: Map<string, { process: ChildProcess; name: string; kill(): void }> }).processes.set(
+    "delayed-exit-event",
+    { process: child, name: "delayed-exit-event", kill: () => undefined },
+  );
+
+  const waiting = manager.waitForExit("delayed-exit-event", 1_000);
+  setImmediate(() => {
+    Object.defineProperty(child, "exitCode", { value: 0, writable: true });
+    child.emit("exit", 0, null);
+  });
+
+  assert.deepEqual(await waiting, { found: true, exited: true, exitCode: 0, signal: null });
 });
 
 test("GDB Server readiness accepts stderr and text split across chunks", async () => {
