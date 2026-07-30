@@ -1030,12 +1030,14 @@ interface VerifySegment {
 }
 
 function verifyOnlyFailureDiagnostic(raw: string): string | undefined {
+  const reportedMismatch = verifyOnlyReportedMismatch(raw);
   return verifyOnlyDiagnosticLines(raw)
     .find((line) => (
       /^(?:\*+\s*)?error:/i.test(line)
       || /^(?:could not|cannot|failed to)\s+(?:read|access|connect|halt)\b/i.test(line)
       || /\bunknown command\.\s*['"]?\?['"]?\s+for help\./i.test(line)
-    ) && !isVerifyOnlyMismatchLine(line));
+    ) && !isVerifyOnlyMismatchLine(line)
+      && !(reportedMismatch && /^error:\s*(?:verify failed|failed to verify)\.?\s*$/i.test(line)));
 }
 
 function verifyOnlyMismatchDiagnostic(raw: string): boolean {

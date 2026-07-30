@@ -327,8 +327,11 @@ test("JLinkBackend firmware Verify-only chunks large images and independently co
       return successfulProcess(
         scripts,
         commanderInvocation === 1
-          ? "Verify failed @ 0x0000C123, Expected 5F read DF\nO.K.\n"
+          ? "Verify failed @ address 0x0000C123. Expected 5F read DF\nERROR: Verify failed.\n"
           : "O.K.\n",
+        "",
+        undefined,
+        commanderInvocation === 1 ? 1 : 0,
       );
     },
   );
@@ -405,6 +408,22 @@ test("JLinkBackend firmware Verify-only treats an addressless contents-differ re
   assert.match(result.error ?? "", /reported no independently readable address/i);
 });
 
+test("JLinkBackend firmware Verify-only keeps an addressless verify-failed summary fail-closed", async (context) => {
+  const backend = new JLinkBackend(
+    { installDir: "Z:\\missing-jlink", memoryHelperPath: "Z:\\missing-helper.exe", device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], "ERROR: Verify failed.\nO.K.\n"),
+  );
+
+  const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "summary-only"), 0x0000c000);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, true);
+  assert.match(result.error ?? "", /ERROR: Verify failed/i);
+});
+
 test("JLinkBackend firmware Verify-only does not promote an address-only report without independent read evidence", async (context) => {
   const backend = new JLinkBackend(
     { installDir: "Z:\\missing-jlink", memoryHelperPath: "Z:\\missing-helper.exe", device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
@@ -428,6 +447,26 @@ test("JLinkBackend firmware Verify-only fails closed on a zero-exit memory-read 
   );
 
   const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "read-error"), 0x0000c000);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
+  assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, true);
+  assert.match(result.error ?? "", /could not read memory/i);
+});
+
+test("JLinkBackend firmware Verify-only lets a read failure override a co-reported address mismatch", async (context) => {
+  const backend = new JLinkBackend(
+    { installDir: "Z:\\missing-jlink", memoryHelperPath: "Z:\\missing-helper.exe", device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    () => successfulProcess([], [
+      "Verify failed @ address 0x0000C000. Expected 01 read 81",
+      "ERROR: Verify failed.",
+      "Could not read memory at 0x0000C004",
+    ].join("\n"), "", undefined, 1),
+  );
+
+  const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "mismatch-with-read-failure"), 0x0000c000);
 
   assert.equal(result.success, false);
   assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
@@ -1332,7 +1371,13 @@ function temporaryFirmwareBin(context: TestContext, name: string): string {
   return file;
 }
 
-function successfulProcess(scripts: string[], stdout = "", stderr = "", onScript?: (script: string) => void): ChildProcess {
+function successfulProcess(
+  scripts: string[],
+  stdout = "",
+  stderr = "",
+  onScript?: (script: string) => void,
+  exitCode = 0,
+): ChildProcess {
   type MutableChild = EventEmitter & {
     stdout: PassThrough;
     stderr: PassThrough;
@@ -1359,9 +1404,9 @@ function successfulProcess(scripts: string[], stdout = "", stderr = "", onScript
       child.stdout.end();
       if (stderr) child.stderr.write(stderr);
       child.stderr.end();
-      child.exitCode = 0;
-      child.emit("exit", 0, null);
-      child.emit("close", 0, null);
+      child.exitCode = exitCode;
+      child.emit("exit", exitCode, null);
+      child.emit("close", exitCode, null);
     });
   });
   child.kill = () => true;
