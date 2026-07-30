@@ -19,6 +19,7 @@ import { canonicalProbeSerial, ProbeIdentityError } from "./probe-identity";
 
 export type TargetInterface = "SWD" | "JTAG";
 export type ArtifactMatchStatus = "unverified" | "verified" | "mismatch";
+export type MemoryMutationTrustStatus = "unverified" | "verified";
 export type MemoryRegionKind = "ram" | "flash" | "rom" | "peripheral" | "unknown";
 
 export interface TargetFileBinding {
@@ -57,6 +58,12 @@ export interface LiveArtifactMatch {
   };
 }
 
+export interface LiveMemoryMutationTrust {
+  status: MemoryMutationTrustStatus;
+  source: string;
+  timestamp: string;
+}
+
 export interface ArtifactMatchBindingExpectation {
   targetGeneration: string;
   probeSerial: string;
@@ -87,6 +94,7 @@ export interface StoredTarget {
   memoryRegions: MemoryRegion[];
   missingOptionalInputs: string[];
   liveArtifactMatch: LiveArtifactMatch;
+  liveMemoryMutationTrust: LiveMemoryMutationTrust;
 }
 
 export interface TargetConfigureInput {
@@ -242,6 +250,7 @@ export class TargetStore {
         !gdbPath && "gdbPath",
       ].filter((value): value is string => Boolean(value)),
       liveArtifactMatch: { status: "unverified", source: "target_configure", timestamp: configuredAt },
+      liveMemoryMutationTrust: { status: "unverified", source: "target_configure", timestamp: configuredAt },
     };
     await this.withLock(async () => {
       const document = this.readDocument();
@@ -323,6 +332,56 @@ export class TargetStore {
     });
   }
 
+  async setMemoryMutationTrust(
+    projectRoot: string,
+    status: MemoryMutationTrustStatus,
+    source: string,
+    expected?: Omit<ArtifactMatchBindingExpectation, "migrateFlashIdentityOnVerified">,
+  ): Promise<StoredTarget> {
+    return this.withLock(async () => {
+      const canonical = this.canonicalProjectRoot(projectRoot);
+      const document = this.readDocument();
+      const key = targetKey(canonical);
+      const target = document.targets[key];
+      if (!target) throw new TargetStoreError("TARGET_NOT_CONFIGURED", "target_configure must be called for this projectRoot first");
+      if (expected && (
+        target.generation !== expected.targetGeneration
+        || target.probeSerial !== expected.probeSerial
+        || (expected.artifactGeneration !== undefined && target.artifact?.generation !== expected.artifactGeneration)
+      )) {
+        throw new TargetStoreError("TARGET_GENERATION_CHANGED", "Target or Artifact generation changed while the operation was executing");
+      }
+      const timestamp = new Date().toISOString();
+      const dirtyPath = this.persistMutationTrustDirtyMarker(target, status, source, timestamp);
+      target.liveMemoryMutationTrust = { status, source, timestamp };
+      this.writeDocument(document);
+      this.clearDirtyMarker(dirtyPath, "Memory mutation trust");
+      return target;
+    });
+  }
+
+  private persistMutationTrustDirtyMarker(target: StoredTarget, status: MemoryMutationTrustStatus, source: string, timestamp: string): string {
+    const markerPath = this.mutationTrustDirtyPath(target);
+    this.inMemoryDirty.add(markerPath);
+    if (existsSync(markerPath)) return markerPath;
+    const temporary = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, `${JSON.stringify({
+        formatVersion: 1,
+        projectKey: createHash("sha256").update(targetKey(target.projectRoot)).digest("hex"),
+        targetGeneration: target.generation,
+        requestedStatus: status,
+        source,
+        timestamp,
+      })}\n`, { encoding: "utf8", flag: "wx" });
+      renameSync(temporary, markerPath);
+      return markerPath;
+    } catch (error) {
+      rmSync(temporary, { force: true });
+      throw new TargetStoreError("MUTATION_TRUST_DIRTY_MARKER_FAILED", `cannot persist fail-closed memory mutation trust marker: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private persistArtifactDirtyMarker(target: StoredTarget, status: ArtifactMatchStatus, source: string, timestamp: string): string {
     const markerPath = this.artifactDirtyPath(target);
     this.inMemoryDirty.add(markerPath);
@@ -347,37 +406,61 @@ export class TargetStore {
   }
 
   private clearArtifactDirtyMarker(markerPath: string): void {
+    this.clearDirtyMarker(markerPath, "Artifact state");
+  }
+
+  private clearDirtyMarker(markerPath: string, label: string): void {
     try {
       rmSync(markerPath, { force: true });
       this.inMemoryDirty.delete(markerPath);
     } catch (error) {
-      throw new TargetStoreError("ARTIFACT_DIRTY_CLEAR_FAILED", `Artifact state was persisted but its fail-closed marker could not be cleared: ${error instanceof Error ? error.message : String(error)}`);
+      throw new TargetStoreError("DIRTY_MARKER_CLEAR_FAILED", `${label} was persisted but its fail-closed marker could not be cleared: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   private applyDirtyArtifactOverlay(target: StoredTarget): StoredTarget {
-    const markerPath = this.artifactDirtyPath(target);
-    if (!this.inMemoryDirty.has(markerPath) && !existsSync(markerPath)) {
-      if (target.liveArtifactMatch.status === "verified" && target.flashIdentityVersion !== 1) {
-        return {
-          ...target,
-          liveArtifactMatch: {
-            status: "unverified",
-            source: "legacy_flash_identity_missing",
-            timestamp: target.liveArtifactMatch.timestamp,
-          },
-        };
-      }
-      return target;
-    }
-    let timestamp = target.liveArtifactMatch.timestamp;
-    try { timestamp = statSync(markerPath).mtime.toISOString(); } catch { /* in-memory poison remains authoritative */ }
-    return {
+    const layeredTarget = target.liveMemoryMutationTrust ? target : {
       ...target,
-      liveArtifactMatch: {
+      liveMemoryMutationTrust: {
+        status: "unverified" as const,
+        source: "legacy_state_layer_missing",
+        timestamp: target.configuredAt,
+      },
+    };
+    const artifactMarkerPath = this.artifactDirtyPath(layeredTarget);
+    let result = layeredTarget;
+    if (this.inMemoryDirty.has(artifactMarkerPath) || existsSync(artifactMarkerPath)) {
+      let timestamp = layeredTarget.liveArtifactMatch.timestamp;
+      try { timestamp = statSync(artifactMarkerPath).mtime.toISOString(); } catch { /* in-memory poison remains authoritative */ }
+      result = {
+        ...result,
+        liveArtifactMatch: {
+          status: "unverified",
+          source: "artifact_state_persistence_incomplete",
+          timestamp,
+        },
+      };
+    } else if (layeredTarget.liveArtifactMatch.status === "verified" && layeredTarget.flashIdentityVersion !== 1) {
+      result = {
+        ...result,
+        liveArtifactMatch: {
+          status: "unverified",
+          source: "legacy_flash_identity_missing",
+          timestamp: layeredTarget.liveArtifactMatch.timestamp,
+        },
+      };
+    }
+
+    const mutationMarkerPath = this.mutationTrustDirtyPath(layeredTarget);
+    if (!this.inMemoryDirty.has(mutationMarkerPath) && !existsSync(mutationMarkerPath)) return result;
+    let mutationTimestamp = layeredTarget.liveMemoryMutationTrust.timestamp;
+    try { mutationTimestamp = statSync(mutationMarkerPath).mtime.toISOString(); } catch { /* in-memory poison remains authoritative */ }
+    return {
+      ...result,
+      liveMemoryMutationTrust: {
         status: "unverified",
-        source: "artifact_state_persistence_incomplete",
-        timestamp,
+        source: "mutation_trust_persistence_incomplete",
+        timestamp: mutationTimestamp,
       },
     };
   }
@@ -385,6 +468,11 @@ export class TargetStore {
   private artifactDirtyPath(target: Pick<StoredTarget, "projectRoot" | "generation">): string {
     const project = createHash("sha256").update(targetKey(target.projectRoot)).digest("hex");
     return join(this.dirtyRoot, `${project}-${target.generation}.json`);
+  }
+
+  private mutationTrustDirtyPath(target: Pick<StoredTarget, "projectRoot" | "generation">): string {
+    const project = createHash("sha256").update(targetKey(target.projectRoot)).digest("hex");
+    return join(this.dirtyRoot, `${project}-${target.generation}-mutation.json`);
   }
 
   private readDocument(): TargetStoreDocument {

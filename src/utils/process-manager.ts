@@ -15,6 +15,14 @@ export interface TerminateChildProcessOptions {
   forceRetryMs?: number;
 }
 
+export interface ProcessExitObservation {
+  found: boolean;
+  exited: boolean;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  error?: string;
+}
+
 /**
  * Terminate a child without treating its generic `error` event as proof of
  * exit. In particular, a failed kill can emit `error` while the process is
@@ -80,6 +88,7 @@ function delay(milliseconds: number): Promise<void> {
  */
 export class ProcessManager extends EventEmitter {
   private processes = new Map<string, ManagedProcess>();
+  private lastExits = new Map<string, Omit<ProcessExitObservation, "found" | "exited">>();
 
   spawn(
     name: string,
@@ -89,6 +98,7 @@ export class ProcessManager extends EventEmitter {
   ): ManagedProcess {
     // Kill existing process with same name
     this.kill(name);
+    this.lastExits.delete(name);
 
     log(`Spawning process "${name}": ${command} ${args.join(" ")}`);
 
@@ -106,6 +116,11 @@ export class ProcessManager extends EventEmitter {
     proc.on("error", (err) => {
       logError(`Process "${name}" error`, err);
       if (!childProcessAlive(proc) && this.processes.get(name)?.process === proc) {
+        this.lastExits.set(name, {
+          exitCode: proc.exitCode,
+          signal: proc.signalCode,
+          error: err.message,
+        });
         this.processes.delete(name);
         this.emit("processExit", name, null, err);
       }
@@ -114,6 +129,7 @@ export class ProcessManager extends EventEmitter {
     proc.on("exit", (code, signal) => {
       log(`Process "${name}" exited (code=${code}, signal=${signal})`);
       if (this.processes.get(name)?.process === proc) {
+        this.lastExits.set(name, { exitCode: code, signal });
         this.processes.delete(name);
         this.emit("processExit", name, code, signal);
       }
@@ -149,6 +165,55 @@ export class ProcessManager extends EventEmitter {
     await terminateChildProcess(existing.process, { terminateWaitMs: timeoutMs });
     if (this.processes.get(name)?.process === existing.process) this.processes.delete(name);
     return { found: true, exited: true };
+  }
+
+  async waitForExit(name: string, timeoutMs = 3000): Promise<ProcessExitObservation> {
+    const existing = this.processes.get(name);
+    if (!existing) {
+      const previous = this.lastExits.get(name);
+      return previous
+        ? { found: true, exited: true, ...previous }
+        : { found: false, exited: true, exitCode: null, signal: null };
+    }
+    const proc = existing.process;
+    const previous = this.lastExits.get(name);
+    if (
+      !childProcessAlive(proc)
+      && (previous !== undefined || proc.exitCode !== null || proc.signalCode !== null)
+    ) {
+      return {
+        found: true,
+        exited: true,
+        exitCode: previous?.exitCode ?? proc.exitCode,
+        signal: previous?.signal ?? proc.signalCode,
+        ...(previous?.error ? { error: previous.error } : {}),
+      };
+    }
+    return new Promise((resolve) => {
+      let lastError: string | undefined;
+      const finish = (observation: ProcessExitObservation) => {
+        clearTimeout(timer);
+        proc.off("exit", onExit);
+        proc.off("close", onExit);
+        proc.off("error", onError);
+        resolve(observation);
+      };
+      const onExit = (exitCode: number | null, signal: NodeJS.Signals | null) => {
+        finish({ found: true, exited: true, exitCode, signal, ...(lastError ? { error: lastError } : {}) });
+      };
+      const onError = (error: Error) => {
+        lastError = error.message;
+        if (!childProcessAlive(proc)) {
+          finish({ found: true, exited: true, exitCode: proc.exitCode, signal: proc.signalCode, error: lastError });
+        }
+      };
+      const timer = setTimeout(() => {
+        finish({ found: true, exited: false, exitCode: null, signal: null, ...(lastError ? { error: lastError } : {}) });
+      }, Math.max(0, timeoutMs));
+      proc.once("exit", onExit);
+      proc.once("close", onExit);
+      proc.on("error", onError);
+    });
   }
 
   get(name: string): ManagedProcess | undefined {

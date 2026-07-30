@@ -125,6 +125,7 @@ export interface CoreRegisterWriteInput {
   name: string;
   value: number;
   verify?: boolean;
+  verificationConnection?: "same_session" | "independent_session";
 }
 
 export interface FlashInput {
@@ -232,12 +233,162 @@ export class DirectMcuService {
       if (envelope.probe) envelope.probe.owner = owner ?? null;
       envelope.before = { persistedTargetGeneration: target.generation };
       envelope.after = { persistedTargetGeneration: target.generation, owner: owner ?? null };
-      envelope.data = { target, owner: owner ?? null };
+      envelope.data = {
+        target,
+        owner: owner ?? null,
+        stateLayers: {
+          firmwareIdentity: target.liveArtifactMatch,
+          targetExecution: {
+            status: "not_observed",
+            source: "target_status_does_not_attach",
+          },
+          sessionOwner: owner ?? null,
+          memoryMutationTrust: target.liveMemoryMutationTrust,
+        },
+      };
       envelope.verification = { status: "observed", method: "persisted_target_and_machine_owner_state" };
       return finishEnvelope(envelope, true);
     } catch (error) {
       return this.failure(empty, error, "target_lookup");
     }
+  }
+
+  verifyFirmware(projectRoot: string): Promise<OperationEnvelope> {
+    return this.queued("firmware_verify", projectRoot, [], async (envelope, target, runtime) => {
+      assertArtifactBindingsCurrent(target);
+      if (!target.artifact || target.artifactFlashImages.length === 0) {
+        throw executionError(
+          "FIRMWARE_VERIFY_BINDING_REQUIRED",
+          "precondition",
+          "firmware Verify-only requires an Artifact and at least one configured HEX, S-record, or BIN flash image",
+          { writeIssued: false, stateUnknown: false },
+        );
+      }
+      const snapshots: Array<{ configured: FlashImageBinding; snapshot: FlashImageBinding }> = [];
+      const snapshotRoot = await createRepoTempDir("firmware-verify-");
+      try {
+        for (const image of target.artifactFlashImages) {
+          const live = inspectFlashFile(target.projectRoot, image.path, image.baseAddress);
+          if (!sameFlashBinding(live, image)) {
+            throw new TargetStoreError("FLASH_INPUT_CHANGED", "configured firmware Verify-only input changed before the Probe command; no hardware command was issued");
+          }
+          const snapshotPath = join(snapshotRoot, `input-${snapshots.length}${extname(live.path).toLowerCase()}`);
+          copyFileSync(live.path, snapshotPath, constants.COPYFILE_EXCL);
+          const snapshot = inspectFlashFile(target.projectRoot, snapshotPath, live.baseAddress);
+          if (snapshot.sha256 !== live.sha256 || snapshot.size !== live.size || snapshot.format !== live.format) {
+            throw new TargetStoreError("FLASH_INPUT_CHANGED", "firmware Verify-only input changed while its immutable snapshot was created; no hardware command was issued");
+          }
+          chmodSync(snapshotPath, 0o400);
+          snapshots.push({ configured: live, snapshot });
+        }
+        const before = await observe(runtime.probe);
+        envelope.before = observationData(before);
+        requireHaltedCoreAccess(before, "firmware Verify-only");
+        const commands: Array<Record<string, unknown>> = [];
+        let failed: CommandResult | undefined;
+        for (const { configured, snapshot } of snapshots) {
+          const result = await runtime.probe.verifyFirmware(snapshot.path, snapshot.baseAddress);
+          let snapshotAfter: FlashImageBinding;
+          try {
+            snapshotAfter = inspectFlashFile(target.projectRoot, snapshot.path, snapshot.baseAddress);
+          } catch (error) {
+            const updated = await this.transitionArtifact(target, "unverified", "segger_verify_snapshot_lost", false);
+            refreshArtifact(envelope, updated);
+            throw executionError(
+              "FIRMWARE_VERIFY_SNAPSHOT_CHANGED",
+              "verification",
+              error instanceof Error ? error.message : String(error),
+              { writeIssued: false, stateUnknown: false },
+            );
+          }
+          if (!sameFlashBinding(snapshotAfter, snapshot)) {
+            const updated = await this.transitionArtifact(target, "unverified", "segger_verify_snapshot_changed", false);
+            refreshArtifact(envelope, updated);
+            throw executionError(
+              "FIRMWARE_VERIFY_SNAPSHOT_CHANGED",
+              "verification",
+              "immutable firmware Verify-only snapshot changed while SEGGER was reading it",
+              { writeIssued: false, stateUnknown: false },
+            );
+          }
+          commands.push({
+            file: configured,
+            executionSnapshot: { sha256: snapshot.sha256, size: snapshot.size },
+            command: commandData({ ...result, writeIssued: false }),
+          });
+          if (!result.success) {
+            failed = result;
+            break;
+          }
+        }
+        envelope.data = { images: commands, mode: "verify_only", writesIssued: false };
+        for (const { configured } of snapshots) {
+          const current = inspectFlashFile(target.projectRoot, configured.path, configured.baseAddress);
+          if (!sameFlashBinding(current, configured)) {
+            const updated = await this.transitionArtifact(target, "unverified", "segger_verify_input_changed", false);
+            refreshArtifact(envelope, updated);
+            throw executionError(
+              "FLASH_INPUT_CHANGED_DURING_VERIFY",
+              "verification",
+              "configured firmware image changed while SEGGER Verify-only was executing",
+              { writeIssued: false, stateUnknown: false },
+            );
+          }
+        }
+        const after = await observe(runtime.probe);
+        envelope.after = observationData(after);
+        if (before.state !== after.state) {
+          const mismatch = failed?.errorCode === ProbeErrorCode.JLINK_VERIFY_MISMATCH;
+          const updated = await this.transitionArtifact(
+            target,
+            mismatch ? "mismatch" : "unverified",
+            mismatch ? "segger_verify_only_mismatch" : "segger_verify_only_state_changed",
+            false,
+          );
+          refreshArtifact(envelope, updated);
+          throw executionError(
+            "HIDDEN_STATE_CHANGE",
+            "final_observation",
+            `firmware Verify-only changed target state from ${before.state} to ${after.state}`,
+            { writeIssued: false, stateUnknown: after.state === "unknown" },
+          );
+        }
+        let updated = target;
+        if (failed) {
+          const mismatch = failed.errorCode === ProbeErrorCode.JLINK_VERIFY_MISMATCH;
+          updated = await this.transitionArtifact(
+            target,
+            mismatch ? "mismatch" : "unverified",
+            mismatch ? "segger_verify_only_mismatch" : "segger_verify_only_failed",
+            false,
+          );
+          refreshArtifact(envelope, updated);
+        } else {
+          updated = await this.transitionArtifact(target, "verified", "segger_verify_only", false);
+          refreshArtifact(envelope, updated);
+        }
+        if (failed) {
+          envelope.verification = {
+            status: "failed",
+            method: "segger_verify_only",
+            details: { mismatch: failed.errorCode === ProbeErrorCode.JLINK_VERIFY_MISMATCH },
+          };
+          throw executionError(
+            failed.errorCode === ProbeErrorCode.JLINK_VERIFY_MISMATCH ? "FIRMWARE_VERIFY_MISMATCH" : "FIRMWARE_VERIFY_FAILED",
+            "verification",
+            failed.error ?? "SEGGER firmware Verify-only failed",
+            { writeIssued: false, stateUnknown: failed.stateUnknown === true || after.state === "unknown" },
+          );
+        }
+        envelope.verification = { status: "verified", method: "segger_verify_only" };
+        envelope.observedEffects.push("firmware_identity_verified");
+      } finally {
+        let cleanupError: Error | undefined;
+        try { cleanupError = await this.cleanupFlashSnapshot(snapshotRoot); }
+        catch (error) { cleanupError = error instanceof Error ? error : new Error(String(error)); }
+        if (cleanupError) envelope.warnings.push(`Temporary firmware Verify-only snapshot cleanup failed: ${cleanupError.message}`);
+      }
+    });
   }
 
   control(tool: "halt" | "resume" | "reset" | "reset_halt", projectRoot: string): Promise<OperationEnvelope> {
@@ -906,6 +1057,15 @@ export class DirectMcuService {
       return Promise.resolve(this.failure(createOperationEnvelope("write_core_register"), error, "validation"));
     }
     return this.queued("write_core_register", input.projectRoot, ["core_register_write"], async (envelope, _target, runtime) => {
+      if (input.verificationConnection === "independent_session") {
+        envelope.verification = { status: "not_applicable", method: "cross_connection_persistence" };
+        throw executionError(
+          "CORE_REGISTER_CROSS_CONNECTION_PERSISTENCE_NOT_APPLICABLE",
+          "precondition",
+          "the configured Probe backend guarantees exact core-register readback only within one connection; cross-connection GPR persistence is not a supported capability",
+          { writeIssued: false, stateUnknown: false },
+        );
+      }
       const before = await observe(runtime.probe);
       envelope.before = observationData(before);
       requireHaltedCoreAccess(before, "core-register write");
@@ -1331,7 +1491,22 @@ export class DirectMcuService {
           try {
             await operation(envelope, current, runtime);
           } catch (error) {
-            if (options.closePersistentMemorySessionOnError && persistentProbe) {
+            let unusableSessionRetired = false;
+            if (persistentProbe && typeof this.memorySessions?.retireIfUnusableForTarget === "function") {
+              try {
+                unusableSessionRetired = await this.memorySessions?.retireIfUnusableForTarget(current) ?? false;
+              } catch (closeError) {
+                annotateMemorySessionRetirement(envelope, {
+                  status: "close_failed",
+                  error: errorMessage(closeError),
+                });
+                throw combineWithMemorySessionRetirement(error, `close failed: ${errorMessage(closeError)}`);
+              }
+              if (unusableSessionRetired) {
+                annotateMemorySessionRetirement(envelope, { status: "unusable_session_retired" });
+              }
+            }
+            if (options.closePersistentMemorySessionOnError && persistentProbe && !unusableSessionRetired) {
               let memorySessionClose: MemorySessionCloseResult | undefined;
               try {
                 memorySessionClose = await this.memorySessions?.closeForTarget(current);
@@ -1404,10 +1579,18 @@ export class DirectMcuService {
         const completed = this.targets.requireCurrent(current);
         refreshArtifact(envelope, completed);
         if (observationInvalidatesConnectionEvidence(envelope)) {
-          const hardwareEffectIssued = requestedEffects.length > 0 && envelope.observedEffects.length > 0;
-          const updated = await this.transitionArtifact(completed, "unverified", "probe_connection_identity_lost", hardwareEffectIssued);
+          const updated = await this.targets.setMemoryMutationTrust(
+            completed.projectRoot,
+            "unverified",
+            "probe_connection_identity_lost",
+            {
+              targetGeneration: completed.generation,
+              probeSerial: completed.probeSerial,
+              artifactGeneration: completed.artifact?.generation,
+            },
+          );
           refreshArtifact(envelope, updated);
-          envelope.warnings.push("Live Artifact verification was invalidated because a state observation lost Probe/Target identity.");
+          envelope.warnings.push("Memory mutation trust was invalidated because a state observation lost Probe/Target identity; firmware identity was preserved.");
         }
       }, localMemoryOwner ? {
         allowedOwnerKinds: ["memory"],
@@ -1423,20 +1606,20 @@ export class DirectMcuService {
       if (activeTarget && (connectionEvidenceLost || postOperationObservationFailed)) {
         try {
           const source = connectionEvidenceLost ? "probe_connection_identity_lost" : "post_operation_observation_failed";
-          const updated = await this.targets.setArtifactMatch(activeTarget.projectRoot, "unverified", source, {
+          const updated = await this.targets.setMemoryMutationTrust(activeTarget.projectRoot, "unverified", source, {
             targetGeneration: activeTarget.generation,
             probeSerial: activeTarget.probeSerial,
             artifactGeneration: activeTarget.artifact?.generation,
           });
           refreshArtifact(envelope, updated);
           envelope.warnings.push(connectionEvidenceLost
-            ? "Live Artifact verification was invalidated because Probe/Target connection identity was lost."
-            : "Live Artifact verification was invalidated because the final observation failed after a hardware effect was issued.");
+            ? "Memory mutation trust was invalidated because Probe/Target connection identity was lost; firmware identity was preserved."
+            : "Memory mutation trust was invalidated because the final observation failed after a hardware effect was issued; firmware identity was preserved.");
         } catch {
           // The original post-write failure is already stateUnknown=true. Do
           // not replace it with a persistence error or imply that verification
           // evidence survived.
-          envelope.warnings.push("Artifact invalidation could not be persisted after an uncertain hardware outcome.");
+          envelope.warnings.push("Memory mutation trust invalidation could not be persisted after an uncertain hardware outcome.");
         }
       }
       return this.failure(envelope, error, activeMetadata ? "execution" : "queue");
@@ -2244,7 +2427,7 @@ async function cortexMExceptionFrame(
   stacked?: Record<string, string>;
   reason?: string;
 }> {
-  const lr = registerNumber(registers.LR);
+  const lr = registerNumber(registers.LR ?? registers.R14);
   if (lr === undefined || (lr >>> 8) !== 0x00ffffff || (lr & 1) === 0) {
     return { status: "unverified", reason: "LR does not provide a provable Cortex-M EXC_RETURN value" };
   }
@@ -2350,8 +2533,12 @@ function refreshArtifact(envelope: OperationEnvelope, target: StoredTarget): voi
     generation: target.artifact.generation,
     path: target.artifact.path,
     match: target.liveArtifactMatch.status,
+    firmwareIdentity: target.liveArtifactMatch.status,
+    mutationTrust: target.liveMemoryMutationTrust.status,
     evidenceSource: target.liveArtifactMatch.source,
     evidenceTimestamp: target.liveArtifactMatch.timestamp,
+    mutationTrustSource: target.liveMemoryMutationTrust.source,
+    mutationTrustTimestamp: target.liveMemoryMutationTrust.timestamp,
   } : null;
 }
 

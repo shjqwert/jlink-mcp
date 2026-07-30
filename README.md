@@ -87,7 +87,7 @@ machine-specific working directory or Target defaults.
 
 ## Canonical Tool List
 
-The standalone server registers exactly these 37 direct tools:
+The standalone server registers exactly these 39 direct tools:
 
 ```text
 list_devices, target_configure, target_status,
@@ -97,7 +97,7 @@ target_control, flash, erase,
 hss_start, hss_status, hss_stop, hss_recover,
 debug_sequence_execute,
 capture_list, capture_summary, capture_series, capture_event_window, capture_export_csv,
-gdb_open, gdb_command, gdb_wait, gdb_backtrace, gdb_close,
+gdb_open, gdb_command, gdb_breakpoint_list, gdb_breakpoint_delete, gdb_wait, gdb_backtrace, gdb_close,
 rtt_open, rtt_read, rtt_search, rtt_clear, rtt_close,
 diagnose_crash, probe_command
 ```

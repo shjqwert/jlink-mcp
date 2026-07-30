@@ -35,6 +35,22 @@ export function registerSessionTools(register: RegisterEnvelopeTool, services: S
     Number(input.timeoutMs),
     Boolean(input.userConfirmed),
   ));
+  register("gdb_breakpoint_list", {
+    ...projectRootInput,
+    timeoutMs: z.number().int().min(1).max(120_000).default(15_000),
+  }, (input) => services.sessions.gdbBreakpointList(
+    String(input.projectRoot),
+    Number(input.timeoutMs),
+  ));
+  register("gdb_breakpoint_delete", {
+    ...projectRootInput,
+    breakpointId: z.number().int().min(1),
+    timeoutMs: z.number().int().min(1).max(120_000).default(15_000),
+  }, (input) => services.sessions.gdbBreakpointDelete(
+    String(input.projectRoot),
+    Number(input.breakpointId),
+    Number(input.timeoutMs),
+  ));
   register("gdb_wait", {
     ...projectRootInput,
     timeoutMs: z.number().int().min(1).max(120_000).default(30_000),
@@ -107,14 +123,15 @@ export async function gdbOpen(
     target.artifact.path,
     restoreRunningStateAfterAttach,
   );
+  const clientData = client.data;
   const envelope = relabelEnvelope(client, "gdb_open");
   envelope.requestedEffects = distinct([...server.requestedEffects, ...client.requestedEffects]);
   envelope.observedEffects = distinct([...server.observedEffects, ...client.observedEffects]);
   envelope.before ??= server.before;
-  envelope.data = { server: server.data, client: client.data };
+  envelope.data = { server: server.data, client: clientData };
   if (!client.ok) {
     const cleanup = await services.sessions.gdbServerStop(target.projectRoot);
-    envelope.data = { server: server.data, client: client.data, cleanup };
+    envelope.data = { server: server.data, client: clientData, cleanup };
     envelope.requestedEffects = distinct([...envelope.requestedEffects, ...cleanup.requestedEffects]);
     envelope.observedEffects = distinct([...envelope.observedEffects, ...cleanup.observedEffects]);
     if (cleanup.ok) {

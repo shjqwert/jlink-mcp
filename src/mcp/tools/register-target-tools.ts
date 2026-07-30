@@ -66,7 +66,7 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
     projectRoot: z.string().min(1),
     device: z.string().min(1),
     gdbDevice: z.string().min(1).optional().describe(
-      "Explicit non-invasive J-Link device/profile used only by GDB Server attach. Keep device as the exact MCU for Flash/Erase; use a validated core-only profile when the exact-device script has attach side effects.",
+      "Explicit non-invasive J-Link device/profile used by GDB Server attach and read-only core-register snapshots. Keep device as the exact MCU for Flash/Erase; use a validated core-only profile when the exact-device script has attach side effects.",
     ),
     probeSerial: z.string().min(1),
     interface: z.enum(["SWD", "JTAG"]),
@@ -107,8 +107,14 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
     }
     return result;
   });
-  register("target_status", projectRootInput,
-    (input) => services.direct.status(String(input.projectRoot)));
+  register("target_status", {
+    ...projectRootInput,
+    firmwareVerification: z.enum(["none", "segger_verify_only"])
+      .describe("Use segger_verify_only to compare every configured flash image without downloading, erasing, programming, or changing memory.")
+      .default("none"),
+  }, async (input) => input.firmwareVerification === "segger_verify_only"
+    ? relabelEnvelope(await services.direct.verifyFirmware(String(input.projectRoot)), "target_status")
+    : services.direct.status(String(input.projectRoot)));
 
   register("artifact_probe", {
     ...projectRootInput,
@@ -175,16 +181,25 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
     ),
     value: uint32.optional(),
     verify: z.boolean().default(false),
+    verificationConnection: z.enum(["same_session", "independent_session"])
+      .describe("same_session verifies the write in one Probe transaction; independent_session requires an explicit backend guarantee for cross-connection GPR persistence.")
+      .default("same_session"),
   }, async (input) => {
     const projectRoot = String(input.projectRoot);
     if (input.action === "read") {
-      if (typeof input.name !== "string" || input.value !== undefined || input.verify !== false) {
+      if (
+        typeof input.name !== "string" || input.value !== undefined || input.verify !== false
+        || input.verificationConnection !== "same_session"
+      ) {
         return actionInputFailure("core_register_access", "action=read requires name and accepts no value or verify options");
       }
       return relabelEnvelope(await services.direct.readCoreRegister(projectRoot, input.name), "core_register_access");
     }
     if (input.action === "read_all") {
-      if (input.name !== undefined || input.value !== undefined || input.verify !== false) {
+      if (
+        input.name !== undefined || input.value !== undefined || input.verify !== false
+        || input.verificationConnection !== "same_session"
+      ) {
         return actionInputFailure("core_register_access", "action=read_all accepts no name, value, or verify options");
       }
       return relabelEnvelope(await services.direct.readCoreRegisters(projectRoot), "core_register_access");
@@ -197,6 +212,7 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
       name: input.name,
       value: input.value,
       verify: Boolean(input.verify),
+      verificationConnection: input.verificationConnection as CoreRegisterWriteInput["verificationConnection"],
     } as CoreRegisterWriteInput), "core_register_access");
   });
   register("peripheral_register_access", {

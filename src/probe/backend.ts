@@ -31,6 +31,7 @@ export enum ProbeErrorCode {
   HIDDEN_STATE_CHANGE = "HIDDEN_STATE_CHANGE",
   PROBE_IDENTITY_MISMATCH = "PROBE_IDENTITY_MISMATCH",
   JLINK_COMMAND_FAILED = "JLINK_COMMAND_FAILED",
+  JLINK_VERIFY_MISMATCH = "JLINK_VERIFY_MISMATCH",
 }
 
 export interface CommandResult {
@@ -62,6 +63,8 @@ export interface ProbeCoreRegisterWriteResult {
   readback?: CommandResult;
 }
 
+export type CoreRegisterPersistenceCapability = "same_connection_only";
+
 export interface MemoryDumpLine {
   address: string;
   hex: string;
@@ -75,6 +78,15 @@ export interface GDBServerInfo {
   gdbPort: number;
   /** Port for RTT telnet access (J-Link specific, -1 if not supported) */
   rttTelnetPort: number;
+}
+
+export interface GDBServerExitObservation {
+  found: boolean;
+  exited: boolean;
+  clean: boolean;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  error?: string;
 }
 
 export interface ProbeStatus {
@@ -376,6 +388,22 @@ export abstract class ProbeBackend {
     return undefined;
   }
 
+  getCoreRegisterPersistenceCapability(): CoreRegisterPersistenceCapability {
+    return "same_connection_only";
+  }
+
+  async verifyFirmware(_filePath: string, _baseAddress?: number): Promise<CommandResult> {
+    return {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "firmware Verify-only is not supported by this backend",
+      errorCode: ProbeErrorCode.INVALID_ARGUMENT,
+      writeIssued: false,
+      stateUnknown: false,
+    };
+  }
+
   // ── Flash ────────────────────────────────────────────────────────
 
   abstract flash(filePath: string, baseAddress?: number): Promise<CommandResult>;
@@ -392,6 +420,15 @@ export abstract class ProbeBackend {
 
   abstract startGDBServer(): Promise<{ success: boolean; message: string }>;
   abstract stopGDBServer(): Promise<{ success: boolean; message: string }>;
+  async waitForGDBServerExit(_timeoutMs = 3000): Promise<GDBServerExitObservation> {
+    return {
+      found: false,
+      exited: !this.isGDBServerRunning(),
+      clean: false,
+      exitCode: null,
+      signal: null,
+    };
+  }
   abstract isGDBServerRunning(): boolean;
   abstract getGDBServerStatus(): GDBServerInfo;
   abstract getGDBServerOutput(lines?: number): string[];

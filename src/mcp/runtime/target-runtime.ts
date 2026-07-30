@@ -1,5 +1,5 @@
 import { dirname } from "node:path";
-import { GDBClient, type GDBTargetExecutionState } from "../../gdb/gdb-client";
+import { GDBClient, type GDBResponse, type GDBTargetExecutionState } from "../../gdb/gdb-client";
 import { createProbeBackend } from "../../probe/factory";
 import type { ProbeBackend } from "../../probe/backend";
 import { RTTClient } from "../../rtt/rtt-client";
@@ -18,6 +18,22 @@ export interface TargetRuntime {
   gdbOwnerExitSubscription?: () => void;
   gdbServerStopping?: boolean;
   gdbServerTargetExecutionState?: GDBTargetExecutionState;
+  gdbServerNaturalExitRequired?: boolean;
+  gdbManagedBreakpointLifecycle?: {
+    attachInitialState: "running";
+    lastManagedResumeState: "running";
+    stopReason?: string;
+    breakpointDeleteDispatched?: boolean;
+    emptyBreakpointListObserved?: boolean;
+  };
+  gdbFlashBreakpointCleanupRequired?: boolean;
+  gdbFlashBreakpointCleanupEvidence?: GDBResponse;
+  gdbFlashBreakpointPreventionEvidence?: {
+    response: GDBResponse;
+    serverProcessId: number;
+    ownerToken: string;
+    targetGeneration: string;
+  };
   gdbClientExitSubscription?: () => void;
   onGdbServerExit(listener: () => void): () => void;
 }
@@ -97,6 +113,7 @@ export class TargetRuntimeRegistry {
 
   canSafelyDispose(runtime: TargetRuntime): boolean {
     if (!runtime.probe.isGDBServerRunning()) return true;
+    if (runtime.gdbFlashBreakpointCleanupRequired && !runtime.gdbFlashBreakpointCleanupEvidence) return false;
     const state = runtime.gdb.isConnected()
       ? runtime.gdb.getTargetExecutionState()
       : runtime.gdbServerTargetExecutionState ?? "unknown";
@@ -105,9 +122,17 @@ export class TargetRuntimeRegistry {
 
   private async disposeRuntime(runtime: TargetRuntime): Promise<boolean> {
     if (!this.canSafelyDispose(runtime)) return false;
+    const clientWasConnected = runtime.gdb.isConnected();
+    if (clientWasConnected) runtime.gdbServerNaturalExitRequired = true;
     runtime.rtt.disconnect();
     await runtime.gdb.disconnect();
-    await runtime.processManager.killAndWait("jlink-gdb-server");
+    if (runtime.gdbServerNaturalExitRequired) {
+      const serverExit = await runtime.probe.waitForGDBServerExit(3_000);
+      if (!serverExit.clean) return false;
+      runtime.gdbServerNaturalExitRequired = false;
+    }
+    const stopped = await runtime.probe.stopGDBServer();
+    if (!stopped.success) return false;
     runtime.gdbOwnerExitSubscription?.();
     runtime.gdbOwnerExitSubscription = undefined;
     runtime.gdbClientExitSubscription?.();

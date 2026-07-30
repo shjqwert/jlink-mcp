@@ -425,6 +425,32 @@ test("TargetStore keeps a durable unverified overlay when Artifact persistence f
   assert.equal(reloaded.liveArtifactMatch.source, "artifact_state_persistence_incomplete");
 });
 
+test("TargetStore keeps a durable unverified mutation-trust overlay when persistence fails", async (context) => {
+  const root = testDirectory(context, "target-store-mutation-dirty-overlay");
+  const projectRoot = join(root, "project");
+  const stateRoot = join(root, "state");
+  mkdirSync(projectRoot, { recursive: true });
+  const store = new TargetStore(stateRoot);
+  const target = await store.configure({
+    projectRoot,
+    device: "T",
+    probeSerial: "4",
+    interface: "SWD",
+    speed: 1000,
+  });
+  const writable = store as unknown as { writeDocument(document: unknown): void };
+  writable.writeDocument = () => { throw new Error("simulated mutation trust publication failure"); };
+
+  await assert.rejects(store.setMemoryMutationTrust(projectRoot, "verified", "fixture", {
+    targetGeneration: target.generation,
+    probeSerial: target.probeSerial,
+  }));
+
+  const reloaded = new TargetStore(stateRoot).require(projectRoot);
+  assert.equal(reloaded.liveMemoryMutationTrust.status, "unverified");
+  assert.equal(reloaded.liveMemoryMutationTrust.source, "mutation_trust_persistence_incomplete");
+});
+
 function testDirectory(context: TestContext, name: string): string {
   const root = join(process.env.TEMP ?? process.cwd(), `jlink-mcp-${name}-${process.pid}-${Date.now()}`);
   mkdirSync(root, { recursive: true });

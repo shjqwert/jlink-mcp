@@ -23,7 +23,7 @@ test("gdb_open rejects an implicit exact-device attach before starting a Server"
 test("gdb_open preserves an attach fault while closing the same-process client and Server", async () => {
   let stops = 0;
   const clientFailure = failEnvelope(createOperationEnvelope("gdb_connect"), {
-    code: "TARGET_FAULTED_DURING_GDB_ATTACH",
+    code: "TARGET_FAULT_OBSERVED_AT_FIRST_GDB_FRAME",
     stage: "gdb_connect",
     message: "fixture HardFault_Handler",
     retryable: false,
@@ -31,6 +31,12 @@ test("gdb_open preserves an attach fault while closing the same-process client a
     stateUnknown: false,
   });
   clientFailure.observedEffects.push("gdb_client_connected", "target_fault_observed");
+  clientFailure.data = {
+    serverOutputAtClientResponse: [
+      "Waiting for GDB connection...",
+      "Target halted: HardFault_Handler",
+    ],
+  };
   const stopped = finishEnvelope(createOperationEnvelope("gdb_server_stop"), true);
   stopped.observedEffects.push("gdb_client_disconnected", "gdb_server_stopped", "gdb_owner_released");
 
@@ -43,15 +49,26 @@ test("gdb_open preserves an attach fault while closing the same-process client a
     },
   }), "D:\\fixture", false);
 
-  assert.equal(result.error?.code, "TARGET_FAULTED_DURING_GDB_ATTACH");
+  assert.equal(result.error?.code, "TARGET_FAULT_OBSERVED_AT_FIRST_GDB_FRAME");
   assert.equal(stops, 1);
   assert.match(result.warnings.join("\n"), /managed Server were closed/i);
   assert.ok(result.observedEffects.includes("gdb_owner_released"));
+  const data = result.data as {
+    client: {
+      serverOutputAtClientResponse: string[];
+      client?: unknown;
+    };
+  };
+  assert.deepEqual(data.client.serverOutputAtClientResponse, [
+    "Waiting for GDB connection...",
+    "Target halted: HardFault_Handler",
+  ]);
+  assert.equal(data.client.client, undefined);
 });
 
 test("gdb_open preserves the attach fault but promotes failed cleanup state uncertainty", async () => {
   const clientFailure = failEnvelope(createOperationEnvelope("gdb_connect"), {
-    code: "TARGET_FAULTED_DURING_GDB_ATTACH",
+    code: "TARGET_FAULT_OBSERVED_AT_FIRST_GDB_FRAME",
     stage: "gdb_connect",
     message: "fixture HardFault_Handler",
     retryable: false,
@@ -75,7 +92,7 @@ test("gdb_open preserves the attach fault but promotes failed cleanup state unce
     gdbServerStop: async () => cleanupFailure,
   }), "D:\\fixture", false);
 
-  assert.equal(result.error?.code, "TARGET_FAULTED_DURING_GDB_ATTACH");
+  assert.equal(result.error?.code, "TARGET_FAULT_OBSERVED_AT_FIRST_GDB_FRAME");
   assert.equal(result.error?.stateUnknown, true);
   assert.ok(result.requestedEffects.includes("gdb_server_stop"));
   assert.ok(result.observedEffects.includes("gdb_client_disconnect_failed"));

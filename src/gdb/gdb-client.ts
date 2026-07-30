@@ -18,6 +18,10 @@ export interface GDBResponse {
   exitError?: string;
   /** Target state explicitly reported by this GDB/MI exchange. */
   observedTargetExecutionState?: GDBTargetExecutionState;
+  /** Target state retained only by a fixed typed command whose successful semantics cannot change execution state. */
+  preservedTargetExecutionState?: Exclude<GDBTargetExecutionState, "unknown">;
+  /** Whether this typed request reached the GDB stdin dispatch boundary. */
+  commandDispatched?: boolean;
 }
 
 export type GDBTargetExecutionState = "running" | "halted" | "unknown";
@@ -52,6 +56,8 @@ export class GDBClient {
   private outputBuffer = "";
   private pendingResolve: ((response: string, processExited: boolean) => void) | null = null;
   private pendingRequiresPrompt = false;
+  private pendingAcceptsAsyncStop = false;
+  private commandStreamTainted = false;
   private stopEvent: string | null = null;
   private history: string[] = [];
   private maxHistory = 200;
@@ -63,6 +69,8 @@ export class GDBClient {
   private loadedSymbolFile: string | null = null;
   private connectedEndpoint: string | null = null;
   private targetExecutionState: GDBTargetExecutionState = "unknown";
+  private nextMiToken = 1;
+  private activeExecutionToken: string | null = null;
   private lastExit: { code: number | null; signal: NodeJS.Signals | null; error?: string } | undefined;
   private readonly spawnProcess: GdbSpawn;
   private readonly unexpectedExitListeners = new Set<(event: GDBUnexpectedExit) => void>();
@@ -119,6 +127,9 @@ export class GDBClient {
       this.outputBuffer = "";
       this.stopEvent = null;
       this.lastExit = undefined;
+      this.commandStreamTainted = false;
+      this.nextMiToken = 1;
+      this.activeExecutionToken = null;
 
       proc.stdout?.on("data", (data: Buffer) => {
         this.handleOutput(data.toString());
@@ -143,6 +154,7 @@ export class GDBClient {
           const pending = this.pendingResolve;
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
           pending?.(this.outputBuffer, true);
           if (pending) return;
           if (!terminating) finish({ success: false, output: "", error: `Failed to start GDB: ${err.message}. Is ${this.gdbPath} installed?`, ...this.exitFacts() });
@@ -154,6 +166,7 @@ export class GDBClient {
           const pendingOutput = this.outputBuffer;
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
           this.lastExit = { code: proc.exitCode, signal: proc.signalCode, error: err.message };
           if (wasConnected) this.notifyUnexpectedExit(proc);
           void this.terminateGdbProcess().then(() => {
@@ -177,6 +190,7 @@ export class GDBClient {
         const pending = this.pendingResolve;
         this.pendingResolve = null;
         this.pendingRequiresPrompt = false;
+        this.pendingAcceptsAsyncStop = false;
         pending?.(this.outputBuffer, true);
         if (pending) return;
         if (!terminating && !settled) finish({ success: false, output: this.cleanMI(this.outputBuffer), rawOutput: this.outputBuffer, error: `GDB exited before connection completed (code ${code})`, ...this.exitFacts() });
@@ -259,16 +273,91 @@ export class GDBClient {
     if (!this.proc || !this.connected) {
       return { success: false, output: "", error: "GDB is not connected", code: "GDB_NOT_CONNECTED" };
     }
-    const result = await this.commandInternal(cmd, timeout);
+    let commandDispatched = false;
+    const result = await this.commandInternal(cmd, timeout, () => { commandDispatched = true; });
     if (!result.observedTargetExecutionState) this.targetExecutionState = "unknown";
-    return result;
+    return {
+      ...result,
+      commandDispatched: commandDispatched || result.commandDispatched === true,
+    };
   }
 
-  private async commandInternal(cmd: string, timeout: number): Promise<GDBResponse> {
+  async listBreakpoints(timeout: number = 15000): Promise<GDBResponse> {
+    return this.commandPreservingKnownState("info breakpoints", timeout);
+  }
+
+  async deleteBreakpoint(breakpointId: number, timeout: number = 15000): Promise<GDBResponse> {
+    if (!Number.isSafeInteger(breakpointId) || breakpointId < 1) {
+      return { success: false, output: "", error: "breakpointId must be a positive integer", code: "GDB_INVALID_BREAKPOINT_ID" };
+    }
+    return this.commandPreservingKnownState(`-break-delete ${breakpointId}`, timeout, "halted");
+  }
+
+  async clearAllBreakpoints(timeout: number = 15000): Promise<GDBResponse> {
+    return this.commandPreservingKnownState(
+      '-interpreter-exec console "monitor clrbp"',
+      timeout,
+      "halted",
+    );
+  }
+
+  async disableFlashBreakpoints(timeout: number = 15000): Promise<GDBResponse> {
+    const result = await this.commandPreservingKnownState(
+      '-interpreter-exec console "monitor flash breakpoints = 0"',
+      timeout,
+    );
+    if (!result.success || /Flash breakpoints disabled/i.test(result.output)) return result;
+    return {
+      ...result,
+      success: false,
+      error: "J-Link GDB Server did not confirm that Flash breakpoints were disabled",
+      code: "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED",
+    };
+  }
+
+  private async commandPreservingKnownState(
+    command: string,
+    timeout: number,
+    requiredState?: Exclude<GDBTargetExecutionState, "unknown">,
+  ): Promise<GDBResponse> {
+    const stateBefore = this.targetExecutionState;
+    if (stateBefore === "unknown" || (requiredState && stateBefore !== requiredState)) {
+      return {
+        success: false,
+        output: "",
+        error: requiredState
+          ? `typed GDB command requires target state ${requiredState}`
+          : "typed GDB command requires a known target execution state",
+        code: stateBefore === "unknown" ? "TARGET_STATE_UNKNOWN" : "HALT_REQUIRED",
+        observedTargetExecutionState: stateBefore,
+        commandDispatched: false,
+      };
+    }
+    let commandDispatched = false;
+    const result = await this.commandInternal(command, timeout, () => { commandDispatched = true; });
+    const typedResult = { ...result, commandDispatched };
+    if (result.observedTargetExecutionState) return typedResult;
+    if (!result.success) {
+      this.targetExecutionState = "unknown";
+      return typedResult;
+    }
+    return { ...typedResult, preservedTargetExecutionState: stateBefore };
+  }
+
+  private async commandInternal(cmd: string, timeout: number, onDispatch?: () => void): Promise<GDBResponse> {
     const blocked = this.hardwareGuard?.();
     if (blocked) return { success: false, output: "", error: blocked };
     if (!this.proc || !this.connected) {
       return { success: false, output: "", error: "GDB not connected. Use gdb_connect first." };
+    }
+    if (this.commandStreamTainted) {
+      return {
+        success: false,
+        output: "",
+        error: "The previous MI transaction ended with an empty response window; explicit disconnect cleanup is required before another command",
+        code: "GDB_CLEANUP_REQUIRED",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
     }
 
     // Throttle rapid commands to avoid overwhelming slow adapters (e.g., ST-Link V2.1)
@@ -288,8 +377,11 @@ export class GDBClient {
     if (this.targetExecutionState === "running" && isMiBreakpointInsert(dispatchedCommand)) {
       return this.insertBreakpointWhileRunning(dispatchedCommand, timeout);
     }
+    const executionToken = dispatchedCommand === "-exec-continue --all" ? this.allocateMiToken() : undefined;
+    if (isRunCommand && !executionToken) this.activeExecutionToken = null;
     try {
-      exchange = await this.sendCommand(dispatchedCommand, timeout);
+      onDispatch?.();
+      exchange = await this.sendCommand(dispatchedCommand, timeout, true, false, executionToken);
     } catch (error) {
       await this.terminateGdbProcess();
       return { success: false, output: "", rawOutput: this.outputBuffer, error: error instanceof Error ? error.message : String(error), code: "GDB_IO_FAILED", ...this.exitFacts() };
@@ -333,6 +425,9 @@ export class GDBClient {
     const errorRecord = findMiResult(rawOutput, "error");
     const errorMessage = errorRecord?.match(/(?:^|,)msg="((?:\\.|[^"])*)"/)?.[1];
     const success = !errorRecord;
+    if (success && executionToken && observedTargetExecutionState === "running") {
+      this.activeExecutionToken = executionToken;
+    }
 
     return {
       success,
@@ -349,6 +444,7 @@ export class GDBClient {
     const deadline = Date.now() + timeout;
     const remaining = () => Math.max(1, deadline - Date.now());
     const rawParts: string[] = [];
+    let breakpointCommandDispatched = false;
     const timedOut = async (phase: string, exchange: GDBCommandExchange): Promise<GDBResponse> => {
       rawParts.push(exchange.output);
       await this.terminateGdbProcess();
@@ -377,9 +473,33 @@ export class GDBClient {
       };
     };
 
+    const preInterrupt = await this.drainPendingOutputBeforeInterrupt(remaining());
+    if (preInterrupt.processExited) return processExited("pre-interrupt drain", preInterrupt);
+    if (preInterrupt.timedOut) return timedOut("pre-interrupt drain", preInterrupt);
+    rawParts.push(preInterrupt.output);
+    if (
+      this.targetExecutionState !== "running"
+      || hasMiAsyncRecord(preInterrupt.output, "stopped")
+    ) {
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        commandDispatched: breakpointCommandDispatched,
+        stopReason: this.stopEvent ?? undefined,
+        error: "target stopped before exec-interrupt was dispatched; breakpoint insertion and automatic resume were refused",
+        code: "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
+    }
+
+    const interruptedExecutionToken = this.activeExecutionToken;
+    const interruptToken = this.allocateMiToken();
     let interrupt: GDBCommandExchange;
     try {
-      interrupt = await this.sendCommand("-exec-interrupt --all", remaining());
+      interrupt = await this.sendCommand("-exec-interrupt --all", remaining(), true, true, interruptToken);
     } catch (error) {
       await this.terminateGdbProcess();
       return {
@@ -393,6 +513,24 @@ export class GDBClient {
       };
     }
     if (interrupt.processExited) return processExited("interrupt", interrupt);
+    if (
+      interrupt.timedOut
+      && interrupt.output.trim().length === 0
+      && this.proc
+      && this.connected
+      && this.targetExecutionState === "running"
+    ) {
+      this.commandStreamTainted = true;
+      return {
+        success: false,
+        output: "",
+        rawOutput: "",
+        dispatchedCommand,
+        error: `GDB produced no MI result, prompt, or async stop for exec-interrupt within ${timeout}ms; the live client and last observed running state were preserved for explicit cleanup`,
+        code: "GDB_INTERRUPT_EMPTY_WINDOW",
+        observedTargetExecutionState: "running",
+      };
+    }
     if (interrupt.timedOut) return timedOut("interrupt", interrupt);
     rawParts.push(interrupt.output);
     const interruptError = findMiResult(interrupt.output, "error");
@@ -403,6 +541,7 @@ export class GDBClient {
         output: this.cleanMI(rawOutput),
         rawOutput,
         dispatchedCommand,
+        commandDispatched: breakpointCommandDispatched,
         error: miErrorMessage(interruptError),
         code: "GDB_BREAKPOINT_TRANSACTION_INTERRUPT_FAILED",
         observedTargetExecutionState: "running",
@@ -414,7 +553,10 @@ export class GDBClient {
     if (stopped.processExited) return processExited("interrupt observation", { ...stopped, output: "" });
     if (stopped.timedOut) return timedOut("interrupt observation", { ...stopped, output: "" });
     const interruptEvidence = rawParts.join("");
-    if (!hasIntentionalInterruptStop(interruptEvidence)) {
+    if (
+      !hasIntentionalInterruptStop(interruptEvidence)
+      && !hasIsolatedRemoteInterruptStop(interruptEvidence, interruptedExecutionToken, interruptToken)
+    ) {
       return {
         success: false,
         output: this.cleanMI(interruptEvidence),
@@ -429,6 +571,7 @@ export class GDBClient {
 
     let breakpoint: GDBCommandExchange;
     try {
+      breakpointCommandDispatched = true;
       breakpoint = await this.sendCommand(dispatchedCommand, remaining());
     } catch (error) {
       await this.terminateGdbProcess();
@@ -438,6 +581,7 @@ export class GDBClient {
         output: this.cleanMI(rawOutput),
         rawOutput,
         dispatchedCommand,
+        commandDispatched: true,
         error: error instanceof Error ? error.message : String(error),
         code: "GDB_IO_FAILED",
         ...this.exitFacts(),
@@ -449,9 +593,10 @@ export class GDBClient {
     const breakpointError = findMiResult(breakpoint.output, "error");
     const breakpointDone = hasMiResult(breakpoint.output, "done");
 
+    const resumeToken = this.allocateMiToken();
     let resume: GDBCommandExchange;
     try {
-      resume = await this.sendCommand("-exec-continue --all", remaining());
+      resume = await this.sendCommand("-exec-continue --all", remaining(), true, false, resumeToken);
     } catch (error) {
       await this.terminateGdbProcess();
       const rawOutput = rawParts.join("");
@@ -483,11 +628,13 @@ export class GDBClient {
         observedTargetExecutionState: this.targetExecutionState,
       };
     }
+    this.activeExecutionToken = resumeToken;
     return {
       success: !breakpointError && breakpointDone,
       output: this.cleanMI(rawOutput),
       rawOutput,
       dispatchedCommand,
+      commandDispatched: true,
       error: breakpointError
         ? miErrorMessage(breakpointError)
         : breakpointDone ? undefined : "GDB did not return a done result for breakpoint insertion",
@@ -498,9 +645,44 @@ export class GDBClient {
     };
   }
 
+  private drainPendingOutputBeforeInterrupt(timeout: number): Promise<GDBCommandExchange> {
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const quietWindow = Math.min(20, Math.max(1, Math.floor(timeout / 4)));
+      let quietSince = started;
+      let lastOutput = this.outputBuffer;
+      const finish = (timedOut: boolean, processExited = false) => {
+        const output = this.outputBuffer;
+        this.outputBuffer = "";
+        resolve({ output, timedOut, processExited });
+      };
+      const check = () => {
+        if (!this.proc || !this.connected) {
+          finish(false, true);
+          return;
+        }
+        if (this.outputBuffer !== lastOutput) {
+          lastOutput = this.outputBuffer;
+          quietSince = Date.now();
+        }
+        if (Date.now() - quietSince >= quietWindow) {
+          finish(false);
+          return;
+        }
+        if (Date.now() - started >= timeout) {
+          finish(true);
+          return;
+        }
+        setTimeout(check, 2);
+      };
+      check();
+    });
+  }
+
   private waitForInterruptStop(interruptOutput: string, timeout: number): Promise<GDBCommandExchange> {
     return new Promise((resolve) => {
       const started = Date.now();
+      let asyncStopObservedAt: number | undefined;
       const finish = (timedOut: boolean, processExited = false) => {
         const output = this.outputBuffer;
         this.outputBuffer = "";
@@ -516,9 +698,21 @@ export class GDBClient {
           return;
         }
         const completeOutput = interruptOutput + this.outputBuffer;
-        if ((this.stopEvent || this.targetExecutionState === "halted") && hasMiPromptAfterStop(completeOutput)) {
-          finish(false);
-          return;
+        if (this.stopEvent || this.targetExecutionState === "halted") {
+          if (hasMiPromptAfterStop(completeOutput)) {
+            finish(false);
+            return;
+          }
+          if (hasMiAsyncRecord(completeOutput, "stopped")) {
+            asyncStopObservedAt ??= Date.now();
+            // Some MI transports omit the prompt after a valid async stop.
+            // Keep a short drain window so a delayed prompt cannot satisfy the
+            // next transaction and steal its real result record.
+            if (Date.now() - asyncStopObservedAt >= Math.min(20, timeout)) {
+              finish(false);
+              return;
+            }
+          }
         }
         if (Date.now() - started >= timeout) {
           finish(true);
@@ -647,10 +841,12 @@ export class GDBClient {
     const pending = this.pendingResolve;
     this.pendingResolve = null;
     this.pendingRequiresPrompt = false;
+    this.pendingAcceptsAsyncStop = false;
+    this.commandStreamTainted = false;
     if (pending) pending(this.outputBuffer, true);
     if (proc) {
       await terminateChildProcess(proc, {
-        gracefulRequest: () => { proc.stdin?.write("quit\n"); },
+        gracefulRequest: () => { proc.stdin?.write("-gdb-exit\n"); },
         gracefulWaitMs: 1_000,
         terminateWaitMs: 1_000,
       });
@@ -668,10 +864,17 @@ export class GDBClient {
     this.updateTargetExecutionState(this.outputBuffer);
 
     // If someone is waiting for a response, check if we have a prompt
-    if (this.pendingResolve && (this.pendingRequiresPrompt ? hasMiPrompt(this.outputBuffer) : this.isResponseComplete())) {
+    if (
+      this.pendingResolve
+      && (
+        (this.pendingAcceptsAsyncStop && hasMiAsyncRecord(this.outputBuffer, "stopped"))
+        || (this.pendingRequiresPrompt ? hasMiPrompt(this.outputBuffer) : this.isResponseComplete())
+      )
+    ) {
       const resolve = this.pendingResolve;
       this.pendingResolve = null;
       this.pendingRequiresPrompt = false;
+      this.pendingAcceptsAsyncStop = false;
       const response = this.outputBuffer;
       this.outputBuffer = "";
       resolve(response, false);
@@ -705,7 +908,19 @@ export class GDBClient {
     return parts.join(" ");
   }
 
-  private sendCommand(cmd: string, timeout: number, requirePrompt = true): Promise<GDBCommandExchange> {
+  private allocateMiToken(): string {
+    const token = String(this.nextMiToken);
+    this.nextMiToken += 1;
+    return token;
+  }
+
+  private sendCommand(
+    cmd: string,
+    timeout: number,
+    requirePrompt = true,
+    acceptAsyncStop = false,
+    miToken?: string,
+  ): Promise<GDBCommandExchange> {
     return new Promise((resolve, reject) => {
       if (!this.proc?.stdin) {
         reject("GDB process not available");
@@ -722,12 +937,14 @@ export class GDBClient {
         if (this.pendingResolve === onResponse) {
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
         }
         resolve({ output, timedOut, processExited });
       };
       const onResponse = (output: string, processExited: boolean) => finish(output, false, processExited);
       this.pendingResolve = onResponse;
       this.pendingRequiresPrompt = requirePrompt;
+      this.pendingAcceptsAsyncStop = acceptAsyncStop;
 
       // Record in history
       this.history.push(`> ${cmd}`);
@@ -746,12 +963,13 @@ export class GDBClient {
         }
       }, timeout);
       try {
-        this.proc.stdin.write(cmd + "\n");
+        this.proc.stdin.write(`${miToken ?? ""}${cmd}\n`);
       } catch (error) {
         clearTimeout(timeoutHandle);
         if (this.pendingResolve === onResponse) {
           this.pendingResolve = null;
           this.pendingRequiresPrompt = false;
+          this.pendingAcceptsAsyncStop = false;
         }
         reject(error);
       }
@@ -762,18 +980,20 @@ export class GDBClient {
     let observed: GDBTargetExecutionState | undefined;
     let stopReason: string | undefined;
     for (const line of raw.split(/\r?\n/)) {
-      if (/^\*stopped(?=,|$)/.test(line)) {
+      const miLine = line.replace(/^\d+(?=[*^+=])/, "");
+      if (/^\*stopped(?=,|$)/.test(miLine)) {
         observed = "halted";
-        stopReason = /(?:^|,)reason="/.test(line) ? this.formatStopReason(line) : "stopped";
-      } else if (/^(?:\*running|\^running)(?=,|$)/.test(line)) {
+        stopReason = /(?:^|,)reason="/.test(miLine) ? this.formatStopReason(miLine) : "stopped";
+      } else if (/^(?:\*running|\^running)(?=,|$)/.test(miLine)) {
         observed = "running";
         stopReason = undefined;
-      } else if (/^=thread-group-exited(?=,|$)/.test(line)) {
+      } else if (/^=thread-group-exited(?=,|$)/.test(miLine)) {
         observed = "unknown";
         stopReason = undefined;
       }
     }
     if (!observed) return undefined;
+    if (observed !== "running") this.activeExecutionToken = null;
     this.targetExecutionState = observed;
     this.stopEvent = observed === "halted" ? stopReason ?? "unknown" : null;
     if (observed === "halted") log(`[GDB] Stop event: ${this.stopEvent}`);
@@ -793,6 +1013,9 @@ export class GDBClient {
     this.loadedSymbolFile = null;
     this.pendingResolve = null;
     this.pendingRequiresPrompt = false;
+    this.pendingAcceptsAsyncStop = false;
+    this.commandStreamTainted = false;
+    this.activeExecutionToken = null;
     if (!proc) return;
     await terminateChildProcess(proc, { terminateWaitMs: 1_000 });
     this.lastExit ??= { code: proc.exitCode, signal: proc.signalCode };
@@ -821,43 +1044,44 @@ export class GDBClient {
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed || trimmed === "(gdb)") continue;
+      const miLine = trimmed.replace(/^\d+(?=[*^+=])/, "");
 
       // Strip MI prefix markers
       // ~"text\n" → text  (console output)
-      const consoleMatch = trimmed.match(/^~"(.*)"$/);
+      const consoleMatch = miLine.match(/^~"(.*)"$/);
       if (consoleMatch) {
         lines.push(consoleMatch[1].replace(/\\n$/, "").replace(/\\t/g, "\t").replace(/\\"/g, '"'));
         continue;
       }
 
       // &"text\n" → skip (log/debug output)
-      if (trimmed.startsWith('&"')) continue;
+      if (miLine.startsWith('&"')) continue;
 
       // ^done → skip
-      if (trimmed.startsWith("^done") && trimmed.length < 10) continue;
+      if (miLine.startsWith("^done") && miLine.length < 10) continue;
       // ^running → note it
-      if (trimmed === "^running") { lines.push("(target running)"); continue; }
+      if (miLine === "^running") { lines.push("(target running)"); continue; }
 
       // ^error,msg="..." → extract error
-      const errorMatch = trimmed.match(/\^error,msg="(.*)"/);
+      const errorMatch = miLine.match(/\^error,msg="(.*)"/);
       if (errorMatch) { lines.push(`Error: ${errorMatch[1].replace(/\\"/g, '"')}`); continue; }
 
       // *stopped,reason="..." → format nicely
-      if (trimmed.startsWith("*stopped")) {
-        lines.push(`Stopped: ${this.formatStopReason(trimmed)}`);
+      if (miLine.startsWith("*stopped")) {
+        lines.push(`Stopped: ${this.formatStopReason(miLine)}`);
         continue;
       }
 
       // =thread-group-* → skip
-      if (trimmed.startsWith("=")) continue;
+      if (miLine.startsWith("=")) continue;
 
       // ^done,value="..." → extract value
-      const valueMatch = trimmed.match(/\^done,value="(.*)"/);
+      const valueMatch = miLine.match(/\^done,value="(.*)"/);
       if (valueMatch) { lines.push(valueMatch[1].replace(/\\"/g, '"').replace(/\\n/g, "\n")); continue; }
 
       // Anything else — pass through
-      if (!trimmed.startsWith("^done")) {
-        lines.push(trimmed);
+      if (!miLine.startsWith("^done")) {
+        lines.push(miLine);
       }
     }
 
@@ -885,23 +1109,46 @@ function isMiBreakpointInsert(command: string): boolean {
 }
 
 function hasIntentionalInterruptStop(raw: string): boolean {
-  const stops = raw.split(/\r?\n/).filter((line) => /^\*stopped(?=,|$)/.test(line));
+  const stops = raw.split(/\r?\n/).filter((line) => /^(?:\d+)?\*stopped(?=,|$)/.test(line));
   if (stops.length !== 1 || !/(?:^|,)signal-name="SIGINT"(?:,|$)/.test(stops[0])) return false;
   const reason = stops[0].match(/(?:^|,)reason="([^"]*)"(?:,|$)/)?.[1];
   return reason === undefined || reason === "signal-received";
+}
+
+function hasIsolatedRemoteInterruptStop(
+  raw: string,
+  executionToken: string | null,
+  interruptToken: string,
+): boolean {
+  if (!executionToken) return false;
+  const lines = raw.split(/\r?\n/);
+  const stops = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /^(?:\d+)?\*stopped(?=,|$)/.test(line));
+  if (stops.length !== 1) return false;
+  const interruptDoneIndex = lines.findIndex((line) => line.startsWith(`${interruptToken}^done`));
+  const stop = stops[0];
+  if (interruptDoneIndex < 0 || stop.index <= interruptDoneIndex) return false;
+  const stopHasExpectedExecutionToken = stop.line.startsWith(`${executionToken}*stopped`);
+  // Temporal ordering after interrupt ^done cannot prove that an un-tokened
+  // async stop was caused by this transaction rather than a real target stop.
+  if (!stopHasExpectedExecutionToken) return false;
+  if (!/(?:^|,)reason="signal-received"(?:,|$)/.test(stop.line)) return false;
+  if (!/(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(stop.line)) return false;
+  return /(?:^|,)stopped-threads="all"(?:,|$)/.test(stop.line);
 }
 
 function hasMiPromptAfterStop(raw: string): boolean {
   const lines = raw.split(/\r?\n/);
   let lastStop = -1;
   for (let index = 0; index < lines.length; index += 1) {
-    if (/^\*stopped(?=,|$)/.test(lines[index])) lastStop = index;
+    if (/^(?:\d+)?\*stopped(?=,|$)/.test(lines[index])) lastStop = index;
   }
   return lastStop >= 0 && lines.slice(lastStop + 1).some((line) => /^\(gdb\)[\t ]*$/.test(line));
 }
 
 function findMiResult(raw: string, kind: "done" | "error" | "running" | "connected" | "exit"): string | undefined {
-  return raw.match(new RegExp(`(?:^|\\r?\\n)(\\^${kind}(?:,[^\\r\\n]*)?)(?=\\r?\\n|$)`, "m"))?.[1];
+  return raw.match(new RegExp(`(?:^|\\r?\\n)((?:\\d+)?\\^${kind}(?:,[^\\r\\n]*)?)(?=\\r?\\n|$)`, "m"))?.[1];
 }
 
 function hasMiResult(raw: string, kind: "done" | "error" | "running" | "connected" | "exit"): boolean {
@@ -909,11 +1156,11 @@ function hasMiResult(raw: string, kind: "done" | "error" | "running" | "connecte
 }
 
 function hasAnyMiResult(raw: string): boolean {
-  return /(?:^|\r?\n)\^(?:done|error|running|connected|exit)(?=,|\r?(?:\n|$))/m.test(raw);
+  return /(?:^|\r?\n)(?:\d+)?\^(?:done|error|running|connected|exit)(?=,|\r?(?:\n|$))/m.test(raw);
 }
 
 function hasMiAsyncRecord(raw: string, kind: "stopped" | "running"): boolean {
-  return new RegExp(`(?:^|\\r?\\n)\\*${kind}(?=,|\\r?(?:\\n|$))`, "m").test(raw);
+  return new RegExp(`(?:^|\\r?\\n)(?:\\d+)?\\*${kind}(?=,|\\r?(?:\\n|$))`, "m").test(raw);
 }
 
 function decodeMiString(value: string): string {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
@@ -33,6 +33,30 @@ test("direct CPU controls are idempotent and report verified final state", async
   assert.deepEqual(probe.actions, ["resume"]);
   assert.equal(resume.after.targetState, "running");
   assert.equal(typeof resume.queueSequence, "number");
+});
+
+test("target_status reports firmware identity, execution observation, owner, and mutation trust as separate layers", async (context) => {
+  const { service, targets, projectRoot } = await fixture(context, "target-status-state-layers");
+  const target = targets.require(projectRoot);
+
+  const result = service.status(projectRoot);
+  const layers = (result.data as {
+    stateLayers: {
+      firmwareIdentity: { status: string };
+      targetExecution: { status: string; source: string };
+      sessionOwner: unknown;
+      memoryMutationTrust: { status: string };
+    };
+  }).stateLayers;
+
+  assert.equal(result.ok, true);
+  assert.equal(layers.firmwareIdentity.status, target.liveArtifactMatch.status);
+  assert.deepEqual(layers.targetExecution, {
+    status: "not_observed",
+    source: "target_status_does_not_attach",
+  });
+  assert.equal(layers.sessionOwner, null);
+  assert.equal(layers.memoryMutationTrust.status, target.liveMemoryMutationTrust.status);
 });
 
 test("CPU controls use one persistent native session instead of the reconnecting J-Link backend", async (context) => {
@@ -114,6 +138,25 @@ test("control failure preserves explicit native dispatch and target-state eviden
   assert.equal(issued.ok, false);
   assert.equal(issued.error?.writeIssued, true);
   assert.equal(issued.error?.stateUnknown, false);
+});
+
+test("control timeout retires an unusable memory session before returning without a recovery connection", async (context) => {
+  const { probe, targets, queue, projectRoot } = await fixture(context, "control-timeout-retires-owner");
+  const launcher = new PoisonedControlSessionLauncher();
+  const sessions = new MemorySessionManager(queue, launcher, 10_000);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
+  launcher.probe.targetState = "halted";
+
+  const result = await service.control("resume", projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "PROBE_BUSY");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(launcher.session.closeCalls, 1);
+  assert.equal(queue.getOwner("123456"), undefined);
+  assert.deepEqual(launcher.probe.actions, ["resume"]);
+  assert.deepEqual(probe.actions, []);
 });
 
 test("read_memory preserves running state and returns decoded bytes", async (context) => {
@@ -479,7 +522,11 @@ test("diagnose_crash collects Cortex-M fault and validated exception-frame evide
     memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "ram", writable: true }],
   });
   probe.targetState = "halted";
-  probe.registersReadResult = { success: true, rawOutput: "PC = 08000100, LR = FFFFFFFD, MSP = 20000020, PSP = 20000020", output: "" };
+  probe.registersReadResult = {
+    success: true,
+    rawOutput: "PC = 08000100, SP(R13)= 20000020, MSP= 20000020, PSP= 00000000, R14(LR) = FFFFFFF9",
+    output: "",
+  };
   const fault = Buffer.alloc(60);
   fault.writeUInt32LE(0x00008200, 36); // CFSR: precise bus fault + valid BFAR.
   fault.writeUInt32LE(0x08000100, 52);
@@ -936,6 +983,28 @@ test("readback mismatch retains the actual memory and core-register values", asy
   assert.deepEqual(register.probe.actions, ["write-register-transaction:PC:8192"]);
 });
 
+test("cross-connection core-register persistence is NOT_APPLICABLE when the backend only guarantees same-session readback", async (context) => {
+  const register = await fixture(context, "register-cross-connection-not-applicable");
+  register.probe.targetState = "halted";
+
+  const result = await register.service.writeCoreRegister({
+    projectRoot: register.projectRoot,
+    name: "R4",
+    value: 0x1357_9bdf,
+    verify: true,
+    verificationConnection: "independent_session",
+  } as Parameters<DirectMcuService["writeCoreRegister"]>[0]);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "CORE_REGISTER_CROSS_CONNECTION_PERSISTENCE_NOT_APPLICABLE");
+  assert.equal(result.error?.stage, "precondition");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.verification.status, "not_applicable");
+  assert.equal(result.verification.method, "cross_connection_persistence");
+  assert.deepEqual(register.probe.actions, []);
+});
+
 test("post-write readback decode failures retain issued and unknown-state facts", async (context) => {
   const memory = await fixture(context, "memory-readback-decode");
   const artifactPath = join(memory.projectRoot, "firmware.elf");
@@ -1039,8 +1108,9 @@ test("post-mutation observation rejection remains an issued uncertain failure", 
   assert.equal(controlResult.error?.writeIssued, true);
   assert.equal(controlResult.error?.stateUnknown, true);
   assert.equal((controlResult.data as { command: { success: boolean } }).command.success, true);
-  assert.equal(control.targets.require(control.projectRoot).liveArtifactMatch.status, "unverified");
-  assert.equal(control.targets.require(control.projectRoot).liveArtifactMatch.source, "post_operation_observation_failed");
+  assert.equal(control.targets.require(control.projectRoot).liveArtifactMatch.status, "verified");
+  assert.equal(control.targets.require(control.projectRoot).liveArtifactMatch.source, "test_verified");
+  assert.equal(control.targets.require(control.projectRoot).liveMemoryMutationTrust.source, "post_operation_observation_failed");
 
   const flash = await fixture(context, "flash-observe-reject");
   writeFileSync(join(flash.projectRoot, "image.bin"), Buffer.from([1, 2, 3, 4]));
@@ -1324,6 +1394,252 @@ test("erase with unsupported blank verification is rejected before erase", async
   assert.deepEqual(probe.actions, ["erase"]);
 });
 
+test("firmware Verify-only restores firmware identity without changing mutation trust or issuing Flash", async (context) => {
+  const { service, probe, targets, queue, projectRoot } = await fixture(context, "firmware-verify-only-match");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.hex");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, ":0400000001020304F2\n:00000001FF\n", "utf8");
+  const previous = targets.require(projectRoot);
+  const configured = await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  const mutationBefore = configured.liveMemoryMutationTrust;
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(result.artifact?.firmwareIdentity, "verified");
+  assert.deepEqual(targets.require(projectRoot).liveMemoryMutationTrust, mutationBefore);
+  assert.equal(result.before.targetState, "halted");
+  assert.equal(result.after.targetState, "halted");
+  assert.equal(queue.getOwner(configured.probeSerial), undefined);
+  assert.equal(result.error?.writeIssued, undefined);
+  assert.equal(result.verification.method, "segger_verify_only");
+  assert.equal(probe.actions.length, 1);
+  assert.match(probe.actions[0], /^verify:.*firmware-verify-/);
+  assert.notEqual(probe.verifiedPaths[0], imagePath);
+  assert.deepEqual(probe.verifiedBytes[0], readFileSync(imagePath));
+  assert.deepEqual(probe.flashPaths, []);
+});
+
+test("firmware Verify-only keeps identity unverified when final target state drifts", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-state-drift");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.hex");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, ":0400000001020304F2\n:00000001FF\n", "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  probe.verifyHook = () => { probe.targetState = "running"; };
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.before.targetState, "halted");
+  assert.equal(result.after.targetState, "running");
+  assert.equal(result.artifact?.firmwareIdentity, "unverified");
+  assert.equal(result.artifact?.evidenceSource, "segger_verify_only_state_changed");
+});
+
+test("firmware Verify-only preserves confirmed mismatch identity when final target state also drifts", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-mismatch-state-drift");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.hex");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, ":0400000001020304F2\n:00000001FF\n", "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  probe.verifyResult = {
+    success: false,
+    rawOutput: "independently confirmed mismatch",
+    output: "",
+    error: "SEGGER VerifyBin mismatch independently confirmed at 0x00000000",
+    errorCode: ProbeErrorCode.JLINK_VERIFY_MISMATCH,
+    writeIssued: false,
+    stateUnknown: false,
+  };
+  probe.verifyHook = () => { probe.targetState = "running"; };
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.artifact?.firmwareIdentity, "mismatch");
+  assert.equal(result.artifact?.evidenceSource, "segger_verify_only_mismatch");
+  assert.equal(result.after.targetState, "running");
+});
+
+test("firmware Verify-only rejects a stale configured image before invoking SEGGER", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-stale");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.hex");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, ":0400000001020304F2\n:00000001FF\n", "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  writeFileSync(imagePath, ":0400000005060708E2\n:00000001FF\n", "utf8");
+  probe.targetState = "halted";
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "FLASH_INPUT_CHANGED");
+  assert.deepEqual(probe.actions, []);
+});
+
+test("firmware Verify-only uses a snapshot and fails closed if the bound image changes during verification", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-race");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.hex");
+  const original = ":0400000001020304F2\n:00000001FF\n";
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, original, "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  probe.verifyHook = () => writeFileSync(imagePath, ":0400000005060708E2\n:00000001FF\n", "utf8");
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "FLASH_INPUT_CHANGED_DURING_VERIFY");
+  assert.equal(result.artifact?.firmwareIdentity, "unverified");
+  assert.deepEqual(probe.verifiedBytes[0], Buffer.from(original));
+});
+
+test("firmware Verify-only mismatch is fail-closed and explicitly unissued", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-mismatch");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.s19");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, "S107000001020304EE\nS9030000FC\n", "utf8");
+  const previous = targets.require(projectRoot);
+  const configured = await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  await targets.setMemoryMutationTrust(projectRoot, "verified", "fixture", {
+    targetGeneration: configured.generation,
+    probeSerial: configured.probeSerial,
+    artifactGeneration: configured.artifact?.generation,
+  });
+  const mutationBefore = targets.require(projectRoot).liveMemoryMutationTrust;
+  probe.targetState = "halted";
+  probe.verifyResult = {
+    success: false,
+    rawOutput: "****** Error: Failed to verify @ address 0x0000C000",
+    output: "",
+    error: "Failed to verify @ address 0x0000C000",
+    errorCode: ProbeErrorCode.JLINK_VERIFY_MISMATCH,
+    writeIssued: false,
+    stateUnknown: false,
+  };
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "FIRMWARE_VERIFY_MISMATCH");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.artifact?.firmwareIdentity, "mismatch");
+  assert.deepEqual(targets.require(projectRoot).liveMemoryMutationTrust, mutationBefore);
+  assert.equal(result.after.targetState, "halted");
+  assert.equal(probe.actions.length, 1);
+  assert.match(probe.actions[0], /^verify:.*firmware-verify-/);
+  assert.notEqual(probe.verifiedPaths[0], imagePath);
+  assert.deepEqual(probe.flashPaths, []);
+});
+
+test("firmware Verify-only preserves independent-confirmation uncertainty and keeps identity unverified", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-unconfirmed");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.s19");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, "S107000001020304EE\nS9030000FC\n", "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  probe.verifyResult = {
+    success: false,
+    rawOutput: "Verify failed @ address 0x00000000\nindependent read helper timed out",
+    output: "",
+    error: "SEGGER VerifyBin mismatch could not be independently confirmed",
+    errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+    writeIssued: false,
+    stateUnknown: true,
+  };
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "FIRMWARE_VERIFY_FAILED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(result.artifact?.firmwareIdentity, "unverified");
+  assert.equal(result.artifact?.evidenceSource, "segger_verify_only_failed");
+  assert.equal(result.after.targetState, "halted");
+});
+
 test("erase reports a fatal J-Link programming diagnostic as issued with unknown state", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "erase-fatal-programming-diagnostic");
   probe.eraseResult = {
@@ -1502,7 +1818,7 @@ test("post-write unknown target state is a structured uncertain failure", async 
   assert.equal(result.error?.stateUnknown, true);
 });
 
-test("connection identity failure invalidates verified Artifact evidence", async (context) => {
+test("connection identity failure preserves firmware identity and invalidates mutation trust", async (context) => {
   const { service, probe, targets, projectRoot } = await fixture(context, "connection-invalidation");
   const artifactPath = join(projectRoot, "firmware.elf");
   writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
@@ -1524,10 +1840,11 @@ test("connection identity failure invalidates verified Artifact evidence", async
   const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "PROBE_NOT_FOUND");
-  assert.equal(targets.require(projectRoot).liveArtifactMatch.source, "probe_connection_identity_lost");
+  assert.equal(targets.require(projectRoot).liveArtifactMatch.source, "test_verified");
+  assert.equal(targets.require(projectRoot).liveMemoryMutationTrust.source, "probe_connection_identity_lost");
 });
 
-test("final observation identity failure invalidates Artifact evidence without hiding issued control facts", async (context) => {
+test("final observation identity failure preserves firmware identity without hiding issued control facts", async (context) => {
   const { service, probe, targets, projectRoot } = await fixture(context, "final-observation-invalidation");
   const artifactPath = join(projectRoot, "firmware.elf");
   writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
@@ -1548,7 +1865,8 @@ test("final observation identity failure invalidates Artifact evidence without h
   assert.equal(result.error?.writeIssued, true);
   assert.equal(result.error?.stateUnknown, true);
   assert.equal((result.data as { command: { success: boolean } }).command.success, true);
-  assert.equal(targets.require(projectRoot).liveArtifactMatch.source, "probe_connection_identity_lost");
+  assert.equal(targets.require(projectRoot).liveArtifactMatch.source, "test_verified");
+  assert.equal(targets.require(projectRoot).liveMemoryMutationTrust.source, "probe_connection_identity_lost");
 });
 
 test("queued direct request rejects a Target generation changed while waiting", async (context) => {
@@ -2161,6 +2479,10 @@ class FakeProbe extends ProbeBackend {
   writeMemoryResults: CommandResult[] = [];
   writeRegisterReject?: Error;
   rawResult: CommandResult = ok();
+  verifyResult: CommandResult = ok();
+  verifyHook?: (filePath: string) => void;
+  verifiedPaths: string[] = [];
+  verifiedBytes: Buffer[] = [];
   eraseResult?: CommandResult;
   flashPaths: string[] = [];
   readResult?: CommandResult;
@@ -2260,6 +2582,13 @@ class FakeProbe extends ProbeBackend {
     this.targetState = "halted";
     return ok();
   }
+  override async verifyFirmware(filePath: string, baseAddress?: number): Promise<CommandResult> {
+    this.verifiedPaths.push(filePath);
+    this.verifiedBytes.push(readFileSync(filePath));
+    this.actions.push(`verify:${filePath}:${baseAddress ?? "embedded"}`);
+    this.verifyHook?.(filePath);
+    return { ...this.verifyResult, writeIssued: false };
+  }
   async erase(): Promise<CommandResult> {
     this.actions.push("erase");
     const result = this.eraseResult ?? ok();
@@ -2303,6 +2632,23 @@ class PreDispatchMemorySessionLauncher implements MemorySessionLauncher {
   }
 }
 
+class PoisonedControlSessionLauncher implements MemorySessionLauncher {
+  readonly probe: PoisonedControlProbe;
+  readonly session: PreDispatchMemorySession;
+
+  constructor() {
+    let session!: PreDispatchMemorySession;
+    this.probe = new PoisonedControlProbe(() => { session.reusable = false; });
+    session = new PreDispatchMemorySession(this.probe);
+    this.session = session;
+  }
+
+  async open(_target: Parameters<MemorySessionLauncher["open"]>[0], onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    onStarted?.(this.session.pid, this.session.runtime);
+    return this.session;
+  }
+}
+
 class PreDispatchMemorySession implements PersistentMemorySession {
   readonly pid = process.pid;
   readonly runtime: MemorySessionRuntimeFacts = {
@@ -2312,15 +2658,35 @@ class PreDispatchMemorySession implements PersistentMemorySession {
     runtimeSha256: "b".repeat(64),
   };
   private alive = true;
+  reusable = true;
+  closeCalls = 0;
   closeError?: Error;
   constructor(readonly probe: ProbeBackend) {}
   isAlive(): boolean { return this.alive; }
-  isReusable(): boolean { return this.alive; }
+  isReusable(): boolean { return this.alive && this.reusable; }
   async close(): Promise<void> {
+    this.closeCalls += 1;
     if (this.closeError) throw this.closeError;
     this.alive = false;
   }
   onExit(): () => void { return () => undefined; }
+}
+
+class PoisonedControlProbe extends FakeProbe {
+  constructor(private readonly poison: () => void) { super(); }
+  override async resume(): Promise<CommandResult> {
+    this.actions.push("resume");
+    this.poison();
+    return {
+      success: false,
+      rawOutput: "",
+      output: "",
+      error: "native memory session did not respond before its timeout",
+      errorCode: ProbeErrorCode.PROBE_BUSY,
+      writeIssued: true,
+      stateUnknown: true,
+    };
+  }
 }
 
 class PreDispatchProbe extends FakeProbe {

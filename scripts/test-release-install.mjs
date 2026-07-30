@@ -119,7 +119,10 @@ async function assertMcpSurface(standalone, cwd, label) {
       throw new Error(`${label} MCP server identity mismatch`);
     }
     const tools = (await client.listTools()).tools;
-    if (tools.length !== 37) throw new Error(`${label} MCP exposed ${tools.length} tools instead of 37`);
+    if (tools.length !== 39) throw new Error(`${label} MCP exposed ${tools.length} tools instead of 39`);
+    for (const requiredTool of ["gdb_breakpoint_list", "gdb_breakpoint_delete"]) {
+      if (!tools.some(({ name }) => name === requiredTool)) throw new Error(`${label} MCP did not expose ${requiredTool}`);
+    }
     const listed = parseEnvelope(await client.callTool({ name: "capture_list", arguments: { limit: 10 } }));
     if (!listed.ok || !listed.data?.captures?.some((entry) => entry.captureId === captureId && entry.formatStatus === "supported")) {
       throw new Error(`${label} MCP did not list the JCAP v1 release fixture`);

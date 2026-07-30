@@ -42,6 +42,64 @@ test("memory startup persists the native PID before helper readiness completes",
   launcher.finishStart();
   await opening;
   assert.equal(queue.getOwner(target.probeSerial)?.resourcePid, 7999);
+  assert.equal(queue.getOwner(target.probeSerial)?.details?.startup, undefined);
+  assert.equal(queue.getOwner(target.probeSerial)?.details?.phase, "native_memory_session_active");
+});
+
+test("owner activation failure releases ownership when helper exit was confirmed", async (context) => {
+  const { target, queue } = await fixture(context, 10_000);
+  const session = new FakeSession(7997);
+  session.closeErrorAfterExit = new MemorySessionError(
+    "MEMORY_SESSION_TIMEOUT",
+    "close request timed out after helper exit",
+    true,
+    true,
+    false,
+    session.pid,
+  );
+  const manager = new MemorySessionManager(queue, {
+    async open(_target, onStarted) {
+      onStarted?.(session.pid, session.runtime);
+      return session;
+    },
+  }, 10_000);
+  failOwnerActivationUpdate(queue);
+
+  await assert.rejects(
+    queue.runExclusive(target.probeSerial, async (metadata) => manager.probeFor(target, metadata)),
+    (error: unknown) => error instanceof MemorySessionError
+      && error.code === "MEMORY_SESSION_OWNER_UPDATE_FAILED"
+      && !error.retainOwner,
+  );
+  assert.equal(queue.getOwner(target.probeSerial), undefined);
+});
+
+test("owner activation failure retains ownership when helper exit is unconfirmed", async (context) => {
+  const { target, queue } = await fixture(context, 10_000);
+  const session = new FakeSession(7996);
+  session.closeError = new MemorySessionError(
+    "MEMORY_SESSION_CLOSE_UNCONFIRMED",
+    "native memory helper did not exit after close",
+    true,
+    true,
+    true,
+    session.pid,
+  );
+  const manager = new MemorySessionManager(queue, {
+    async open(_target, onStarted) {
+      onStarted?.(session.pid, session.runtime);
+      return session;
+    },
+  }, 10_000);
+  failOwnerActivationUpdate(queue);
+
+  await assert.rejects(
+    queue.runExclusive(target.probeSerial, async (metadata) => manager.probeFor(target, metadata)),
+    (error: unknown) => error instanceof MemorySessionError
+      && error.code === "MEMORY_SESSION_STARTUP_EXIT_UNCONFIRMED"
+      && error.retainOwner,
+  );
+  assert.equal(queue.getOwner(target.probeSerial)?.resourcePid, session.pid);
 });
 
 test("an unproven startup failure retains the resource owner fail-closed", async (context) => {
@@ -86,6 +144,26 @@ test("an indeterminate memory session remains fail-closed and is never reused", 
     /helper exit unconfirmed/,
   );
   assert.equal(launcher.opens, 1);
+  assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
+});
+
+test("unusable-session retirement never reports success while a stale memory owner remains", async (context) => {
+  const { target, queue, manager } = await fixture(context, 10_000);
+  await queue.runExclusive(target.probeSerial, async (metadata) => {
+    queue.claimOwner(target.probeSerial, {
+      kind: "memory",
+      projectRoot: target.projectRoot,
+      targetGeneration: target.generation,
+      details: { backend: "native_memory_session" },
+    }, metadata.leaseToken);
+  });
+
+  await assert.rejects(
+    manager.retireIfUnusableForTarget(target),
+    (error: unknown) => error instanceof MemorySessionError
+      && error.code === "MEMORY_SESSION_OWNER_RELEASE_UNCONFIRMED"
+      && error.retainOwner,
+  );
   assert.equal(queue.getOwner(target.probeSerial)?.kind, "memory");
 });
 
@@ -163,6 +241,7 @@ class FakeSession implements PersistentMemorySession {
   closeCalls = 0;
   reusable = true;
   closeError?: Error;
+  closeErrorAfterExit?: Error;
   private alive = true;
   private readonly listeners = new Set<() => void>();
 
@@ -180,7 +259,18 @@ class FakeSession implements PersistentMemorySession {
     this.alive = false;
     for (const listener of this.listeners) listener();
     this.listeners.clear();
+    if (this.closeErrorAfterExit) throw this.closeErrorAfterExit;
   }
+}
+
+function failOwnerActivationUpdate(queue: ProbeQueue): void {
+  const updateOwnerResource = queue.updateOwnerResource.bind(queue);
+  let updates = 0;
+  queue.updateOwnerResource = (...args: Parameters<ProbeQueue["updateOwnerResource"]>) => {
+    updates += 1;
+    if (updates === 2) throw new Error("fixture owner activation update failed");
+    return updateOwnerResource(...args);
+  };
 }
 
 function startupRuntime(): MemorySessionRuntimeFacts {
