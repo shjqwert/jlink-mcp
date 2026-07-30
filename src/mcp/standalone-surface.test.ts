@@ -120,6 +120,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     {
       const properties = tools.find((tool) => tool.name === "target_configure")?.inputSchema.properties as Record<string, { description?: string }>;
       assert.match(properties.gdbDevice?.description ?? "", /non-invasive J-Link device\/profile/i);
+      assert.match(properties.gdbDevice?.description ?? "", /core-register snapshots/i);
       assert.match(properties.gdbDevice?.description ?? "", /Flash\/Erase/i);
     }
     {

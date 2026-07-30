@@ -66,7 +66,7 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
     projectRoot: z.string().min(1),
     device: z.string().min(1),
     gdbDevice: z.string().min(1).optional().describe(
-      "Explicit non-invasive J-Link device/profile used only by GDB Server attach. Keep device as the exact MCU for Flash/Erase; use a validated core-only profile when the exact-device script has attach side effects.",
+      "Explicit non-invasive J-Link device/profile used by GDB Server attach and read-only core-register snapshots. Keep device as the exact MCU for Flash/Erase; use a validated core-only profile when the exact-device script has attach side effects.",
     ),
     probeSerial: z.string().min(1),
     interface: z.enum(["SWD", "JTAG"]),

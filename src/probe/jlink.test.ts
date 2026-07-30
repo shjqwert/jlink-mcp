@@ -681,6 +681,21 @@ test("JLinkBackend uses the explicit GDB attach profile instead of the Flash dev
   assert.equal(args[args.indexOf("-device") + 1], "Cortex-M4");
 });
 
+test("JLinkBackend uses the explicit non-invasive attach profile for register snapshots", async () => {
+  const spawnedArgs: string[][] = [];
+  const backend = new JLinkBackend(
+    { device: "Z20K146M", gdbDevice: "Cortex-M4", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    new ProcessManager(),
+    (_command, args) => {
+      spawnedArgs.push([...args]);
+      return successfulProcess([]);
+    },
+  );
+
+  assert.equal((await backend.readAllRegisters()).success, true);
+  assert.equal(spawnedArgs[0][spawnedArgs[0].indexOf("-device") + 1], "Cortex-M4");
+});
+
 test("JLinkBackend fails a zero-exit erase when J-Link reports a fatal RAMCode diagnostic", async () => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(

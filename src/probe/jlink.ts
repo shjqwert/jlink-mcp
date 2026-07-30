@@ -145,14 +145,14 @@ export class JLinkBackend extends ProbeBackend {
    * Raw JLinkExe execution. Does NOT include preflight/locking.
    * Public methods add only in-process exclusion and the requested command.
    */
-  private async execRaw(commands: string[], timeoutMs = 30000, options: { exitOnError?: boolean } = {}): Promise<CommandResult> {
+  private async execRaw(commands: string[], timeoutMs = 30000, options: { exitOnError?: boolean; device?: string } = {}): Promise<CommandResult> {
     this.connectionGeneration += 1;
     const autoConnect = commands.length > 0
       && commands.every((command) => PROBE_ONLY_RAW_COMMANDS.has(command.trim().toLowerCase()))
       ? "0"
       : "1";
     const args = [
-      "-device", this.config.device,
+      "-device", options.device ?? this.config.device,
       "-if", this.config.interface,
       "-speed", String(this.config.speed),
       "-autoconnect", autoConnect,
@@ -524,7 +524,11 @@ export class JLinkBackend extends ProbeBackend {
   }
 
   async readAllRegisters(): Promise<CommandResult> {
-    return this.executeDirect(["exec SetSkipDebugDeInit = 1", "regs"]);
+    return this.executeDirect(
+      ["exec SetSkipDebugDeInit = 1", "regs"],
+      30000,
+      { device: this.config.gdbDevice ?? this.config.device },
+    );
   }
   async readRegister(name: string): Promise<CommandResult> {
     if (!/^(?:r(?:1[0-5]|[0-9])|pc|sp|lr|xpsr|control|primask|basepri|faultmask|msp|psp|msplim|psplim)$/i.test(name)) {
@@ -651,12 +655,16 @@ export class JLinkBackend extends ProbeBackend {
     return this.executeDirect(commands);
   }
 
-  private async executeDirect(commands: string[], timeoutMs = 30000): Promise<CommandResult> {
+  private async executeDirect(
+    commands: string[],
+    timeoutMs = 30000,
+    options: { device?: string } = {},
+  ): Promise<CommandResult> {
     if (!this.beginHardwareOperation()) {
       return { success: false, rawOutput: "", output: `Probe is exclusively owned by ${this.getExclusiveOwner()}`, error: "Capture owns the probe", errorCode: ProbeErrorCode.PROBE_BUSY };
     }
     try {
-      return await this.acquireLock(() => this.execRaw(commands, timeoutMs));
+      return await this.acquireLock(() => this.execRaw(commands, timeoutMs, options));
     } finally {
       this.endHardwareOperation();
     }

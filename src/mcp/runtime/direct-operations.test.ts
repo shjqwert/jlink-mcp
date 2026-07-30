@@ -503,7 +503,11 @@ test("diagnose_crash collects Cortex-M fault and validated exception-frame evide
     memoryRegions: [{ start: 0x20000000, length: 0x1000, kind: "ram", writable: true }],
   });
   probe.targetState = "halted";
-  probe.registersReadResult = { success: true, rawOutput: "PC = 08000100, LR = FFFFFFFD, MSP = 20000020, PSP = 20000020", output: "" };
+  probe.registersReadResult = {
+    success: true,
+    rawOutput: "PC = 08000100, SP(R13)= 20000020, MSP= 20000020, PSP= 00000000, R14(LR) = FFFFFFF9",
+    output: "",
+  };
   const fault = Buffer.alloc(60);
   fault.writeUInt32LE(0x00008200, 36); // CFSR: precise bus fault + valid BFAR.
   fault.writeUInt32LE(0x08000100, 52);

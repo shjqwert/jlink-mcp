@@ -2404,7 +2404,7 @@ async function cortexMExceptionFrame(
   stacked?: Record<string, string>;
   reason?: string;
 }> {
-  const lr = registerNumber(registers.LR);
+  const lr = registerNumber(registers.LR ?? registers.R14);
   if (lr === undefined || (lr >>> 8) !== 0x00ffffff || (lr & 1) === 0) {
     return { status: "unverified", reason: "LR does not provide a provable Cortex-M EXC_RETURN value" };
   }
