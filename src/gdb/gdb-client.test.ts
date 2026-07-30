@@ -141,6 +141,119 @@ test("GDBClient accepts the documented reasonless SIGINT stop from exec-interrup
   await client.disconnect();
 });
 
+test("GDBClient accepts a SIGTRAP stop strictly correlated to the active MI execution transaction", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    {
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",stopped-threads="all"\n',
+    },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+
+  assert.equal(breakpoint.success, true, JSON.stringify(breakpoint));
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
+  const interruptToken = breakpoint.rawOutput?.match(/(?:^|\n)(\d+)\^done(?:\r?\n)/)?.[1];
+  const stoppedToken = breakpoint.rawOutput?.match(/(?:^|\n)(\d+)\*stopped,[^\r\n]*signal-name="SIGTRAP"/)?.[1];
+  assert.ok(interruptToken);
+  assert.ok(stoppedToken);
+  assert.notEqual(interruptToken, stoppedToken);
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- JlinkTestFixtureTask1ms",
+    "-exec-continue --all",
+  ]);
+  await client.disconnect();
+});
+
+test("GDBClient rejects every incomplete SIGTRAP interrupt correlation", async (t) => {
+  const unsafeCases: Array<{
+    name: string;
+    interruptStopOutput: string;
+    interruptStopToken?: "active" | "none" | "wrong";
+    interruptStopBeforeDone?: boolean;
+  }> = [
+    {
+      name: "missing execution token",
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",stopped-threads="all"\n',
+      interruptStopToken: "none",
+    },
+    {
+      name: "wrong execution token",
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",stopped-threads="all"\n',
+      interruptStopToken: "wrong",
+    },
+    {
+      name: "stop precedes interrupt result",
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",stopped-threads="all"\n',
+      interruptStopBeforeDone: true,
+    },
+    {
+      name: "multiple stops",
+      interruptStopOutput: [
+        '*stopped,reason="signal-received",signal-name="SIGTRAP",stopped-threads="all"',
+        '*stopped,reason="signal-received",signal-name="SIGTRAP",stopped-threads="all"',
+        "",
+      ].join("\n"),
+    },
+    {
+      name: "wrong stop reason",
+      interruptStopOutput: '*stopped,reason="breakpoint-hit",signal-name="SIGTRAP",stopped-threads="all"\n',
+    },
+    {
+      name: "wrong signal",
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGSEGV",stopped-threads="all"\n',
+    },
+    {
+      name: "missing all-thread scope",
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",thread-id="1"\n',
+    },
+  ];
+
+  for (const unsafeCase of unsafeCases) {
+    await t.test(unsafeCase.name, async () => {
+      const signals: Array<NodeJS.Signals | number | undefined> = [];
+      const commands: string[] = [];
+      const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+        signals,
+        undefined,
+        false,
+        false,
+        commands,
+        false,
+        "(gdb)\n",
+        false,
+        false,
+        false,
+        unsafeCase,
+      ));
+
+      assert.equal((await client.connect("localhost", 2331)).success, true);
+      assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
+      const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 100);
+
+      assert.equal(breakpoint.success, false);
+      assert.equal(breakpoint.code, "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE");
+      assert.equal(breakpoint.observedTargetExecutionState, "halted");
+      assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+      await client.disconnect();
+    });
+  }
+});
+
 test("GDBClient accepts an async SIGINT stop when exec-interrupt has no synchronous MI result or prompt", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const commands: string[] = [];
@@ -560,6 +673,8 @@ function createFakeGdbProcess(
   splitConnectPrompt = false,
   transaction?: {
     interruptStopOutput?: string;
+    interruptStopToken?: "active" | "none" | "wrong";
+    interruptStopBeforeDone?: boolean;
     interruptAsyncOnly?: boolean;
     interruptNoOutput?: boolean;
     breakpointInsertOutput?: string;
@@ -583,9 +698,13 @@ function createFakeGdbProcess(
   let terminationScheduled = false;
   let miAsyncEnabled = false;
   let targetRunning = false;
+  let activeExecutionToken: string | undefined;
   child.stdin = new Writable({
     write(chunk, _encoding, callback) {
-      const command = chunk.toString().trim();
+      const wireCommand = chunk.toString().trim();
+      const tokenMatch = /^(\d+)(-.*)$/.exec(wireCommand);
+      const miToken = tokenMatch?.[1];
+      const command = tokenMatch?.[2] ?? wireCommand;
       commands?.push(command);
       if (command === "-gdb-set mi-async on") {
         if (errorOnMiAsync) {
@@ -631,20 +750,31 @@ function createFakeGdbProcess(
       } else if (command === "-exec-interrupt --all") {
         setImmediate(() => {
           if (transaction?.interruptNoOutput) return;
+          const stopOutput = transaction?.interruptStopOutput
+            ?? '*stopped,reason="signal-received",signal-name="SIGINT",thread-id="1"\n';
+          const stopToken = transaction?.interruptStopToken === "none"
+            ? undefined
+            : transaction?.interruptStopToken === "wrong"
+              ? "999"
+              : activeExecutionToken;
+          const correlatedStopOutput = stopToken && stopOutput.startsWith("*") ? `${stopToken}${stopOutput}` : stopOutput;
           if (transaction?.interruptAsyncOnly) {
             if (targetRunning) {
               targetRunning = false;
-              child.stdout.write(transaction.interruptStopOutput
-                ?? '*stopped,reason="signal-received",signal-name="SIGINT",thread-id="1"\n');
+              child.stdout.write(correlatedStopOutput);
             }
             return;
           }
-          child.stdout.write("^done\n(gdb)\n");
+          if (transaction?.interruptStopBeforeDone && targetRunning) {
+            targetRunning = false;
+            child.stdout.write(`${correlatedStopOutput}${miToken ?? ""}^done\n(gdb)\n`);
+            return;
+          }
+          child.stdout.write(`${miToken ?? ""}^done\n(gdb)\n`);
           if (targetRunning) {
             setTimeout(() => {
               targetRunning = false;
-              child.stdout.write(transaction?.interruptStopOutput
-                ?? '*stopped,reason="signal-received",signal-name="SIGINT",thread-id="1"\n');
+              child.stdout.write(correlatedStopOutput);
               setImmediate(() => child.stdout.write("(gdb)\n"));
             }, 5);
           }
@@ -654,7 +784,10 @@ function createFakeGdbProcess(
         if (!targetRunning && output) setTimeout(() => child.stdout.write(output), 5);
       } else if (command === "-exec-continue --all") {
         targetRunning = true;
-        setImmediate(() => child.stdout.write('^running\n*running,thread-id="all"\n(gdb)\n'));
+        activeExecutionToken = miToken;
+        setImmediate(() => child.stdout.write(
+          `${miToken ?? ""}^running\n${miToken ?? ""}*running,thread-id="all"\n(gdb)\n`,
+        ));
       } else if (command === "break JlinkTestFixtureTask1ms") {
         // Direct CLI breakpoint compatibility can remain synchronous even
         // when MI async is enabled, matching the running-target zero-output hang.

@@ -65,6 +65,8 @@ export class GDBClient {
   private loadedSymbolFile: string | null = null;
   private connectedEndpoint: string | null = null;
   private targetExecutionState: GDBTargetExecutionState = "unknown";
+  private nextMiToken = 1;
+  private activeExecutionToken: string | null = null;
   private lastExit: { code: number | null; signal: NodeJS.Signals | null; error?: string } | undefined;
   private readonly spawnProcess: GdbSpawn;
   private readonly unexpectedExitListeners = new Set<(event: GDBUnexpectedExit) => void>();
@@ -122,6 +124,8 @@ export class GDBClient {
       this.stopEvent = null;
       this.lastExit = undefined;
       this.commandStreamTainted = false;
+      this.nextMiToken = 1;
+      this.activeExecutionToken = null;
 
       proc.stdout?.on("data", (data: Buffer) => {
         this.handleOutput(data.toString());
@@ -303,8 +307,10 @@ export class GDBClient {
     if (this.targetExecutionState === "running" && isMiBreakpointInsert(dispatchedCommand)) {
       return this.insertBreakpointWhileRunning(dispatchedCommand, timeout);
     }
+    const executionToken = dispatchedCommand === "-exec-continue --all" ? this.allocateMiToken() : undefined;
+    if (isRunCommand && !executionToken) this.activeExecutionToken = null;
     try {
-      exchange = await this.sendCommand(dispatchedCommand, timeout);
+      exchange = await this.sendCommand(dispatchedCommand, timeout, true, false, executionToken);
     } catch (error) {
       await this.terminateGdbProcess();
       return { success: false, output: "", rawOutput: this.outputBuffer, error: error instanceof Error ? error.message : String(error), code: "GDB_IO_FAILED", ...this.exitFacts() };
@@ -348,6 +354,9 @@ export class GDBClient {
     const errorRecord = findMiResult(rawOutput, "error");
     const errorMessage = errorRecord?.match(/(?:^|,)msg="((?:\\.|[^"])*)"/)?.[1];
     const success = !errorRecord;
+    if (success && executionToken && observedTargetExecutionState === "running") {
+      this.activeExecutionToken = executionToken;
+    }
 
     return {
       success,
@@ -392,9 +401,11 @@ export class GDBClient {
       };
     };
 
+    const interruptedExecutionToken = this.activeExecutionToken;
+    const interruptToken = this.allocateMiToken();
     let interrupt: GDBCommandExchange;
     try {
-      interrupt = await this.sendCommand("-exec-interrupt --all", remaining(), true, true);
+      interrupt = await this.sendCommand("-exec-interrupt --all", remaining(), true, true, interruptToken);
     } catch (error) {
       await this.terminateGdbProcess();
       return {
@@ -447,7 +458,10 @@ export class GDBClient {
     if (stopped.processExited) return processExited("interrupt observation", { ...stopped, output: "" });
     if (stopped.timedOut) return timedOut("interrupt observation", { ...stopped, output: "" });
     const interruptEvidence = rawParts.join("");
-    if (!hasIntentionalInterruptStop(interruptEvidence)) {
+    if (
+      !hasIntentionalInterruptStop(interruptEvidence)
+      && !hasCorrelatedRemoteInterruptStop(interruptEvidence, interruptedExecutionToken, interruptToken)
+    ) {
       return {
         success: false,
         output: this.cleanMI(interruptEvidence),
@@ -482,9 +496,10 @@ export class GDBClient {
     const breakpointError = findMiResult(breakpoint.output, "error");
     const breakpointDone = hasMiResult(breakpoint.output, "done");
 
+    const resumeToken = this.allocateMiToken();
     let resume: GDBCommandExchange;
     try {
-      resume = await this.sendCommand("-exec-continue --all", remaining());
+      resume = await this.sendCommand("-exec-continue --all", remaining(), true, false, resumeToken);
     } catch (error) {
       await this.terminateGdbProcess();
       const rawOutput = rawParts.join("");
@@ -516,6 +531,7 @@ export class GDBClient {
         observedTargetExecutionState: this.targetExecutionState,
       };
     }
+    this.activeExecutionToken = resumeToken;
     return {
       success: !breakpointError && breakpointDone,
       output: this.cleanMI(rawOutput),
@@ -760,7 +776,19 @@ export class GDBClient {
     return parts.join(" ");
   }
 
-  private sendCommand(cmd: string, timeout: number, requirePrompt = true, acceptAsyncStop = false): Promise<GDBCommandExchange> {
+  private allocateMiToken(): string {
+    const token = String(this.nextMiToken);
+    this.nextMiToken += 1;
+    return token;
+  }
+
+  private sendCommand(
+    cmd: string,
+    timeout: number,
+    requirePrompt = true,
+    acceptAsyncStop = false,
+    miToken?: string,
+  ): Promise<GDBCommandExchange> {
     return new Promise((resolve, reject) => {
       if (!this.proc?.stdin) {
         reject("GDB process not available");
@@ -803,7 +831,7 @@ export class GDBClient {
         }
       }, timeout);
       try {
-        this.proc.stdin.write(cmd + "\n");
+        this.proc.stdin.write(`${miToken ?? ""}${cmd}\n`);
       } catch (error) {
         clearTimeout(timeoutHandle);
         if (this.pendingResolve === onResponse) {
@@ -820,18 +848,20 @@ export class GDBClient {
     let observed: GDBTargetExecutionState | undefined;
     let stopReason: string | undefined;
     for (const line of raw.split(/\r?\n/)) {
-      if (/^\*stopped(?=,|$)/.test(line)) {
+      const miLine = line.replace(/^\d+(?=[*^+=])/, "");
+      if (/^\*stopped(?=,|$)/.test(miLine)) {
         observed = "halted";
-        stopReason = /(?:^|,)reason="/.test(line) ? this.formatStopReason(line) : "stopped";
-      } else if (/^(?:\*running|\^running)(?=,|$)/.test(line)) {
+        stopReason = /(?:^|,)reason="/.test(miLine) ? this.formatStopReason(miLine) : "stopped";
+      } else if (/^(?:\*running|\^running)(?=,|$)/.test(miLine)) {
         observed = "running";
         stopReason = undefined;
-      } else if (/^=thread-group-exited(?=,|$)/.test(line)) {
+      } else if (/^=thread-group-exited(?=,|$)/.test(miLine)) {
         observed = "unknown";
         stopReason = undefined;
       }
     }
     if (!observed) return undefined;
+    if (observed !== "running") this.activeExecutionToken = null;
     this.targetExecutionState = observed;
     this.stopEvent = observed === "halted" ? stopReason ?? "unknown" : null;
     if (observed === "halted") log(`[GDB] Stop event: ${this.stopEvent}`);
@@ -853,6 +883,7 @@ export class GDBClient {
     this.pendingRequiresPrompt = false;
     this.pendingAcceptsAsyncStop = false;
     this.commandStreamTainted = false;
+    this.activeExecutionToken = null;
     if (!proc) return;
     await terminateChildProcess(proc, { terminateWaitMs: 1_000 });
     this.lastExit ??= { code: proc.exitCode, signal: proc.signalCode };
@@ -881,43 +912,44 @@ export class GDBClient {
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed || trimmed === "(gdb)") continue;
+      const miLine = trimmed.replace(/^\d+(?=[*^+=])/, "");
 
       // Strip MI prefix markers
       // ~"text\n" → text  (console output)
-      const consoleMatch = trimmed.match(/^~"(.*)"$/);
+      const consoleMatch = miLine.match(/^~"(.*)"$/);
       if (consoleMatch) {
         lines.push(consoleMatch[1].replace(/\\n$/, "").replace(/\\t/g, "\t").replace(/\\"/g, '"'));
         continue;
       }
 
       // &"text\n" → skip (log/debug output)
-      if (trimmed.startsWith('&"')) continue;
+      if (miLine.startsWith('&"')) continue;
 
       // ^done → skip
-      if (trimmed.startsWith("^done") && trimmed.length < 10) continue;
+      if (miLine.startsWith("^done") && miLine.length < 10) continue;
       // ^running → note it
-      if (trimmed === "^running") { lines.push("(target running)"); continue; }
+      if (miLine === "^running") { lines.push("(target running)"); continue; }
 
       // ^error,msg="..." → extract error
-      const errorMatch = trimmed.match(/\^error,msg="(.*)"/);
+      const errorMatch = miLine.match(/\^error,msg="(.*)"/);
       if (errorMatch) { lines.push(`Error: ${errorMatch[1].replace(/\\"/g, '"')}`); continue; }
 
       // *stopped,reason="..." → format nicely
-      if (trimmed.startsWith("*stopped")) {
-        lines.push(`Stopped: ${this.formatStopReason(trimmed)}`);
+      if (miLine.startsWith("*stopped")) {
+        lines.push(`Stopped: ${this.formatStopReason(miLine)}`);
         continue;
       }
 
       // =thread-group-* → skip
-      if (trimmed.startsWith("=")) continue;
+      if (miLine.startsWith("=")) continue;
 
       // ^done,value="..." → extract value
-      const valueMatch = trimmed.match(/\^done,value="(.*)"/);
+      const valueMatch = miLine.match(/\^done,value="(.*)"/);
       if (valueMatch) { lines.push(valueMatch[1].replace(/\\"/g, '"').replace(/\\n/g, "\n")); continue; }
 
       // Anything else — pass through
-      if (!trimmed.startsWith("^done")) {
-        lines.push(trimmed);
+      if (!miLine.startsWith("^done")) {
+        lines.push(miLine);
       }
     }
 
@@ -945,23 +977,43 @@ function isMiBreakpointInsert(command: string): boolean {
 }
 
 function hasIntentionalInterruptStop(raw: string): boolean {
-  const stops = raw.split(/\r?\n/).filter((line) => /^\*stopped(?=,|$)/.test(line));
+  const stops = raw.split(/\r?\n/).filter((line) => /^(?:\d+)?\*stopped(?=,|$)/.test(line));
   if (stops.length !== 1 || !/(?:^|,)signal-name="SIGINT"(?:,|$)/.test(stops[0])) return false;
   const reason = stops[0].match(/(?:^|,)reason="([^"]*)"(?:,|$)/)?.[1];
   return reason === undefined || reason === "signal-received";
+}
+
+function hasCorrelatedRemoteInterruptStop(
+  raw: string,
+  executionToken: string | null,
+  interruptToken: string,
+): boolean {
+  if (!executionToken) return false;
+  const lines = raw.split(/\r?\n/);
+  const stops = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => /^(?:\d+)?\*stopped(?=,|$)/.test(line));
+  if (stops.length !== 1) return false;
+  const interruptDoneIndex = lines.findIndex((line) => line.startsWith(`${interruptToken}^done`));
+  const stop = stops[0];
+  if (interruptDoneIndex < 0 || stop.index <= interruptDoneIndex) return false;
+  if (!stop.line.startsWith(`${executionToken}*stopped`)) return false;
+  if (!/(?:^|,)reason="signal-received"(?:,|$)/.test(stop.line)) return false;
+  if (!/(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(stop.line)) return false;
+  return /(?:^|,)stopped-threads="all"(?:,|$)/.test(stop.line);
 }
 
 function hasMiPromptAfterStop(raw: string): boolean {
   const lines = raw.split(/\r?\n/);
   let lastStop = -1;
   for (let index = 0; index < lines.length; index += 1) {
-    if (/^\*stopped(?=,|$)/.test(lines[index])) lastStop = index;
+    if (/^(?:\d+)?\*stopped(?=,|$)/.test(lines[index])) lastStop = index;
   }
   return lastStop >= 0 && lines.slice(lastStop + 1).some((line) => /^\(gdb\)[\t ]*$/.test(line));
 }
 
 function findMiResult(raw: string, kind: "done" | "error" | "running" | "connected" | "exit"): string | undefined {
-  return raw.match(new RegExp(`(?:^|\\r?\\n)(\\^${kind}(?:,[^\\r\\n]*)?)(?=\\r?\\n|$)`, "m"))?.[1];
+  return raw.match(new RegExp(`(?:^|\\r?\\n)((?:\\d+)?\\^${kind}(?:,[^\\r\\n]*)?)(?=\\r?\\n|$)`, "m"))?.[1];
 }
 
 function hasMiResult(raw: string, kind: "done" | "error" | "running" | "connected" | "exit"): boolean {
@@ -969,11 +1021,11 @@ function hasMiResult(raw: string, kind: "done" | "error" | "running" | "connecte
 }
 
 function hasAnyMiResult(raw: string): boolean {
-  return /(?:^|\r?\n)\^(?:done|error|running|connected|exit)(?=,|\r?(?:\n|$))/m.test(raw);
+  return /(?:^|\r?\n)(?:\d+)?\^(?:done|error|running|connected|exit)(?=,|\r?(?:\n|$))/m.test(raw);
 }
 
 function hasMiAsyncRecord(raw: string, kind: "stopped" | "running"): boolean {
-  return new RegExp(`(?:^|\\r?\\n)\\*${kind}(?=,|\\r?(?:\\n|$))`, "m").test(raw);
+  return new RegExp(`(?:^|\\r?\\n)(?:\\d+)?\\*${kind}(?=,|\\r?(?:\\n|$))`, "m").test(raw);
 }
 
 function decodeMiString(value: string): string {
