@@ -32,6 +32,18 @@ test("ProbeQueue permits different Probe serials to execute concurrently", async
   assert.equal(maximum, 2);
 });
 
+test("ProbeQueue publishes a token-specific guard before lease execution", async (context) => {
+  const root = testDirectory(context, "queue-token-guard");
+  const serial = "10021";
+  const queue = new ProbeQueue(root);
+  const leaseDirectory = join(root, createHash("sha256").update(serial).digest("hex"), "lease.lock");
+  await queue.runExclusive(serial, async (metadata) => {
+    const guardName = `.owner-${createHash("sha256").update(metadata.leaseToken).digest("hex")}.guard`;
+    assert.equal(existsSync(join(leaseDirectory, guardName)), true);
+  });
+  assert.equal(existsSync(leaseDirectory), false);
+});
+
 test("ProbeQueue reports explicit long-lived owner errors", async (context) => {
   const queue = new ProbeQueue(testDirectory(context, "queue-owner"));
   let owner!: ReturnType<ProbeQueue["claimOwner"]>;
@@ -62,12 +74,13 @@ test("ProbeQueue serializes separate Node processes and returns actual sequence 
     "const fs=require('node:fs');",
     "const {ProbeQueue}=require(process.argv[1]);",
     "const root=process.argv[2], log=process.argv[3], id=process.argv[4];",
-    "(async()=>{const q=new ProbeQueue(root);const r=await q.runExclusive('1003',async m=>{fs.appendFileSync(log,JSON.stringify({id,kind:'start',sequence:m.queueSequence})+'\\n');await new Promise(r=>setTimeout(r,40));fs.appendFileSync(log,JSON.stringify({id,kind:'end',sequence:m.queueSequence})+'\\n');});process.stdout.write(String(r.queueSequence));})().catch(e=>{process.stderr.write(String(e.stack||e));process.exit(1);});",
+    "(async()=>{const q=new ProbeQueue(root);const r=await q.runExclusive('1003',async m=>{fs.appendFileSync(log,JSON.stringify({id,kind:'start',sequence:m.queueSequence})+'\\n');await new Promise(r=>setTimeout(r,2));fs.appendFileSync(log,JSON.stringify({id,kind:'end',sequence:m.queueSequence})+'\\n');});process.stdout.write(String(r.queueSequence));})().catch(e=>{process.stderr.write(String(e.stack||e));process.exit(1);});",
   ].join("");
-  const children = ["a", "b", "c", "d", "e", "f", "g", "h"].map((id) => runChild(script, [modulePath, root, logPath, id]));
+  const children = Array.from({ length: 24 }, (_, index) => String(index))
+    .map((id) => runChild(script, [modulePath, root, logPath, id]));
   const sequences = (await Promise.all(children)).map(Number);
   const records = readFileSync(logPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { kind: string; sequence: number });
-  assert.deepEqual(records.map((record) => record.kind), Array.from({ length: children.length }, () => ["start", "end"]).flat());
+  assert.deepEqual(records.map((record) => record.kind), Array.from({ length: sequences.length }, () => ["start", "end"]).flat());
   assert.deepEqual(records.filter((record) => record.kind === "start").map((record) => record.sequence), [...sequences].sort((a, b) => a - b));
 });
 
@@ -82,6 +95,104 @@ test("ProbeQueue recovers a lease left by a crashed process", async (context) =>
   assert.equal(await runChild(script, [modulePath, root]), "held");
   const result = await new ProbeQueue(root).runExclusive("1004", async () => "recovered", { queueTimeoutMs: 5_000 });
   assert.equal(result.value, "recovered");
+});
+
+test("ProbeQueue stale readers cannot retire a replacement directory lock", async (context) => {
+  const root = testDirectory(context, "queue-stale-reader-aba");
+  const serial = "10041";
+  const modulePath = join(__dirname, "probe-queue.js");
+  const probeDirectory = join(root, createHash("sha256").update(serial).digest("hex"));
+  const lockDirectory = join(probeDirectory, "owner-update.lock");
+  const staleRead = join(root, "stale-read");
+  const resumeStaleReader = join(root, "resume-stale-reader");
+  const staleRemovalAttempt = join(root, "stale-removal-attempt");
+  const replacementHeld = join(root, "replacement-held");
+  const releaseReplacementOwner = join(root, "release-replacement-owner");
+  const now = new Date().toISOString();
+  const staleToken = randomUUID();
+  mkdirSync(lockDirectory, { recursive: true });
+  writeFileSync(join(lockDirectory, "owner.json"), JSON.stringify({
+    sequence: 0,
+    pid: 2_147_483_647,
+    processInstanceId: "dead-lock-owner",
+    processStartedAt: now,
+    token: staleToken,
+    queuedAt: now,
+    heartbeatAt: now,
+  }));
+  const staleGuardName = `.owner-${createHash("sha256").update(staleToken).digest("hex")}.guard`;
+  writeFileSync(join(lockDirectory, staleGuardName), staleToken);
+  writeFileSync(join(probeDirectory, "owner.json"), JSON.stringify({
+    kind: "hss",
+    token: randomUUID(),
+    pid: 2_147_483_647,
+    processInstanceId: "dead-controller",
+    processStartedAt: now,
+    heartbeatAt: now,
+    projectRoot: "P",
+    targetGeneration: "G",
+    acquiredAt: now,
+    resourcePid: process.pid,
+    details: { captureId: "capture-aba" },
+  }));
+
+  const staleReaderScript = [
+    "const fs=require('node:fs'),path=require('node:path');",
+    "const originalRead=fs.readFileSync.bind(fs),originalRename=fs.renameSync.bind(fs);",
+    "const modulePath=process.argv[1],root=process.argv[2],serial=process.argv[3],resourcePid=Number(process.argv[4]),staleRead=process.argv[5],resume=process.argv[6],attempt=process.argv[7];",
+    "let captured=false;",
+    "fs.readFileSync=(file,...args)=>{const value=originalRead(file,...args);if(!captured&&String(file).endsWith(path.join('owner-update.lock','owner.json'))){captured=true;fs.writeFileSync(staleRead,'');while(!fs.existsSync(resume))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return value;};",
+    "fs.renameSync=(source,destination)=>{if(captured&&String(source).includes('owner-update.lock')&&String(source).endsWith('.guard'))fs.writeFileSync(attempt,'');return originalRename(source,destination);};",
+    "const {ProbeQueue}=require(modulePath);",
+    "try{new ProbeQueue(root).adoptOwner(serial,{kind:'hss',projectRoot:'P',targetGeneration:'G',resourcePid,captureId:'capture-aba'});process.stderr.write('stale reader unexpectedly adopted owner');process.exit(1);}catch(e){if(e.code!=='OWNER_ADOPTION_DENIED')throw e;process.stdout.write('blocked');}",
+  ].join("");
+  const staleReader = runChild(staleReaderScript, [
+    modulePath,
+    root,
+    serial,
+    String(process.pid),
+    staleRead,
+    resumeStaleReader,
+    staleRemovalAttempt,
+  ]);
+
+  const replacementScript = [
+    "const fs=require('node:fs');",
+    "const originalRename=fs.renameSync.bind(fs);",
+    "const modulePath=process.argv[1],root=process.argv[2],serial=process.argv[3],resourcePid=Number(process.argv[4]),resume=process.argv[5],attempt=process.argv[6],held=process.argv[7],release=process.argv[8];",
+    "let guardRenames=0;",
+    "fs.renameSync=(source,destination)=>{if(String(source).includes('owner-update.lock')&&String(source).endsWith('.guard')&&++guardRenames===2){fs.writeFileSync(held,'');fs.writeFileSync(resume,'');while(!fs.existsSync(attempt))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return originalRename(source,destination);};",
+    "const {ProbeQueue}=require(modulePath);",
+    "const q=new ProbeQueue(root);q.adoptOwner(serial,{kind:'hss',projectRoot:'P',targetGeneration:'G',resourcePid,captureId:'capture-aba'});process.stdout.write('adopted');while(!fs.existsSync(release))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);",
+  ].join("");
+  let replacement: Promise<string> | undefined;
+  try {
+    await waitForFile(staleRead);
+    replacement = runChild(replacementScript, [
+      modulePath,
+      root,
+      serial,
+      String(process.pid),
+      resumeStaleReader,
+      staleRemovalAttempt,
+      replacementHeld,
+      releaseReplacementOwner,
+    ]);
+    await waitForFile(replacementHeld);
+    await waitForFile(staleRemovalAttempt);
+    const replacementLock = JSON.parse(readFileSync(join(lockDirectory, "owner.json"), "utf8")) as { token: string };
+    const replacementGuardName = `.owner-${createHash("sha256").update(replacementLock.token).digest("hex")}.guard`;
+    assert.notEqual(replacementLock.token, staleToken);
+    assert.equal(existsSync(join(lockDirectory, staleGuardName)), false);
+    assert.equal(existsSync(join(lockDirectory, replacementGuardName)), true);
+    assert.equal(await staleReader, "blocked");
+    writeFileSync(releaseReplacementOwner, "");
+    assert.equal(await replacement, "adopted");
+  } finally {
+    writeFileSync(resumeStaleReader, "");
+    writeFileSync(releaseReplacementOwner, "");
+    await Promise.allSettled([staleReader, ...(replacement ? [replacement] : [])]);
+  }
 });
 
 test("ProbeQueue status reads an owner without waiting for a live metadata lock", async (context) => {
@@ -242,10 +353,28 @@ function runChild(script: string, args: string[]): Promise<string> {
     const child = spawn(process.execPath, ["-e", script, ...args], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      if (settled) return;
+      settled = true;
+      rejectChild(new Error("child process timed out after 15 seconds"));
+    }, 15_000);
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on("error", rejectChild);
-    child.on("exit", (code) => code === 0 ? resolveChild(stdout) : rejectChild(new Error(stderr || `child exited ${code}`)));
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      rejectChild(error);
+    });
+    child.on("exit", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (code === 0) resolveChild(stdout);
+      else rejectChild(new Error(stderr || `child exited ${code}`));
+    });
   });
 }
 
@@ -257,6 +386,12 @@ function testDirectory(_context: TestContext, name: string): string {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+async function waitForFile(filePath: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(filePath) && Date.now() < deadline) await delay(10);
+  assert.equal(existsSync(filePath), true, `timed out waiting for ${filePath}`);
 }
 
 async function waitForProcessExit(pid: number): Promise<void> {

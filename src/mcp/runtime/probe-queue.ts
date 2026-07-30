@@ -510,6 +510,7 @@ function tryCreateLease(lockPath: string, record: TicketRecord | LeaseRecord): b
   try {
     mkdirSync(prepared);
     writeFileSync(join(prepared, "owner.json"), JSON.stringify(record), { encoding: "utf8", flag: "wx" });
+    writeFileSync(directoryGuardPath(prepared, record.token), record.token, { encoding: "utf8", flag: "wx" });
     renameSync(prepared, lockPath);
     return true;
   } catch (error) {
@@ -544,12 +545,29 @@ function removeJsonFileIfTokenMatches(filePath: string, token: string): boolean 
 }
 
 function removeDirectoryIfTokenMatches(directory: string, token: string): boolean {
+  const guardPath = directoryGuardPath(directory, token);
+  const claimedGuardPath = `${guardPath}.retiring-${process.pid}-${randomUUID()}`;
   try {
-    const current = JSON.parse(readFileSync(join(directory, "owner.json"), "utf8")) as { token?: string };
-    if (current.token !== token) return false;
-    rmSync(directory, { recursive: true, force: true });
-    return true;
-  } catch { return false; }
+    renameSync(guardPath, claimedGuardPath);
+  } catch {
+    return false;
+  }
+  const retiredDirectory = `${directory}.retired-${process.pid}-${randomUUID()}`;
+  try {
+    renameSync(directory, retiredDirectory);
+  } catch {
+    try { renameSync(claimedGuardPath, guardPath); } catch { /* leave the lock fail-closed */ }
+    return false;
+  }
+  try {
+    rmSync(retiredDirectory, { recursive: true, force: true });
+  } catch { /* the live lock name was already retired atomically */ }
+  return true;
+}
+
+function directoryGuardPath(directory: string, token: string): string {
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  return join(directory, `.owner-${tokenHash}.guard`);
 }
 
 function releaseDirectoryLock(lockPath: string, token: string): void {
