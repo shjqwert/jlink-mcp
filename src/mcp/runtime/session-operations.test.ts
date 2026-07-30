@@ -402,7 +402,7 @@ test("GDB connect restores a normal attach halt to the requested running state",
   fixtureValue.gdb.commandResult = { success: true, output: "running", rawOutput: "^running", observedTargetExecutionState: "running" };
   const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, true);
-  assert.deepEqual(fixtureValue.gdb.commands, ["continue"]);
+  assert.deepEqual(fixtureValue.gdb.commands, ["-exec-continue --all"]);
   assert.deepEqual(result.observedEffects, ["gdb_client_connected", "gdb_attach_halted_target", "target_state_restored:halted->running"]);
   assert.equal(fixtureValue.gdb.isConnected(), true);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
@@ -426,7 +426,7 @@ test("GDB connect restores the audited RT-06 J-Link attach stop only with explic
   fixtureValue.gdb.commandResult = { success: true, output: "running", rawOutput: "^running", observedTargetExecutionState: "running" };
   const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, true);
-  assert.deepEqual(fixtureValue.gdb.commands, ["continue"]);
+  assert.deepEqual(fixtureValue.gdb.commands, ["-exec-continue --all"]);
   assert.deepEqual(result.observedEffects, ["gdb_client_connected", "gdb_attach_halted_target", "target_state_restored:halted->running"]);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
   assert.equal((result.data as { attachStopClassification: string }).attachStopClassification, "reasonless_attach_like_stop");
@@ -620,7 +620,7 @@ test("GDB connect fails closed when an attach halt cannot be restored", async (c
   assert.equal(result.error?.code, "GDB_ATTACH_STATE_RESTORE_FAILED");
   assert.equal(result.error?.writeIssued, true);
   assert.equal(result.error?.stateUnknown, true);
-  assert.deepEqual(fixtureValue.gdb.commands, ["continue"]);
+  assert.deepEqual(fixtureValue.gdb.commands, ["-exec-continue --all"]);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
 });
 

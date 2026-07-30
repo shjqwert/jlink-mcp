@@ -429,7 +429,7 @@ export class SessionOperations {
             && targetExecutionStateExpectedAfterAttach === "running"
             && attachStopClassification) {
           envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target");
-          const restore = await runtime.gdb.command("continue");
+          const restore = await runtime.gdb.command("-exec-continue --all");
           const executionStateAfterRestore = runtime.gdb.getTargetExecutionState();
           runtime.gdbServerTargetExecutionState = executionStateAfterRestore;
           envelope.data = {
