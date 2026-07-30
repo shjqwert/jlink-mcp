@@ -627,9 +627,103 @@ export class JLinkBackend extends ProbeBackend {
         };
       }
       const mismatch = verifyOnlyMismatchDiagnostic(diagnostics);
+      if (mismatch) {
+        const reported = verifyOnlyReportedMismatch(diagnostics);
+        if (!reported) {
+          return {
+            ...result,
+            success: false,
+            error: "SEGGER VerifyBin reported a mismatch but reported no independently readable address",
+            errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+            writeIssued: false,
+            stateUnknown: false,
+            suggestedAction: "Keep firmware identity unverified; an addressless vendor mismatch is not sufficient proof of target content.",
+          };
+        }
+        const expected = preparedByteAt(prepared, reported.address);
+        if (expected === undefined || (reported.expected !== undefined && reported.expected !== expected)) {
+          return {
+            ...result,
+            success: false,
+            error: "SEGGER VerifyBin mismatch evidence does not identify a byte matching the configured image",
+            errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+            writeIssued: false,
+            stateUnknown: false,
+            suggestedAction: "Keep firmware identity unverified and inspect the staged image range and raw SEGGER diagnostic.",
+          };
+        }
+        const confirmation = await this.accessMemoryNonIntrusive(
+          reported.address,
+          1,
+          1,
+          undefined,
+          undefined,
+          true,
+        );
+        const confirmed = confirmation.success ? memoryReadByte(confirmation.output) : undefined;
+        if (!confirmation.success || confirmed === undefined) {
+          return {
+            ...confirmation,
+            success: false,
+            rawOutput: [result.rawOutput, confirmation.rawOutput].filter(Boolean).join("\n"),
+            error: `SEGGER VerifyBin mismatch could not be independently confirmed: ${confirmation.error ?? "invalid independent read response"}`,
+            errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+            writeIssued: false,
+            stateUnknown: confirmation.stateUnknown ?? true,
+            suggestedAction: "Keep firmware identity unverified until the reported address can be read independently without changing target state.",
+          };
+        }
+        if (confirmed !== expected) {
+          return {
+            ...result,
+            success: false,
+            rawOutput: [result.rawOutput, confirmation.rawOutput].filter(Boolean).join("\n"),
+            error: `SEGGER VerifyBin mismatch independently confirmed at 0x${reported.address.toString(16).padStart(8, "0")}`,
+            errorCode: ProbeErrorCode.JLINK_VERIFY_MISMATCH,
+            writeIssued: false,
+            stateUnknown: false,
+            suggestedAction: "The independently read target byte does not match the configured firmware image.",
+          };
+        }
+        const retry = await this.execRaw(commands, 180000, { exitOnError: false });
+        const retryDiagnostics = `${retry.rawOutput}\n${retry.stderr ?? ""}\n${retry.error ?? ""}`;
+        const retryFailure = verifyOnlyFailureDiagnostic(retryDiagnostics);
+        const retryMismatch = verifyOnlyMismatchDiagnostic(retryDiagnostics);
+        if (!retryFailure && !retryMismatch && retry.success) {
+          const address = `0x${reported.address.toString(16).padStart(8, "0")}`;
+          return {
+            ...retry,
+            rawOutput: [
+              result.rawOutput,
+              `Independent uncached read confirmed configured byte 0x${expected.toString(16).padStart(2, "0")} at ${address}.`,
+              confirmation.rawOutput,
+              "Full-image chunked VerifyBin retry passed.",
+              retry.rawOutput,
+            ].filter(Boolean).join("\n"),
+            output: `SEGGER VerifyBin anomaly independently confirmed at ${address}; full-image retry passed across ${prepared.bins.length} chunk(s).`,
+            writeIssued: false,
+            stateUnknown: false,
+          };
+        }
+        return {
+          ...retry,
+          success: false,
+          rawOutput: [result.rawOutput, confirmation.rawOutput, retry.rawOutput].filter(Boolean).join("\n"),
+          error: retryFailure
+            ? `SEGGER VerifyBin retry failed: ${retryFailure}`
+            : "SEGGER VerifyBin mismatch remained after an independent read matched the configured byte",
+          errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+          writeIssued: false,
+          stateUnknown: retryFailure ? true : retry.stateUnknown,
+          suggestedAction: "Verification evidence is contradictory; keep firmware identity unverified and inspect the raw SEGGER and independent-read evidence.",
+        };
+      }
       return {
         ...result,
         success: mismatch ? false : result.success,
+        output: !mismatch && result.success
+          ? `SEGGER VerifyBin full-image verification passed across ${prepared.bins.length} chunk(s).\n${result.output}`.trim()
+          : result.output,
         error: mismatch ? "SEGGER VerifyBin reported a content mismatch" : result.error,
         errorCode: mismatch ? ProbeErrorCode.JLINK_VERIFY_MISMATCH : result.errorCode,
         writeIssued: false,
@@ -955,14 +1049,16 @@ function verifyOnlyDiagnosticLines(raw: string): string[] {
 }
 
 function isVerifyOnlyMismatchLine(line: string): boolean {
-  return /(?:failed to verify|verify failed)\s+@\s+address\s+0x[0-9a-f]+\b/i.test(line)
+  return /(?:failed to verify|verify failed)\s+@\s+(?:address\s+)?0x[0-9a-f]+\b/i.test(line)
     || /contents?\s+(?:differ|do not match)\b/i.test(line);
 }
 
 interface PreparedVerifyBins {
-  bins: Array<{ path: string; address: number }>;
+  bins: Array<{ path: string; address: number; data: Buffer }>;
   cleanup(): void;
 }
+
+const VERIFY_BIN_CHUNK_BYTES = 4096;
 
 function prepareVerifyBins(filePath: string, baseAddress?: number): PreparedVerifyBins {
   const extension = path.extname(filePath).toLowerCase();
@@ -973,7 +1069,11 @@ function prepareVerifyBins(filePath: string, baseAddress?: number): PreparedVeri
     const stats = fs.statSync(filePath);
     if (!stats.isFile() || stats.size <= 0) throw new Error("raw BIN Verify-only requires a non-empty regular file");
     if (baseAddress + stats.size > 0x1_0000_0000) throw new Error("raw BIN data exceeds the 32-bit target address space");
-    return { bins: [{ path: filePath, address: baseAddress }], cleanup: () => undefined };
+    const data = fs.readFileSync(filePath);
+    if (data.length <= VERIFY_BIN_CHUNK_BYTES) {
+      return { bins: [{ path: filePath, address: baseAddress, data }], cleanup: () => undefined };
+    }
+    return stageVerifyBins([{ address: baseAddress, data }]);
   }
 
   const source = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
@@ -984,15 +1084,22 @@ function prepareVerifyBins(filePath: string, baseAddress?: number): PreparedVeri
       : undefined;
   if (!segments) throw new Error("firmware Verify-only supports Intel HEX, S-record, or raw BIN inputs only");
   if (segments.length === 0) throw new Error("firmware Verify-only input contains no data records");
+  return stageVerifyBins(segments);
+}
 
+function stageVerifyBins(segments: VerifySegment[]): PreparedVerifyBins {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "jlink-verify-"));
   try {
-    const bins = segments.map((segment, index) => {
-      const binPath = path.join(root, `segment-${index}.bin`);
-      fs.writeFileSync(binPath, segment.data, { flag: "wx" });
-      fs.chmodSync(binPath, 0o400);
-      return { path: binPath, address: segment.address };
-    });
+    const bins: PreparedVerifyBins["bins"] = [];
+    for (const [segmentIndex, segment] of segments.entries()) {
+      for (let offset = 0; offset < segment.data.length; offset += VERIFY_BIN_CHUNK_BYTES) {
+        const data = segment.data.subarray(offset, Math.min(segment.data.length, offset + VERIFY_BIN_CHUNK_BYTES));
+        const binPath = path.join(root, `segment-${segmentIndex}-chunk-${offset / VERIFY_BIN_CHUNK_BYTES}.bin`);
+        fs.writeFileSync(binPath, data, { flag: "wx" });
+        fs.chmodSync(binPath, 0o400);
+        bins.push({ path: binPath, address: segment.address + offset, data });
+      }
+    }
     return {
       bins,
       cleanup: () => {
@@ -1004,6 +1111,37 @@ function prepareVerifyBins(filePath: string, baseAddress?: number): PreparedVeri
     fs.rmSync(root, { recursive: true, force: true });
     throw error;
   }
+}
+
+function preparedByteAt(prepared: PreparedVerifyBins, address: number): number | undefined {
+  const item = prepared.bins.find((candidate) => address >= candidate.address && address < candidate.address + candidate.data.length);
+  return item?.data[address - item.address];
+}
+
+function memoryReadByte(output: string): number | undefined {
+  const match = output.match(/=\s*([0-9a-f]{2})(?:\s|$)/i);
+  return match ? Number.parseInt(match[1], 16) : undefined;
+}
+
+interface VerifyOnlyReportedMismatch {
+  address: number;
+  expected?: number;
+  read?: number;
+}
+
+function verifyOnlyReportedMismatch(raw: string): VerifyOnlyReportedMismatch | undefined {
+  for (const line of verifyOnlyDiagnosticLines(raw)) {
+    const match = line.match(
+      /(?:failed to verify|verify failed)\s+@\s+(?:address\s+)?0x([0-9a-f]+)(?:\s*,?\s*expected\s+([0-9a-f]{2})\s+read\s+([0-9a-f]{2}))?/i,
+    );
+    if (!match) continue;
+    return {
+      address: Number.parseInt(match[1], 16),
+      expected: match[2] ? Number.parseInt(match[2], 16) : undefined,
+      read: match[3] ? Number.parseInt(match[3], 16) : undefined,
+    };
+  }
+  return undefined;
 }
 
 function parseSrecVerifySegments(source: string): VerifySegment[] {

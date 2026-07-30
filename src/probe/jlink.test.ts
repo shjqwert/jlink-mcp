@@ -257,10 +257,10 @@ test("JLinkBackend firmware Verify-only rejects Intel HEX checksum, EOF, and ove
   assert.equal(spawnCount, 0);
 });
 
-test("JLinkBackend firmware Verify-only classifies zero-exit vendor mismatch as read-only mismatch", async (context) => {
+test("JLinkBackend firmware Verify-only keeps an unconfirmed vendor mismatch fail-closed", async (context) => {
   const scripts: string[] = [];
   const backend = new JLinkBackend(
-    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    { installDir: "Z:\\missing-jlink", memoryHelperPath: "Z:\\missing-helper.exe", device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
     () => successfulProcess(scripts, "****** Error: Failed to verify @ address 0x0000C000\nO.K.\n"),
   );
@@ -269,18 +269,129 @@ test("JLinkBackend firmware Verify-only classifies zero-exit vendor mismatch as 
   const result = await backend.verifyFirmware(bin, 0x0000c000);
 
   assert.equal(result.success, false);
-  assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
   assert.equal(result.writeIssued, false);
   assert.equal(result.stateUnknown, false);
-  assert.match(result.error ?? "", /content mismatch/i);
+  assert.match(result.error ?? "", /independently confirmed/i);
   assert.deepEqual(scripts, [
     `exec SetRestartOnClose = 0\nhalt\nVerifyBin "${bin}" 0xc000\nhalt\nexit\n`,
   ]);
 });
 
-test("JLinkBackend firmware Verify-only treats zero-exit contents-differ output as failure", async (context) => {
+test("JLinkBackend firmware Verify-only chunks large images and independently confirms a transient vendor mismatch", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-confirm-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const helper = join(root, "hss_helper.exe");
+  const dll = join(root, "JLink_x64.dll");
+  writeFileSync(helper, "test");
+  writeFileSync(dll, "test");
+  const bin = join(root, "large.bin");
+  const bytes = Buffer.alloc(8193, 0x21);
+  bytes[0x123] = 0x5f;
+  writeFileSync(bin, bytes);
+  const scripts: string[] = [];
+  let commanderInvocation = 0;
   const backend = new JLinkBackend(
-    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    {
+      installDir: root,
+      memoryHelperPath: helper,
+      device: "TEST",
+      serialNumber: "123456",
+      interface: "SWD",
+      speed: 1000,
+    },
+    new ProcessManager(),
+    (command, args) => {
+      if (command === helper) {
+        assert.deepEqual(args.slice(args.indexOf("--address"), args.indexOf("--address") + 4), [
+          "--address",
+          "0xc123",
+          "--size",
+          "1",
+        ]);
+        assert.deepEqual(
+          args.slice(args.indexOf("--preserve-debug-state-on-close")),
+          ["--preserve-debug-state-on-close", "true"],
+        );
+        return helperProcess(JSON.stringify({
+          status: "ok",
+          probeSerial: 123456,
+          memoryCacheDisabled: true,
+          debugDeinitSkipped: true,
+          targetWasHaltedRaw: 1,
+          targetWasHaltedAfterReadRaw: 1,
+          samples: [{ valid: true, bytes: "5f" }],
+        }));
+      }
+      commanderInvocation += 1;
+      return successfulProcess(
+        scripts,
+        commanderInvocation === 1
+          ? "Verify failed @ 0x0000C123, Expected 5F read DF\nO.K.\n"
+          : "O.K.\n",
+      );
+    },
+  );
+
+  const result = await backend.verifyFirmware(bin, 0x0000c000);
+
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, false);
+  assert.equal(commanderInvocation, 2);
+  assert.equal((scripts[0].match(/\nVerifyBin /g) ?? []).length, 3);
+  assert.match(result.output, /independently confirmed.*0x0000c123/i);
+  assert.match(result.output, /full-image retry passed/i);
+});
+
+test("JLinkBackend firmware Verify-only reports mismatch only after an independent byte read disagrees", async (context) => {
+  const root = mkdtempSync(join(tmpdir(), "jlink-verify-real-mismatch-test-"));
+  context.after(() => rmSync(root, { recursive: true, force: true }));
+  const helper = join(root, "hss_helper.exe");
+  const dll = join(root, "JLink_x64.dll");
+  writeFileSync(helper, "test");
+  writeFileSync(dll, "test");
+  let commanderInvocations = 0;
+  const backend = new JLinkBackend(
+    {
+      installDir: root,
+      memoryHelperPath: helper,
+      device: "TEST",
+      serialNumber: "123456",
+      interface: "SWD",
+      speed: 1000,
+    },
+    new ProcessManager(),
+    (command) => {
+      if (command === helper) {
+        return helperProcess(JSON.stringify({
+          status: "ok",
+          probeSerial: 123456,
+          memoryCacheDisabled: true,
+          debugDeinitSkipped: true,
+          targetWasHaltedRaw: 1,
+          targetWasHaltedAfterReadRaw: 1,
+          samples: [{ valid: true, bytes: "df" }],
+        }));
+      }
+      commanderInvocations += 1;
+      return successfulProcess([], "Verify failed @ address 0x0000C000, Expected 01 read DF\nO.K.\n");
+    },
+  );
+
+  const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "confirmed-mismatch"), 0x0000c000);
+
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, false);
+  assert.equal(commanderInvocations, 1);
+  assert.match(result.error ?? "", /independently confirmed.*0x0000c000/i);
+});
+
+test("JLinkBackend firmware Verify-only treats an addressless contents-differ result as unconfirmed", async (context) => {
+  const backend = new JLinkBackend(
+    { installDir: "Z:\\missing-jlink", memoryHelperPath: "Z:\\missing-helper.exe", device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
     () => successfulProcess([], "Contents differ\nO.K.\n"),
   );
@@ -288,13 +399,15 @@ test("JLinkBackend firmware Verify-only treats zero-exit contents-differ output 
   const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "contents-differ"), 0x0000c000);
 
   assert.equal(result.success, false);
-  assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
   assert.equal(result.writeIssued, false);
+  assert.equal(result.stateUnknown, false);
+  assert.match(result.error ?? "", /reported no independently readable address/i);
 });
 
-test("JLinkBackend firmware Verify-only classifies zero-exit reverse verify-failed wording as mismatch", async (context) => {
+test("JLinkBackend firmware Verify-only does not promote an address-only report without independent read evidence", async (context) => {
   const backend = new JLinkBackend(
-    { device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
+    { installDir: "Z:\\missing-jlink", memoryHelperPath: "Z:\\missing-helper.exe", device: "TEST", serialNumber: "123456", interface: "SWD", speed: 1000 },
     new ProcessManager(),
     () => successfulProcess([], "J-Link>Verify failed @ address 0x0000C000\nO.K.\n"),
   );
@@ -302,7 +415,7 @@ test("JLinkBackend firmware Verify-only classifies zero-exit reverse verify-fail
   const result = await backend.verifyFirmware(temporaryFirmwareBin(context, "reverse-mismatch"), 0x0000c000);
 
   assert.equal(result.success, false);
-  assert.equal(result.errorCode, ProbeErrorCode.JLINK_VERIFY_MISMATCH);
+  assert.equal(result.errorCode, ProbeErrorCode.JLINK_COMMAND_FAILED);
   assert.equal(result.stateUnknown, false);
   assert.equal(result.writeIssued, false);
 });

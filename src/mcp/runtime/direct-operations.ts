@@ -369,7 +369,7 @@ export class DirectMcuService {
             failed.errorCode === ProbeErrorCode.JLINK_VERIFY_MISMATCH ? "FIRMWARE_VERIFY_MISMATCH" : "FIRMWARE_VERIFY_FAILED",
             "verification",
             failed.error ?? "SEGGER firmware Verify-only failed",
-            { writeIssued: false, stateUnknown: after.state === "unknown" },
+            { writeIssued: false, stateUnknown: failed.stateUnknown === true || after.state === "unknown" },
           );
         }
         envelope.verification = { status: "verified", method: "segger_verify_only" };

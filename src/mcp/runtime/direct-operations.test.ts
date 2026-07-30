@@ -1532,6 +1532,44 @@ test("firmware Verify-only mismatch is fail-closed and explicitly unissued", asy
   assert.deepEqual(probe.flashPaths, []);
 });
 
+test("firmware Verify-only preserves independent-confirmation uncertainty and keeps identity unverified", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-unconfirmed");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.s19");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, "S107000001020304EE\nS9030000FC\n", "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  probe.verifyResult = {
+    success: false,
+    rawOutput: "Verify failed @ address 0x00000000\nindependent read helper timed out",
+    output: "",
+    error: "SEGGER VerifyBin mismatch could not be independently confirmed",
+    errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+    writeIssued: false,
+    stateUnknown: true,
+  };
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "FIRMWARE_VERIFY_FAILED");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, true);
+  assert.equal(result.artifact?.firmwareIdentity, "unverified");
+  assert.equal(result.artifact?.evidenceSource, "segger_verify_only_failed");
+  assert.equal(result.after.targetState, "halted");
+});
+
 test("erase reports a fatal J-Link programming diagnostic as issued with unknown state", async (context) => {
   const { service, probe, projectRoot } = await fixture(context, "erase-fatal-programming-diagnostic");
   probe.eraseResult = {
