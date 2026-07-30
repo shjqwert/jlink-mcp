@@ -16,6 +16,8 @@ import { inspectArtifactFile, TargetStore, TargetStoreError, type StoredTarget }
 export interface SessionGdbClient {
   connect(host?: string, port?: number, elfFile?: string): Promise<GDBResponse>;
   command(command: string, timeout?: number): Promise<GDBResponse>;
+  listBreakpoints(timeout?: number): Promise<GDBResponse>;
+  deleteBreakpoint(breakpointId: number, timeout?: number): Promise<GDBResponse>;
   wait(timeout?: number): Promise<GDBResponse>;
   backtrace(full?: boolean): Promise<GDBResponse>;
   isConnected(): boolean;
@@ -528,6 +530,123 @@ export class SessionOperations {
       envelope.verification = { status: "executed_unverified" };
       envelope.warnings.push("Raw GDB command semantics are not interpreted; side effects are unknown.");
       envelope.artifact = this.artifactSummary(this.targets.require(target.projectRoot));
+    });
+  }
+
+  gdbBreakpointList(projectRoot: string, timeoutMs = 15_000): Promise<OperationEnvelope> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return Promise.resolve(validationFailure("gdb_breakpoint_list", "timeoutMs must be 1..120000"));
+    return this.withGdbOwner("gdb_breakpoint_list", projectRoot, ["gdb_breakpoints_read"], async (envelope, _target, runtime) => {
+      if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
+      const executionStateBefore = runtime.gdb.getTargetExecutionState();
+      if (
+        executionStateBefore === "unknown"
+        || runtime.gdbServerTargetExecutionState === "unknown"
+        || runtime.gdbServerTargetExecutionState !== executionStateBefore
+      ) {
+        throw new SessionError("TARGET_STATE_UNKNOWN", "target state is not consistently known before breakpoint listing; no command was issued", false, false, true);
+      }
+      envelope.before = { ...(envelope.before as Record<string, unknown>), targetExecutionState: executionStateBefore };
+      const result = await runtime.gdb.listBreakpoints(timeoutMs);
+      const executionStateAfter = runtime.gdb.getTargetExecutionState();
+      runtime.gdbServerTargetExecutionState = executionStateAfter;
+      envelope.data = { ...result, targetExecutionState: executionStateAfter, sideEffects: "read_only" };
+      envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: executionStateAfter };
+      if (executionStateAfter !== executionStateBefore) {
+        throw new SessionError(
+          "HIDDEN_STATE_CHANGE",
+          `breakpoint listing changed target state from ${executionStateBefore} to ${executionStateAfter}`,
+          false,
+          false,
+          executionStateAfter === "unknown",
+        );
+      }
+      if (!result.success) throw gdbError(result, "gdb_breakpoint_list", false, false);
+      if (
+        result.observedTargetExecutionState !== executionStateAfter
+        && result.preservedTargetExecutionState !== executionStateAfter
+      ) {
+        runtime.gdbServerTargetExecutionState = "unknown";
+        envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: "unknown" };
+        throw new SessionError("TARGET_STATE_UNKNOWN", "breakpoint listing returned no valid execution-state observation or typed preservation evidence", false, false, true);
+      }
+      envelope.verification = { status: "observed", method: "typed_read_only_gdb_command" };
+    });
+  }
+
+  gdbBreakpointDelete(projectRoot: string, breakpointId: number, timeoutMs = 15_000): Promise<OperationEnvelope> {
+    if (!Number.isSafeInteger(breakpointId) || breakpointId < 1) return Promise.resolve(validationFailure("gdb_breakpoint_delete", "breakpointId must be a positive integer"));
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return Promise.resolve(validationFailure("gdb_breakpoint_delete", "timeoutMs must be 1..120000"));
+    return this.withGdbOwner("gdb_breakpoint_delete", projectRoot, ["gdb_breakpoint_delete", "memory_mutation_trust_invalidated"], async (envelope, target, runtime) => {
+      if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
+      const executionStateBefore = runtime.gdb.getTargetExecutionState();
+      const serverExecutionStateBefore = runtime.gdbServerTargetExecutionState;
+      if (
+        executionStateBefore === "unknown"
+        || serverExecutionStateBefore === "unknown"
+        || executionStateBefore !== serverExecutionStateBefore
+      ) {
+        throw new SessionError(
+          "TARGET_STATE_UNKNOWN",
+          "target state is not consistently known before breakpoint deletion; no command was issued",
+          false,
+          false,
+          true,
+        );
+      }
+      if (executionStateBefore !== "halted") {
+        throw new SessionError(
+          "HALT_REQUIRED",
+          "breakpoint deletion requires a halted target; no command was issued",
+          false,
+          false,
+          false,
+        );
+      }
+      envelope.before = { ...(envelope.before as Record<string, unknown>), targetExecutionState: executionStateBefore };
+      const result = await runtime.gdb.deleteBreakpoint(breakpointId, timeoutMs);
+      const commandDispatched = result.commandDispatched === true;
+      const executionStateAfter = runtime.gdb.getTargetExecutionState();
+      runtime.gdbServerTargetExecutionState = executionStateAfter;
+      runtime.gdbPreServerStateExpectationValid = false;
+      envelope.data = {
+        breakpointId,
+        ...result,
+        targetExecutionState: executionStateAfter,
+        sideEffects: "breakpoint_configuration_and_possible_memory_mutation",
+      };
+      envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: executionStateAfter };
+      if (commandDispatched) {
+        try {
+          const updated = await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_breakpoint_delete", {
+            targetGeneration: target.generation,
+            probeSerial: target.probeSerial,
+            artifactGeneration: target.artifact?.generation,
+          });
+          envelope.artifact = this.artifactSummary(updated);
+        } catch (error) {
+          const code = error instanceof TargetStoreError ? error.code : "ARTIFACT_STATE_PERSIST_FAILED";
+          throw new SessionError(code, error instanceof Error ? error.message : String(error), false, true, executionStateAfter === "unknown");
+        }
+      }
+      if (executionStateAfter !== executionStateBefore) {
+        throw new SessionError(
+          "HIDDEN_STATE_CHANGE",
+          `breakpoint deletion changed target state from ${executionStateBefore} to ${executionStateAfter}`,
+          false,
+          commandDispatched,
+          executionStateAfter === "unknown",
+        );
+      }
+      if (!result.success) throw gdbError(result, "gdb_breakpoint_delete", commandDispatched, false);
+      if (
+        result.observedTargetExecutionState !== executionStateAfter
+        && result.preservedTargetExecutionState !== executionStateAfter
+      ) {
+        runtime.gdbServerTargetExecutionState = "unknown";
+        envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: "unknown" };
+        throw new SessionError("TARGET_STATE_UNKNOWN", "breakpoint deletion returned no valid execution-state observation or typed preservation evidence", false, true, true);
+      }
+      envelope.verification = { status: "observed", method: "typed_gdb_breakpoint_delete_and_state_preservation" };
     });
   }
 

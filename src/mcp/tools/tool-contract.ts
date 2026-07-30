@@ -9,7 +9,7 @@ export const AGENT_TOOL_NAMES = [
   "hss_start", "hss_status", "hss_stop", "hss_recover",
   "debug_sequence_execute",
   "capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_export_csv",
-  "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
+  "gdb_open", "gdb_command", "gdb_breakpoint_list", "gdb_breakpoint_delete", "gdb_wait", "gdb_backtrace", "gdb_close",
   "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close",
   "diagnose_crash", "probe_command",
 ] as const;
@@ -51,6 +51,8 @@ export const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   capture_export_csv: repairingCaptureQuery("Explicitly export a bounded CSV outside the JCAP package."),
   gdb_open: configuredTarget("Start one managed GDB Server and client using the current Artifact as symbols."),
   gdb_command: configuredTarget(confirmedOperation("Execute one exact raw GDB command and report unknown effects.")),
+  gdb_breakpoint_list: configuredTarget("Read the managed GDB breakpoint table through one fixed read-only command while preserving only consistently known target execution state."),
+  gdb_breakpoint_delete: configuredTarget("Delete one numbered managed GDB breakpoint only while the target is known halted; preserve execution-state evidence and invalidate memory mutation trust."),
   gdb_wait: configuredTarget("Wait for an already issued GDB run or step to stop."),
   gdb_backtrace: configuredTarget("Read a backtrace when the target state permits it."),
   gdb_close: configuredTarget("Disconnect the managed GDB client and stop its server without target control."),

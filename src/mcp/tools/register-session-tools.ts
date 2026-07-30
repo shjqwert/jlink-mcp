@@ -35,6 +35,22 @@ export function registerSessionTools(register: RegisterEnvelopeTool, services: S
     Number(input.timeoutMs),
     Boolean(input.userConfirmed),
   ));
+  register("gdb_breakpoint_list", {
+    ...projectRootInput,
+    timeoutMs: z.number().int().min(1).max(120_000).default(15_000),
+  }, (input) => services.sessions.gdbBreakpointList(
+    String(input.projectRoot),
+    Number(input.timeoutMs),
+  ));
+  register("gdb_breakpoint_delete", {
+    ...projectRootInput,
+    breakpointId: z.number().int().min(1),
+    timeoutMs: z.number().int().min(1).max(120_000).default(15_000),
+  }, (input) => services.sessions.gdbBreakpointDelete(
+    String(input.projectRoot),
+    Number(input.breakpointId),
+    Number(input.timeoutMs),
+  ));
   register("gdb_wait", {
     ...projectRootInput,
     timeoutMs: z.number().int().min(1).max(120_000).default(30_000),

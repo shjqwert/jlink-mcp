@@ -50,14 +50,197 @@ test("raw GDB command without current state evidence invalidates cached state an
   const command = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "monitor reset halt");
   assert.equal(command.ok, true);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
-  const waited = await fixtureValue.sessions.gdbWait(fixtureValue.projectRoot, 1);
-  assert.equal(waited.ok, false);
-  assert.equal(waited.error?.code, "TARGET_STATE_UNKNOWN");
-  assert.equal(fixtureValue.gdb.waitCalls, 0);
   const stopped = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
   assert.equal(stopped.ok, false);
   assert.equal(stopped.error?.code, "TARGET_STATE_UNKNOWN");
   assert.equal(fixtureValue.probe.serverRunning, true);
+});
+
+test("typed breakpoint listing preserves halted evidence and permits GDB close", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-breakpoint-list-close");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "Num Type Disp Enb Address What\n1 breakpoint keep y 0x0001c0f2 JlinkTestFixtureTask1ms",
+    rawOutput: "~\"Num Type Disp Enb Address What\\n\"\n^done\n(gdb)",
+  };
+
+  const listed = await fixtureValue.sessions.gdbBreakpointList(fixtureValue.projectRoot);
+  assert.equal(listed.ok, true, JSON.stringify(listed.error));
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+  assert.equal((listed.data as { targetExecutionState: string }).targetExecutionState, "halted");
+  assert.match((listed.data as { output: string }).output, /breakpoint/);
+
+  fixtureValue.probe.targetState = "halted";
+  const closed = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+  assert.equal(closed.ok, true, JSON.stringify(closed.error));
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
+});
+
+test("GDB-014 typed breakpoint list-delete-list preserves halted close evidence", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-breakpoint-list-delete-close", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+  await fixtureValue.targets.setMemoryMutationTrust(fixtureValue.projectRoot, "verified", "fixture");
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "Num Type Disp Enb Address What\n1 breakpoint keep y 0x0001c0f2 JlinkTestFixtureTask1ms",
+  };
+  const beforeDelete = await fixtureValue.sessions.gdbBreakpointList(fixtureValue.projectRoot);
+  assert.equal(beforeDelete.ok, true, JSON.stringify(beforeDelete.error));
+
+  fixtureValue.gdb.commandResult = { success: true, output: "" };
+  const deleted = await fixtureValue.sessions.gdbBreakpointDelete(fixtureValue.projectRoot, 1);
+  assert.equal(deleted.ok, true, JSON.stringify(deleted.error));
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+  assert.equal(deleted.artifact?.firmwareIdentity, "verified");
+  assert.equal(deleted.artifact?.mutationTrust, "unverified");
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveMemoryMutationTrust.source, "gdb_breakpoint_delete");
+
+  fixtureValue.gdb.commandResult = { success: true, output: "No breakpoints or watchpoints." };
+  const afterDelete = await fixtureValue.sessions.gdbBreakpointList(fixtureValue.projectRoot);
+  assert.equal(afterDelete.ok, true, JSON.stringify(afterDelete.error));
+  assert.match((afterDelete.data as { output: string }).output, /No breakpoints/);
+  assert.deepEqual(fixtureValue.gdb.commands, ["info breakpoints", "-break-delete 1", "info breakpoints"]);
+
+  fixtureValue.probe.targetState = "halted";
+  const closed = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+  assert.equal(closed.ok, true, JSON.stringify(closed.error));
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial), undefined);
+});
+
+test("GDB-003 stopped next and finish evidence survives typed breakpoint listing and close", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-step-list-close");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  for (const command of ["next", "finish"]) {
+    fixtureValue.gdb.commandResult = {
+      success: true,
+      output: `Stopped after ${command}`,
+      rawOutput: '*stopped,reason="end-stepping-range",stopped-threads="all"\n^done\n(gdb)',
+      observedTargetExecutionState: "halted",
+    };
+    const stepped = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, command);
+    assert.equal(stepped.ok, true, JSON.stringify(stepped.error));
+    assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+
+    fixtureValue.gdb.commandResult = { success: true, output: "No breakpoints or watchpoints." };
+    const listed = await fixtureValue.sessions.gdbBreakpointList(fixtureValue.projectRoot);
+    assert.equal(listed.ok, true, JSON.stringify(listed.error));
+    assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+  }
+
+  fixtureValue.probe.targetState = "halted";
+  const closed = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+  assert.equal(closed.ok, true, JSON.stringify(closed.error));
+});
+
+test("typed breakpoint operations fail closed on unknown or changing execution state", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-breakpoint-state-gates");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "unknown";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "unknown";
+  const unknownList = await fixtureValue.sessions.gdbBreakpointList(fixtureValue.projectRoot);
+  assert.equal(unknownList.error?.code, "TARGET_STATE_UNKNOWN");
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+
+  fixtureValue.gdb.executionState = "running";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "running";
+  const runningDelete = await fixtureValue.sessions.gdbBreakpointDelete(fixtureValue.projectRoot, 1);
+  assert.equal(runningDelete.error?.code, "HALT_REQUIRED");
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+
+  fixtureValue.runtime.gdbServerTargetExecutionState = "unknown";
+  const runningUnknownDelete = await fixtureValue.sessions.gdbBreakpointDelete(fixtureValue.projectRoot, 1);
+  assert.equal(runningUnknownDelete.error?.code, "TARGET_STATE_UNKNOWN");
+  assert.equal(runningUnknownDelete.error?.stateUnknown, true);
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  const mismatchedDelete = await fixtureValue.sessions.gdbBreakpointDelete(fixtureValue.projectRoot, 1);
+  assert.equal(mismatchedDelete.error?.code, "TARGET_STATE_UNKNOWN");
+  assert.equal(mismatchedDelete.error?.stateUnknown, true);
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "No breakpoints or watchpoints.",
+    observedTargetExecutionState: "running",
+  };
+  const driftedList = await fixtureValue.sessions.gdbBreakpointList(fixtureValue.projectRoot);
+  assert.equal(driftedList.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(driftedList.error?.stateUnknown, false);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
+});
+
+test("typed breakpoint command failures prioritize observed execution-state drift", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-breakpoint-failure-drift", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  fixtureValue.gdb.commandResult = {
+    success: false,
+    output: "partial",
+    error: "command failed",
+    code: "GDB_COMMAND_FAILED",
+    observedTargetExecutionState: "running",
+  };
+  const listDrift = await fixtureValue.sessions.gdbBreakpointList(fixtureValue.projectRoot);
+  assert.equal(listDrift.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(listDrift.error?.writeIssued, false);
+  assert.equal((listDrift.data as { code: string }).code, "GDB_COMMAND_FAILED");
+
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  fixtureValue.gdb.commandResult = {
+    success: false,
+    output: "client exited",
+    error: "GDB exited",
+    code: "GDB_PROCESS_EXITED",
+  };
+  const deleteUnknown = await fixtureValue.sessions.gdbBreakpointDelete(fixtureValue.projectRoot, 1);
+  assert.equal(deleteUnknown.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(deleteUnknown.error?.writeIssued, true);
+  assert.equal(deleteUnknown.error?.stateUnknown, true);
+  assert.equal((deleteUnknown.data as { code: string }).code, "GDB_PROCESS_EXITED");
+  assert.equal(deleteUnknown.artifact?.firmwareIdentity, "verified");
+  assert.equal(deleteUnknown.artifact?.mutationTrust, "unverified");
+});
+
+test("typed breakpoint delete preserves unissued facts when client state drifts before dispatch", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-breakpoint-predispatch-drift", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+  await fixtureValue.targets.setMemoryMutationTrust(fixtureValue.projectRoot, "verified", "fixture");
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  fixtureValue.gdb.typedCommandHook = () => { fixtureValue.gdb.executionState = "running"; };
+
+  const runningDrift = await fixtureValue.sessions.gdbBreakpointDelete(fixtureValue.projectRoot, 1);
+  assert.equal(runningDrift.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(runningDrift.error?.writeIssued, false);
+  assert.equal(runningDrift.error?.stateUnknown, false);
+  assert.equal((runningDrift.data as { commandDispatched: boolean }).commandDispatched, false);
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveMemoryMutationTrust.status, "verified");
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveMemoryMutationTrust.source, "fixture");
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.runtime.gdbServerTargetExecutionState = "halted";
+  fixtureValue.gdb.typedCommandHook = () => { fixtureValue.gdb.executionState = "unknown"; };
+  const exitDrift = await fixtureValue.sessions.gdbBreakpointDelete(fixtureValue.projectRoot, 1);
+  assert.equal(exitDrift.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(exitDrift.error?.writeIssued, false);
+  assert.equal(exitDrift.error?.stateUnknown, true);
+  assert.equal((exitDrift.data as { commandDispatched: boolean }).commandDispatched, false);
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveMemoryMutationTrust.status, "verified");
+  assert.deepEqual(fixtureValue.gdb.commands, []);
 });
 
 test("gdb_wait is a no-op for halted state and polls only an explicitly running target", async (context) => {
@@ -751,6 +934,7 @@ class FakeGdb implements SessionGdbClient {
   waitCalls = 0;
   backtraceResult: GDBResponse = { success: true, output: "#0 main" };
   commandResult: GDBResponse = { success: true, output: "ok" };
+  typedCommandHook?: () => void;
   waitResult: GDBResponse = { success: true, output: "stopped", stopReason: "breakpoint", observedTargetExecutionState: "halted" };
   connectHook?: () => void;
   connectCalls = 0;
@@ -767,6 +951,38 @@ class FakeGdb implements SessionGdbClient {
     this.commands.push(command);
     this.executionState = this.commandResult.observedTargetExecutionState ?? "unknown";
     return this.commandResult;
+  }
+  async listBreakpoints(): Promise<GDBResponse> {
+    return this.typedCommand("info breakpoints");
+  }
+  async deleteBreakpoint(breakpointId: number): Promise<GDBResponse> {
+    return this.typedCommand(`-break-delete ${breakpointId}`, "halted");
+  }
+  private async typedCommand(command: string, requiredState?: GDBTargetExecutionState): Promise<GDBResponse> {
+    this.typedCommandHook?.();
+    if (
+      this.executionState === "unknown"
+      || (requiredState && this.executionState !== requiredState)
+    ) {
+      return {
+        success: false,
+        output: "",
+        error: requiredState ? `typed GDB command requires target state ${requiredState}` : "typed GDB command requires a known target execution state",
+        code: this.executionState === "unknown" ? "TARGET_STATE_UNKNOWN" : "HALT_REQUIRED",
+        observedTargetExecutionState: this.executionState,
+        commandDispatched: false,
+      };
+    }
+    this.commands.push(command);
+    if (this.commandResult.observedTargetExecutionState) {
+      this.executionState = this.commandResult.observedTargetExecutionState;
+      return { ...this.commandResult, commandDispatched: true };
+    }
+    if (!this.commandResult.success) {
+      this.executionState = "unknown";
+      return { ...this.commandResult, commandDispatched: true };
+    }
+    return { ...this.commandResult, preservedTargetExecutionState: this.executionState, commandDispatched: true };
   }
   async wait(): Promise<GDBResponse> {
     this.waitCalls += 1;

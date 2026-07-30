@@ -15,7 +15,7 @@ const EXPECTED_TOOLS = [
   "hss_start", "hss_status", "hss_stop", "hss_recover",
   "debug_sequence_execute",
   "capture_list", "capture_summary", "capture_series", "capture_event_window", "capture_export_csv",
-  "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
+  "gdb_open", "gdb_command", "gdb_breakpoint_list", "gdb_breakpoint_delete", "gdb_wait", "gdb_backtrace", "gdb_close",
   "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close",
   "diagnose_crash", "probe_command",
 ].sort();
@@ -86,7 +86,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       "target_status", "artifact_probe", "symbol_search", "symbol_resolve", "read_variable", "write_variable",
       "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "target_control",
       "flash", "erase", "hss_start", "hss_status", "hss_stop", "hss_recover", "debug_sequence_execute",
-      "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close",
+      "gdb_open", "gdb_command", "gdb_breakpoint_list", "gdb_breakpoint_delete", "gdb_wait", "gdb_backtrace", "gdb_close",
       "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command",
     ]) {
       assert.match(toolByName.get(name)?.description ?? "", /target_configure/i, `${name} must disclose target_configure prerequisite`);
@@ -98,7 +98,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       assert.match(runId.description ?? "", /not a general task ID/i, `${tool.name}.runId must reject task-ID semantics`);
     }
     assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 37-tool list");
-    for (const name of ["target_control", "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "flash", "erase", "gdb_open", "gdb_command", "gdb_wait", "gdb_backtrace", "gdb_close", "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command", "hss_start"] as const) {
+    for (const name of ["target_control", "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "flash", "erase", "gdb_open", "gdb_command", "gdb_breakpoint_list", "gdb_breakpoint_delete", "gdb_wait", "gdb_backtrace", "gdb_close", "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command", "hss_start"] as const) {
       const schema = tools.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
       assert.ok(schema.properties?.projectRoot, `${name} must expose projectRoot`);
       assert.ok(schema.required?.includes("projectRoot"), `${name} must require projectRoot`);
@@ -204,6 +204,8 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       ["capture_export_csv", { captureId: "43000000-0000-4000-8000-000000000001" }],
       ["gdb_open", { projectRoot: root }],
       ["gdb_command", { projectRoot: root, command: "info registers" }],
+      ["gdb_breakpoint_list", { projectRoot: root }],
+      ["gdb_breakpoint_delete", { projectRoot: root, breakpointId: 1 }],
       ["gdb_wait", { projectRoot: root }],
       ["gdb_backtrace", { projectRoot: root }],
       ["gdb_close", { projectRoot: root }],

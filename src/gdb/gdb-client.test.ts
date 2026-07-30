@@ -606,6 +606,41 @@ test("GDBClient tracks only observed MI running and halted states", async () => 
   assert.equal(client.getTargetExecutionState(), "unknown");
 });
 
+test("GDBClient typed breakpoint commands preserve known halted state without weakening raw commands", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const stopped = '*stopped,reason="breakpoint-hit",bkptno="1"\n(gdb)\n';
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(signals, stopped, false, false, commands));
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal(client.getTargetExecutionState(), "halted");
+
+  const listed = await client.listBreakpoints();
+  assert.equal(listed.success, true);
+  assert.equal(listed.observedTargetExecutionState, undefined);
+  assert.equal(listed.preservedTargetExecutionState, "halted");
+  assert.equal(listed.commandDispatched, true);
+  assert.equal(client.getTargetExecutionState(), "halted");
+
+  const deleted = await client.deleteBreakpoint(1);
+  assert.equal(deleted.success, true);
+  assert.equal(deleted.observedTargetExecutionState, undefined);
+  assert.equal(deleted.preservedTargetExecutionState, "halted");
+  assert.equal(deleted.commandDispatched, true);
+  assert.equal(client.getTargetExecutionState(), "halted");
+  assert.ok(commands.some((command) => command.includes("info breakpoints")));
+  assert.ok(commands.some((command) => command.includes("-break-delete 1")));
+
+  const raw = await client.command("info breakpoints");
+  assert.equal(raw.success, true);
+  assert.equal(raw.preservedTargetExecutionState, undefined);
+  assert.equal(client.getTargetExecutionState(), "unknown");
+  const rejectedDelete = await client.deleteBreakpoint(1);
+  assert.equal(rejectedDelete.success, false);
+  assert.equal(rejectedDelete.code, "TARGET_STATE_UNKNOWN");
+  assert.equal(rejectedDelete.commandDispatched, false);
+  await client.disconnect();
+});
+
 test("GDBClient wait reports an in-wait disconnect without inventing target state", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const stopped = '*stopped,reason="signal-received",signal-name="SIGTRAP"\n(gdb)\n';

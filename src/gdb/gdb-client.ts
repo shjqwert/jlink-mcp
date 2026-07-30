@@ -18,6 +18,10 @@ export interface GDBResponse {
   exitError?: string;
   /** Target state explicitly reported by this GDB/MI exchange. */
   observedTargetExecutionState?: GDBTargetExecutionState;
+  /** Target state retained only by a fixed typed command whose successful semantics cannot change execution state. */
+  preservedTargetExecutionState?: Exclude<GDBTargetExecutionState, "unknown">;
+  /** Whether this typed request reached the GDB stdin dispatch boundary. */
+  commandDispatched?: boolean;
 }
 
 export type GDBTargetExecutionState = "running" | "halted" | "unknown";
@@ -274,7 +278,47 @@ export class GDBClient {
     return result;
   }
 
-  private async commandInternal(cmd: string, timeout: number): Promise<GDBResponse> {
+  async listBreakpoints(timeout: number = 15000): Promise<GDBResponse> {
+    return this.commandPreservingKnownState("info breakpoints", timeout);
+  }
+
+  async deleteBreakpoint(breakpointId: number, timeout: number = 15000): Promise<GDBResponse> {
+    if (!Number.isSafeInteger(breakpointId) || breakpointId < 1) {
+      return { success: false, output: "", error: "breakpointId must be a positive integer", code: "GDB_INVALID_BREAKPOINT_ID" };
+    }
+    return this.commandPreservingKnownState(`-break-delete ${breakpointId}`, timeout, "halted");
+  }
+
+  private async commandPreservingKnownState(
+    command: string,
+    timeout: number,
+    requiredState?: Exclude<GDBTargetExecutionState, "unknown">,
+  ): Promise<GDBResponse> {
+    const stateBefore = this.targetExecutionState;
+    if (stateBefore === "unknown" || (requiredState && stateBefore !== requiredState)) {
+      return {
+        success: false,
+        output: "",
+        error: requiredState
+          ? `typed GDB command requires target state ${requiredState}`
+          : "typed GDB command requires a known target execution state",
+        code: stateBefore === "unknown" ? "TARGET_STATE_UNKNOWN" : "HALT_REQUIRED",
+        observedTargetExecutionState: stateBefore,
+        commandDispatched: false,
+      };
+    }
+    let commandDispatched = false;
+    const result = await this.commandInternal(command, timeout, () => { commandDispatched = true; });
+    const typedResult = { ...result, commandDispatched };
+    if (result.observedTargetExecutionState) return typedResult;
+    if (!result.success) {
+      this.targetExecutionState = "unknown";
+      return typedResult;
+    }
+    return { ...typedResult, preservedTargetExecutionState: stateBefore };
+  }
+
+  private async commandInternal(cmd: string, timeout: number, onDispatch?: () => void): Promise<GDBResponse> {
     const blocked = this.hardwareGuard?.();
     if (blocked) return { success: false, output: "", error: blocked };
     if (!this.proc || !this.connected) {
@@ -310,6 +354,7 @@ export class GDBClient {
     const executionToken = dispatchedCommand === "-exec-continue --all" ? this.allocateMiToken() : undefined;
     if (isRunCommand && !executionToken) this.activeExecutionToken = null;
     try {
+      onDispatch?.();
       exchange = await this.sendCommand(dispatchedCommand, timeout, true, false, executionToken);
     } catch (error) {
       await this.terminateGdbProcess();
