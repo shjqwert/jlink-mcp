@@ -1430,6 +1430,76 @@ test("firmware Verify-only restores firmware identity without changing mutation 
   assert.deepEqual(probe.flashPaths, []);
 });
 
+test("firmware Verify-only keeps identity unverified when final target state drifts", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-state-drift");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.hex");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, ":0400000001020304F2\n:00000001FF\n", "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  probe.verifyHook = () => { probe.targetState = "running"; };
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.before.targetState, "halted");
+  assert.equal(result.after.targetState, "running");
+  assert.equal(result.artifact?.firmwareIdentity, "unverified");
+  assert.equal(result.artifact?.evidenceSource, "segger_verify_only_state_changed");
+});
+
+test("firmware Verify-only preserves confirmed mismatch identity when final target state also drifts", async (context) => {
+  const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-mismatch-state-drift");
+  const artifactPath = join(projectRoot, "firmware.elf");
+  const imagePath = join(projectRoot, "firmware.hex");
+  writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+  writeFileSync(imagePath, ":0400000001020304F2\n:00000001FF\n", "utf8");
+  const previous = targets.require(projectRoot);
+  await targets.configure({
+    projectRoot,
+    device: previous.device,
+    probeSerial: previous.probeSerial,
+    interface: previous.interface,
+    speed: previous.speed,
+    artifactPath,
+    artifactFlashImages: [{ path: imagePath }],
+  });
+  probe.targetState = "halted";
+  probe.verifyResult = {
+    success: false,
+    rawOutput: "independently confirmed mismatch",
+    output: "",
+    error: "SEGGER VerifyBin mismatch independently confirmed at 0x00000000",
+    errorCode: ProbeErrorCode.JLINK_VERIFY_MISMATCH,
+    writeIssued: false,
+    stateUnknown: false,
+  };
+  probe.verifyHook = () => { probe.targetState = "running"; };
+
+  const result = await service.verifyFirmware(projectRoot);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE");
+  assert.equal(result.error?.writeIssued, false);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.equal(result.artifact?.firmwareIdentity, "mismatch");
+  assert.equal(result.artifact?.evidenceSource, "segger_verify_only_mismatch");
+  assert.equal(result.after.targetState, "running");
+});
+
 test("firmware Verify-only rejects a stale configured image before invoking SEGGER", async (context) => {
   const { service, probe, targets, projectRoot } = await fixture(context, "firmware-verify-only-stale");
   const artifactPath = join(projectRoot, "firmware.elf");

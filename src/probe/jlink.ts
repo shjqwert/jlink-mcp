@@ -613,26 +613,57 @@ export class JLinkBackend extends ProbeBackend {
         ...prepared.bins.map((item) => `VerifyBin "${item.path}" 0x${item.address.toString(16)}`),
         "halt",
       ];
-      const result = await this.execRaw(commands, 180000, { exitOnError: false });
-      const diagnostics = `${result.rawOutput}\n${result.stderr ?? ""}\n${result.error ?? ""}`;
-      const failureDiagnostic = verifyOnlyFailureDiagnostic(diagnostics);
-      if (failureDiagnostic) {
-        return {
-          ...result,
-          success: false,
-          error: `SEGGER VerifyBin failed: ${failureDiagnostic}`,
-          errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
-          writeIssued: false,
-          stateUnknown: true,
-        };
-      }
-      const mismatch = verifyOnlyMismatchDiagnostic(diagnostics);
-      if (mismatch) {
-        const reported = verifyOnlyReportedMismatch(diagnostics);
-        if (!reported) {
+      const evidence: string[] = [];
+      const confirmedAddresses: string[] = [];
+      for (let attempt = 1; attempt <= VERIFY_ONLY_MAX_FULL_IMAGE_ATTEMPTS; attempt += 1) {
+        const result = await this.execRaw(commands, 180000, { exitOnError: false });
+        evidence.push([
+          `VerifyBin attempt ${attempt}/${VERIFY_ONLY_MAX_FULL_IMAGE_ATTEMPTS}:`,
+          result.rawOutput,
+          result.stderr ? `stderr:\n${result.stderr}` : undefined,
+          result.error ? `transportError: ${result.error}` : undefined,
+          `exitCode=${String(result.exitCode)}`,
+        ].filter(Boolean).join("\n"));
+        const diagnostics = `${result.rawOutput}\n${result.stderr ?? ""}\n${result.error ?? ""}`;
+        const failureDiagnostic = verifyOnlyFailureDiagnostic(diagnostics);
+        if (failureDiagnostic) {
           return {
             ...result,
             success: false,
+            rawOutput: evidence.join("\n"),
+            error: `SEGGER VerifyBin failed: ${failureDiagnostic}`,
+            errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+            writeIssued: false,
+            stateUnknown: true,
+          };
+        }
+        const mismatch = verifyOnlyMismatchDiagnostic(diagnostics);
+        if (!mismatch) {
+          if (!result.success) {
+            return {
+              ...result,
+              rawOutput: evidence.join("\n"),
+              writeIssued: false,
+            };
+          }
+          const chain = confirmedAddresses.length > 0
+            ? ` Independently confirmed transient mismatch chain: ${confirmedAddresses.join(" -> ")}.`
+            : "";
+          return {
+            ...result,
+            rawOutput: evidence.join("\n"),
+            output: `SEGGER VerifyBin full-image clean pass on attempt ${attempt} across ${prepared.bins.length} chunk(s).${chain}`,
+            writeIssued: false,
+            stateUnknown: false,
+          };
+        }
+
+        const reportedMismatches = verifyOnlyReportedMismatches(diagnostics);
+        if (reportedMismatches.length === 0) {
+          return {
+            ...result,
+            success: false,
+            rawOutput: evidence.join("\n"),
             error: "SEGGER VerifyBin reported a mismatch but reported no independently readable address",
             errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
             writeIssued: false,
@@ -640,96 +671,88 @@ export class JLinkBackend extends ProbeBackend {
             suggestedAction: "Keep firmware identity unverified; an addressless vendor mismatch is not sufficient proof of target content.",
           };
         }
-        const expected = preparedByteAt(prepared, reported.address);
-        if (expected === undefined || (reported.expected !== undefined && reported.expected !== expected)) {
+        if (reportedMismatches.length > VERIFY_ONLY_MAX_REPORTED_MISMATCHES_PER_ATTEMPT) {
           return {
             ...result,
             success: false,
-            error: "SEGGER VerifyBin mismatch evidence does not identify a byte matching the configured image",
+            rawOutput: evidence.join("\n"),
+            error: `SEGGER VerifyBin reported more than ${VERIFY_ONLY_MAX_REPORTED_MISMATCHES_PER_ATTEMPT} distinct mismatches in one attempt`,
             errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
             writeIssued: false,
             stateUnknown: false,
-            suggestedAction: "Keep firmware identity unverified and inspect the staged image range and raw SEGGER diagnostic.",
+            suggestedAction: "Keep firmware identity unverified; the bounded independent-confirmation budget was exceeded.",
           };
         }
-        const confirmation = await this.accessMemoryNonIntrusive(
-          reported.address,
-          1,
-          1,
-          undefined,
-          undefined,
-          true,
-        );
-        const confirmed = confirmation.success ? memoryReadByte(confirmation.output) : undefined;
-        if (!confirmation.success || confirmed === undefined) {
-          return {
-            ...confirmation,
-            success: false,
-            rawOutput: [result.rawOutput, confirmation.rawOutput].filter(Boolean).join("\n"),
-            error: `SEGGER VerifyBin mismatch could not be independently confirmed: ${confirmation.error ?? "invalid independent read response"}`,
-            errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
-            writeIssued: false,
-            stateUnknown: confirmation.stateUnknown ?? true,
-            suggestedAction: "Keep firmware identity unverified until the reported address can be read independently without changing target state.",
-          };
-        }
-        if (confirmed !== expected) {
-          return {
-            ...result,
-            success: false,
-            rawOutput: [result.rawOutput, confirmation.rawOutput].filter(Boolean).join("\n"),
-            error: `SEGGER VerifyBin mismatch independently confirmed at 0x${reported.address.toString(16).padStart(8, "0")}`,
-            errorCode: ProbeErrorCode.JLINK_VERIFY_MISMATCH,
-            writeIssued: false,
-            stateUnknown: false,
-            suggestedAction: "The independently read target byte does not match the configured firmware image.",
-          };
-        }
-        const retry = await this.execRaw(commands, 180000, { exitOnError: false });
-        const retryDiagnostics = `${retry.rawOutput}\n${retry.stderr ?? ""}\n${retry.error ?? ""}`;
-        const retryFailure = verifyOnlyFailureDiagnostic(retryDiagnostics);
-        const retryMismatch = verifyOnlyMismatchDiagnostic(retryDiagnostics);
-        if (!retryFailure && !retryMismatch && retry.success) {
+        for (const reported of reportedMismatches) {
+          const expected = preparedByteAt(prepared, reported.address);
+          if (expected === undefined || (reported.expected !== undefined && reported.expected !== expected)) {
+            return {
+              ...result,
+              success: false,
+              rawOutput: evidence.join("\n"),
+              error: "SEGGER VerifyBin mismatch evidence does not identify a byte matching the configured image",
+              errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+              writeIssued: false,
+              stateUnknown: false,
+              suggestedAction: "Keep firmware identity unverified and inspect the staged image range and raw SEGGER diagnostic.",
+            };
+          }
+          const confirmation = await this.accessMemoryNonIntrusive(
+            reported.address,
+            1,
+            1,
+            undefined,
+            undefined,
+            true,
+          );
           const address = `0x${reported.address.toString(16).padStart(8, "0")}`;
+          evidence.push([
+            `Independent confirmation for attempt ${attempt} at ${address}:`,
+            confirmation.rawOutput,
+            confirmation.stderr ? `stderr:\n${confirmation.stderr}` : undefined,
+            confirmation.error ? `error: ${confirmation.error}` : undefined,
+          ].filter(Boolean).join("\n"));
+          const confirmed = confirmation.success ? memoryReadByte(confirmation.output) : undefined;
+          if (!confirmation.success || confirmed === undefined) {
+            return {
+              ...confirmation,
+              success: false,
+              rawOutput: evidence.join("\n"),
+              error: `SEGGER VerifyBin mismatch could not be independently confirmed: ${confirmation.error ?? "invalid independent read response"}`,
+              errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
+              writeIssued: false,
+              stateUnknown: confirmation.stateUnknown ?? true,
+              suggestedAction: "Keep firmware identity unverified until the reported address can be read independently without changing target state.",
+            };
+          }
+          if (confirmed !== expected) {
+            return {
+              ...result,
+              success: false,
+              rawOutput: evidence.join("\n"),
+              error: `SEGGER VerifyBin mismatch independently confirmed at ${address}`,
+              errorCode: ProbeErrorCode.JLINK_VERIFY_MISMATCH,
+              writeIssued: false,
+              stateUnknown: false,
+              suggestedAction: "The independently read target byte does not match the configured firmware image.",
+            };
+          }
+          confirmedAddresses.push(address);
+        }
+        if (attempt === VERIFY_ONLY_MAX_FULL_IMAGE_ATTEMPTS) {
           return {
-            ...retry,
-            rawOutput: [
-              result.rawOutput,
-              `Independent uncached read confirmed configured byte 0x${expected.toString(16).padStart(2, "0")} at ${address}.`,
-              confirmation.rawOutput,
-              "Full-image chunked VerifyBin retry passed.",
-              retry.rawOutput,
-            ].filter(Boolean).join("\n"),
-            output: `SEGGER VerifyBin anomaly independently confirmed at ${address}; full-image retry passed across ${prepared.bins.length} chunk(s).`,
+            ...result,
+            success: false,
+            rawOutput: evidence.join("\n"),
+            error: `SEGGER VerifyBin did not produce a full-image clean pass within ${VERIFY_ONLY_MAX_FULL_IMAGE_ATTEMPTS} attempts`,
+            errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
             writeIssued: false,
             stateUnknown: false,
+            suggestedAction: "Keep firmware identity unverified; the bounded transient-mismatch confirmation budget was exhausted.",
           };
         }
-        return {
-          ...retry,
-          success: false,
-          rawOutput: [result.rawOutput, confirmation.rawOutput, retry.rawOutput].filter(Boolean).join("\n"),
-          error: retryFailure
-            ? `SEGGER VerifyBin retry failed: ${retryFailure}`
-            : "SEGGER VerifyBin mismatch remained after an independent read matched the configured byte",
-          errorCode: ProbeErrorCode.JLINK_COMMAND_FAILED,
-          writeIssued: false,
-          stateUnknown: retryFailure ? true : retry.stateUnknown,
-          suggestedAction: "Verification evidence is contradictory; keep firmware identity unverified and inspect the raw SEGGER and independent-read evidence.",
-        };
       }
-      return {
-        ...result,
-        success: mismatch ? false : result.success,
-        output: !mismatch && result.success
-          ? `SEGGER VerifyBin full-image verification passed across ${prepared.bins.length} chunk(s).\n${result.output}`.trim()
-          : result.output,
-        error: mismatch ? "SEGGER VerifyBin reported a content mismatch" : result.error,
-        errorCode: mismatch ? ProbeErrorCode.JLINK_VERIFY_MISMATCH : result.errorCode,
-        writeIssued: false,
-        stateUnknown: mismatch ? false : result.stateUnknown,
-        suggestedAction: mismatch ? "The target firmware does not match the configured image." : result.suggestedAction,
-      };
+      throw new Error("unreachable Verify-only attempt loop");
     } finally {
       prepared.cleanup();
     }
@@ -1030,7 +1053,7 @@ interface VerifySegment {
 }
 
 function verifyOnlyFailureDiagnostic(raw: string): string | undefined {
-  const reportedMismatch = verifyOnlyReportedMismatch(raw);
+  const reportedMismatch = verifyOnlyReportedMismatches(raw).length > 0;
   return verifyOnlyDiagnosticLines(raw)
     .find((line) => (
       /^(?:\*+\s*)?error:/i.test(line)
@@ -1061,6 +1084,8 @@ interface PreparedVerifyBins {
 }
 
 const VERIFY_BIN_CHUNK_BYTES = 4096;
+const VERIFY_ONLY_MAX_FULL_IMAGE_ATTEMPTS = 4;
+const VERIFY_ONLY_MAX_REPORTED_MISMATCHES_PER_ATTEMPT = 8;
 
 function prepareVerifyBins(filePath: string, baseAddress?: number): PreparedVerifyBins {
   const extension = path.extname(filePath).toLowerCase();
@@ -1131,19 +1156,25 @@ interface VerifyOnlyReportedMismatch {
   read?: number;
 }
 
-function verifyOnlyReportedMismatch(raw: string): VerifyOnlyReportedMismatch | undefined {
+function verifyOnlyReportedMismatches(raw: string): VerifyOnlyReportedMismatch[] {
+  const reported: VerifyOnlyReportedMismatch[] = [];
+  const seen = new Set<string>();
   for (const line of verifyOnlyDiagnosticLines(raw)) {
     const match = line.match(
-      /(?:failed to verify|verify failed)\s+@\s+(?:address\s+)?0x([0-9a-f]+)(?:\s*,?\s*expected\s+([0-9a-f]{2})\s+read\s+([0-9a-f]{2}))?/i,
+      /(?:failed to verify|verify failed)\s+@\s+(?:address\s+)?0x([0-9a-f]+)(?:\s*[,.]?\s*expected\s+([0-9a-f]{2})\s+read\s+([0-9a-f]{2}))?/i,
     );
     if (!match) continue;
-    return {
+    const item = {
       address: Number.parseInt(match[1], 16),
       expected: match[2] ? Number.parseInt(match[2], 16) : undefined,
       read: match[3] ? Number.parseInt(match[3], 16) : undefined,
     };
+    const key = `${item.address}:${String(item.expected)}:${String(item.read)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reported.push(item);
   }
-  return undefined;
+  return reported;
 }
 
 function parseSrecVerifySegments(source: string): VerifySegment[] {

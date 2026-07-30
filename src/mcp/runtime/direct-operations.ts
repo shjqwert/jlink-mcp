@@ -335,6 +335,24 @@ export class DirectMcuService {
             );
           }
         }
+        const after = await observe(runtime.probe);
+        envelope.after = observationData(after);
+        if (before.state !== after.state) {
+          const mismatch = failed?.errorCode === ProbeErrorCode.JLINK_VERIFY_MISMATCH;
+          const updated = await this.transitionArtifact(
+            target,
+            mismatch ? "mismatch" : "unverified",
+            mismatch ? "segger_verify_only_mismatch" : "segger_verify_only_state_changed",
+            false,
+          );
+          refreshArtifact(envelope, updated);
+          throw executionError(
+            "HIDDEN_STATE_CHANGE",
+            "final_observation",
+            `firmware Verify-only changed target state from ${before.state} to ${after.state}`,
+            { writeIssued: false, stateUnknown: after.state === "unknown" },
+          );
+        }
         let updated = target;
         if (failed) {
           const mismatch = failed.errorCode === ProbeErrorCode.JLINK_VERIFY_MISMATCH;
@@ -348,16 +366,6 @@ export class DirectMcuService {
         } else {
           updated = await this.transitionArtifact(target, "verified", "segger_verify_only", false);
           refreshArtifact(envelope, updated);
-        }
-        const after = await observe(runtime.probe);
-        envelope.after = observationData(after);
-        if (before.state !== after.state) {
-          throw executionError(
-            "HIDDEN_STATE_CHANGE",
-            "final_observation",
-            `firmware Verify-only changed target state from ${before.state} to ${after.state}`,
-            { writeIssued: false, stateUnknown: after.state === "unknown" },
-          );
         }
         if (failed) {
           envelope.verification = {
