@@ -28,6 +28,12 @@ export interface TargetRuntime {
   };
   gdbFlashBreakpointCleanupRequired?: boolean;
   gdbFlashBreakpointCleanupEvidence?: GDBResponse;
+  gdbFlashBreakpointPreventionEvidence?: {
+    response: GDBResponse;
+    serverProcessId: number;
+    ownerToken: string;
+    targetGeneration: string;
+  };
   gdbClientExitSubscription?: () => void;
   onGdbServerExit(listener: () => void): () => void;
 }

@@ -19,6 +19,7 @@ export interface SessionGdbClient {
   listBreakpoints(timeout?: number): Promise<GDBResponse>;
   deleteBreakpoint(breakpointId: number, timeout?: number): Promise<GDBResponse>;
   clearAllBreakpoints(timeout?: number): Promise<GDBResponse>;
+  disableFlashBreakpoints(timeout?: number): Promise<GDBResponse>;
   wait(timeout?: number): Promise<GDBResponse>;
   backtrace(full?: boolean): Promise<GDBResponse>;
   isConnected(): boolean;
@@ -73,6 +74,12 @@ export interface SessionTargetRuntime {
   };
   gdbFlashBreakpointCleanupRequired?: boolean;
   gdbFlashBreakpointCleanupEvidence?: GDBResponse;
+  gdbFlashBreakpointPreventionEvidence?: {
+    response: GDBResponse;
+    serverProcessId: number;
+    ownerToken: string;
+    targetGeneration: string;
+  };
   gdbPreServerStateExpectationValid?: boolean;
   gdbClientExitSubscription?: () => void;
   onGdbServerExit?: (listener: () => void) => () => void;
@@ -139,6 +146,7 @@ export class SessionOperations {
       runtime.gdbManagedBreakpointLifecycle = undefined;
       runtime.gdbFlashBreakpointCleanupRequired = false;
       runtime.gdbFlashBreakpointCleanupEvidence = undefined;
+      runtime.gdbFlashBreakpointPreventionEvidence = undefined;
       runtime.gdbPreServerStateExpectationValid = true;
       const serverOutputAtReady = runtime.probe.getGDBServerOutput(200);
       runtime.gdbAttachBoundaryEvidence = {
@@ -176,6 +184,7 @@ export class SessionOperations {
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbServerNaturalExitRequired = false;
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbFlashBreakpointPreventionEvidence = undefined;
         void (async () => {
           try {
             await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_server_unexpected_exit", {
@@ -200,6 +209,7 @@ export class SessionOperations {
         runtime.gdbAttachBoundaryEvidence = undefined;
         runtime.gdbInitialAttachBoundaryAvailable = false;
         runtime.gdbPreServerStateExpectationValid = false;
+        runtime.gdbFlashBreakpointPreventionEvidence = undefined;
         throw new SessionError("GDB_SERVER_EXITED", "GDB Server exited before ownership could be established", true, false);
       }
       envelope.observedEffects.push("gdb_server_started", "gdb_owner_acquired");
@@ -388,6 +398,7 @@ export class SessionOperations {
         runtime.gdbManagedBreakpointLifecycle = undefined;
         runtime.gdbFlashBreakpointCleanupRequired = false;
         runtime.gdbFlashBreakpointCleanupEvidence = undefined;
+        runtime.gdbFlashBreakpointPreventionEvidence = undefined;
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbOwnerExitSubscription?.();
         runtime.gdbOwnerExitSubscription = undefined;
@@ -454,7 +465,7 @@ export class SessionOperations {
   }
 
   gdbConnect(projectRoot: string, symbolFile?: string, restoreRunningStateAfterAttach = false): Promise<OperationEnvelope> {
-    const requestedEffects = ["connect_gdb_client"];
+    const requestedEffects = ["connect_gdb_client", "disable_gdb_flash_breakpoints"];
     if (restoreRunningStateAfterAttach) requestedEffects.push("restore_running_state_after_attach");
     return this.withGdbOwner("gdb_connect", projectRoot, requestedEffects, async (envelope, target, runtime) => {
       const executionStateBeforeConnect = runtime.gdbServerTargetExecutionState ?? "unknown";
@@ -587,6 +598,12 @@ export class SessionOperations {
             && targetExecutionStateExpectedAfterAttach === "running"
             && attachStopClassification) {
           envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target");
+          const flashBreakpointPrevention = await this.disableGdbFlashBreakpoints(
+            envelope,
+            target,
+            runtime,
+            executionStateAfterConnect,
+          );
           const restore = await runtime.gdb.command("-exec-continue --all");
           const executionStateAfterRestore = runtime.gdb.getTargetExecutionState();
           runtime.gdbServerTargetExecutionState = executionStateAfterRestore;
@@ -598,6 +615,7 @@ export class SessionOperations {
             targetExecutionStateAfterConnect: executionStateAfterConnect,
             targetExecutionStateAfterRestore: executionStateAfterRestore,
             attachStopClassification,
+            flashBreakpointPrevention,
             restoreRunningStateAfterAttachAuthorized: true,
             stateRestore: restore,
             gdbClientConnected: runtime.gdb.isConnected(),
@@ -647,6 +665,12 @@ export class SessionOperations {
         );
       }
       envelope.observedEffects.push("gdb_client_connected");
+      const flashBreakpointPrevention = await this.disableGdbFlashBreakpoints(
+        envelope,
+        target,
+        runtime,
+        executionStateAfterConnect,
+      );
       runtime.gdbServerTargetExecutionState = runtime.gdb.getTargetExecutionState();
       envelope.data = {
         ...result,
@@ -654,6 +678,7 @@ export class SessionOperations {
         targetExecutionStateBeforeConnect: executionStateBeforeConnect,
         targetExecutionStateExpectedAfterAttach,
         targetExecutionStateAfterConnect: executionStateAfterConnect,
+        flashBreakpointPrevention,
       };
       envelope.verification = { status: "observed", method: "gdb_response" };
     });
@@ -665,10 +690,26 @@ export class SessionOperations {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return Promise.resolve(validationFailure("gdb_command", "timeoutMs must be 1..120000"));
     return this.withGdbOwner("gdb_command", projectRoot, ["raw_gdb_command", "unknown_side_effects"], async (envelope, target, runtime) => {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
+      const breakpointRequest = isGdbBreakpointInsertionRequest(command);
+      const currentFlashBreakpointPrevention = this.confirmedGdbFlashBreakpointPrevention(runtime, target);
+      if (breakpointRequest && !currentFlashBreakpointPrevention) {
+        throw new SessionError(
+          "GDB_FLASH_BREAKPOINT_PREVENTION_REQUIRED",
+          "breakpoint insertion requires current, confirmed J-Link Flash breakpoint prevention evidence; reconnect GDB before retrying",
+          false,
+          false,
+          false,
+        );
+      }
+      if (!breakpointRequest) runtime.gdbFlashBreakpointPreventionEvidence = undefined;
+      const flashBreakpointPrevention = breakpointRequest
+        ? currentFlashBreakpointPrevention
+        : undefined;
       const executionStateBefore = runtime.gdb.getTargetExecutionState();
       const result = await runtime.gdb.command(command, timeoutMs);
-      const breakpointInsertionDispatched = result.commandDispatched === true
-        && result.dispatchedCommand?.startsWith("-break-insert ") === true;
+      const breakpointInsertionDispatched = breakpointRequest
+        && result.commandDispatched === true;
+      const flashBreakpointPreventionConfirmed = flashBreakpointPrevention !== undefined;
       if (breakpointInsertionDispatched) {
         runtime.gdbFlashBreakpointCleanupRequired = true;
         runtime.gdbFlashBreakpointCleanupEvidence = undefined;
@@ -677,11 +718,13 @@ export class SessionOperations {
       runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState ?? "unknown";
       runtime.gdbPreServerStateExpectationValid = false;
       const sideEffects = breakpointInsertionDispatched
-        ? "breakpoint_configuration_and_possible_firmware_overlay"
+        ? flashBreakpointPreventionConfirmed
+          ? "breakpoint_configuration_flash_breakpoints_disabled"
+          : "breakpoint_configuration_and_possible_firmware_overlay"
         : "unknown";
-      envelope.data = { command, ...result, sideEffects };
+      envelope.data = { command, ...result, sideEffects, flashBreakpointPrevention: flashBreakpointPrevention ?? null };
       try {
-        if (breakpointInsertionDispatched) {
+        if (breakpointInsertionDispatched && !flashBreakpointPreventionConfirmed) {
           await this.targets.setArtifactMatch(target.projectRoot, "unverified", "gdb_breakpoint_insert", {
             targetGeneration: target.generation,
             probeSerial: target.probeSerial,
@@ -716,11 +759,15 @@ export class SessionOperations {
         runtime.gdbManagedBreakpointLifecycle = undefined;
       }
       envelope.observedEffects.push("raw_gdb_command_issued", "side_effects_unknown");
-      envelope.data = { command, ...result, sideEffects };
+      envelope.data = { command, ...result, sideEffects, flashBreakpointPrevention: flashBreakpointPrevention ?? null };
       envelope.verification = { status: "executed_unverified" };
       envelope.warnings.push("Raw GDB command semantics are not interpreted; side effects are unknown.");
       if (breakpointInsertionDispatched) {
-        envelope.warnings.push("Managed breakpoint insertion may use J-Link FlashBP; firmware identity remains unverified until a later explicit Verify-only operation succeeds after GDB cleanup.");
+        envelope.warnings.push(
+          flashBreakpointPreventionConfirmed
+            ? "J-Link Flash breakpoints were explicitly disabled before insertion; firmware identity is preserved, while breakpoint/debug-state cleanup remains required."
+            : "Managed breakpoint insertion may use J-Link FlashBP; firmware identity remains unverified until a later explicit Verify-only operation succeeds after GDB cleanup.",
+        );
       }
       envelope.artifact = this.artifactSummary(this.targets.require(target.projectRoot));
     });
@@ -991,6 +1038,95 @@ export class SessionOperations {
     });
   }
 
+  private async disableGdbFlashBreakpoints(
+    envelope: OperationEnvelope,
+    target: StoredTarget,
+    runtime: SessionTargetRuntime,
+    expectedState: Exclude<GDBTargetExecutionState, "unknown">,
+  ): Promise<GDBResponse> {
+    runtime.gdbFlashBreakpointPreventionEvidence = undefined;
+    const prevention = await runtime.gdb.disableFlashBreakpoints();
+    const stateAfterPrevention = runtime.gdb.getTargetExecutionState();
+    runtime.gdbServerTargetExecutionState = stateAfterPrevention;
+    envelope.data = {
+      ...(envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data)
+        ? envelope.data as Record<string, unknown>
+        : {}),
+      flashBreakpointPrevention: prevention,
+      targetExecutionStateAfterFlashBreakpointPrevention: stateAfterPrevention,
+    };
+    if (stateAfterPrevention !== expectedState) {
+      throw new SessionError(
+        "HIDDEN_STATE_CHANGE",
+        `disabling J-Link Flash breakpoints changed target state from ${expectedState} to ${stateAfterPrevention}`,
+        false,
+        prevention.commandDispatched === true,
+        stateAfterPrevention === "unknown",
+      );
+    }
+    if (!prevention.success) {
+      throw new SessionError(
+        prevention.code ?? "GDB_FLASH_BREAKPOINT_PREVENTION_FAILED",
+        prevention.error ?? "J-Link GDB Server did not confirm that Flash breakpoints were disabled",
+        false,
+        prevention.commandDispatched === true,
+        false,
+      );
+    }
+    if (
+      prevention.commandDispatched !== true
+      || (
+        prevention.observedTargetExecutionState !== expectedState
+        && prevention.preservedTargetExecutionState !== expectedState
+      )
+    ) {
+      throw new SessionError(
+        "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED",
+        "J-Link GDB Server Flash breakpoint prevention returned without target-state preservation evidence",
+        false,
+        prevention.commandDispatched === true,
+        false,
+      );
+    }
+    const serverStatus = runtime.probe.getGDBServerStatus();
+    if (!serverStatus.running || !serverStatus.processId || !runtime.gdbOwnerToken) {
+      throw new SessionError(
+        "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED",
+        "J-Link Flash breakpoint prevention could not be bound to the current Server process and owner",
+        false,
+        prevention.commandDispatched === true,
+        false,
+      );
+    }
+    runtime.gdbFlashBreakpointPreventionEvidence = {
+      response: prevention,
+      serverProcessId: serverStatus.processId,
+      ownerToken: runtime.gdbOwnerToken,
+      targetGeneration: target.generation,
+    };
+    envelope.observedEffects.push("gdb_flash_breakpoints_disabled");
+    return prevention;
+  }
+
+  private confirmedGdbFlashBreakpointPrevention(
+    runtime: SessionTargetRuntime,
+    target: StoredTarget,
+  ): GDBResponse | undefined {
+    const evidence = runtime.gdbFlashBreakpointPreventionEvidence;
+    const serverStatus = runtime.probe.getGDBServerStatus();
+    if (
+      !evidence
+      || !serverStatus.running
+      || serverStatus.processId !== evidence.serverProcessId
+      || runtime.gdbOwnerToken !== evidence.ownerToken
+      || target.generation !== evidence.targetGeneration
+      || evidence.response.success !== true
+      || evidence.response.commandDispatched !== true
+      || !/Flash breakpoints disabled/i.test(evidence.response.output)
+    ) return undefined;
+    return evidence.response;
+  }
+
   private withGdbOwner(
     tool: string,
     projectRoot: string,
@@ -1104,6 +1240,7 @@ export class SessionOperations {
         runtime.gdbClientExitedUnexpectedly = true;
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbFlashBreakpointPreventionEvidence = undefined;
       });
     }
     return runtime;
@@ -1183,6 +1320,11 @@ function gdbAttachStopClassification(
     ) return "reasonless_attach_like_stop";
   }
   return undefined;
+}
+
+function isGdbBreakpointInsertionRequest(command: string): boolean {
+  const normalized = command.trim();
+  return /^(?:break|b)\b/i.test(normalized) || /^-break-insert\b/.test(normalized);
 }
 
 function userConfirmationRequired(): Promise<OperationEnvelope> {

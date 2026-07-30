@@ -626,6 +626,17 @@ test("GDBClient typed breakpoint commands preserve known halted state without we
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal(client.getTargetExecutionState(), "halted");
 
+  const disabledFlashBreakpoints = await client.disableFlashBreakpoints();
+  assert.equal(disabledFlashBreakpoints.success, true);
+  assert.equal(disabledFlashBreakpoints.commandDispatched, true);
+  assert.equal(disabledFlashBreakpoints.preservedTargetExecutionState, "halted");
+  assert.equal(
+    disabledFlashBreakpoints.dispatchedCommand,
+    '-interpreter-exec console "monitor flash breakpoints = 0"',
+  );
+  assert.match(disabledFlashBreakpoints.output, /Flash breakpoints disabled/i);
+  assert.equal(client.getTargetExecutionState(), "halted");
+
   const listed = await client.listBreakpoints();
   assert.equal(listed.success, true);
   assert.equal(listed.observedTargetExecutionState, undefined);
@@ -650,6 +661,7 @@ test("GDBClient typed breakpoint commands preserve known halted state without we
   assert.ok(commands.some((command) => command.includes("info breakpoints")));
   assert.ok(commands.some((command) => command.includes("-break-delete 1")));
   assert.ok(commands.some((command) => command.includes('-interpreter-exec console "monitor clrbp"')));
+  assert.ok(commands.some((command) => command.includes('monitor flash breakpoints = 0')));
 
   const inserted = await client.command("break OsUserConfig.c:60");
   assert.equal(inserted.success, true);
@@ -679,6 +691,38 @@ test("GDBClient reports a pre-dispatch guard rejection without breakpoint issue"
   assert.equal(result.success, false);
   assert.equal(result.commandDispatched, false);
   assert.equal(result.dispatchedCommand, undefined);
+  await client.disconnect();
+});
+
+test("GDBClient fails closed when J-Link does not confirm FlashBP prevention", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const stopped = '*stopped,reason="breakpoint-hit",bkptno="1"\n(gdb)\n';
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    stopped,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { flashBreakpointDisableOutput: "^done\n(gdb)\n" },
+  ));
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+
+  const result = await client.disableFlashBreakpoints();
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED");
+  assert.equal(result.commandDispatched, true);
+  assert.equal(result.preservedTargetExecutionState, "halted");
+  assert.equal(client.getTargetExecutionState(), "halted");
+  assert.deepEqual(commands.filter((command) => command.includes("flash breakpoints")), [
+    '-interpreter-exec console "monitor flash breakpoints = 0"',
+  ]);
   await client.disconnect();
 });
 
@@ -782,6 +826,7 @@ function createFakeGdbProcess(
     interruptAsyncOnly?: boolean;
     interruptNoOutput?: boolean;
     breakpointInsertOutput?: string;
+    flashBreakpointDisableOutput?: string;
   },
 ): ChildProcess {
   type MutableChild = EventEmitter & {
@@ -887,6 +932,11 @@ function createFakeGdbProcess(
       } else if (command.startsWith("-break-insert -- ")) {
         const output = transaction?.breakpointInsertOutput ?? "^done\n(gdb)\n";
         if (!targetRunning && output) setTimeout(() => child.stdout.write(output), 5);
+      } else if (command === '-interpreter-exec console "monitor flash breakpoints = 0"') {
+        setImmediate(() => child.stdout.write(
+          transaction?.flashBreakpointDisableOutput
+            ?? '~"Flash breakpoints disabled\\n"\n^done\n(gdb)\n',
+        ));
       } else if (command === "-exec-continue --all") {
         targetRunning = true;
         activeExecutionToken = miToken;

@@ -8,7 +8,7 @@ import { RTTClient } from "../../rtt/rtt-client";
 import { DirectMcuService } from "./direct-operations";
 import { MemorySessionManager } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
-import { SessionOperations, type GdbAttachBoundaryEvidence, type SessionGdbClient } from "./session-operations";
+import { SessionOperations, type GdbAttachBoundaryEvidence, type SessionGdbClient, type SessionTargetRuntime } from "./session-operations";
 import { TargetStore } from "./target-store";
 
 test("GDB Server claims a long-lived owner that excludes direct MCU operations", async (context) => {
@@ -43,7 +43,7 @@ test("raw GDB command preserves firmware identity and independently invalidates 
   assert.equal((result.data as { sideEffects: string }).sideEffects, "unknown");
 });
 
-test("managed breakpoint insertion invalidates firmware identity until Verify-only", async (context) => {
+test("all breakpoint insertion forms require prevention evidence before dispatch", async (context) => {
   const fixtureValue = await fixture(context, "gdb-flash-breakpoint-artifact", true);
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
@@ -55,12 +55,165 @@ test("managed breakpoint insertion invalidates firmware identity until Verify-on
     observedTargetExecutionState: "halted",
   };
 
-  const result = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "break OsUserConfig.c:60");
+  for (const command of [
+    "break OsUserConfig.c:60",
+    "b OsUserConfig.c:60",
+    "-break-insert -- OsUserConfig.c:60",
+  ]) {
+    const result = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, command);
+    assert.equal(result.error?.code, "GDB_FLASH_BREAKPOINT_PREVENTION_REQUIRED", command);
+    assert.equal(result.error?.writeIssued, false, command);
+    assert.equal(result.error?.stateUnknown, false, command);
+    assert.equal(result.artifact?.firmwareIdentity, "verified", command);
+  }
+  assert.deepEqual(fixtureValue.gdb.commands, []);
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.source, "fixture");
+});
 
-  assert.equal(result.ok, true);
-  assert.equal(result.artifact?.firmwareIdentity, "unverified");
-  assert.equal(result.artifact?.mutationTrust, "unverified");
-  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.source, "gdb_breakpoint_insert");
+test("confirmed FlashBP prevention preserves firmware identity across managed breakpoint insertion", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-flash-breakpoint-prevented", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "running",
+    observedTargetExecutionState: "running",
+  };
+  assert.equal((await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true)).ok, true);
+
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "Breakpoint 1",
+    dispatchedCommand: "-break-insert -- OsUserConfig.c:60",
+    commandDispatched: true,
+    observedTargetExecutionState: "running",
+  };
+  const inserted = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "break OsUserConfig.c:60");
+
+  assert.equal(inserted.ok, true, JSON.stringify(inserted.error));
+  assert.equal(inserted.artifact?.firmwareIdentity, "verified");
+  assert.equal(
+    (inserted.data as { sideEffects: string }).sideEffects,
+    "breakpoint_configuration_flash_breakpoints_disabled",
+  );
+  assert.equal(
+    (inserted.data as { flashBreakpointPrevention: { success: boolean } }).flashBreakpointPrevention.success,
+    true,
+  );
+  assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.source, "fixture");
+});
+
+test("confirmed alias and complex breakpoints still require explicit close cleanup", async (context) => {
+  for (const command of [
+    "b OsUserConfig.c:60",
+    "break OsUserConfig.c:60 if counter > 0",
+  ]) {
+    const fixtureValue = await fixture(
+      context,
+      `gdb-flash-breakpoint-prevented-${command.startsWith("b ") ? "alias" : "complex"}`,
+      true,
+    );
+    await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+    await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+    fixtureValue.gdb.executionState = "halted";
+    fixtureValue.gdb.connectResult = {
+      success: true,
+      output: "Stopped at main()",
+      rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+      observedTargetExecutionState: "halted",
+    };
+    fixtureValue.gdb.commandResult = {
+      success: true,
+      output: "running",
+      observedTargetExecutionState: "running",
+    };
+    assert.equal((await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true)).ok, true);
+
+    fixtureValue.gdb.commandResult = {
+      success: true,
+      output: "Breakpoint 1",
+      dispatchedCommand: command,
+      commandDispatched: true,
+      observedTargetExecutionState: "running",
+    };
+    const inserted = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, command);
+    assert.equal(inserted.ok, true, command);
+    assert.equal(inserted.artifact?.firmwareIdentity, "verified", command);
+    assert.equal(
+      (fixtureValue.runtime as SessionTargetRuntime).gdbFlashBreakpointCleanupRequired,
+      true,
+      command,
+    );
+
+    fixtureValue.gdb.waitResult = {
+      success: true,
+      output: "Target stopped: breakpoint-hit breakpoint #1",
+      stopReason: "breakpoint-hit breakpoint #1 at OsUserConfig.c:60",
+      observedTargetExecutionState: "halted",
+    };
+    assert.equal((await fixtureValue.sessions.gdbWait(fixtureValue.projectRoot)).ok, true, command);
+    fixtureValue.gdb.commandResult = { success: true, output: "O.K." };
+    fixtureValue.probe.targetState = "halted";
+    const closed = await fixtureValue.sessions.gdbServerStop(fixtureValue.projectRoot);
+    assert.equal(closed.ok, true, command);
+    assert.ok(
+      fixtureValue.gdb.commands.includes('-interpreter-exec console "monitor clrbp"'),
+      command,
+    );
+  }
+});
+
+test("raw FlashBP re-enable invalidates prevention evidence and blocks the next breakpoint", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-flash-breakpoint-reenabled", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "running",
+    observedTargetExecutionState: "running",
+  };
+  assert.equal((await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true)).ok, true);
+
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "Flash breakpoints enabled",
+    observedTargetExecutionState: "running",
+  };
+  assert.equal(
+    (await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "monitor flash breakpoints = 1")).ok,
+    true,
+  );
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "Breakpoint 1",
+    dispatchedCommand: "-break-insert -- OsUserConfig.c:60",
+    commandDispatched: true,
+    observedTargetExecutionState: "running",
+  };
+
+  const rejected = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "break OsUserConfig.c:60");
+
+  assert.equal(rejected.error?.code, "GDB_FLASH_BREAKPOINT_PREVENTION_REQUIRED");
+  assert.equal(rejected.error?.writeIssued, false);
+  assert.equal(
+    fixtureValue.gdb.commands.filter((command) => command === "-break-insert -- OsUserConfig.c:60").length,
+    0,
+  );
+  assert.equal(rejected.artifact?.firmwareIdentity, "verified");
 });
 
 test("raw GDB command without current state evidence invalidates cached state and blocks server stop", async (context) => {
@@ -223,6 +376,7 @@ test("gdb_close accepts a clean single-run detach resume only after a fully mana
 test("gdb_close never clears pending FlashBPs while the target is running", async (context) => {
   const fixtureValue = await fixture(context, "gdb-flash-breakpoint-cleanup-running");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  bindConfirmedFlashBreakpointPrevention(fixtureValue);
   fixtureValue.gdb.commandResult = {
     success: true,
     output: "Breakpoint 1",
@@ -269,6 +423,7 @@ test("gdb_close rejects target state drift caused by FlashBP cleanup", async (co
   ]) {
     const fixtureValue = await fixture(context, `gdb-flash-breakpoint-cleanup-drift-${item.name}`);
     await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+    bindConfirmedFlashBreakpointPrevention(fixtureValue);
     fixtureValue.gdb.commandResult = {
       success: true,
       output: "Breakpoint 1",
@@ -294,6 +449,7 @@ test("gdb_close rejects target state drift caused by FlashBP cleanup", async (co
 test("gdb_close retains ownership when FlashBP cleanup lacks dispatch evidence", async (context) => {
   const fixtureValue = await fixture(context, "gdb-flash-breakpoint-cleanup-unconfirmed");
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  bindConfirmedFlashBreakpointPrevention(fixtureValue);
   fixtureValue.gdb.commandResult = {
     success: true,
     output: "Breakpoint 1",
@@ -695,6 +851,7 @@ test("failed raw GDB command retains command and partial output facts", async (c
 test("empty GDB interrupt window preserves firmware identity and explicit cleanup releases a running owner", async (context) => {
   const fixtureValue = await fixture(context, "gdb-empty-interrupt-window", true);
   await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  bindConfirmedFlashBreakpointPrevention(fixtureValue);
   await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
   fixtureValue.gdb.executionState = "running";
   fixtureValue.gdb.commandResult = {
@@ -811,6 +968,8 @@ test("unexpected GDB Server exit releases its long-lived owner", async (context)
   const fixtureValue = await fixture(context, "gdb-unexpected-exit", true);
   const started = await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
   assert.equal(started.ok, true);
+  bindConfirmedFlashBreakpointPrevention(fixtureValue);
+  assert.notEqual(fixtureValue.runtime.gdbFlashBreakpointPreventionEvidence, undefined);
   await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
   fixtureValue.triggerGdbServerExit();
   assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial)?.kind, "gdb", "owner must gate requests until Artifact invalidation is persisted");
@@ -819,6 +978,7 @@ test("unexpected GDB Server exit releases its long-lived owner", async (context)
   assert.equal(fixtureValue.runtime.gdbOwnerToken, undefined);
   assert.equal(fixtureValue.runtime.gdbAttachBoundaryEvidence, undefined);
   assert.equal(fixtureValue.runtime.gdbInitialAttachBoundaryAvailable, false);
+  assert.equal(fixtureValue.runtime.gdbFlashBreakpointPreventionEvidence, undefined);
   const target = fixtureValue.targets.require(fixtureValue.projectRoot);
   assert.equal(target.liveArtifactMatch.status, "verified");
   assert.equal(target.liveArtifactMatch.source, "fixture");
@@ -967,12 +1127,136 @@ test("GDB connect restores a normal attach halt to the requested running state",
   fixtureValue.gdb.commandResult = { success: true, output: "running", rawOutput: "^running", observedTargetExecutionState: "running" };
   const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, true);
-  assert.deepEqual(fixtureValue.gdb.commands, ["-exec-continue --all"]);
-  assert.deepEqual(result.observedEffects, ["gdb_client_connected", "gdb_attach_halted_target", "target_state_restored:halted->running"]);
+  assert.deepEqual(fixtureValue.gdb.commands, [
+    '-interpreter-exec console "monitor flash breakpoints = 0"',
+    "-exec-continue --all",
+  ]);
+  assert.deepEqual(result.observedEffects, [
+    "gdb_client_connected",
+    "gdb_attach_halted_target",
+    "gdb_flash_breakpoints_disabled",
+    "target_state_restored:halted->running",
+  ]);
   assert.equal(fixtureValue.gdb.isConnected(), true);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
   assert.equal((result.data as { targetExecutionStateAfterConnect: string }).targetExecutionStateAfterConnect, "halted");
   assert.equal((result.data as { targetExecutionStateAfterRestore: string }).targetExecutionStateAfterRestore, "running");
+  assert.equal(
+    (result.data as { flashBreakpointPrevention: { success: boolean } }).flashBreakpointPrevention.success,
+    true,
+  );
+});
+
+test("GDB connect never resumes when FlashBP prevention is unconfirmed", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-flash-breakpoint-prevention-unconfirmed", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  await fixtureValue.targets.setArtifactMatch(fixtureValue.projectRoot, "verified", "fixture");
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.flashBreakpointDisableResult = {
+    success: false,
+    output: "",
+    error: "J-Link GDB Server did not confirm that Flash breakpoints were disabled",
+    code: "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED",
+    commandDispatched: true,
+  };
+
+  const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
+
+  assert.equal(result.error?.code, "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED");
+  assert.equal(result.error?.writeIssued, true);
+  assert.equal(result.error?.stateUnknown, false);
+  assert.deepEqual(fixtureValue.gdb.commands, [
+    '-interpreter-exec console "monitor flash breakpoints = 0"',
+  ]);
+  assert.equal(fixtureValue.gdb.connected, true);
+  assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "halted");
+  assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial)?.kind, "gdb");
+  assert.equal(result.artifact?.firmwareIdentity, "verified");
+});
+
+test("GDB connect rejects target state drift during FlashBP prevention", async (context) => {
+  for (const item of [
+    { name: "running", state: "running" as const, stateUnknown: false },
+    { name: "unknown", state: "unknown" as const, stateUnknown: true },
+  ]) {
+    const fixtureValue = await fixture(context, `gdb-connect-flash-breakpoint-prevention-${item.name}`);
+    await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+    fixtureValue.gdb.executionState = "halted";
+    fixtureValue.gdb.connectResult = {
+      success: true,
+      output: "Stopped at main()",
+      rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+      observedTargetExecutionState: "halted",
+    };
+    fixtureValue.gdb.flashBreakpointDisableResult = {
+      success: true,
+      output: "Flash breakpoints disabled",
+      commandDispatched: true,
+      observedTargetExecutionState: item.state,
+    };
+
+    const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
+
+    assert.equal(result.error?.code, "HIDDEN_STATE_CHANGE", item.name);
+    assert.equal(result.error?.writeIssued, true, item.name);
+    assert.equal(result.error?.stateUnknown, item.stateUnknown, item.name);
+    assert.deepEqual(fixtureValue.gdb.commands, [
+      '-interpreter-exec console "monitor flash breakpoints = 0"',
+    ], item.name);
+    assert.equal(fixtureValue.gdb.connected, true, item.name);
+    assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, item.state, item.name);
+    assert.equal(fixtureValue.queue.getOwner(fixtureValue.target.probeSerial)?.kind, "gdb", item.name);
+  }
+});
+
+test("failed repeated FlashBP prevention clears old evidence and blocks breakpoint insertion", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-connect-flash-breakpoint-prevention-retry");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "running",
+    observedTargetExecutionState: "running",
+  };
+  assert.equal((await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true)).ok, true);
+
+  fixtureValue.gdb.flashBreakpointDisableResult = {
+    success: false,
+    output: "",
+    error: "prevention retry failed",
+    code: "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED",
+    commandDispatched: true,
+  };
+  const retried = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
+  assert.equal(retried.error?.code, "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED");
+
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "Breakpoint 1",
+    dispatchedCommand: "-break-insert -- OsUserConfig.c:60",
+    commandDispatched: true,
+    observedTargetExecutionState: "running",
+  };
+  const rejected = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "break OsUserConfig.c:60");
+
+  assert.equal(rejected.error?.code, "GDB_FLASH_BREAKPOINT_PREVENTION_REQUIRED");
+  assert.equal(rejected.error?.writeIssued, false);
+  assert.equal(
+    fixtureValue.gdb.commands.filter((command) => command === "-break-insert -- OsUserConfig.c:60").length,
+    0,
+  );
 });
 
 test("GDB connect restores the audited RT-06 J-Link attach stop only with explicit authorization", async (context) => {
@@ -991,8 +1275,16 @@ test("GDB connect restores the audited RT-06 J-Link attach stop only with explic
   fixtureValue.gdb.commandResult = { success: true, output: "running", rawOutput: "^running", observedTargetExecutionState: "running" };
   const result = await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true);
   assert.equal(result.ok, true);
-  assert.deepEqual(fixtureValue.gdb.commands, ["-exec-continue --all"]);
-  assert.deepEqual(result.observedEffects, ["gdb_client_connected", "gdb_attach_halted_target", "target_state_restored:halted->running"]);
+  assert.deepEqual(fixtureValue.gdb.commands, [
+    '-interpreter-exec console "monitor flash breakpoints = 0"',
+    "-exec-continue --all",
+  ]);
+  assert.deepEqual(result.observedEffects, [
+    "gdb_client_connected",
+    "gdb_attach_halted_target",
+    "gdb_flash_breakpoints_disabled",
+    "target_state_restored:halted->running",
+  ]);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "running");
   assert.equal((result.data as { attachStopClassification: string }).attachStopClassification, "reasonless_attach_like_stop");
   assert.match(result.warnings.join("\n"), /could not distinguish.*application BKPT.*watchpoint.*fault/i);
@@ -1185,7 +1477,10 @@ test("GDB connect fails closed when an attach halt cannot be restored", async (c
   assert.equal(result.error?.code, "GDB_ATTACH_STATE_RESTORE_FAILED");
   assert.equal(result.error?.writeIssued, true);
   assert.equal(result.error?.stateUnknown, true);
-  assert.deepEqual(fixtureValue.gdb.commands, ["-exec-continue --all"]);
+  assert.deepEqual(fixtureValue.gdb.commands, [
+    '-interpreter-exec console "monitor flash breakpoints = 0"',
+    "-exec-continue --all",
+  ]);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
 });
 
@@ -1198,6 +1493,29 @@ test("an idle GDB client exit invalidates cached state before the next connect",
   assert.equal(result.error?.code, "TARGET_STATE_UNKNOWN");
   assert.equal(fixtureValue.gdb.connectCalls, 0);
   assert.equal(fixtureValue.runtime.gdbServerTargetExecutionState, "unknown");
+});
+
+test("an unexpected GDB client exit invalidates FlashBP prevention evidence", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-idle-client-exit-flash-breakpoint-prevention");
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "running",
+    observedTargetExecutionState: "running",
+  };
+  assert.equal((await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true)).ok, true);
+  assert.notEqual(fixtureValue.runtime.gdbFlashBreakpointPreventionEvidence, undefined);
+
+  fixtureValue.gdb.triggerUnexpectedExit();
+
+  assert.equal(fixtureValue.runtime.gdbFlashBreakpointPreventionEvidence, undefined);
 });
 
 test("a failed first GDB connect invalidates cached running state", async (context) => {
@@ -1299,6 +1617,7 @@ async function fixture(context: TestContext, name: string, withArtifact = false,
     gdbClientExitedUnexpectedly: false,
     gdbPreServerStateExpectationValid: false,
     gdbManagedBreakpointLifecycle: undefined,
+    gdbFlashBreakpointPreventionEvidence: undefined,
     onGdbServerExit: (listener: () => void) => {
       gdbServerExitListener = listener;
       return () => { if (gdbServerExitListener === listener) gdbServerExitListener = undefined; };
@@ -1309,6 +1628,25 @@ async function fixture(context: TestContext, name: string, withArtifact = false,
   return { targets, target, queue, probe, gdb, rtt, runtime, sessions, direct, projectRoot, triggerGdbServerExit: () => gdbServerExitListener?.() };
 }
 
+function bindConfirmedFlashBreakpointPrevention(
+  fixtureValue: Awaited<ReturnType<typeof fixture>>,
+): void {
+  assert.ok(fixtureValue.runtime.gdbOwnerToken);
+  (fixtureValue.runtime as SessionTargetRuntime).gdbFlashBreakpointPreventionEvidence = {
+    response: {
+      success: true,
+      output: "Flash breakpoints disabled",
+      commandDispatched: true,
+      preservedTargetExecutionState: fixtureValue.gdb.executionState === "unknown"
+        ? undefined
+        : fixtureValue.gdb.executionState,
+    },
+    serverProcessId: process.pid,
+    ownerToken: fixtureValue.runtime.gdbOwnerToken,
+    targetGeneration: fixtureValue.target.generation,
+  };
+}
+
 class FakeGdb implements SessionGdbClient {
   connected = true;
   executionState: GDBTargetExecutionState = "running";
@@ -1317,6 +1655,11 @@ class FakeGdb implements SessionGdbClient {
   waitCalls = 0;
   backtraceResult: GDBResponse = { success: true, output: "#0 main" };
   commandResult: GDBResponse = { success: true, output: "ok" };
+  flashBreakpointDisableResult: GDBResponse = {
+    success: true,
+    output: "Flash breakpoints disabled",
+    commandDispatched: true,
+  };
   clearAllBreakpointsResult?: GDBResponse;
   typedCommandHook?: () => void;
   waitResult: GDBResponse = { success: true, output: "stopped", stopReason: "breakpoint", observedTargetExecutionState: "halted" };
@@ -1353,6 +1696,28 @@ class FakeGdb implements SessionGdbClient {
       return this.clearAllBreakpointsResult;
     }
     return this.typedCommand('-interpreter-exec console "monitor clrbp"', "halted");
+  }
+  async disableFlashBreakpoints(): Promise<GDBResponse> {
+    const stateBefore = this.executionState;
+    if (stateBefore === "unknown") {
+      return {
+        success: false,
+        output: "",
+        code: "TARGET_STATE_UNKNOWN",
+        commandDispatched: false,
+        observedTargetExecutionState: "unknown",
+      };
+    }
+    this.commands.push('-interpreter-exec console "monitor flash breakpoints = 0"');
+    if (this.flashBreakpointDisableResult.observedTargetExecutionState) {
+      this.executionState = this.flashBreakpointDisableResult.observedTargetExecutionState;
+      return this.flashBreakpointDisableResult;
+    }
+    return {
+      ...this.flashBreakpointDisableResult,
+      preservedTargetExecutionState: stateBefore,
+      commandDispatched: this.flashBreakpointDisableResult.commandDispatched ?? true,
+    };
   }
   private async typedCommand(command: string, requiredState?: GDBTargetExecutionState): Promise<GDBResponse> {
     this.typedCommandHook?.();

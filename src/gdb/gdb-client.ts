@@ -301,6 +301,20 @@ export class GDBClient {
     );
   }
 
+  async disableFlashBreakpoints(timeout: number = 15000): Promise<GDBResponse> {
+    const result = await this.commandPreservingKnownState(
+      '-interpreter-exec console "monitor flash breakpoints = 0"',
+      timeout,
+    );
+    if (!result.success || /Flash breakpoints disabled/i.test(result.output)) return result;
+    return {
+      ...result,
+      success: false,
+      error: "J-Link GDB Server did not confirm that Flash breakpoints were disabled",
+      code: "GDB_FLASH_BREAKPOINT_PREVENTION_UNCONFIRMED",
+    };
+  }
+
   private async commandPreservingKnownState(
     command: string,
     timeout: number,
