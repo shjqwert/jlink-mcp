@@ -775,21 +775,32 @@ export class SessionOperations {
       const executionStateBefore = runtime.gdb.getTargetExecutionState();
       envelope.before = { ...(envelope.before as Record<string, unknown>), targetExecutionState: executionStateBefore };
       if (executionStateBefore === "unknown") {
+        runtime.gdbManagedBreakpointLifecycle = undefined;
         throw new SessionError("TARGET_STATE_UNKNOWN", "target state is unknown before gdb_wait; no wait was started", false, false, true);
       }
-      if (executionStateBefore === "halted") {
+      if (executionStateBefore === "halted" && !runtime.gdbManagedBreakpointLifecycle) {
         runtime.gdbServerTargetExecutionState = "halted";
         envelope.data = { success: true, output: "Target is already halted", stopReason: "already-halted", noOp: true, observedTargetExecutionState: "halted" };
         envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: "halted" };
         envelope.verification = { status: "observed", method: "gdb_cached_state" };
         return;
       }
-      const result = await runtime.gdb.wait(timeoutMs);
+      let result: Awaited<ReturnType<SessionGdbClient["wait"]>>;
+      try {
+        result = await runtime.gdb.wait(timeoutMs);
+      } catch (error) {
+        runtime.gdbManagedBreakpointLifecycle = undefined;
+        throw error;
+      }
       runtime.gdbServerTargetExecutionState = runtime.gdb.getTargetExecutionState();
       envelope.data = result;
       envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: runtime.gdbServerTargetExecutionState };
-      if (!result.success) throw gdbError(result, "gdb_wait", false, runtime.gdbServerTargetExecutionState === "unknown");
+      if (!result.success) {
+        runtime.gdbManagedBreakpointLifecycle = undefined;
+        throw gdbError(result, "gdb_wait", false, runtime.gdbServerTargetExecutionState === "unknown");
+      }
       if (runtime.gdbServerTargetExecutionState === "unknown") {
+        runtime.gdbManagedBreakpointLifecycle = undefined;
         throw new SessionError("TARGET_STATE_UNKNOWN", "target state became unknown while waiting", false, false, true);
       }
       if (runtime.gdbServerTargetExecutionState === "halted") {
