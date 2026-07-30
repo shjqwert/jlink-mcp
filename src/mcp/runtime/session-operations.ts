@@ -63,6 +63,13 @@ export interface SessionTargetRuntime {
   gdbInitialAttachBoundaryAvailable?: boolean;
   gdbClientExitedUnexpectedly?: boolean;
   gdbServerNaturalExitRequired?: boolean;
+  gdbManagedBreakpointLifecycle?: {
+    attachInitialState: "running";
+    lastManagedResumeState: "running";
+    stopReason?: string;
+    breakpointDeleteDispatched?: boolean;
+    emptyBreakpointListObserved?: boolean;
+  };
   gdbPreServerStateExpectationValid?: boolean;
   gdbClientExitSubscription?: () => void;
   onGdbServerExit?: (listener: () => void) => () => void;
@@ -126,6 +133,7 @@ export class SessionOperations {
       runtime.gdbServerTargetExecutionState = "unknown";
       runtime.gdbClientExitedUnexpectedly = false;
       runtime.gdbServerNaturalExitRequired = false;
+      runtime.gdbManagedBreakpointLifecycle = undefined;
       runtime.gdbPreServerStateExpectationValid = true;
       const serverOutputAtReady = runtime.probe.getGDBServerOutput(200);
       runtime.gdbAttachBoundaryEvidence = {
@@ -162,6 +170,7 @@ export class SessionOperations {
         runtime.gdbInitialAttachBoundaryAvailable = false;
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbServerNaturalExitRequired = false;
+        runtime.gdbManagedBreakpointLifecycle = undefined;
         void (async () => {
           try {
             await this.targets.setMemoryMutationTrust(target.projectRoot, "unverified", "gdb_server_unexpected_exit", {
@@ -232,17 +241,37 @@ export class SessionOperations {
           : runtime.gdbPreServerStateExpectationValid
             ? attachBoundary?.preServerObservation.state ?? "unknown"
             : "unknown";
-      envelope.before = {
-        gdbClientConnected: clientWasConnected,
-        targetExecutionState: executionState,
-        targetExecutionStateExpectedBeforeClose,
-        expectationSource: executionState !== "unknown"
+      const managedBreakpointLifecycle = runtime.gdbManagedBreakpointLifecycle;
+      const managedBreakpointDetachResumeExpected = waitForSingleRunExit
+        && executionState === "halted"
+        && attachBoundary?.preServerObservation.state === "running"
+        && managedBreakpointLifecycle?.attachInitialState === "running"
+        && managedBreakpointLifecycle.lastManagedResumeState === "running"
+        && managedBreakpointLifecycle.stopReason !== undefined
+        && managedBreakpointLifecycle.breakpointDeleteDispatched === true
+        && managedBreakpointLifecycle.emptyBreakpointListObserved === true;
+      const targetExecutionStateExpectedAfterClose = managedBreakpointDetachResumeExpected
+        ? "running"
+        : targetExecutionStateExpectedBeforeClose;
+      const closeStateExpectationSource = managedBreakpointDetachResumeExpected
+        ? "managed_breakpoint_detach_resume"
+        : executionState !== "unknown"
           ? "current_gdb_state"
           : recoveringAfterClientExit
             ? "unavailable_after_unexpected_client_exit"
             : attachBoundary && runtime.gdbPreServerStateExpectationValid
               ? "pre_gdb_server_observation"
-              : "unavailable",
+              : "unavailable";
+      const closeIntent = waitForSingleRunExit
+        ? "disconnect_client_and_allow_single_run_exit"
+        : "stop_server_without_client_connection";
+      envelope.before = {
+        gdbClientConnected: clientWasConnected,
+        targetExecutionState: executionState,
+        targetExecutionStateExpectedBeforeClose,
+        targetExecutionStateExpectedAfterClose,
+        expectationSource: closeStateExpectationSource,
+        closeIntent,
         gdbServerRunning: runtime.probe.isGDBServerRunning(),
       };
       if (targetExecutionStateExpectedBeforeClose === "unknown" && !recoveringAfterClientExit) {
@@ -281,6 +310,7 @@ export class SessionOperations {
         runtime.gdbInitialAttachBoundaryAvailable = false;
         runtime.gdbClientExitedUnexpectedly = false;
         runtime.gdbServerNaturalExitRequired = false;
+        runtime.gdbManagedBreakpointLifecycle = undefined;
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbOwnerExitSubscription?.();
         runtime.gdbOwnerExitSubscription = undefined;
@@ -299,29 +329,40 @@ export class SessionOperations {
           status: runtime.probe.getGDBServerStatus(),
           targetExecutionStateBeforeDisconnect: executionState,
           targetExecutionStateExpectedBeforeClose,
+          targetExecutionStateExpectedAfterClose,
           targetExecutionStateAfterClose: finalState,
+          closeStateExpectationSource,
+          closeIntent,
+          managedBreakpointLifecycle: managedBreakpointLifecycle ?? null,
           serverExitMode: waitForSingleRunExit
             ? "single_run_after_gdb_disconnect"
             : "explicit_stop_without_gdb_connection",
           serverExitObservation: serverExitObservation ?? null,
         };
         if (finalState === "unknown") throw new SessionError("POST_OPERATION_STATE_UNKNOWN", "GDB Server stopped, but target state could not be observed afterward", false, true, true);
-        if (!recoveringAfterClientExit && finalState !== targetExecutionStateExpectedBeforeClose) {
+        if (!recoveringAfterClientExit && finalState !== targetExecutionStateExpectedAfterClose) {
           throw new SessionError(
             "HIDDEN_STATE_CHANGE",
-            executionState === "unknown"
-              ? `target state after GDB Server close was ${finalState}, not the ${targetExecutionStateExpectedBeforeClose} state observed before Server start`
-              : `GDB Server close changed target state from ${executionState} to ${finalState}`,
+            managedBreakpointDetachResumeExpected
+              ? `clean single-run GDB detach did not restore the proven managed running state; observed ${finalState}`
+              : executionState === "unknown"
+                ? `target state after GDB Server close was ${finalState}, not the ${targetExecutionStateExpectedAfterClose} state observed before Server start`
+                : `GDB Server close changed target state from ${executionState} to ${finalState}`,
             false,
             true,
             false,
           );
         }
+        if (managedBreakpointDetachResumeExpected) {
+          envelope.observedEffects.push("target_state_restored_by_single_run_detach:halted->running");
+        }
         envelope.verification = {
           status: "verified",
-          method: waitForSingleRunExit
-            ? "gdb_single_run_exit_and_post_server_probe_observation"
-            : "gdb_state_before_close_and_post_server_probe_observation",
+          method: managedBreakpointDetachResumeExpected
+            ? "managed_breakpoint_lifecycle_single_run_detach_and_post_server_probe_observation"
+            : waitForSingleRunExit
+              ? "gdb_single_run_exit_and_post_server_probe_observation"
+              : "gdb_state_before_close_and_post_server_probe_observation",
         };
         if (recoveringAfterClientExit) {
           envelope.warnings.push("The GDB client exited before close, so pre-close target state was unknown; only the final post-server Probe observation is verified.");
@@ -544,9 +585,11 @@ export class SessionOperations {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return Promise.resolve(validationFailure("gdb_command", "timeoutMs must be 1..120000"));
     return this.withGdbOwner("gdb_command", projectRoot, ["raw_gdb_command", "unknown_side_effects"], async (envelope, target, runtime) => {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
+      const executionStateBefore = runtime.gdb.getTargetExecutionState();
       const result = await runtime.gdb.command(command, timeoutMs);
       const breakpointInsertionDispatched = result.commandDispatched === true
         && result.dispatchedCommand?.startsWith("-break-insert ") === true;
+      runtime.gdbManagedBreakpointLifecycle = undefined;
       runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState ?? "unknown";
       runtime.gdbPreServerStateExpectationValid = false;
       const sideEffects = breakpointInsertionDispatched
@@ -572,6 +615,22 @@ export class SessionOperations {
         throw new SessionError(code, error instanceof Error ? error.message : String(error), false, true, true);
       }
       if (!result.success) throw gdbError(result, "gdb_command", true, runtime.gdbServerTargetExecutionState === "unknown");
+      const attachBoundary = runtime.gdbAttachBoundaryEvidence;
+      if (
+        breakpointInsertionDispatched
+        && executionStateBefore === "running"
+        && runtime.gdbServerTargetExecutionState === "running"
+        && attachBoundary?.preServerObservation.state === "running"
+        && attachBoundary.server.ownerToken === runtime.gdbOwnerToken
+        && attachBoundary.server.targetGeneration === target.generation
+      ) {
+        runtime.gdbManagedBreakpointLifecycle = {
+          attachInitialState: "running",
+          lastManagedResumeState: "running",
+        };
+      } else if (breakpointInsertionDispatched) {
+        runtime.gdbManagedBreakpointLifecycle = undefined;
+      }
       envelope.observedEffects.push("raw_gdb_command_issued", "side_effects_unknown");
       envelope.data = { command, ...result, sideEffects };
       envelope.verification = { status: "executed_unverified" };
@@ -618,6 +677,11 @@ export class SessionOperations {
         runtime.gdbServerTargetExecutionState = "unknown";
         envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: "unknown" };
         throw new SessionError("TARGET_STATE_UNKNOWN", "breakpoint listing returned no valid execution-state observation or typed preservation evidence", false, false, true);
+      }
+      if (runtime.gdbManagedBreakpointLifecycle?.breakpointDeleteDispatched === true) {
+        runtime.gdbManagedBreakpointLifecycle.emptyBreakpointListObserved =
+          executionStateAfter === "halted"
+          && /^\s*No breakpoints or watchpoints\.\s*$/i.test(result.output);
       }
       envelope.verification = { status: "observed", method: "typed_read_only_gdb_command" };
     });
@@ -696,6 +760,10 @@ export class SessionOperations {
         envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: "unknown" };
         throw new SessionError("TARGET_STATE_UNKNOWN", "breakpoint deletion returned no valid execution-state observation or typed preservation evidence", false, true, true);
       }
+      if (runtime.gdbManagedBreakpointLifecycle?.stopReason && commandDispatched) {
+        runtime.gdbManagedBreakpointLifecycle.breakpointDeleteDispatched = true;
+        runtime.gdbManagedBreakpointLifecycle.emptyBreakpointListObserved = false;
+      }
       envelope.verification = { status: "observed", method: "typed_gdb_breakpoint_delete_and_state_preservation" };
     });
   }
@@ -723,6 +791,16 @@ export class SessionOperations {
       if (!result.success) throw gdbError(result, "gdb_wait", false, runtime.gdbServerTargetExecutionState === "unknown");
       if (runtime.gdbServerTargetExecutionState === "unknown") {
         throw new SessionError("TARGET_STATE_UNKNOWN", "target state became unknown while waiting", false, false, true);
+      }
+      if (runtime.gdbServerTargetExecutionState === "halted") {
+        if (
+          runtime.gdbManagedBreakpointLifecycle
+          && /^breakpoint-hit(?:\s|$)/.test(result.stopReason ?? "")
+        ) {
+          runtime.gdbManagedBreakpointLifecycle.stopReason = result.stopReason;
+        } else {
+          runtime.gdbManagedBreakpointLifecycle = undefined;
+        }
       }
       envelope.verification = {
         status: "observed",
@@ -930,6 +1008,7 @@ export class SessionOperations {
         runtime.gdbInitialAttachBoundaryAvailable = false;
         runtime.gdbClientExitedUnexpectedly = true;
         runtime.gdbPreServerStateExpectationValid = false;
+        runtime.gdbManagedBreakpointLifecycle = undefined;
       });
     }
     return runtime;

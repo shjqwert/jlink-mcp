@@ -19,6 +19,13 @@ export interface TargetRuntime {
   gdbServerStopping?: boolean;
   gdbServerTargetExecutionState?: GDBTargetExecutionState;
   gdbServerNaturalExitRequired?: boolean;
+  gdbManagedBreakpointLifecycle?: {
+    attachInitialState: "running";
+    lastManagedResumeState: "running";
+    stopReason?: string;
+    breakpointDeleteDispatched?: boolean;
+    emptyBreakpointListObserved?: boolean;
+  };
   gdbClientExitSubscription?: () => void;
   onGdbServerExit(listener: () => void): () => void;
 }
