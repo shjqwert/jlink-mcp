@@ -401,6 +401,27 @@ export class GDBClient {
       };
     };
 
+    const preInterrupt = await this.drainPendingOutputBeforeInterrupt(remaining());
+    if (preInterrupt.processExited) return processExited("pre-interrupt drain", preInterrupt);
+    if (preInterrupt.timedOut) return timedOut("pre-interrupt drain", preInterrupt);
+    rawParts.push(preInterrupt.output);
+    if (
+      this.targetExecutionState !== "running"
+      || hasMiAsyncRecord(preInterrupt.output, "stopped")
+    ) {
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        stopReason: this.stopEvent ?? undefined,
+        error: "target stopped before exec-interrupt was dispatched; breakpoint insertion and automatic resume were refused",
+        code: "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
+    }
+
     const interruptedExecutionToken = this.activeExecutionToken;
     const interruptToken = this.allocateMiToken();
     let interrupt: GDBCommandExchange;
@@ -460,7 +481,7 @@ export class GDBClient {
     const interruptEvidence = rawParts.join("");
     if (
       !hasIntentionalInterruptStop(interruptEvidence)
-      && !hasCorrelatedRemoteInterruptStop(interruptEvidence, interruptedExecutionToken, interruptToken)
+      && !hasIsolatedRemoteInterruptStop(interruptEvidence, interruptedExecutionToken, interruptToken)
     ) {
       return {
         success: false,
@@ -545,6 +566,40 @@ export class GDBClient {
         : breakpointDone ? undefined : "GDB_BREAKPOINT_RESULT_MISSING",
       observedTargetExecutionState: "running",
     };
+  }
+
+  private drainPendingOutputBeforeInterrupt(timeout: number): Promise<GDBCommandExchange> {
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const quietWindow = Math.min(20, Math.max(1, Math.floor(timeout / 4)));
+      let quietSince = started;
+      let lastOutput = this.outputBuffer;
+      const finish = (timedOut: boolean, processExited = false) => {
+        const output = this.outputBuffer;
+        this.outputBuffer = "";
+        resolve({ output, timedOut, processExited });
+      };
+      const check = () => {
+        if (!this.proc || !this.connected) {
+          finish(false, true);
+          return;
+        }
+        if (this.outputBuffer !== lastOutput) {
+          lastOutput = this.outputBuffer;
+          quietSince = Date.now();
+        }
+        if (Date.now() - quietSince >= quietWindow) {
+          finish(false);
+          return;
+        }
+        if (Date.now() - started >= timeout) {
+          finish(true);
+          return;
+        }
+        setTimeout(check, 2);
+      };
+      check();
+    });
   }
 
   private waitForInterruptStop(interruptOutput: string, timeout: number): Promise<GDBCommandExchange> {
@@ -983,7 +1038,7 @@ function hasIntentionalInterruptStop(raw: string): boolean {
   return reason === undefined || reason === "signal-received";
 }
 
-function hasCorrelatedRemoteInterruptStop(
+function hasIsolatedRemoteInterruptStop(
   raw: string,
   executionToken: string | null,
   interruptToken: string,
@@ -997,7 +1052,12 @@ function hasCorrelatedRemoteInterruptStop(
   const interruptDoneIndex = lines.findIndex((line) => line.startsWith(`${interruptToken}^done`));
   const stop = stops[0];
   if (interruptDoneIndex < 0 || stop.index <= interruptDoneIndex) return false;
-  if (!stop.line.startsWith(`${executionToken}*stopped`)) return false;
+  const stopHasExpectedExecutionToken = stop.line.startsWith(`${executionToken}*stopped`);
+  // GDB/MI async records normally omit tokens. The bounded pre-dispatch drain
+  // and single in-flight command isolate this un-tokened stop to the window
+  // opened by the tokenized interrupt result.
+  const stopIsStandardUnTokenedAsync = stop.line.startsWith("*stopped");
+  if (!stopHasExpectedExecutionToken && !stopIsStandardUnTokenedAsync) return false;
   if (!/(?:^|,)reason="signal-received"(?:,|$)/.test(stop.line)) return false;
   if (!/(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(stop.line)) return false;
   return /(?:^|,)stopped-threads="all"(?:,|$)/.test(stop.line);
