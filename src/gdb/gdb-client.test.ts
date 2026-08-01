@@ -172,7 +172,6 @@ test("GDBClient refuses an un-tokened SIGTRAP stop whose interrupt causality is 
       interruptStopToken: "none",
     },
   ));
-
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
   const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
@@ -208,6 +207,7 @@ test("GDBClient drains and rejects a stop that predates the MI interrupt transac
       interruptSuppressStop: true,
     },
   ));
+  (client as unknown as { commandThrottleMs: number }).commandThrottleMs = 0;
 
   assert.equal((await client.connect("localhost", 2331)).success, true);
   assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
@@ -947,7 +947,7 @@ function createFakeGdbProcess(
             setTimeout(() => {
               targetRunning = false;
               child.stdout.write(`${transaction.delayedIdleStopAfterContinue}(gdb)\n`);
-            }, 60);
+            }, 10);
           }
         });
       } else if (command === "break JlinkTestFixtureTask1ms") {

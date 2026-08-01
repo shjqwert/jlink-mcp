@@ -122,6 +122,7 @@ test("ProbeQueue stale readers cannot retire a replacement directory lock", asyn
   const resumeStaleReader = join(root, "resume-stale-reader");
   const staleRemovalAttempt = join(root, "stale-removal-attempt");
   const replacementHeld = join(root, "replacement-held");
+  const finishReplacementRetirement = join(root, "finish-replacement-retirement");
   const releaseReplacementOwner = join(root, "release-replacement-owner");
   const now = new Date().toISOString();
   const staleToken = randomUUID();
@@ -174,9 +175,9 @@ test("ProbeQueue stale readers cannot retire a replacement directory lock", asyn
   const replacementScript = [
     "const fs=require('node:fs');",
     "const originalRename=fs.renameSync.bind(fs);",
-    "const modulePath=process.argv[1],root=process.argv[2],serial=process.argv[3],resourcePid=Number(process.argv[4]),resume=process.argv[5],attempt=process.argv[6],held=process.argv[7],release=process.argv[8];",
+    "const modulePath=process.argv[1],root=process.argv[2],serial=process.argv[3],resourcePid=Number(process.argv[4]),resume=process.argv[5],attempt=process.argv[6],held=process.argv[7],finishRetirement=process.argv[8],release=process.argv[9];",
     "let guardRenames=0;",
-    "fs.renameSync=(source,destination)=>{if(String(source).includes('owner-update.lock')&&String(source).endsWith('.guard')&&++guardRenames===2){fs.writeFileSync(held,'');fs.writeFileSync(resume,'');while(!fs.existsSync(attempt))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return originalRename(source,destination);};",
+    "fs.renameSync=(source,destination)=>{if(String(source).includes('owner-update.lock')&&String(source).endsWith('.guard')&&++guardRenames===2){fs.writeFileSync(held,'');fs.writeFileSync(resume,'');while(!fs.existsSync(attempt))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);while(!fs.existsSync(finishRetirement))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}return originalRename(source,destination);};",
     "const {ProbeQueue}=require(modulePath);",
     "const q=new ProbeQueue(root);q.adoptOwner(serial,{kind:'hss',projectRoot:'P',targetGeneration:'G',resourcePid,captureId:'capture-aba'});process.stdout.write('adopted');while(!fs.existsSync(release))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);",
   ].join("");
@@ -191,6 +192,7 @@ test("ProbeQueue stale readers cannot retire a replacement directory lock", asyn
       resumeStaleReader,
       staleRemovalAttempt,
       replacementHeld,
+      finishReplacementRetirement,
       releaseReplacementOwner,
     ]);
     await waitForFile(replacementHeld);
@@ -200,11 +202,13 @@ test("ProbeQueue stale readers cannot retire a replacement directory lock", asyn
     assert.notEqual(replacementLock.token, staleToken);
     assert.equal(existsSync(join(lockDirectory, staleGuardName)), false);
     assert.equal(existsSync(join(lockDirectory, replacementGuardName)), true);
+    writeFileSync(finishReplacementRetirement, "");
     assert.equal(await staleReader, "blocked");
     writeFileSync(releaseReplacementOwner, "");
     assert.equal(await replacement, "adopted");
   } finally {
     writeFileSync(resumeStaleReader, "");
+    writeFileSync(finishReplacementRetirement, "");
     writeFileSync(releaseReplacementOwner, "");
     await Promise.allSettled([staleReader, ...(replacement ? [replacement] : [])]);
   }
