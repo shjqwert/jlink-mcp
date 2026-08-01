@@ -2,10 +2,12 @@
 
 Standalone MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
-The server serializes physical Probe access and reports observed state and side effects. It does not infer a Target from an environment default: configure each canonical `projectRoot` with `target_configure` before target operations.
+The server serializes physical Probe access and reports observed state and side effects. It does not infer a project or Target from the server working directory: call `mcp_init` with the canonical engineering `projectRoot`, then configure that root with `target_configure` before target operations.
 
-## v1.1.5 development changes
+## v1.1.5 changes
 
+- MCP startup, handshake, and tool discovery no longer create project-local directories. `mcp_init` explicitly selects one canonical engineering root and creates only its `.jlink-mcp` state directory; `test-output` remains lazy until an HSS, acceptance-evidence, or export write needs it.
+- Probe queue lock retirement retries bounded transient Windows sharing violations without weakening token ownership or stale-reader protection.
 - Timed HSS sequences reject normal variable access after `hss_stop`; failure cleanup remains bounded and preserves the original error.
 - HSS capability discovery restores an originally running target with explicit `JLINKARM_Go` evidence when capability attach unexpectedly halts it, while still reporting the state-change failure.
 - `target_configure.gdbDevice` is now required by `gdb_open`. It separates a validated non-invasive GDB attach profile from the exact `device` retained for Flash/Erase. A failed attach is cleaned up in the owning MCP process without resuming a faulted target.
@@ -13,20 +15,20 @@ The server serializes physical Probe access and reports observed state and side 
 - `write_variable` keeps exact verification as the default and adds an explicit `range` comparator for firmware-consumed dynamic fields. Protocol ACK/Complete must still be checked separately.
 - The v1.1.4 unknown-memory write software gate remains covered; no hardware Flash/Erase result is claimed by this change.
 
-## Install the current stable v1.1.4 release
+## Install the current stable v1.1.5 release
 
 - Windows x64 with Node.js 22 or 24.
 - SEGGER J-Link Software and a connected supported J-Link Probe for hardware operations.
 - A project-local ELF with DWARF for typed variables and crash source mapping; an SVD is required for peripheral register access.
 
 Ordinary users do not need Visual Studio, CMake, Python, or a database server. Download
-`jlink-mcp-v1.1.4-windows-x64.zip` and `SHA256SUMS.txt` from the
-[v1.1.4 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v1.1.4),
+`jlink-mcp-v1.1.5-windows-x64.zip` and `SHA256SUMS.txt` from the
+[v1.1.5 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v1.1.5),
 verify the checksum, and extract the ZIP. Then run:
 
 ```powershell
 .\doctor.cmd
-codex mcp add jlink -- D:\Tools\jlink-mcp-v1.1.4-windows-x64\jlink-mcp.cmd
+codex mcp add jlink -- D:\Tools\jlink-mcp-v1.1.5-windows-x64\jlink-mcp.cmd
 ```
 
 The portable ZIP includes production npm dependencies, the SQLite native binding, and the
@@ -35,7 +37,7 @@ prebuilt `hss_helper.exe`. The only vendor runtime installed separately is SEGGE
 The Release also provides `jlink-mcp-1.1.4.tgz` for an online npm installation:
 
 ```powershell
-npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v1.1.4/jlink-mcp-1.1.4.tgz
+npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v1.1.5/jlink-mcp-1.1.5.tgz
 jlink-mcp-doctor
 codex mcp add jlink -- jlink-mcp
 ```
@@ -87,10 +89,10 @@ machine-specific working directory or Target defaults.
 
 ## Canonical Tool List
 
-The standalone server registers exactly these 39 direct tools:
+The standalone server registers exactly these 40 direct tools:
 
 ```text
-list_devices, target_configure, target_status,
+mcp_init, list_devices, target_configure, target_status,
 artifact_probe, symbol_search, symbol_resolve,
 read_variable, write_variable, read_memory, write_memory, core_register_access, peripheral_register_access,
 target_control, flash, erase,
@@ -106,6 +108,7 @@ Only the read-only `rtt://output`, `probe://gdb-server-log`, and `probe://status
 
 ## Operating rules
 
+- Starting the MCP server and listing its tools are side-effect free for the engineering project. Call `mcp_init` once with the exact absolute project root before project-scoped tools; initialization rejects a different root in the same process and a subdirectory beneath an existing `.jlink-mcp` root.
 - Reads and preflight do not implicitly halt, reset, resume, recover, flash, erase, or write the target.
 - `target_control` is the explicit CPU-state operation. Core-register and SVD peripheral-register operations are separate bounded actions.
 - RAM (`write_memory`) and typed-variable writes default to exact readback verification. SVD peripheral-register writes also default to verification. Readback proves bytes observed by its named J-Link connection, not target-program consumption.

@@ -2,7 +2,7 @@ import type { z } from "zod";
 import type { OperationEnvelope } from "../runtime/operation-envelope";
 
 export const AGENT_TOOL_NAMES = [
-  "list_devices", "target_configure", "target_status",
+  "mcp_init", "list_devices", "target_configure", "target_status",
   "artifact_probe", "symbol_search", "symbol_resolve",
   "read_variable", "write_variable", "read_memory", "write_memory", "core_register_access", "peripheral_register_access",
   "target_control", "flash", "erase",
@@ -17,15 +17,16 @@ export const AGENT_TOOL_NAMES = [
 export type AgentToolName = typeof AGENT_TOOL_NAMES[number];
 
 const configuredTarget = (description: string): string =>
-  `${description} Requires a current target_configure for this projectRoot before use.`;
+  description + " Requires mcp_init and a current target_configure for this projectRoot before use.";
 const confirmedOperation = (description: string): string =>
   `${description} Explain the exact target effects and obtain explicit user confirmation before setting userConfirmed=true.`;
 const repairingCaptureQuery = (description: string): string =>
-  `${description} If the terminal JCAP v1 index is missing or invalid, this query may repair and atomically republish capture.db after Raw identity and SQLite integrity verification.`;
+  description + " Requires mcp_init for the engineering project that owns the capture. If the terminal JCAP v1 index is missing or invalid, this query may repair and atomically republish capture.db after Raw identity and SQLite integrity verification.";
 
 export const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
+  mcp_init: "Initialize exactly one explicit canonical engineering project root for this MCP process and create its .jlink-mcp state directory. This does not create test-output or access J-Link hardware.",
   list_devices: "List connected J-Link probes without changing target state.",
-  target_configure: "Persist one explicit Target configuration for a project root. Call this before any project-scoped Target, Probe, symbol, HSS, GDB, or RTT tool, and repeat it when the intended target configuration changes.",
+  target_configure: "Persist one explicit Target configuration for the project root selected by mcp_init. Call mcp_init first, then repeat target_configure when the intended target configuration changes.",
   target_status: configuredTarget("Report persisted Target, Probe, Artifact, SVD, owner, and separated state layers without attaching to observe target execution. Optionally request SEGGER Verify-only for configured flash images."),
   artifact_probe: configuredTarget("Discover and classify bounded Artifact, MAP, and flash-image candidates."),
   symbol_search: configuredTarget("Search the configured Artifact symbol catalog."),
@@ -44,7 +45,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   hss_stop: configuredTarget("Stop an active HSS capture and finalize available data."),
   hss_recover: configuredTarget("Recover and index the trustworthy prefix of an interrupted HSS capture."),
   debug_sequence_execute: configuredTarget("Synchronously execute multiple HSS/read/write operations on fixed intervals over at least one second and wait until completion. Do not use for a single variable read or write."),
-  capture_list: "List bounded local Capture packages and report whether each package is supported JCAP v1, legacy, or invalid.",
+  capture_list: "List bounded local Capture packages for the engineering project selected by mcp_init and report whether each package is supported JCAP v1, legacy, or invalid.",
   capture_summary: repairingCaptureQuery("Return bounded provenance, lifecycle, variables, quality, and counts for a capture."),
   capture_series: repairingCaptureQuery("Return bounded aggregate time-series buckets for selected variables and ticks."),
   capture_event_window: repairingCaptureQuery("Return one event and bounded neighboring series data."),

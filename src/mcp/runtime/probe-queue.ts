@@ -63,6 +63,8 @@ interface LeaseRecord extends TicketRecord {
 const processInstanceId = randomUUID();
 const processStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
 const inProcessTails = new Map<string, Promise<void>>();
+const DIRECTORY_RENAME_RETRY_DELAYS_MS = [1, 2, 4, 8, 16, 32, 64] as const;
+const RETRYABLE_DIRECTORY_RENAME_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 
 export class ProbeQueueError extends Error {
   constructor(
@@ -547,22 +549,31 @@ function removeJsonFileIfTokenMatches(filePath: string, token: string): boolean 
 function removeDirectoryIfTokenMatches(directory: string, token: string): boolean {
   const guardPath = directoryGuardPath(directory, token);
   const claimedGuardPath = `${guardPath}.retiring-${process.pid}-${randomUUID()}`;
-  try {
-    renameSync(guardPath, claimedGuardPath);
-  } catch {
-    return false;
-  }
+  if (!renameDirectoryEntryWithRetry(guardPath, claimedGuardPath)) return false;
   const retiredDirectory = `${directory}.retired-${process.pid}-${randomUUID()}`;
-  try {
-    renameSync(directory, retiredDirectory);
-  } catch {
-    try { renameSync(claimedGuardPath, guardPath); } catch { /* leave the lock fail-closed */ }
+  if (!renameDirectoryEntryWithRetry(directory, retiredDirectory)) {
+    renameDirectoryEntryWithRetry(claimedGuardPath, guardPath);
     return false;
   }
   try {
     rmSync(retiredDirectory, { recursive: true, force: true });
   } catch { /* the live lock name was already retired atomically */ }
   return true;
+}
+
+function renameDirectoryEntryWithRetry(source: string, destination: string): boolean {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(source, destination);
+      return true;
+    } catch (error) {
+      const code = String((error as NodeJS.ErrnoException).code);
+      if (!RETRYABLE_DIRECTORY_RENAME_CODES.has(code)
+        || attempt >= DIRECTORY_RENAME_RETRY_DELAYS_MS.length
+        || !existsSync(source)) return false;
+      synchronousDelay(DIRECTORY_RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
 }
 
 function directoryGuardPath(directory: string, token: string): string {

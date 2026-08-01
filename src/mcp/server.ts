@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { join } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ProbeBackend } from "../probe/backend";
 import { createProbeBackend, type ProbeFactoryConfig } from "../probe/factory";
 import { log } from "../utils/logger";
@@ -10,7 +12,7 @@ import { AcceptanceEvidenceStore, readRepositoryIdentity } from "./acceptance/ev
 import { DirectMcuService } from "./runtime/direct-operations";
 import { ArtifactVariableService } from "./runtime/artifact-operations";
 import { SvdRegisterService } from "./runtime/svd-operations";
-import { createOperationEnvelope, failEnvelope, type OperationEnvelope } from "./runtime/operation-envelope";
+import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./runtime/operation-envelope";
 import { ProbeQueue } from "./runtime/probe-queue";
 import { MemorySessionManager } from "./runtime/memory-session";
 import { SessionOperations } from "./runtime/session-operations";
@@ -40,6 +42,33 @@ export interface JLinkMcpServerOptions {
   storageRoot?: string;
   evidenceRoot?: string;
   queueRoot?: string;
+}
+
+interface ProjectContext {
+  projectRoot: string;
+  stateRoot: string;
+  evidenceRoot: string;
+  targets: TargetStore;
+  direct: DirectMcuService;
+  artifacts: ArtifactVariableService;
+  variables: VariableAccessRouter;
+  registers: SvdRegisterService;
+  sessions: SessionOperations;
+  hss: HssOperations;
+  captures: CaptureQueryOperations;
+  sequence: DebugSequenceExecutor;
+  evidence: AcceptanceEvidenceStore;
+}
+
+class ProjectInitializationError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "ProjectInitializationError";
+  }
 }
 
 export function operationHadIssuedEffects(envelope: Pick<OperationEnvelope, "observedEffects">): boolean {
@@ -73,50 +102,18 @@ export class JLinkMcpServer {
   private readonly server: McpServer;
   private readonly discoveryProcesses = new ProcessManager();
   private readonly discoveryProbe: ProbeBackend;
-  private readonly targets: TargetStore;
   private readonly queue: ProbeQueue;
   private readonly memorySessions: MemorySessionManager;
   private readonly runtimes = new TargetRuntimeRegistry();
-  private readonly direct: DirectMcuService;
-  private readonly artifacts: ArtifactVariableService;
-  private readonly variables: VariableAccessRouter;
-  private readonly registers: SvdRegisterService;
-  private readonly sessions: SessionOperations;
-  private readonly hss: HssOperations;
-  private readonly captures: CaptureQueryOperations;
-  private readonly sequence: DebugSequenceExecutor;
-  private readonly evidence: AcceptanceEvidenceStore;
+  private readonly options: JLinkMcpServerOptions;
+  private projectContext?: ProjectContext;
   private readonly implemented = new Set<AgentToolName>();
 
   constructor(probeConfig?: ProbeFactoryConfig, options: JLinkMcpServerOptions = {}) {
+    this.options = options;
     this.discoveryProbe = createProbeBackend(probeConfig ?? { type: "jlink" }, this.discoveryProcesses);
-    const cwd = options.cwd ?? process.cwd();
-    const stateRoot = options.storageRoot ?? join(cwd, ".jlink-mcp");
-    const evidenceRoot = options.evidenceRoot ?? join(cwd, "test-output");
-    this.targets = new TargetStore(stateRoot);
     this.queue = new ProbeQueue(options.queueRoot);
     this.memorySessions = new MemorySessionManager(this.queue);
-    this.direct = new DirectMcuService(this.targets, this.queue, (target) => this.runtimes.get(target), undefined, this.memorySessions);
-    this.artifacts = new ArtifactVariableService(this.targets);
-    this.registers = new SvdRegisterService(this.targets, this.direct);
-    this.sessions = new SessionOperations(this.targets, this.queue, (target) => this.runtimes.get(target), this.memorySessions);
-    this.evidence = new AcceptanceEvidenceStore(evidenceRoot, readRepositoryIdentity(cwd).commit);
-    this.hss = new HssOperations(
-      this.targets,
-      this.queue,
-      this.artifacts,
-      undefined,
-      evidenceRoot,
-      stateRoot,
-      undefined,
-      this.memorySessions,
-    );
-    this.captures = new CaptureQueryOperations(
-      evidenceRoot,
-      <T>(runId: string, operation: () => Promise<T>) => this.evidence.guardRunMutation(runId, operation),
-    );
-    this.variables = new VariableAccessRouter(this.targets, this.artifacts, this.direct, this.hss);
-    this.sequence = new DebugSequenceExecutor(this.variables, this.hss);
     this.server = new McpServer({ name: "jlink-mcp", version: JLINK_MCP_VERSION });
     this.registerTools();
     this.registerResources();
@@ -124,23 +121,31 @@ export class JLinkMcpServer {
 
   private registerTools(): void {
     const register = this.registerEnvelopeTool.bind(this) as RegisterEnvelopeTool;
+    register("mcp_init", {
+      projectRoot: z.string().min(1).describe("Existing absolute root of the engineering project to initialize for this MCP process."),
+    }, (input) => this.initializeProject(String(input.projectRoot)));
+
+    const current = () => this.requireProjectContext();
     registerTargetTools(register, {
       discoveryProbe: this.discoveryProbe,
-      direct: this.direct,
+      get direct() { return current().direct; },
       runtimes: this.runtimes,
-      artifacts: this.artifacts,
-      variables: this.variables,
-      registers: this.registers,
+      get artifacts() { return current().artifacts; },
+      get variables() { return current().variables; },
+      get registers() { return current().registers; },
     });
 
     registerSessionTools(register, {
-      targets: this.targets,
-      sessions: this.sessions,
-      direct: this.direct,
+      get targets() { return current().targets; },
+      get sessions() { return current().sessions; },
+      get direct() { return current().direct; },
     });
 
-    registerHssTools(register, { hss: this.hss, sequence: this.sequence });
-    registerCaptureTools(register, { captures: this.captures });
+    registerHssTools(register, {
+      get hss() { return current().hss; },
+      get sequence() { return current().sequence; },
+    });
+    registerCaptureTools(register, { get captures() { return current().captures; } });
 
     const missing = AGENT_TOOL_NAMES.filter((name) => !this.implemented.has(name));
     if (missing.length) throw new Error(`missing concrete MCP tool handlers: ${missing.join(", ")}`);
@@ -153,8 +158,12 @@ export class JLinkMcpServer {
   ): void {
     if (this.implemented.has(name)) throw new Error(`duplicate MCP tool handler: ${name}`);
     this.implemented.add(name);
-    const schemaWithRunId = Object.hasOwn(inputSchema, "runId") ? inputSchema : { ...inputSchema, runId: acceptanceRunId.optional() };
+    const schemaWithRunId = name === "mcp_init" || Object.hasOwn(inputSchema, "runId")
+      ? inputSchema
+      : { ...inputSchema, runId: acceptanceRunId.optional() };
     this.server.registerTool(name, { description: TOOL_DESCRIPTIONS[name], inputSchema: schemaWithRunId }, async (input, extra) => {
+      const gateFailure = this.projectGateFailure(name, input as Record<string, unknown>);
+      if (gateFailure) return toolResult(gateFailure);
       const requestedRunId = (input as Record<string, unknown>).runId;
       const execute = async (): Promise<OperationEnvelope> => {
         try { return await handler(input as Record<string, unknown>, extra.signal); }
@@ -173,7 +182,7 @@ export class JLinkMcpServer {
       if (typeof requestedRunId !== "string") envelope = await execute();
       else {
         try {
-          const recorded = await this.evidence.executeAndRecordMcpCommand(requestedRunId, name, input as Record<string, unknown>, execute);
+          const recorded = await this.requireProjectContext().evidence.executeAndRecordMcpCommand(requestedRunId, name, input as Record<string, unknown>, execute);
           envelope = recorded.envelope;
           if (recorded.evidenceError) envelope = applyEvidenceLogFailure(envelope, recorded.evidenceError);
         } catch (error) {
@@ -189,12 +198,166 @@ export class JLinkMcpServer {
           });
         }
       }
-      return {
-        isError: !envelope.ok,
-        content: [{ type: "text" as const, text: JSON.stringify(envelope) }],
-        structuredContent: envelope as unknown as Record<string, unknown>,
-      };
+      return toolResult(envelope);
     });
+  }
+
+  private async initializeProject(projectRootInput: string): Promise<OperationEnvelope> {
+    const envelope = createOperationEnvelope("mcp_init");
+    envelope.requestedEffects = ["initialize_project_local_mcp_state"];
+    let initializationWriteIssued = false;
+    try {
+      const projectRoot = canonicalProjectRoot(projectRootInput);
+      if (this.projectContext) {
+        if (pathKey(this.projectContext.projectRoot) !== pathKey(projectRoot)) {
+          throw new ProjectInitializationError(
+            "MCP_ALREADY_INITIALIZED",
+            "this MCP process is already initialized for " + this.projectContext.projectRoot,
+            { initializedProjectRoot: this.projectContext.projectRoot, requestedProjectRoot: projectRoot },
+          );
+        }
+        envelope.data = projectContextData(this.projectContext, false);
+        envelope.verification = { status: "verified", method: "canonical_project_root_match" };
+        return finishEnvelope(envelope, true);
+      }
+
+      await this.assertClientProjectRoot(projectRoot);
+      const initializedAncestor = findInitializedAncestor(projectRoot);
+      if (initializedAncestor) {
+        throw new ProjectInitializationError(
+          "PROJECT_NESTED_UNDER_INITIALIZED_ROOT",
+          "projectRoot is nested under an existing .jlink-mcp root: " + initializedAncestor,
+          { initializedProjectRoot: initializedAncestor, requestedProjectRoot: projectRoot },
+        );
+      }
+
+      const stateRoot = resolve(this.options.storageRoot ?? join(projectRoot, ".jlink-mcp"));
+      const evidenceRoot = resolve(this.options.evidenceRoot ?? join(projectRoot, "test-output"));
+      const stateRootExisted = existsSync(stateRoot);
+      const targets = new TargetStore(stateRoot);
+      initializationWriteIssued = true;
+      const direct = new DirectMcuService(targets, this.queue, (target) => this.runtimes.get(target), undefined, this.memorySessions);
+      const artifacts = new ArtifactVariableService(targets);
+      const registers = new SvdRegisterService(targets, direct);
+      const sessions = new SessionOperations(targets, this.queue, (target) => this.runtimes.get(target), this.memorySessions);
+      const evidence = new AcceptanceEvidenceStore(evidenceRoot, readRepositoryIdentity(projectRoot).commit);
+      const hss = new HssOperations(
+        targets,
+        this.queue,
+        artifacts,
+        undefined,
+        evidenceRoot,
+        stateRoot,
+        undefined,
+        this.memorySessions,
+      );
+      const captures = new CaptureQueryOperations(
+        evidenceRoot,
+        <T>(runId: string, operation: () => Promise<T>) => evidence.guardRunMutation(runId, operation),
+      );
+      const variables = new VariableAccessRouter(targets, artifacts, direct, hss);
+      const sequence = new DebugSequenceExecutor(variables, hss);
+      this.projectContext = {
+        projectRoot,
+        stateRoot,
+        evidenceRoot,
+        targets,
+        direct,
+        artifacts,
+        variables,
+        registers,
+        sessions,
+        hss,
+        captures,
+        sequence,
+        evidence,
+      };
+      if (!stateRootExisted) envelope.observedEffects.push("project_state_root_created");
+      envelope.observedEffects.push("project_context_initialized");
+      envelope.data = projectContextData(this.projectContext, !stateRootExisted);
+      envelope.verification = { status: "verified", method: "canonical_project_root_and_lazy_output_initialization" };
+      return finishEnvelope(envelope, true);
+    } catch (error) {
+      const initializationError = error instanceof ProjectInitializationError ? error : undefined;
+      if (initializationError?.details) envelope.data = initializationError.details;
+      return failEnvelope(envelope, {
+        code: initializationError?.code ?? "PROJECT_INITIALIZATION_FAILED",
+        stage: "project_initialization",
+        message: error instanceof Error ? error.message : String(error),
+        retryable: false,
+        writeIssued: initializationWriteIssued,
+        stateUnknown: false,
+      });
+    }
+  }
+
+  private async assertClientProjectRoot(projectRoot: string): Promise<void> {
+    if (!this.server.server.getClientCapabilities()?.roots) return;
+    let roots: string[];
+    try {
+      const listed = await this.server.server.listRoots();
+      roots = listed.roots.flatMap(({ uri }) => {
+        try { return uri.startsWith("file:") ? [canonicalProjectRoot(fileURLToPath(uri))] : []; }
+        catch { return []; }
+      });
+    } catch (error) {
+      throw new ProjectInitializationError(
+        "CLIENT_ROOTS_UNAVAILABLE",
+        "the MCP client declared workspace roots but they could not be read: " + (error instanceof Error ? error.message : String(error)),
+      );
+    }
+    if (roots.length && !roots.some((root) => pathKey(root) === pathKey(projectRoot))) {
+      throw new ProjectInitializationError(
+        "PROJECT_ROOT_NOT_CLIENT_ROOT",
+        "projectRoot must exactly match one of the workspace roots declared by the MCP client",
+        { requestedProjectRoot: projectRoot, clientProjectRoots: roots },
+      );
+    }
+  }
+
+  private projectGateFailure(name: AgentToolName, input: Record<string, unknown>): OperationEnvelope | undefined {
+    if (name === "mcp_init" || (name === "list_devices" && typeof input.runId !== "string")) return undefined;
+    if (!this.projectContext) {
+      return failEnvelope(createOperationEnvelope(name), {
+        code: "PROJECT_NOT_INITIALIZED",
+        stage: "project_initialization",
+        message: "call mcp_init with the absolute engineering project root before using project-scoped tools",
+        retryable: false,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    }
+    if (typeof input.projectRoot !== "string") return undefined;
+    try {
+      const requestedRoot = canonicalProjectRoot(input.projectRoot);
+      if (pathKey(requestedRoot) === pathKey(this.projectContext.projectRoot)) return undefined;
+      const envelope = createOperationEnvelope(name);
+      envelope.data = { initializedProjectRoot: this.projectContext.projectRoot, requestedProjectRoot: requestedRoot };
+      return failEnvelope(envelope, {
+        code: "PROJECT_ROOT_MISMATCH",
+        stage: "project_initialization",
+        message: "projectRoot does not match the root selected by mcp_init",
+        retryable: false,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    } catch (error) {
+      return failEnvelope(createOperationEnvelope(name), {
+        code: "INVALID_PROJECT_ROOT",
+        stage: "project_initialization",
+        message: error instanceof Error ? error.message : String(error),
+        retryable: false,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    }
+  }
+
+  private requireProjectContext(): ProjectContext {
+    if (!this.projectContext) {
+      throw new ProjectInitializationError("PROJECT_NOT_INITIALIZED", "call mcp_init before using project-scoped tools");
+    }
+    return this.projectContext;
   }
 
   private registerResources(): void {
@@ -244,4 +407,50 @@ export class JLinkMcpServer {
     this.discoveryProbe.dispose();
     this.discoveryProcesses.killAll();
   }
+}
+
+function canonicalProjectRoot(projectRoot: string): string {
+  if (!projectRoot || !isAbsolute(projectRoot)) {
+    throw new ProjectInitializationError("INVALID_PROJECT_ROOT", "projectRoot must be an existing absolute directory");
+  }
+  let canonical: string;
+  try { canonical = normalize(realpathSync.native(projectRoot)); }
+  catch { throw new ProjectInitializationError("PROJECT_ROOT_NOT_FOUND", "projectRoot does not exist: " + projectRoot); }
+  if (!statSync(canonical).isDirectory()) {
+    throw new ProjectInitializationError("INVALID_PROJECT_ROOT", "projectRoot must identify a directory");
+  }
+  return canonical;
+}
+
+function findInitializedAncestor(projectRoot: string): string | undefined {
+  let current = dirname(projectRoot);
+  while (true) {
+    const marker = join(current, ".jlink-mcp");
+    if (existsSync(marker) && statSync(marker).isDirectory()) return current;
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+function pathKey(path: string): string {
+  return process.platform === "win32" ? normalize(path).toLowerCase() : normalize(path);
+}
+
+function projectContextData(context: ProjectContext, stateRootCreated: boolean): Record<string, unknown> {
+  return {
+    projectRoot: context.projectRoot,
+    stateRoot: context.stateRoot,
+    evidenceRoot: context.evidenceRoot,
+    stateRootCreated,
+    evidenceRootCreated: false,
+  };
+}
+
+function toolResult(envelope: OperationEnvelope) {
+  return {
+    isError: !envelope.ok,
+    content: [{ type: "text" as const, text: JSON.stringify(envelope) }],
+    structuredContent: envelope as unknown as Record<string, unknown>,
+  };
 }

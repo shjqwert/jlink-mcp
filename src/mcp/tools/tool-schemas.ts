@@ -2,7 +2,7 @@ import { z } from "zod";
 import { isValidAcceptanceRunId } from "../acceptance/run-id";
 
 export const projectRootInput = {
-  projectRoot: z.string().min(1).describe("Existing absolute project root configured by target_configure"),
+  projectRoot: z.string().min(1).describe("Existing absolute engineering project root selected by mcp_init and configured by target_configure"),
 };
 
 export const acceptanceRunId = z.string().refine(

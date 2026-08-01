@@ -19,7 +19,7 @@ const references = JSON.parse(readFileSync(
 ));
 const tools = await loadLiveToolCatalog();
 
-assert.equal(tools.length, 39, "routing eval must use the live 39-tool MCP catalog");
+assert.equal(tools.length, 40, "routing eval must use the live 40-tool MCP catalog");
 assert.ok(tools.every(({ description, inputSchema }) => description.length > 0 && inputSchema?.type === "object"));
 assert.ok(tools.some(({ name }) => name === "gdb_breakpoint_list"), "routing catalog must include typed breakpoint listing");
 assert.ok(tools.some(({ name }) => name === "gdb_breakpoint_delete"), "routing catalog must include typed breakpoint deletion");

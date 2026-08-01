@@ -144,7 +144,6 @@ export class HssOperations implements CaptureVariableAccess {
     this.outputRoot = resolve(outputRoot);
     this.sessionStore = new HssSessionStore(stateRoot);
     this.sessionWorkRoot = resolve(sessionWorkRoot);
-    mkdirSync(this.outputRoot, { recursive: true });
     mkdirSync(this.sessionWorkRoot, { recursive: true });
     try {
       for (const session of this.sessionStore.list()) {

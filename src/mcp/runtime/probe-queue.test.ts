@@ -44,6 +44,21 @@ test("ProbeQueue publishes a token-specific guard before lease execution", async
   assert.equal(existsSync(leaseDirectory), false);
 });
 
+test("ProbeQueue retries transient Windows lock-retirement sharing violations", async (context) => {
+  const root = testDirectory(context, "queue-retirement-retry");
+  const modulePath = join(__dirname, "probe-queue.js");
+  const script = [
+    "const fs=require('node:fs');",
+    "const originalRename=fs.renameSync.bind(fs);",
+    "let guardFailures=0,directoryFailures=0;",
+    "fs.renameSync=(source,destination)=>{const from=String(source),to=String(destination);if(guardFailures===0&&from.includes('.guard')&&to.includes('.retiring-')){guardFailures+=1;throw Object.assign(new Error('transient guard sharing violation'),{code:'EPERM'});}if(directoryFailures===0&&from.endsWith('.lock')&&to.includes('.retired-')){directoryFailures+=1;throw Object.assign(new Error('transient directory sharing violation'),{code:'EPERM'});}return originalRename(source,destination);};",
+    "const {ProbeQueue}=require(process.argv[1]);",
+    "(async()=>{const q=new ProbeQueue(process.argv[2]);await q.runExclusive('10022',async()=>undefined);await q.runExclusive('10022',async()=>undefined);process.stdout.write(JSON.stringify({guardFailures,directoryFailures}));})().catch(error=>{process.stderr.write(String(error.stack||error));process.exit(1);});",
+  ].join("");
+  const injected = JSON.parse(await runChild(script, [modulePath, root])) as { guardFailures: number; directoryFailures: number };
+  assert.deepEqual(injected, { guardFailures: 1, directoryFailures: 1 });
+});
+
 test("ProbeQueue reports explicit long-lived owner errors", async (context) => {
   const queue = new ProbeQueue(testDirectory(context, "queue-owner"));
   let owner!: ReturnType<ProbeQueue["claimOwner"]>;

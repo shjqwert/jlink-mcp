@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -8,7 +8,7 @@ import { AGENT_TOOL_NAMES, applyEvidenceLogFailure, operationHadIssuedEffects } 
 import { createOperationEnvelope, failEnvelope } from "./runtime/operation-envelope";
 
 const EXPECTED_TOOLS = [
-  "list_devices", "target_configure", "target_status",
+  "mcp_init", "list_devices", "target_configure", "target_status",
   "artifact_probe", "symbol_search", "symbol_resolve",
   "read_variable", "write_variable", "read_memory", "write_memory", "core_register_access", "peripheral_register_access",
   "target_control", "flash", "erase",
@@ -41,6 +41,71 @@ test("evidence failure classifies every observed explicit side effect as issued"
   assert.match(evidenceFailed.warnings.join("\n"), /do not retry/i);
 });
 
+test("standalone defers project directories until mcp_init and rejects nested initialization", async (context) => {
+  const root = testDirectory(context, "deferred-project-init");
+  const projectRoot = join(root, "project");
+  const childRoot = join(projectRoot, "child");
+  mkdirSync(childRoot, { recursive: true });
+  const first = await connectClientWithEnvironment(
+    childRoot,
+    "deferred-project-init-first",
+    queueOnlyEnvironment(join(root, "queue-first")),
+  );
+  try {
+    assert.equal(existsSync(join(projectRoot, ".jlink-mcp")), false);
+    assert.equal(existsSync(join(projectRoot, "test-output")), false);
+    await first.client.listTools();
+    assert.equal(existsSync(join(projectRoot, ".jlink-mcp")), false, "tools/list must not initialize project storage");
+    assert.equal(existsSync(join(projectRoot, "test-output")), false, "tools/list must not initialize project output");
+
+    const beforeInit = parseEnvelope(await first.client.callTool({ name: "target_status", arguments: { projectRoot } }));
+    assert.equal(beforeInit.ok, false);
+    assert.equal((beforeInit.error as { code?: string }).code, "PROJECT_NOT_INITIALIZED");
+    assert.equal(existsSync(join(projectRoot, ".jlink-mcp")), false, "rejected project tools must not initialize storage");
+
+    const initialized = parseEnvelope(await first.client.callTool({ name: "mcp_init", arguments: { projectRoot } }));
+    assert.equal(initialized.ok, true, JSON.stringify(initialized.error));
+    assert.equal(existsSync(join(projectRoot, ".jlink-mcp")), true);
+    assert.equal(existsSync(join(projectRoot, "test-output")), false, "mcp_init must leave test-output lazy");
+    assert.equal(existsSync(join(childRoot, ".jlink-mcp")), false);
+    const repeated = parseEnvelope(await first.client.callTool({ name: "mcp_init", arguments: { projectRoot } }));
+    assert.equal(repeated.ok, true, JSON.stringify(repeated.error));
+    assert.equal((repeated.data as { stateRootCreated: boolean }).stateRootCreated, false);
+
+    const otherRoot = join(root, "other-project");
+    mkdirSync(otherRoot);
+    const switched = parseEnvelope(await first.client.callTool({ name: "mcp_init", arguments: { projectRoot: otherRoot } }));
+    assert.equal(switched.ok, false);
+    assert.equal((switched.error as { code?: string }).code, "MCP_ALREADY_INITIALIZED");
+    assert.equal(existsSync(join(otherRoot, ".jlink-mcp")), false);
+    const mismatchedTool = parseEnvelope(await first.client.callTool({ name: "target_status", arguments: { projectRoot: otherRoot } }));
+    assert.equal(mismatchedTool.ok, false);
+    assert.equal((mismatchedTool.error as { code?: string }).code, "PROJECT_ROOT_MISMATCH");
+
+    const listed = parseEnvelope(await first.client.callTool({ name: "capture_list", arguments: {} }));
+    assert.equal(listed.ok, true, JSON.stringify(listed.error));
+    assert.deepEqual((listed.data as { captures: unknown[] }).captures, []);
+    assert.equal(existsSync(join(projectRoot, "test-output")), false, "read-only capture listing must not create test-output");
+  } finally {
+    await first.client.close();
+  }
+
+  const second = await connectClientWithEnvironment(
+    childRoot,
+    "deferred-project-init-second",
+    queueOnlyEnvironment(join(root, "queue-second")),
+  );
+  try {
+    const nested = parseEnvelope(await second.client.callTool({ name: "mcp_init", arguments: { projectRoot: childRoot } }));
+    assert.equal(nested.ok, false);
+    assert.equal((nested.error as { code?: string }).code, "PROJECT_NESTED_UNDER_INITIALIZED_ROOT");
+    assert.equal(existsSync(join(childRoot, ".jlink-mcp")), false);
+    assert.equal(existsSync(join(childRoot, "test-output")), false);
+  } finally {
+    await second.client.close();
+  }
+});
+
 test("standalone stdio exposes only the Agent-first MCP surface", async (context) => {
   const root = testDirectory(context, "surface-contract");
   const transport = new StdioClientTransport({
@@ -59,6 +124,8 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
     const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
+    const initialized = parseEnvelope(await client.callTool({ name: "mcp_init", arguments: { projectRoot: root } }));
+    assert.equal(initialized.ok, true, JSON.stringify(initialized.error));
     const sequenceDescription = tools.find((tool) => tool.name === "debug_sequence_execute")?.description ?? "";
     assert.match(sequenceDescription, /multiple.*at least one second/i);
     assert.match(sequenceDescription, /wait until completion/i);
@@ -92,12 +159,13 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       assert.match(toolByName.get(name)?.description ?? "", /target_configure/i, `${name} must disclose target_configure prerequisite`);
     }
     for (const tool of tools) {
+      if (tool.name === "mcp_init") continue;
       const runId = tool.inputSchema.properties?.runId as { description?: string } | undefined;
       assert.ok(runId, `${tool.name} must accept optional runId evidence routing`);
       assert.match(runId.description ?? "", /Acceptance evidence routing identifier/i, `${tool.name}.runId must explain evidence routing`);
       assert.match(runId.description ?? "", /not a general task ID/i, `${tool.name}.runId must reject task-ID semantics`);
     }
-    assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 37-tool list");
+    assert.deepEqual([...AGENT_TOOL_NAMES].sort(), EXPECTED_TOOLS, "AGENT_TOOL_NAMES must remain the canonical 40-tool list");
     for (const name of ["target_control", "read_memory", "write_memory", "core_register_access", "peripheral_register_access", "flash", "erase", "gdb_open", "gdb_command", "gdb_breakpoint_list", "gdb_breakpoint_delete", "gdb_wait", "gdb_backtrace", "gdb_close", "rtt_open", "rtt_read", "rtt_search", "rtt_clear", "rtt_close", "diagnose_crash", "probe_command", "hss_start"] as const) {
       const schema = tools.find((tool) => tool.name === name)?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
       assert.ok(schema.properties?.projectRoot, `${name} must expose projectRoot`);
@@ -230,7 +298,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       const envelope = parseEnvelope(await client.callTool({ name, arguments: argumentsValue }));
       assert.equal((envelope.error as { code?: string } | undefined)?.code, "USER_CONFIRMATION_REQUIRED", `${name} must not execute without user confirmation`);
     }
-    assert.deepEqual(readdirSync(join(root, "evidence")), [], "operations without runId must not create a command log or synthetic run directory");
+    assert.equal(existsSync(join(root, "evidence")), false, "operations without runId must not create the lazy evidence root");
     const logged = parseEnvelope(await client.callTool({ name: "target_configure", arguments: { projectRoot: root, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, runId: "surface-run" } }));
     assert.equal(logged.ok, true, JSON.stringify(logged.error));
     const commandsFile = join(root, "evidence", "surface-run", "commands.ndjson");
@@ -284,6 +352,8 @@ test("target configuration survives a standalone restart and explicit reconfigur
   const first = await connectClient(root, "target-persistence-first");
   let firstGeneration: string;
   try {
+    const initialized = parseEnvelope(await first.client.callTool({ name: "mcp_init", arguments: { projectRoot } }));
+    assert.equal(initialized.ok, true, JSON.stringify(initialized.error));
     const configured = await first.client.callTool({ name: "target_configure", arguments: { projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 } });
     const envelope = parseEnvelope(configured);
     assert.equal(envelope.ok, true);
@@ -294,6 +364,8 @@ test("target configuration survives a standalone restart and explicit reconfigur
 
   const second = await connectClient(root, "target-persistence-second");
   try {
+    const initialized = parseEnvelope(await second.client.callTool({ name: "mcp_init", arguments: { projectRoot } }));
+    assert.equal(initialized.ok, true, JSON.stringify(initialized.error));
     const status = parseEnvelope(await second.client.callTool({ name: "target_status", arguments: { projectRoot } }));
     assert.equal(status.ok, true);
     assert.equal((status.data as { target: { generation: string } }).target.generation, firstGeneration!);
@@ -306,16 +378,28 @@ test("target configuration survives a standalone restart and explicit reconfigur
 });
 
 async function connectClient(cwd: string, name: string): Promise<{ client: Client; transport: StdioClientTransport }> {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [join(__dirname, "standalone.js")], cwd, stderr: "pipe", env: childEnvironment(join(cwd, "queue")) });
+  return connectClientWithEnvironment(cwd, name, childEnvironment(join(cwd, "queue")));
+}
+
+async function connectClientWithEnvironment(cwd: string, name: string, env: Record<string, string>): Promise<{ client: Client; transport: StdioClientTransport }> {
+  const transport = new StdioClientTransport({ command: process.execPath, args: [join(__dirname, "standalone.js")], cwd, stderr: "pipe", env });
   const client = new Client({ name, version: "1" });
   await client.connect(transport);
   return { client, transport };
+}
+
+function queueOnlyEnvironment(queueRoot: string): Record<string, string> {
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    JLINK_MCP_QUEUE_ROOT: queueRoot,
+  };
 }
 
 function childEnvironment(queueRoot: string): Record<string, string> {
   const localRoot = dirname(queueRoot);
   return {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+    JLINK_INSTALL_DIR: join(localRoot, "missing-jlink-install"),
     JLINK_MCP_QUEUE_ROOT: queueRoot,
     JLINK_MCP_STORAGE_ROOT: join(localRoot, "storage"),
     JLINK_MCP_EVIDENCE_ROOT: join(localRoot, "evidence"),
@@ -331,7 +415,10 @@ function parseEnvelope(result: Awaited<ReturnType<Client["callTool"]>>): Record<
 }
 
 function testDirectory(_context: TestContext, name: string): string {
-  const root = join(process.env.TEMP ?? process.cwd(), `jlink-mcp-surface-${name}-${process.pid}-${Date.now()}`);
+  const systemTemp = process.env.LOCALAPPDATA
+    ? join(process.env.LOCALAPPDATA, "Temp")
+    : process.env.TEMP ?? process.cwd();
+  const root = join(systemTemp, `jlink-mcp-surface-${name}-${process.pid}-${Date.now()}`);
   mkdirSync(root, { recursive: true });
   return root;
 }
