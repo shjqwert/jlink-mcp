@@ -72,6 +72,7 @@ export interface SessionTargetRuntime {
     breakpointDeleteDispatched?: boolean;
     emptyBreakpointListObserved?: boolean;
   };
+  gdbManagedBreakpointPhase?: "inserted_halted" | "awaiting_stop";
   gdbFlashBreakpointCleanupRequired?: boolean;
   gdbFlashBreakpointCleanupEvidence?: GDBResponse;
   gdbFlashBreakpointPreventionEvidence?: {
@@ -144,6 +145,7 @@ export class SessionOperations {
       runtime.gdbClientExitedUnexpectedly = false;
       runtime.gdbServerNaturalExitRequired = false;
       runtime.gdbManagedBreakpointLifecycle = undefined;
+      runtime.gdbManagedBreakpointPhase = undefined;
       runtime.gdbFlashBreakpointCleanupRequired = false;
       runtime.gdbFlashBreakpointCleanupEvidence = undefined;
       runtime.gdbFlashBreakpointPreventionEvidence = undefined;
@@ -184,6 +186,7 @@ export class SessionOperations {
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbServerNaturalExitRequired = false;
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
         runtime.gdbFlashBreakpointPreventionEvidence = undefined;
         void (async () => {
           try {
@@ -396,6 +399,7 @@ export class SessionOperations {
         runtime.gdbClientExitedUnexpectedly = false;
         runtime.gdbServerNaturalExitRequired = false;
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
         runtime.gdbFlashBreakpointCleanupRequired = false;
         runtime.gdbFlashBreakpointCleanupEvidence = undefined;
         runtime.gdbFlashBreakpointPreventionEvidence = undefined;
@@ -691,6 +695,9 @@ export class SessionOperations {
     return this.withGdbOwner("gdb_command", projectRoot, ["raw_gdb_command", "unknown_side_effects"], async (envelope, target, runtime) => {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
       const breakpointRequest = isGdbBreakpointInsertionRequest(command);
+      const executionInterruptRequest = command.trim() === "-exec-interrupt --all";
+      const executionContinueRequest = command.trim() === "continue";
+      const managedBreakpointPhaseBefore = runtime.gdbManagedBreakpointPhase;
       const currentFlashBreakpointPrevention = this.confirmedGdbFlashBreakpointPrevention(runtime, target);
       if (breakpointRequest && !currentFlashBreakpointPrevention) {
         throw new SessionError(
@@ -701,7 +708,8 @@ export class SessionOperations {
           false,
         );
       }
-      if (!breakpointRequest) runtime.gdbFlashBreakpointPreventionEvidence = undefined;
+      if (!breakpointRequest && !executionInterruptRequest) runtime.gdbFlashBreakpointPreventionEvidence = undefined;
+      if (!breakpointRequest && !executionContinueRequest) runtime.gdbManagedBreakpointPhase = undefined;
       const flashBreakpointPrevention = breakpointRequest
         ? currentFlashBreakpointPrevention
         : undefined;
@@ -715,7 +723,9 @@ export class SessionOperations {
         runtime.gdbFlashBreakpointCleanupEvidence = undefined;
       }
       runtime.gdbManagedBreakpointLifecycle = undefined;
-      runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState ?? "unknown";
+      runtime.gdbServerTargetExecutionState = result.observedTargetExecutionState
+        ?? result.preservedTargetExecutionState
+        ?? "unknown";
       runtime.gdbPreServerStateExpectationValid = false;
       const sideEffects = breakpointInsertionDispatched
         ? flashBreakpointPreventionConfirmed
@@ -741,22 +751,45 @@ export class SessionOperations {
         const code = error instanceof TargetStoreError ? error.code : "ARTIFACT_STATE_PERSIST_FAILED";
         throw new SessionError(code, error instanceof Error ? error.message : String(error), false, true, true);
       }
-      if (!result.success) throw gdbError(result, "gdb_command", true, runtime.gdbServerTargetExecutionState === "unknown");
+      if (!result.success) {
+        runtime.gdbManagedBreakpointPhase = undefined;
+        throw gdbError(result, "gdb_command", true, runtime.gdbServerTargetExecutionState === "unknown");
+      }
       const attachBoundary = runtime.gdbAttachBoundaryEvidence;
+      const attachBoundaryMatches = attachBoundary?.preServerObservation.state === "running"
+        && attachBoundary.server.ownerToken === runtime.gdbOwnerToken
+        && attachBoundary.server.targetGeneration === target.generation;
       if (
         breakpointInsertionDispatched
         && executionStateBefore === "running"
         && runtime.gdbServerTargetExecutionState === "running"
-        && attachBoundary?.preServerObservation.state === "running"
-        && attachBoundary.server.ownerToken === runtime.gdbOwnerToken
-        && attachBoundary.server.targetGeneration === target.generation
+        && attachBoundaryMatches
       ) {
         runtime.gdbManagedBreakpointLifecycle = {
           attachInitialState: "running",
           lastManagedResumeState: "running",
         };
+        runtime.gdbManagedBreakpointPhase = undefined;
+      } else if (
+        breakpointInsertionDispatched
+        && executionStateBefore === "halted"
+        && runtime.gdbServerTargetExecutionState === "halted"
+        && attachBoundaryMatches
+      ) {
+        runtime.gdbManagedBreakpointPhase = "inserted_halted";
       } else if (breakpointInsertionDispatched) {
-        runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
+      } else if (
+        executionContinueRequest
+        && managedBreakpointPhaseBefore === "inserted_halted"
+        && executionStateBefore === "halted"
+        && result.commandDispatched === true
+        && runtime.gdbServerTargetExecutionState === "running"
+        && attachBoundaryMatches
+      ) {
+        runtime.gdbManagedBreakpointPhase = "awaiting_stop";
+      } else if (executionContinueRequest) {
+        runtime.gdbManagedBreakpointPhase = undefined;
       }
       envelope.observedEffects.push("raw_gdb_command_issued", "side_effects_unknown");
       envelope.data = { command, ...result, sideEffects, flashBreakpointPrevention: flashBreakpointPrevention ?? null };
@@ -901,15 +934,21 @@ export class SessionOperations {
 
   gdbWait(projectRoot: string, timeoutMs = 30_000): Promise<OperationEnvelope> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return Promise.resolve(validationFailure("gdb_wait", "timeoutMs must be 1..120000"));
-    return this.withGdbOwner("gdb_wait", projectRoot, [], async (envelope, _target, runtime) => {
+    return this.withGdbOwner("gdb_wait", projectRoot, [], async (envelope, target, runtime) => {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
       const executionStateBefore = runtime.gdb.getTargetExecutionState();
+      const managedBreakpointPhase = runtime.gdbManagedBreakpointPhase;
       envelope.before = { ...(envelope.before as Record<string, unknown>), targetExecutionState: executionStateBefore };
       if (executionStateBefore === "unknown") {
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
         throw new SessionError("TARGET_STATE_UNKNOWN", "target state is unknown before gdb_wait; no wait was started", false, false, true);
       }
-      if (executionStateBefore === "halted" && !runtime.gdbManagedBreakpointLifecycle) {
+      if (
+        executionStateBefore === "halted"
+        && !runtime.gdbManagedBreakpointLifecycle
+        && managedBreakpointPhase !== "awaiting_stop"
+      ) {
         runtime.gdbServerTargetExecutionState = "halted";
         envelope.data = { success: true, output: "Target is already halted", stopReason: "already-halted", noOp: true, observedTargetExecutionState: "halted" };
         envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: "halted" };
@@ -921,6 +960,7 @@ export class SessionOperations {
         result = await runtime.gdb.wait(timeoutMs);
       } catch (error) {
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
         throw error;
       }
       runtime.gdbServerTargetExecutionState = runtime.gdb.getTargetExecutionState();
@@ -928,21 +968,34 @@ export class SessionOperations {
       envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: runtime.gdbServerTargetExecutionState };
       if (!result.success) {
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
         throw gdbError(result, "gdb_wait", false, runtime.gdbServerTargetExecutionState === "unknown");
       }
       if (runtime.gdbServerTargetExecutionState === "unknown") {
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
         throw new SessionError("TARGET_STATE_UNKNOWN", "target state became unknown while waiting", false, false, true);
       }
       if (runtime.gdbServerTargetExecutionState === "halted") {
-        if (
-          runtime.gdbManagedBreakpointLifecycle
-          && /^breakpoint-hit(?:\s|$)/.test(result.stopReason ?? "")
-        ) {
+        const breakpointStop = /^breakpoint-hit(?:\s|$)/.test(result.stopReason ?? "");
+        const attachBoundary = runtime.gdbAttachBoundaryEvidence;
+        const attachBoundaryMatches = attachBoundary?.preServerObservation.state === "running"
+          && attachBoundary.server.ownerToken === runtime.gdbOwnerToken
+          && attachBoundary.server.targetGeneration === target.generation;
+        if (runtime.gdbManagedBreakpointLifecycle && breakpointStop) {
           runtime.gdbManagedBreakpointLifecycle.stopReason = result.stopReason;
+        } else if (managedBreakpointPhase === "awaiting_stop" && breakpointStop && attachBoundaryMatches) {
+          runtime.gdbManagedBreakpointLifecycle = {
+            attachInitialState: "running",
+            lastManagedResumeState: "running",
+            stopReason: result.stopReason,
+          };
         } else {
           runtime.gdbManagedBreakpointLifecycle = undefined;
         }
+        runtime.gdbManagedBreakpointPhase = undefined;
+      } else if (managedBreakpointPhase !== "awaiting_stop") {
+        runtime.gdbManagedBreakpointPhase = undefined;
       }
       envelope.verification = {
         status: "observed",
@@ -1240,6 +1293,7 @@ export class SessionOperations {
         runtime.gdbClientExitedUnexpectedly = true;
         runtime.gdbPreServerStateExpectationValid = false;
         runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
         runtime.gdbFlashBreakpointPreventionEvidence = undefined;
       });
     }

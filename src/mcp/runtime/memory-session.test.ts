@@ -3,9 +3,94 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { ProbeBackend } from "../../probe/backend";
-import { MemorySessionError, MemorySessionManager, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
+import { MemorySessionError, MemorySessionManager, resetPersistentMemorySession, selectMemorySessionAttachDevice, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore, type StoredTarget } from "./target-store";
+
+test("persistent memory session uses an explicit Cortex-M4 attach profile without changing target identity", () => {
+  assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
+  assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: undefined }), "Z20K146M");
+});
+
+test("reset resumes in the same persistent session only after a known halted ResetNoHalt mismatch", async () => {
+  const operations: string[] = [];
+  const result = await resetPersistentMemorySession(async (body) => {
+    operations.push(String(body.op));
+    if (body.op === "reset") {
+      return {
+        status: "error",
+        errorCode: "JLINK_CONTROL_STATE_MISMATCH",
+        api: "JLINKARM_IsHalted",
+        targetStateBefore: "running",
+        targetStateAfter: "halted",
+        writeIssued: true,
+        stateUnknown: false,
+      };
+    }
+    return {
+      status: "ok",
+      api: "JLINKARM_Go",
+      targetStateBefore: "halted",
+      targetStateAfter: "running",
+      writeIssued: true,
+      stateUnknown: false,
+    };
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.writeIssued, true);
+  assert.equal(result.stateUnknown, false);
+  assert.deepEqual(operations, ["reset", "resume"]);
+  assert.match(result.output, /reset_no_halt_resume_fallback/);
+});
+
+test("reset does not resume when the post-reset state is unknown", async () => {
+  const operations: string[] = [];
+  const result = await resetPersistentMemorySession(async (body) => {
+    operations.push(String(body.op));
+    return {
+      status: "error",
+      errorCode: "JLINK_STATE_OBSERVATION_FAILED",
+      api: "JLINKARM_IsHalted",
+      targetStateAfter: "unknown",
+      writeIssued: true,
+      stateUnknown: true,
+    };
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.stateUnknown, true);
+  assert.deepEqual(operations, ["reset"]);
+});
+
+test("reset reports a known halted failure when the bounded resume also stays halted", async () => {
+  const operations: string[] = [];
+  const result = await resetPersistentMemorySession(async (body) => {
+    operations.push(String(body.op));
+    return body.op === "reset"
+      ? {
+        status: "error",
+        errorCode: "JLINK_CONTROL_STATE_MISMATCH",
+        api: "JLINKARM_IsHalted",
+        targetStateAfter: "halted",
+        writeIssued: true,
+        stateUnknown: false,
+      }
+      : {
+        status: "error",
+        errorCode: "JLINK_CONTROL_STATE_MISMATCH",
+        api: "JLINKARM_IsHalted",
+        targetStateAfter: "halted",
+        writeIssued: true,
+        stateUnknown: false,
+      };
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.writeIssued, true);
+  assert.equal(result.stateUnknown, false);
+  assert.deepEqual(operations, ["reset", "resume"]);
+});
 
 test("persistent memory session reuses one native connection and publishes a durable owner", async (context) => {
   const { target, queue, manager, launcher } = await fixture(context, 10_000);

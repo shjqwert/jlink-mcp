@@ -665,6 +665,9 @@ test("GDBClient typed breakpoint commands preserve known halted state without we
   assert.equal(inserted.success, true);
   assert.equal(inserted.dispatchedCommand, "-break-insert -- OsUserConfig.c:60");
   assert.equal(inserted.commandDispatched, true);
+  assert.equal(inserted.observedTargetExecutionState, undefined);
+  assert.equal(inserted.preservedTargetExecutionState, "halted");
+  assert.equal(client.getTargetExecutionState(), "halted");
 
   const raw = await client.command("info breakpoints");
   assert.equal(raw.success, true);

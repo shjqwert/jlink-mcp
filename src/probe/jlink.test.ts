@@ -9,7 +9,12 @@ import test, { type TestContext } from "node:test";
 import { findJLinkInstallDir, getConfig, selectJLinkInstallDir } from "../utils/config";
 import { ProcessManager } from "../utils/process-manager";
 import { ProbeErrorCode, type CommandResult } from "./backend";
-import { JLinkBackend, waitForGdbServerReady, type JLinkSpawn } from "./jlink";
+import { JLinkBackend, selectJLinkNonIntrusiveAttachDevice, waitForGdbServerReady, type JLinkSpawn } from "./jlink";
+
+test("non-intrusive helper uses an explicit Cortex-M4 attach profile", () => {
+  assert.equal(selectJLinkNonIntrusiveAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
+  assert.equal(selectJLinkNonIntrusiveAttachDevice({ device: "Z20K146M" }), "Z20K146M");
+});
 
 test("J-Link installation discovery prefers an installation declaring the requested device", (context) => {
   const root = mkdtempSync(join(tmpdir(), "jlink-discovery-test-"));

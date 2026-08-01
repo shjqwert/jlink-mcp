@@ -283,6 +283,10 @@ class NativeMemorySessionLauncher implements MemorySessionLauncher {
   }
 }
 
+export function selectMemorySessionAttachDevice(target: Pick<StoredTarget, "device" | "gdbDevice">): string {
+  return target.gdbDevice === "Cortex-M4" ? target.gdbDevice : target.device;
+}
+
 class NativePersistentMemorySession implements PersistentMemorySession {
   readonly probe: ProbeBackend;
   readonly pid: number;
@@ -319,7 +323,7 @@ class NativePersistentMemorySession implements PersistentMemorySession {
     const child = spawn(runtime.helperPath, [
       "memory-session",
       "--dll", runtime.runtimePath,
-      "--device", target.device,
+      "--device", selectMemorySessionAttachDevice(target),
       "--interface", target.interface,
       "--serial", target.probeSerial,
       "--speed", String(target.speed),
@@ -469,7 +473,7 @@ class NativePersistentMemorySession implements PersistentMemorySession {
       }
       if (value.status === "ready") {
         if (value.command !== "memory-session" || !Number.isSafeInteger(value.probeSerial) || String(value.probeSerial) !== this.target.probeSerial
-          || value.device !== this.target.device || value.interface !== this.target.interface || value.speedKhz !== this.target.speed
+          || value.device !== selectMemorySessionAttachDevice(this.target) || value.interface !== this.target.interface || value.speedKhz !== this.target.speed
           || !["running", "halted"].includes(String(value.targetState)) || value.memoryCacheDisabled !== true) {
           this.poison(new MemorySessionError("MEMORY_SESSION_READY_INVALID", "native memory helper readiness does not match the configured target", false, true));
           return;
@@ -544,6 +548,40 @@ class NativePersistentMemorySession implements PersistentMemorySession {
   }
 }
 
+export async function resetPersistentMemorySession(
+  request: (body: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  halt = false,
+): Promise<CommandResult> {
+  try {
+    if (halt) return sessionCommand(await request({ op: "reset_halt" }), true);
+    const resetResponse = await request({ op: "reset" });
+    const resetResult = sessionCommand(resetResponse, true);
+    const canResume = resetResponse.status === "error"
+      && resetResponse.errorCode === "JLINK_CONTROL_STATE_MISMATCH"
+      && resetResponse.api === "JLINKARM_IsHalted"
+      && resetResponse.targetStateAfter === "halted"
+      && resetResponse.writeIssued === true
+      && resetResponse.stateUnknown === false;
+    if (!canResume) return resetResult;
+
+    const resumeResponse = await request({ op: "resume" });
+    const resumeResult = sessionCommand(resumeResponse, true);
+    const output = JSON.stringify({
+      protocol: "reset_no_halt_resume_fallback",
+      reset: resetResponse,
+      resume: resumeResponse,
+    });
+    return {
+      ...resumeResult,
+      rawOutput: output,
+      output,
+      writeIssued: resetResult.writeIssued === true || resumeResult.writeIssued === true,
+    };
+  } catch (error) {
+    return sessionException(error, true);
+  }
+}
+
 class NativeMemorySessionProbe extends ProbeBackend {
   readonly type = "jlink" as const;
   readonly displayName = "native-persistent-memory-session";
@@ -598,7 +636,9 @@ class NativeMemorySessionProbe extends ProbeBackend {
   async getDeviceInfo(): Promise<CommandResult> { return unsupported("memory session does not expose device info"); }
   async halt(): Promise<CommandResult> { return this.control("halt"); }
   async resume(): Promise<CommandResult> { return this.control("resume"); }
-  async reset(halt = false): Promise<CommandResult> { return this.control(halt ? "reset_halt" : "reset"); }
+  async reset(halt = false): Promise<CommandResult> {
+    return resetPersistentMemorySession((body) => this.session.request(body), halt);
+  }
   async step(): Promise<CommandResult> { return unsupported("memory session does not step the target"); }
   async readAllRegisters(): Promise<CommandResult> { return unsupported("memory session does not read core registers"); }
   async readRegister(): Promise<CommandResult> { return unsupported("memory session does not read core registers"); }

@@ -110,6 +110,77 @@ test("confirmed FlashBP prevention preserves firmware identity across managed br
   assert.equal(fixtureValue.targets.require(fixtureValue.projectRoot).liveArtifactMatch.source, "fixture");
 });
 
+test("explicit MI interrupt preserves confirmed FlashBP prevention for a halted breakpoint insertion", async (context) => {
+  const fixtureValue = await fixture(context, "gdb-interrupt-flash-breakpoint-prevention", true);
+  await fixtureValue.sessions.gdbServerStart(fixtureValue.projectRoot);
+  fixtureValue.gdb.executionState = "halted";
+  fixtureValue.gdb.connectResult = {
+    success: true,
+    output: "Stopped at main()",
+    rawOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",frame={func="main"}\n^done',
+    observedTargetExecutionState: "halted",
+  };
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "running",
+    observedTargetExecutionState: "running",
+  };
+  assert.equal((await fixtureValue.sessions.gdbConnect(fixtureValue.projectRoot, undefined, true)).ok, true);
+
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "",
+    rawOutput: "^done",
+    dispatchedCommand: "-exec-interrupt --all",
+    commandDispatched: true,
+    observedTargetExecutionState: "halted",
+  };
+  assert.equal(
+    (await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "-exec-interrupt --all")).ok,
+    true,
+  );
+  assert.notEqual(fixtureValue.runtime.gdbFlashBreakpointPreventionEvidence, undefined);
+
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "Breakpoint 1",
+    dispatchedCommand: "-break-insert -- OsUserConfig.c:60",
+    commandDispatched: true,
+    preservedTargetExecutionState: "halted",
+  };
+  const inserted = await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "break OsUserConfig.c:60");
+  assert.equal(inserted.ok, true, JSON.stringify(inserted.error));
+  assert.equal(
+    (inserted.data as { flashBreakpointPrevention: { success: boolean } }).flashBreakpointPrevention.success,
+    true,
+  );
+  assert.equal(fixtureValue.runtime.gdbManagedBreakpointPhase, "inserted_halted");
+
+  fixtureValue.gdb.commandResult = {
+    success: true,
+    output: "running",
+    dispatchedCommand: "continue",
+    commandDispatched: true,
+    observedTargetExecutionState: "running",
+  };
+  assert.equal((await fixtureValue.sessions.gdbCommand(fixtureValue.projectRoot, "continue")).ok, true);
+  assert.equal(fixtureValue.runtime.gdbManagedBreakpointPhase, "awaiting_stop");
+
+  fixtureValue.gdb.waitResult = {
+    success: true,
+    output: "Target stopped: breakpoint-hit breakpoint #1",
+    stopReason: "breakpoint-hit breakpoint #1 at OsUserConfig.c:60",
+    observedTargetExecutionState: "halted",
+  };
+  const stopped = await fixtureValue.sessions.gdbWait(fixtureValue.projectRoot);
+  assert.equal((stopped.data as { stopReason: string }).stopReason, "breakpoint-hit breakpoint #1 at OsUserConfig.c:60");
+  assert.equal(
+    fixtureValue.runtime.gdbManagedBreakpointLifecycle?.stopReason,
+    "breakpoint-hit breakpoint #1 at OsUserConfig.c:60",
+  );
+  assert.equal(fixtureValue.runtime.gdbManagedBreakpointPhase, undefined);
+});
+
 test("confirmed alias and complex breakpoints still require explicit close cleanup", async (context) => {
   for (const command of [
     "b OsUserConfig.c:60",
@@ -1616,7 +1687,8 @@ async function fixture(context: TestContext, name: string, withArtifact = false,
     gdbInitialAttachBoundaryAvailable: false,
     gdbClientExitedUnexpectedly: false,
     gdbPreServerStateExpectationValid: false,
-    gdbManagedBreakpointLifecycle: undefined,
+    gdbManagedBreakpointLifecycle: undefined as SessionTargetRuntime["gdbManagedBreakpointLifecycle"],
+    gdbManagedBreakpointPhase: undefined as SessionTargetRuntime["gdbManagedBreakpointPhase"],
     gdbFlashBreakpointPreventionEvidence: undefined,
     onGdbServerExit: (listener: () => void) => {
       gdbServerExitListener = listener;
@@ -1676,7 +1748,9 @@ class FakeGdb implements SessionGdbClient {
   }
   async command(command: string): Promise<GDBResponse> {
     this.commands.push(command);
-    this.executionState = this.commandResult.observedTargetExecutionState ?? "unknown";
+    this.executionState = this.commandResult.observedTargetExecutionState
+      ?? this.commandResult.preservedTargetExecutionState
+      ?? "unknown";
     return this.commandResult;
   }
   async listBreakpoints(): Promise<GDBResponse> {

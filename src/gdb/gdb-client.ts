@@ -273,11 +273,21 @@ export class GDBClient {
     if (!this.proc || !this.connected) {
       return { success: false, output: "", error: "GDB is not connected", code: "GDB_NOT_CONNECTED" };
     }
+    const executionStateBefore = this.targetExecutionState;
     let commandDispatched = false;
     const result = await this.commandInternal(cmd, timeout, () => { commandDispatched = true; });
-    if (!result.observedTargetExecutionState) this.targetExecutionState = "unknown";
+    const breakpointInsertionPreservedHaltedState = result.success
+      && commandDispatched
+      && executionStateBefore === "halted"
+      && isMiBreakpointInsert(result.dispatchedCommand ?? toMiTransactionCommand(cmd))
+      && !result.observedTargetExecutionState;
+    if (!result.observedTargetExecutionState) {
+      this.targetExecutionState = breakpointInsertionPreservedHaltedState ? "halted" : "unknown";
+    }
     return {
       ...result,
+      preservedTargetExecutionState: result.preservedTargetExecutionState
+        ?? (breakpointInsertionPreservedHaltedState ? "halted" : undefined),
       commandDispatched: commandDispatched || result.commandDispatched === true,
     };
   }

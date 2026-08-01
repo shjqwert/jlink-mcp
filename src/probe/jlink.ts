@@ -93,6 +93,10 @@ function jlinkRegisterReadbackAfterWriteEcho(raw: string, token: string): string
   return undefined;
 }
 
+export function selectJLinkNonIntrusiveAttachDevice(config: Pick<JLinkConfig, "device" | "gdbDevice">): string {
+  return config.gdbDevice === "Cortex-M4" ? config.gdbDevice : config.device;
+}
+
 export class JLinkBackend extends ProbeBackend {
   readonly type = "jlink" as const;
   readonly displayName = "SEGGER J-Link";
@@ -271,7 +275,7 @@ export class JLinkBackend extends ProbeBackend {
     const args = [
       writeBytes ? "write-ram-probe" : "read-ram-probe",
       "--dll", dll,
-      "--device", this.config.device,
+      "--device", selectJLinkNonIntrusiveAttachDevice(this.config),
       "--interface", this.config.interface,
       "--serial", this.config.serialNumber!,
       "--speed", String(this.config.speed),

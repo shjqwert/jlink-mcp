@@ -26,6 +26,7 @@ export interface TargetRuntime {
     breakpointDeleteDispatched?: boolean;
     emptyBreakpointListObserved?: boolean;
   };
+  gdbManagedBreakpointPhase?: "inserted_halted" | "awaiting_stop";
   gdbFlashBreakpointCleanupRequired?: boolean;
   gdbFlashBreakpointCleanupEvidence?: GDBResponse;
   gdbFlashBreakpointPreventionEvidence?: {
