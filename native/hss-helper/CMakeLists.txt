@@ -11,7 +11,7 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "hss_helper requires a 64-bit compiler")
 endif()
 
-set(HSS_HELPER_VERSION "1.1.5" CACHE STRING "HSS Helper product version")
+set(HSS_HELPER_VERSION "2.0.14" CACHE STRING "HSS Helper component version")
 
 add_executable(hss_helper hss_helper.cpp)
 target_compile_features(hss_helper PRIVATE cxx_std_17)

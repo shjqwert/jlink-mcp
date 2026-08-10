@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { existsSync, realpathSync, statSync } from "node:fs";
@@ -22,6 +22,8 @@ import { HssOperations } from "./runtime/hss-operations";
 import { DebugSequenceExecutor } from "./runtime/debug-sequence";
 import { VariableAccessRouter } from "./runtime/variable-access-router";
 import { CaptureQueryOperations } from "./runtime/capture-query-operations";
+import { OperationDetailStore } from "./runtime/operation-detail-store";
+import { TaskOperations } from "./runtime/task-operations";
 import {
   AGENT_TOOL_NAMES,
   TOOL_DESCRIPTIONS,
@@ -33,15 +35,27 @@ import { registerTargetTools } from "./tools/register-target-tools";
 import { registerSessionTools } from "./tools/register-session-tools";
 import { registerHssTools } from "./tools/register-hss-tools";
 import { registerCaptureTools } from "./tools/register-capture-tools";
+import { registerTaskTools } from "./tools/register-task-tools";
+import {
+  ADVANCED_TOOL_NAMES,
+  COMPACT_TOOL_NAMES,
+  TASK_TOOL_DESCRIPTIONS,
+  type RegisterTaskTool,
+  type TaskToolName,
+} from "./tools/task-tool-contract";
+import { DEFAULT_MCP_PROFILE, type McpProfile, usesLegacySurface } from "./profile";
 import { JLINK_MCP_VERSION } from "./version";
 
 export { AGENT_TOOL_NAMES } from "./tools/tool-contract";
+export { ADVANCED_TOOL_NAMES, COMPACT_TOOL_NAMES } from "./tools/task-tool-contract";
+export { MCP_PROFILES, parseMcpProfile } from "./profile";
 
 export interface JLinkMcpServerOptions {
   cwd?: string;
   storageRoot?: string;
   evidenceRoot?: string;
   queueRoot?: string;
+  profile?: McpProfile;
 }
 
 interface ProjectContext {
@@ -106,11 +120,14 @@ export class JLinkMcpServer {
   private readonly memorySessions: MemorySessionManager;
   private readonly runtimes = new TargetRuntimeRegistry();
   private readonly options: JLinkMcpServerOptions;
+  private readonly profile: McpProfile;
+  private readonly operationDetails = new OperationDetailStore();
   private projectContext?: ProjectContext;
-  private readonly implemented = new Set<AgentToolName>();
+  private readonly implemented = new Set<string>();
 
   constructor(probeConfig?: ProbeFactoryConfig, options: JLinkMcpServerOptions = {}) {
     this.options = options;
+    this.profile = options.profile ?? DEFAULT_MCP_PROFILE;
     this.discoveryProbe = createProbeBackend(probeConfig ?? { type: "jlink" }, this.discoveryProcesses);
     this.queue = new ProbeQueue(options.queueRoot);
     this.memorySessions = new MemorySessionManager(this.queue);
@@ -120,6 +137,14 @@ export class JLinkMcpServer {
   }
 
   private registerTools(): void {
+    if (!usesLegacySurface(this.profile)) {
+      this.registerTaskSurface();
+      return;
+    }
+    this.registerLegacySurface();
+  }
+
+  private registerLegacySurface(): void {
     const register = this.registerEnvelopeTool.bind(this) as RegisterEnvelopeTool;
     register("mcp_init", {
       projectRoot: z.string().min(1).describe("Existing absolute root of the engineering project to initialize for this MCP process."),
@@ -149,6 +174,32 @@ export class JLinkMcpServer {
 
     const missing = AGENT_TOOL_NAMES.filter((name) => !this.implemented.has(name));
     if (missing.length) throw new Error(`missing concrete MCP tool handlers: ${missing.join(", ")}`);
+  }
+
+  private registerTaskSurface(): void {
+    const current = () => this.requireProjectContext();
+    const operations = new TaskOperations({
+      discoveryProbe: this.discoveryProbe,
+      get targets() { return current().targets; },
+      get direct() { return current().direct; },
+      runtimes: this.runtimes,
+      get artifacts() { return current().artifacts; },
+      get variables() { return current().variables; },
+      get registers() { return current().registers; },
+      get sessions() { return current().sessions; },
+      get hss() { return current().hss; },
+      get captures() { return current().captures; },
+      get sequence() { return current().sequence; },
+    });
+    const register = this.registerTaskTool.bind(this) as RegisterTaskTool;
+    registerTaskTools(register, {
+      operations,
+      getProjectRoot: () => current().projectRoot,
+      project: (action, projectRoot, params, signal) => this.handleTaskProject(operations, action, projectRoot, params, signal),
+    }, this.profile === "advanced");
+    const expected = this.profile === "advanced" ? ADVANCED_TOOL_NAMES : COMPACT_TOOL_NAMES;
+    const missing = expected.filter((name) => !this.implemented.has(name));
+    if (missing.length) throw new Error(`missing compact MCP tool handlers: ${missing.join(", ")}`);
   }
 
   private registerEnvelopeTool(
@@ -200,6 +251,79 @@ export class JLinkMcpServer {
       }
       return toolResult(envelope);
     });
+  }
+
+  private registerTaskTool(
+    name: TaskToolName,
+    inputSchema: Record<string, z.ZodType>,
+    handler: (input: Record<string, unknown>, signal?: AbortSignal) => OperationEnvelope | Promise<OperationEnvelope>,
+  ): void {
+    if (this.implemented.has(name)) throw new Error(`duplicate MCP tool handler: ${name}`);
+    this.implemented.add(name);
+    this.server.registerTool(name, { description: TASK_TOOL_DESCRIPTIONS[name], inputSchema }, async (input, extra) => {
+      if (name !== "project" && !this.projectContext) {
+        return this.compactToolResult(failEnvelope(createOperationEnvelope(name), {
+          code: "PROJECT_NOT_BOUND",
+          stage: "project_binding",
+          message: "call project with action=bind or configure before using project-scoped tools",
+          retryable: false,
+          writeIssued: false,
+          stateUnknown: false,
+        }));
+      }
+      let envelope: OperationEnvelope;
+      try {
+        envelope = await handler(input as Record<string, unknown>, extra.signal);
+      } catch (error) {
+        envelope = failEnvelope(createOperationEnvelope(name), {
+          code: /\.params\.|unsupported action|bound project root/.test(error instanceof Error ? error.message : String(error))
+            ? "ACTION_INPUT_INVALID"
+            : "INTERNAL_ERROR",
+          stage: "dispatch",
+          message: error instanceof Error ? error.message : String(error),
+          retryable: false,
+          writeIssued: false,
+          stateUnknown: false,
+        });
+      }
+      return this.compactToolResult(envelope);
+    });
+  }
+
+  private async handleTaskProject(
+    operations: TaskOperations,
+    action: string,
+    requestedRoot: string | undefined,
+    params: Record<string, unknown>,
+    _signal?: AbortSignal,
+  ): Promise<OperationEnvelope> {
+    if (action === "devices") return operations.project(action, undefined, params);
+    const initialized = await this.bindTaskProject(requestedRoot);
+    if (!initialized.ok || action === "bind") return relabelTaskEnvelope(initialized, "project");
+    return operations.project(action, this.requireProjectContext().projectRoot, params);
+  }
+
+  private async bindTaskProject(requestedRoot: string | undefined): Promise<OperationEnvelope> {
+    if (requestedRoot) return this.initializeProject(requestedRoot);
+    if (this.projectContext) return this.initializeProject(this.projectContext.projectRoot);
+    let roots: string[] | undefined;
+    try { roots = await this.clientProjectRoots(); }
+    catch (error) {
+      return projectBindingFailure(error);
+    }
+    if (!roots || roots.length !== 1) {
+      const envelope = createOperationEnvelope("project");
+      envelope.data = { clientProjectRoots: roots ?? [], rootCount: roots?.length ?? 0 };
+      return failEnvelope(envelope, {
+        code: "PROJECT_ROOT_REQUIRED",
+        stage: "project_binding",
+        message: "provide projectRoot because the MCP client did not declare exactly one usable file workspace root",
+        retryable: false,
+        writeIssued: false,
+        stateUnknown: false,
+      });
+    }
+    return this.initializeProject(roots[0]);
   }
 
   private async initializeProject(projectRootInput: string): Promise<OperationEnvelope> {
@@ -292,25 +416,29 @@ export class JLinkMcpServer {
   }
 
   private async assertClientProjectRoot(projectRoot: string): Promise<void> {
-    if (!this.server.server.getClientCapabilities()?.roots) return;
-    let roots: string[];
-    try {
-      const listed = await this.server.server.listRoots();
-      roots = listed.roots.flatMap(({ uri }) => {
-        try { return uri.startsWith("file:") ? [canonicalProjectRoot(fileURLToPath(uri))] : []; }
-        catch { return []; }
-      });
-    } catch (error) {
-      throw new ProjectInitializationError(
-        "CLIENT_ROOTS_UNAVAILABLE",
-        "the MCP client declared workspace roots but they could not be read: " + (error instanceof Error ? error.message : String(error)),
-      );
-    }
+    const roots = await this.clientProjectRoots();
+    if (!roots) return;
     if (roots.length && !roots.some((root) => pathKey(root) === pathKey(projectRoot))) {
       throw new ProjectInitializationError(
         "PROJECT_ROOT_NOT_CLIENT_ROOT",
         "projectRoot must exactly match one of the workspace roots declared by the MCP client",
         { requestedProjectRoot: projectRoot, clientProjectRoots: roots },
+      );
+    }
+  }
+
+  private async clientProjectRoots(): Promise<string[] | undefined> {
+    if (!this.server.server.getClientCapabilities()?.roots) return undefined;
+    try {
+      const listed = await this.server.server.listRoots();
+      return [...new Set(listed.roots.flatMap(({ uri }) => {
+        try { return uri.startsWith("file:") ? [canonicalProjectRoot(fileURLToPath(uri))] : []; }
+        catch { return []; }
+      }))];
+    } catch (error) {
+      throw new ProjectInitializationError(
+        "CLIENT_ROOTS_UNAVAILABLE",
+        "the MCP client declared workspace roots but they could not be read: " + (error instanceof Error ? error.message : String(error)),
       );
     }
   }
@@ -376,6 +504,25 @@ export class JLinkMcpServer {
         targets: this.runtimes.entries().map((runtime) => ({ generation: runtime.targetGeneration, probe: runtime.probe.getStatus(), rtt: runtime.rtt.getStats() })),
         runningDiscoveryProcesses: this.discoveryProcesses.listRunning(),
       }, null, 2), mimeType: "application/json" }] }));
+
+    if (!usesLegacySurface(this.profile)) {
+      this.server.resource(
+        "operation-detail",
+        new ResourceTemplate("jlink://operation/{operationId}", { list: undefined }),
+        { description: "Full bounded process-local envelope for a compact tool result", mimeType: "application/json" },
+        async (uri, variables) => {
+          const operationId = String(variables.operationId ?? "");
+          const text = this.operationDetails.get(operationId)
+            ?? JSON.stringify({ ok: false, error: { code: "OPERATION_DETAIL_NOT_FOUND", message: "detail expired or is not owned by this MCP process" } });
+          return { contents: [{ uri: uri.toString(), text, mimeType: "application/json" }] };
+        },
+      );
+    }
+  }
+
+  private compactToolResult(envelope: OperationEnvelope) {
+    this.operationDetails.put(envelope);
+    return compactToolResult(envelope);
   }
 
   async startStdio(): Promise<void> {
@@ -453,4 +600,85 @@ function toolResult(envelope: OperationEnvelope) {
     content: [{ type: "text" as const, text: JSON.stringify(envelope) }],
     structuredContent: envelope as unknown as Record<string, unknown>,
   };
+}
+
+const COMPACT_RESULT_MAX_BYTES = 6 * 1024;
+
+export function compactToolResult(envelope: OperationEnvelope) {
+  const detailsUri = `jlink://operation/${envelope.operationId}`;
+  const result: Record<string, unknown> = {
+    ok: envelope.ok,
+    operationId: envelope.operationId,
+    tool: envelope.tool,
+    verification: compactVerification(envelope.verification),
+    data: boundedCompactData(envelope.data, 2_048),
+    detailsUri,
+  };
+  if (envelope.requestedEffects.length) result.requestedEffects = envelope.requestedEffects.slice(0, 6).map((effect) => truncate(effect, 120));
+  if (envelope.observedEffects.length) result.observedEffects = envelope.observedEffects.slice(0, 6).map((effect) => truncate(effect, 120));
+  if (envelope.outputFiles.length) result.outputFiles = envelope.outputFiles.slice(0, 4).map((path) => truncate(path, 200));
+  if (envelope.warnings.length) result.warnings = envelope.warnings.slice(0, 4).map((warning) => truncate(warning, 200));
+  if (envelope.error) result.error = {
+    code: truncate(envelope.error.code, 96),
+    stage: truncate(envelope.error.stage, 96),
+    message: truncate(envelope.error.message, 512),
+    retryable: envelope.error.retryable,
+    writeIssued: envelope.error.writeIssued,
+    stateUnknown: envelope.error.stateUnknown,
+  };
+  if (Buffer.byteLength(JSON.stringify(result)) > COMPACT_RESULT_MAX_BYTES) {
+    result.data = { omitted: true, reason: "compact_result_budget", detailsUri };
+    result.verification = {
+      status: truncate(envelope.verification.status, 96),
+      method: envelope.verification.method ? truncate(envelope.verification.method, 160) : undefined,
+      detailsOmitted: envelope.verification.details !== undefined,
+    };
+  }
+  return {
+    isError: !envelope.ok,
+    content: [{
+      type: "text" as const,
+      text: `${envelope.ok ? "OK" : "ERROR"} ${envelope.tool} ${envelope.operationId}; details: ${detailsUri}`,
+    }],
+    structuredContent: result,
+  };
+}
+
+function boundedCompactData(data: unknown, maxBytes: number): unknown {
+  let json: string;
+  try { json = JSON.stringify(data) ?? "null"; }
+  catch { return { omitted: true, reason: "not_json_serializable" }; }
+  const bytes = Buffer.byteLength(json);
+  if (bytes <= maxBytes) return data;
+  return { omitted: true, reason: "available_via_details_uri", byteLength: bytes };
+}
+
+function compactVerification(verification: OperationEnvelope["verification"]): Record<string, unknown> {
+  const result: Record<string, unknown> = { status: truncate(verification.status, 96) };
+  if (verification.method) result.method = truncate(verification.method, 160);
+  if (verification.details !== undefined) result.details = boundedCompactData(verification.details, 512);
+  return result;
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+}
+
+function relabelTaskEnvelope(envelope: OperationEnvelope, tool: string): OperationEnvelope {
+  envelope.tool = tool;
+  return envelope;
+}
+
+function projectBindingFailure(error: unknown): OperationEnvelope {
+  const envelope = createOperationEnvelope("project");
+  const initializationError = error instanceof ProjectInitializationError ? error : undefined;
+  if (initializationError?.details) envelope.data = initializationError.details;
+  return failEnvelope(envelope, {
+    code: initializationError?.code ?? "PROJECT_BINDING_FAILED",
+    stage: "project_binding",
+    message: error instanceof Error ? error.message : String(error),
+    retryable: false,
+    writeIssued: false,
+    stateUnknown: false,
+  });
 }

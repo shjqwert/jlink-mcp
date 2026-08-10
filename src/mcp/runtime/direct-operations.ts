@@ -132,22 +132,16 @@ export interface FlashInput {
   projectRoot: string;
   path: string;
   baseAddress?: number;
-  /** Set only after the user explicitly approves this exact destructive operation. */
-  userConfirmed?: boolean;
 }
 
 export interface EraseInput {
   projectRoot: string;
   verifyBlank?: boolean;
-  /** Set only after the user explicitly approves erasing the target flash. */
-  userConfirmed?: boolean;
 }
 
 export interface ProbeCommandInput {
   projectRoot: string;
   commands: string[];
-  /** Set only after the user explicitly approves these exact raw commands. */
-  userConfirmed?: boolean;
 }
 
 export type FlashSnapshotCleanup = (snapshotRoot: string) => Promise<Error | undefined>;
@@ -173,7 +167,6 @@ export class DirectMcuService {
     private readonly runtimeFor: DirectRuntimeProvider,
     private readonly cleanupFlashSnapshot: FlashSnapshotCleanup = removeFlashSnapshotDirectory,
     private readonly memorySessions?: MemorySessionManager,
-    private readonly requireUserConfirmation = true,
   ) {}
 
   async configure(input: TargetConfigureInput): Promise<OperationEnvelope> {
@@ -1170,7 +1163,6 @@ export class DirectMcuService {
   }
 
   flash(input: FlashInput): Promise<OperationEnvelope> {
-    if (this.requireUserConfirmation && input.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("flash"));
     let target: StoredTarget;
     let flashFile: ReturnType<typeof inspectFlashFile>;
     try {
@@ -1338,7 +1330,6 @@ export class DirectMcuService {
   }
 
   erase(input: EraseInput): Promise<OperationEnvelope> {
-    if (this.requireUserConfirmation && input.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("erase"));
     const { projectRoot, verifyBlank = false } = input;
     return this.queued("erase", projectRoot, ["reset", "halt", "erase_flash"], async (envelope, target, runtime) => {
       if (verifyBlank && !runtime.probe.supportsBlankVerification()) throw executionError("BLANK_VERIFICATION_UNSUPPORTED", "validation", "this backend has no trustworthy blank verification; erase was not issued");
@@ -1380,7 +1371,6 @@ export class DirectMcuService {
   }
 
   probeCommand(input: ProbeCommandInput): Promise<OperationEnvelope> {
-    if (this.requireUserConfirmation && input.userConfirmed !== true) return Promise.resolve(userConfirmationRequired("probe_command"));
     const { projectRoot, commands } = input;
     if (!Array.isArray(commands) || commands.length < 1 || commands.length > 100 || commands.some((command) => !command || /[\0\r\n]/.test(command))) {
       return Promise.resolve(failEnvelope(createOperationEnvelope("probe_command"), {
@@ -2554,17 +2544,6 @@ function requireKnownPostWriteState(observation: TargetStateObservation, operati
   if (observation.state === "unknown") {
     throw executionError("POST_OPERATION_STATE_UNKNOWN", "final_observation", `target state could not be observed after ${operation}`, { writeIssued: true, stateUnknown: true });
   }
-}
-
-function userConfirmationRequired(tool: string): OperationEnvelope {
-  return failEnvelope(createOperationEnvelope(tool), {
-    code: "USER_CONFIRMATION_REQUIRED",
-    stage: "confirmation",
-    message: `${tool} can have destructive or unknown side effects. Obtain explicit user approval for this exact operation, then retry with userConfirmed=true.`,
-    retryable: true,
-    writeIssued: false,
-    stateUnknown: false,
-  });
 }
 
 function requireHaltedCoreAccess(observation: TargetStateObservation, operation: string): void {

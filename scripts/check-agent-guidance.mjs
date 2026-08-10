@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 const workspace = resolve(process.cwd());
 const runtimePath = resolve(workspace, "out/mcp/server.js");
 if (!existsSync(runtimePath)) throw new Error("guidance check requires a compiled standalone runtime; run npm run compile first");
-const { AGENT_TOOL_NAMES } = await import(pathToFileURL(runtimePath).href);
+const { AGENT_TOOL_NAMES, COMPACT_TOOL_NAMES } = await import(pathToFileURL(runtimePath).href);
 
 const guidanceFiles = [
   "README.md",
@@ -22,7 +22,7 @@ const forbiddenNames = [
   "rtt_connect", "rtt_disconnect", "rtt_channel_list", "rtt_channel_read",
   "analysis_profiles", "analysis_run", "variable_write_plan", "variable_write_execute",
 ];
-const forbiddenGuidance = [/challengeId/i, /approvalToken/i, /planId/i, /risks*level/i, /jlink:\/\/discovery\/catalog/i];
+const forbiddenGuidance = [/challengeId/i, /approvalToken/i, /planId/i, /userConfirmed/i, /risks*level/i, /jlink:\/\/discovery\/catalog/i];
 const findings = [];
 const texts = new Map();
 
@@ -47,10 +47,14 @@ for (const relativePath of requiredToolLists) {
   for (const name of AGENT_TOOL_NAMES) {
     if (!new RegExp(`\\b${escapeRegExp(name)}\\b`).test(text)) findings.push(`${relativePath}: missing documented tool ${name}`);
   }
+  for (const name of COMPACT_TOOL_NAMES) {
+    if (!new RegExp(`\\b${escapeRegExp(name)}\\b`).test(text)) findings.push(`${relativePath}: missing documented compact tool ${name}`);
+  }
 }
 
 const readme = texts.get("README.md") ?? "";
-if (!/userConfirmed/i.test(readme)) findings.push("README.md: missing explicit user-confirmation guidance for high-risk operations");
+if (!/JLINK_MCP_PROFILE=compact/i.test(readme)) findings.push("README.md: missing default compact profile guidance");
+if (!/legacy[\s\S]*40 direct tools/i.test(readme)) findings.push("README.md: missing legacy 40-tool compatibility guidance");
 
 for (const relativePath of [".mcp.json", "mcp-config.json"]) {
   const text = texts.get(relativePath) ?? "";
@@ -71,7 +75,7 @@ if (findings.length) {
   process.stderr.write(`${findings.join("\n")}\n`);
   process.exit(1);
 }
-process.stdout.write(`active guidance matches ${AGENT_TOOL_NAMES.length} runtime tools\n`);
+process.stdout.write(`active guidance matches ${COMPACT_TOOL_NAMES.length} compact and ${AGENT_TOOL_NAMES.length} legacy tools\n`);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

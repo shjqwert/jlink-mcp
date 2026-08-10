@@ -23,46 +23,69 @@ const outputDir = resolve(sourceDir, "bin");
 const output = resolve(outputDir, "hss_helper.exe");
 const hashFile = `${output}.sha256`;
 const packageJson = JSON.parse(readFileSync(resolve(workspace, "package.json"), "utf8"));
-const productVersion = String(packageJson.version ?? "");
+const helperRelease = packageJson.jlinkMcp?.hssHelper;
+const helperVersion = String(helperRelease?.version ?? "");
+const helperSha256 = String(helperRelease?.sha256 ?? "");
+const prebuilt = resolve(sourceDir, "prebuilt", "windows-x64", "hss_helper.exe");
+const sourceBuild = process.argv.slice(2).includes("--source");
 
-if (!/^\d+\.\d+\.\d+$/.test(productVersion)) {
-  throw new Error(`package.json contains an invalid release version: ${productVersion}`);
+if (!/^\d+\.\d+\.\d+$/.test(helperVersion)
+    || helperRelease?.protocolVersion !== 3
+    || helperRelease?.architecture !== "x64"
+    || !/^[0-9a-f]{64}$/.test(helperSha256)) {
+  throw new Error("package.json contains an invalid pinned HSS Helper declaration");
 }
 
-const visualStudio = findVisualStudio();
-const cmake = findCmake(visualStudio.installationPath);
-const generator = generatorForVersion(visualStudio.installationVersion);
-const cmakeHelp = run(cmake, ["--help"], { capture: true }).stdout;
-if (!cmakeHelp.includes(generator)) {
-  throw new Error(`CMake does not support the required generator: ${generator}`);
-}
-
-removeControlledBuildDirectory(buildDir);
-mkdirSync(buildDir, { recursive: true });
-mkdirSync(tempDir, { recursive: true });
 mkdirSync(outputDir, { recursive: true });
+if (sourceBuild) buildFromSource();
+else installVerifiedPrebuilt();
 
-const env = { ...process.env, TEMP: tempDir, TMP: tempDir, TMPDIR: tempDir };
-run(cmake, [
-  "--fresh",
-  "-S", sourceDir,
-  "-B", buildDir,
-  "-G", generator,
-  "-A", "x64",
-  `-DHSS_HELPER_VERSION=${productVersion}`,
-  "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
-], { env });
-run(cmake, ["--build", buildDir, "--config", "Release"], { env });
-
-const built = resolve(buildDir, "Release", "hss_helper.exe");
-if (!existsSync(built) || !statSync(built).isFile()) {
-  throw new Error(`HSS build did not produce ${built}`);
+function installVerifiedPrebuilt() {
+  if (!existsSync(prebuilt) || !statSync(prebuilt).isFile()) {
+    throw new Error(`pinned HSS Helper was not found: ${prebuilt}`);
+  }
+  const actual = sha256(prebuilt);
+  if (actual !== helperSha256) throw new Error(`pinned HSS Helper SHA-256 mismatch: ${actual}`);
+  copyFileSync(prebuilt, output);
+  writeFileSync(hashFile, `${actual}  hss_helper.exe\r\n`, "utf8");
+  process.stdout.write(`HSS Helper ${helperVersion} installed from verified prebuilt\n${output}\nSHA-256 ${actual}\n`);
 }
-copyFileSync(built, output);
 
-const digest = createHash("sha256").update(readFileSync(output)).digest("hex");
-writeFileSync(hashFile, `${digest}  hss_helper.exe\r\n`, "utf8");
-process.stdout.write(`HSS Helper ${productVersion} built with ${generator}\n${output}\nSHA-256 ${digest}\n`);
+function buildFromSource() {
+  const visualStudio = findVisualStudio();
+  const cmake = findCmake(visualStudio.installationPath);
+  const generator = generatorForVersion(visualStudio.installationVersion);
+  const cmakeHelp = run(cmake, ["--help"], { capture: true }).stdout;
+  if (!cmakeHelp.includes(generator)) {
+    throw new Error(`CMake does not support the required generator: ${generator}`);
+  }
+  removeControlledBuildDirectory(buildDir);
+  mkdirSync(buildDir, { recursive: true });
+  mkdirSync(tempDir, { recursive: true });
+  const env = { ...process.env, TEMP: tempDir, TMP: tempDir, TMPDIR: tempDir };
+  run(cmake, [
+    "--fresh",
+    "-S", sourceDir,
+    "-B", buildDir,
+    "-G", generator,
+    "-A", "x64",
+    `-DHSS_HELPER_VERSION=${helperVersion}`,
+    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded",
+  ], { env });
+  run(cmake, ["--build", buildDir, "--config", "Release"], { env });
+  const built = resolve(buildDir, "Release", "hss_helper.exe");
+  if (!existsSync(built) || !statSync(built).isFile()) {
+    throw new Error(`HSS build did not produce ${built}`);
+  }
+  copyFileSync(built, output);
+  const digest = sha256(output);
+  writeFileSync(hashFile, `${digest}  hss_helper.exe\r\n`, "utf8");
+  process.stdout.write(`HSS Helper ${helperVersion} built with ${generator}\n${output}\nSHA-256 ${digest}\n`);
+}
+
+function sha256(file) {
+  return createHash("sha256").update(readFileSync(file)).digest("hex");
+}
 
 function findVisualStudio() {
   const vswhere = resolve(

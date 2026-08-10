@@ -2,42 +2,48 @@
 
 Standalone MCP server for explicit, Agent-driven SEGGER J-Link debugging.
 
-The server serializes physical Probe access and reports observed state and side effects. It does not infer a project or Target from the server working directory: call `mcp_init` with the canonical engineering `projectRoot`, then configure that root with `target_configure` before target operations.
+The server serializes physical Probe access and reports observed state and side effects. The default compact profile binds one explicit workspace with `project`, then exposes nine task-level tools. It never infers a project or Target from the server working directory.
 
-## v1.1.5 changes
+Current source keeps the original 40-tool protocol in the opt-in `legacy` and `acceptance` profiles while making `compact` the default. `advanced` adds one explicit raw-command escape hatch.
 
-- MCP startup, handshake, and tool discovery no longer create project-local directories. `mcp_init` explicitly selects one canonical engineering root and creates only its `.jlink-mcp` state directory; `test-output` remains lazy until an HSS, acceptance-evidence, or export write needs it.
-- Probe queue lock retirement retries bounded transient Windows sharing violations without weakening token ownership or stale-reader protection.
-- Timed HSS sequences reject normal variable access after `hss_stop`; failure cleanup remains bounded and preserves the original error.
-- HSS capability discovery restores an originally running target with explicit `JLINKARM_Go` evidence when capability attach unexpectedly halts it, while still reporting the state-change failure.
-- `target_configure.gdbDevice` is now required by `gdb_open`. It separates a validated non-invasive GDB attach profile from the exact `device` retained for Flash/Erase. A failed attach is cleaned up in the owning MCP process without resuming a faulted target.
-- Single core-register access uses the J-Link V8.84-supported tokens `"R15 (PC)"`, `R14`, and `"R13 (SP)"` for PC/R15, LR/R14, and SP/R13 respectively.
-- `write_variable` keeps exact verification as the default and adds an explicit `range` comparator for firmware-consumed dynamic fields. Protocol ACK/Complete must still be checked separately.
-- The v1.1.4 unknown-memory write software gate remains covered; no hardware Flash/Erase result is claimed by this change.
+## v2.0.20 changes
 
-## Install the current stable v1.1.5 release
+- The default MCP surface is reduced from 40 direct tools to nine task tools: `project`, `inspect`, `write`, `control`, `program`, `debug`, `trace`, `capture`, and `diagnose_crash`.
+- Common breakpoint, RTT-window, and HSS-window workflows are available as one-call actions, with bounded default results and full operation details available through a resource link.
+- Project binding remains explicit and process-scoped; ordinary task calls no longer repeat `projectRoot` or acceptance `runId`.
+- Hardware-action policy belongs to the Agent or client. The MCP request schema no longer adds a duplicate authorization token, while Target identity, bounds, ownership, verification, cleanup, and uncertainty reporting remain enforced.
+- HSS now consistently uses the separately validated `gdbDevice` attach profile, so a Flash device script is never selected merely because the exact programming device is configured.
+- HSS stop is idempotent after a successful natural completion, eliminating a capture-window race without masking failed or interrupted sessions.
+- `debug.run_to` restores only a classified normal J-Link attach stop before running to the requested breakpoint; explicit breakpoints, watchpoints, fault handlers, and other signals remain fail-closed.
+- `debug.run_to` now retains a classified attach halt long enough to insert its managed hardware breakpoint, then resumes explicitly, avoiding a second interrupt-classification round trip.
+- Managed breakpoint cleanup reads the breakpoint number from the native MI `bkpt` result even when GDB emits no human-readable `Breakpoint N` line.
+- `debug.run_to` rejects timeouts, unrelated stops, and mismatched breakpoint numbers; it aborts dispatched insertion failures, clears its managed breakpoint, restores a timed-out running target, and avoids a duplicate continue when attach never halted.
+- Release builds use the repository's pinned Windows x64 Helper component; runtime selection verifies its version, protocol, architecture, and SHA-256 before first execution, while native source rebuilds remain explicit.
+- The opt-in `legacy` and `acceptance` profiles retain the 40 direct tools for compatibility and full evidence workflows; `advanced` adds only the raw escape hatch to the compact surface.
+
+## Install the current stable v2.0.20 release
 
 - Windows x64 with Node.js 22 or 24.
 - SEGGER J-Link Software and a connected supported J-Link Probe for hardware operations.
 - A project-local ELF with DWARF for typed variables and crash source mapping; an SVD is required for peripheral register access.
 
 Ordinary users do not need Visual Studio, CMake, Python, or a database server. Download
-`jlink-mcp-v1.1.5-windows-x64.zip` and `SHA256SUMS.txt` from the
-[v1.1.5 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v1.1.5),
+`jlink-mcp-v2.0.20-windows-x64.zip` and `SHA256SUMS.txt` from the
+[v2.0.20 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v2.0.20),
 verify the checksum, and extract the ZIP. Then run:
 
 ```powershell
 .\doctor.cmd
-codex mcp add jlink -- D:\Tools\jlink-mcp-v1.1.5-windows-x64\jlink-mcp.cmd
+codex mcp add jlink -- D:\Tools\jlink-mcp-v2.0.20-windows-x64\jlink-mcp.cmd
 ```
 
 The portable ZIP includes production npm dependencies, the SQLite native binding, and the
 prebuilt `hss_helper.exe`. The only vendor runtime installed separately is SEGGER J-Link Software.
 
-The Release also provides `jlink-mcp-1.1.4.tgz` for an online npm installation:
+The Release also provides `jlink-mcp-2.0.20.tgz` for an online npm installation:
 
 ```powershell
-npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v1.1.5/jlink-mcp-1.1.5.tgz
+npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v2.0.20/jlink-mcp-2.0.20.tgz
 jlink-mcp-doctor
 codex mcp add jlink -- jlink-mcp
 ```
@@ -56,19 +62,20 @@ npm run build
 npm test
 ```
 
-Only the release maintainer needs Visual Studio with the x64 C++ workload and CMake:
+Release packaging uses the repository's hash-verified prebuilt Windows x64 Helper and does not require Visual Studio. A maintainer rebuilding that component from source needs Visual Studio with the x64 C++ workload and CMake:
 
 ```powershell
 npm run test:release
 npm run pack:release
+npm run build:hss:source
 $env:JLINK_MCP_TEST_ROOT = "D:\User\Jlink_MCP_TEST"
 npm run test:release-install
 ```
 
-`build:release` produces a statically linked Windows x64 HSS Helper, verifies its product and
+`build:release` verifies the pinned statically linked Windows x64 HSS Helper, its component and
 protocol versions, runs its self-test, and builds the Node entry points. `pack:release` runs the
 complete release gate, then creates the installable npm archive, portable ZIP, and SHA-256 manifest
-under `release/v1.1.5/`. The package is marked private to prevent accidental npm Registry
+under `release/v2.0.20/`. The package is marked private to prevent accidental npm Registry
 publication; release artifacts are distributed only through GitHub Releases.
 
 ## Portable MCP configuration
@@ -87,9 +94,21 @@ machine-specific working directory or Target defaults.
 }
 ```
 
+The default is `JLINK_MCP_PROFILE=compact`. Set the environment variable to `advanced`, `legacy`, or `acceptance` only when that wider contract is required. A profile is fixed for the lifetime of one MCP process.
+
 ## Canonical Tool List
 
-The standalone server registers exactly these 40 direct tools:
+The default `compact` profile registers exactly nine task tools:
+
+```text
+project, inspect, write, control, program, debug, trace, capture, diagnose_crash
+```
+
+Each task uses a small `action` plus `params` contract. `project` binds the explicit root and handles `devices`, `configure`, `status`, `verify`, and `artifacts`; all other tools consume the bound root internally. `debug.run_to`, `trace.rtt_window`, and `trace.hss_window` each provide one-call managed workflows. Compact results contain the outcome and `jlink://operation/{operationId}` link; the bounded process-local resource retains the full operation envelope.
+
+The `advanced` profile exposes those nine tools plus `raw`. The raw `gdb` and `probe` actions keep unknown-effect and state-uncertainty reporting without adding a second authorization token to the request.
+
+The `legacy` profile preserves these 40 direct tools and their schemas unchanged. `acceptance` uses the same direct surface so `runId` and full evidence envelopes remain available:
 
 ```text
 mcp_init, list_devices, target_configure, target_status,
@@ -104,15 +123,15 @@ rtt_open, rtt_read, rtt_search, rtt_clear, rtt_close,
 diagnose_crash, probe_command
 ```
 
-Only the read-only `rtt://output`, `probe://gdb-server-log`, and `probe://status` Resources are exposed; no MCP Prompts are registered.
+All profiles expose the read-only `rtt://output`, `probe://gdb-server-log`, and `probe://status` resources. Compact and advanced also expose the bounded operation-detail resource template. No MCP Prompts are registered.
 
 ## Operating rules
 
-- Starting the MCP server and listing its tools are side-effect free for the engineering project. Call `mcp_init` once with the exact absolute project root before project-scoped tools; initialization rejects a different root in the same process and a subdirectory beneath an existing `.jlink-mcp` root.
+- Starting the MCP server and listing its tools are side-effect free for the engineering project. In compact/advanced, call `project` with an explicit `projectRoot`, or omit it only when the client declares exactly one file workspace root. In legacy/acceptance, call `mcp_init`. Binding rejects a different root in the same process and a subdirectory beneath an existing `.jlink-mcp` root.
 - Reads and preflight do not implicitly halt, reset, resume, recover, flash, erase, or write the target.
 - `target_control` is the explicit CPU-state operation. Core-register and SVD peripheral-register operations are separate bounded actions.
 - RAM (`write_memory`) and typed-variable writes default to exact readback verification. SVD peripheral-register writes also default to verification. Readback proves bytes observed by its named J-Link connection, not target-program consumption.
-- Before `flash`, `erase`, `probe_command`, or `gdb_command`, the AI must explain the exact intended effects and obtain the user's explicit approval. It then retries the same call with `userConfirmed: true`; otherwise the server rejects the operation before accessing the target.
+- Hardware-action policy belongs to the Agent or MCP client. The server does not require a duplicate confirmation field; it still enforces exact Target identity, bounded inputs, Probe ownership, Artifact freshness, verification, cleanup, and explicit unknown-state reporting.
 - If the target was halted before `flash`, the server verifies that it remains halted and issues a safety halt when the vendor tool leaves its state running or unknown. This recovery is reported explicitly and never resumes a target that was running before Flash.
 - Typed variable and HSS requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
 - HSS is capped at ten synchronized capture variables, 1 kHz, and 60 seconds. Optional `writeVariables` are resolved before start and do not consume capture slots; sampled variables remain writable for compatibility.

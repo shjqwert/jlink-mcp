@@ -53,6 +53,7 @@ const transport = new StdioClientTransport({
     JLINK_GDB_PORT: options["gdb-port"] ?? "2331",
     JLINK_RTT_PORT: options["rtt-port"] ?? "19021",
     JLINK_SWO_PORT: options["swo-port"] ?? "2332",
+    JLINK_MCP_PROFILE: "legacy",
   },
   stderr: "pipe",
 });
@@ -172,7 +173,6 @@ try {
     projectRoot,
     command: "-exec-interrupt --all",
     timeoutMs: 30_000,
-    userConfirmed: true,
   });
   let interruptWait;
   if (targetState(interrupt.response) !== "halted") {
@@ -186,7 +186,6 @@ try {
     projectRoot,
     command: `break ${breakpointName}`,
     timeoutMs: 30_000,
-    userConfirmed: true,
   });
   breakpointInserted = true;
   gdbExplicitlyHalted = false;
@@ -194,7 +193,6 @@ try {
     projectRoot,
     command: "continue",
     timeoutMs: 30_000,
-    userConfirmed: true,
   });
   requireState(continueToBreakpoint, "running");
   const wait = await gate.call("gdb_wait", { projectRoot, timeoutMs: 60_000 });
@@ -255,7 +253,6 @@ try {
           projectRoot,
           command: "continue",
           timeoutMs: 30_000,
-          userConfirmed: true,
         });
         requireState(resume, "running");
         gdbExplicitlyHalted = false;

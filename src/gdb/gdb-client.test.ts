@@ -79,6 +79,56 @@ test("GDBClient uses the native MI breakpoint transaction while the target runs"
   await client.disconnect();
 });
 
+test("GDBClient explicit MI interrupt waits for causally isolated halt evidence", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(signals, undefined, false, false, commands));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const interrupted = await client.command("-exec-interrupt --all", 1_000);
+
+  assert.equal(interrupted.success, true);
+  assert.equal(interrupted.commandDispatched, true);
+  assert.equal(interrupted.observedTargetExecutionState, "halted");
+  assert.match(interrupted.stopReason ?? "", /SIGINT/);
+  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+  assert.deepEqual(signals, []);
+  await client.disconnect();
+});
+
+test("GDBClient accepts a strictly ordered tokenless SIGTRAP stop from exec-interrupt", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    {
+      interruptStopOutput: '*stopped,reason="signal-received",signal-name="SIGTRAP",stopped-threads="all"\n',
+      interruptStopToken: "none",
+    },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
+  const interrupted = await client.command("-exec-interrupt --all", 1_000);
+
+  assert.equal(interrupted.success, true, JSON.stringify(interrupted));
+  assert.equal(interrupted.commandDispatched, true);
+  assert.equal(interrupted.observedTargetExecutionState, "halted");
+  assert.match(interrupted.stopReason ?? "", /SIGTRAP/);
+  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
+  await client.disconnect();
+});
+
 test("GDBClient refuses breakpoint insertion and auto-resume after a non-SIGINT stop", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const commands: string[] = [];
@@ -153,7 +203,7 @@ test("GDBClient disconnect uses the MI exit command and observes graceful proces
   assert.deepEqual(signals, []);
 });
 
-test("GDBClient refuses an un-tokened SIGTRAP stop whose interrupt causality is unproven", async () => {
+test("GDBClient accepts a strictly ordered tokenless SIGTRAP stop during breakpoint insertion", async () => {
   const signals: Array<NodeJS.Signals | number | undefined> = [];
   const commands: string[] = [];
   const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
@@ -176,15 +226,17 @@ test("GDBClient refuses an un-tokened SIGTRAP stop whose interrupt causality is 
   assert.equal((await client.command("-exec-continue --all")).observedTargetExecutionState, "running");
   const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1000);
 
-  assert.equal(breakpoint.success, false, JSON.stringify(breakpoint));
-  assert.equal(breakpoint.code, "GDB_BREAKPOINT_TRANSACTION_STOP_UNSAFE");
-  assert.equal(breakpoint.observedTargetExecutionState, "halted");
+  assert.equal(breakpoint.success, true, JSON.stringify(breakpoint));
+  assert.equal(breakpoint.observedTargetExecutionState, "running");
   const interruptToken = breakpoint.rawOutput?.match(/(?:^|\n)(\d+)\^done(?:\r?\n)/)?.[1];
   const stoppedToken = breakpoint.rawOutput?.match(/(?:^|\n)(\d+)\*stopped,[^\r\n]*signal-name="SIGTRAP"/)?.[1];
   assert.ok(interruptToken);
   assert.equal(stoppedToken, undefined);
-  assert.deepEqual(commands.slice(-1), ["-exec-interrupt --all"]);
-  assert.equal(commands.filter((command) => command === "-exec-continue --all").length, 1);
+  assert.deepEqual(commands.slice(-3), [
+    "-exec-interrupt --all",
+    "-break-insert -- JlinkTestFixtureTask1ms",
+    "-exec-continue --all",
+  ]);
   await client.disconnect();
 });
 
@@ -453,10 +505,38 @@ test("GDBClient terminates after a breakpoint phase timeout and never auto-resum
 
   assert.equal(breakpoint.success, false);
   assert.equal(breakpoint.code, "GDB_COMMAND_TIMEOUT");
+  assert.equal(breakpoint.commandDispatched, true);
   assert.match(breakpoint.rawOutput ?? "", /SIGINT/);
   assert.deepEqual(commands.slice(-2), ["-exec-interrupt --all", "-break-insert -- JlinkTestFixtureTask1ms"]);
   assert.equal(client.isConnected(), false);
   assert.equal(signals[0], "SIGTERM");
+});
+
+test("GDBClient retains breakpoint dispatch evidence when GDB exits during insertion", async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const commands: string[] = [];
+  const client = new GDBClient("fake-gdb", undefined, () => createFakeGdbProcess(
+    signals,
+    undefined,
+    false,
+    false,
+    commands,
+    false,
+    "(gdb)\n",
+    false,
+    false,
+    false,
+    { breakpointExit: true },
+  ));
+
+  assert.equal((await client.connect("localhost", 2331)).success, true);
+  assert.equal((await client.command("continue")).observedTargetExecutionState, "running");
+  const breakpoint = await client.command("break JlinkTestFixtureTask1ms", 1_000);
+
+  assert.equal(breakpoint.success, false);
+  assert.equal(breakpoint.code, "GDB_PROCESS_EXITED");
+  assert.equal(breakpoint.commandDispatched, true);
+  assert.deepEqual(commands.slice(-2), ["-exec-interrupt --all", "-break-insert -- JlinkTestFixtureTask1ms"]);
 });
 
 test("GDBClient leaves complex and aliased CLI breakpoint commands exact", async () => {
@@ -827,6 +907,7 @@ function createFakeGdbProcess(
     interruptAsyncOnly?: boolean;
     interruptNoOutput?: boolean;
     breakpointInsertOutput?: string;
+    breakpointExit?: boolean;
     flashBreakpointDisableOutput?: string;
   },
 ): ChildProcess {
@@ -931,6 +1012,15 @@ function createFakeGdbProcess(
           }
         });
       } else if (command.startsWith("-break-insert -- ")) {
+        if (transaction?.breakpointExit) {
+          setTimeout(() => {
+            child.exitCode = 7;
+            child.emit("exit", 7, null);
+            child.emit("close", 7, null);
+          }, 5);
+          callback();
+          return;
+        }
         const output = transaction?.breakpointInsertOutput ?? "^done\n(gdb)\n";
         if (!targetRunning && output) setTimeout(() => child.stdout.write(output), 5);
       } else if (command === '-interpreter-exec console "monitor flash breakpoints = 0"') {

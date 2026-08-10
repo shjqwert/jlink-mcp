@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import sqlite3 from "sqlite3";
+import { matchesPinnedHssHelperManifest, PINNED_HSS_HELPER_RELEASE } from "./hss-helper-release";
 import { JLINK_MCP_VERSION } from "./version";
 
 export interface DoctorCheck {
@@ -63,6 +65,20 @@ async function checkSqlite(): Promise<DoctorCheck> {
 function checkHelper(packageRoot: string): DoctorCheck {
   const executable = join(packageRoot, "native", "hss-helper", "bin", "hss_helper.exe");
   if (!regularFile(executable)) return { id: "hss-helper", status: "fail", detail: `missing: ${executable}` };
+  let expected: Record<string, unknown>;
+  try {
+    const packageJson = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    expected = packageJson.jlinkMcp?.hssHelper ?? {};
+  } catch (error) {
+    return { id: "hss-helper", status: "fail", detail: error instanceof Error ? error.message : String(error) };
+  }
+  if (!matchesPinnedHssHelperManifest(expected)) {
+    return { id: "hss-helper", status: "fail", detail: "package HSS helper manifest does not match the pinned runtime identity" };
+  }
+  const digest = createHash("sha256").update(readFileSync(executable)).digest("hex");
+  if (digest !== PINNED_HSS_HELPER_RELEASE.sha256) {
+    return { id: "hss-helper", status: "fail", detail: "HSS helper SHA-256 does not match the pinned runtime identity" };
+  }
   const result = spawnSync(executable, ["version"], { encoding: "utf8", windowsHide: true });
   if (result.error || result.status !== 0) {
     return { id: "hss-helper", status: "fail", detail: result.error?.message ?? `exited ${String(result.status)}` };
@@ -70,9 +86,10 @@ function checkHelper(packageRoot: string): DoctorCheck {
   try {
     const response = JSON.parse(result.stdout.trim());
     const valid = response.status === "ok"
-      && response.helperProtocolVersion === 3
-      && response.helperVersion === JLINK_MCP_VERSION
-      && response.architecture === "x64";
+      && response.helperVersion === expected.version
+      && response.helperProtocolVersion === expected.protocolVersion
+      && response.architecture === expected.architecture
+      && digest === expected.sha256;
     return {
       id: "hss-helper",
       status: valid ? "pass" : "fail",

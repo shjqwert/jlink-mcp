@@ -198,7 +198,6 @@ export async function completeManagedBreakpointCleanup(
         projectRoot,
         command: "continue",
         timeoutMs,
-        userConfirmed: true,
       });
       transcript.push(resumed);
       if (!resumeConfirmed(resumed.response)) throw new Error("GDB_RESUME_BEFORE_CLOSE_UNCONFIRMED");

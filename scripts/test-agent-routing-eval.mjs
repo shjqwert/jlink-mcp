@@ -17,7 +17,7 @@ const references = JSON.parse(readFileSync(
   resolve(root, "evals", "agent-routing", "reference-traces.json"),
   "utf8",
 ));
-const tools = await loadLiveToolCatalog();
+const tools = await loadLiveToolCatalog("legacy");
 
 assert.equal(tools.length, 40, "routing eval must use the live 40-tool MCP catalog");
 assert.ok(tools.every(({ description, inputSchema }) => description.length > 0 && inputSchema?.type === "object"));
@@ -93,7 +93,7 @@ assert.deepEqual(
 
 const requiredGoalFacts = new Map([
   ["read-variable-needs-target", ["C:\\eval\\jlink-project", "EVAL-PROBE-001", "STM32F407VG", "SWD", "2000"]],
-  ["flash-requires-confirmation", ["C:\\eval\\jlink-project", "EVAL-PROBE-001", "STM32F407VG", "SWD", "2000"]],
+  ["flash-after-configure", ["C:\\eval\\jlink-project", "EVAL-PROBE-001", "STM32F407VG", "SWD", "2000"]],
   ["hss-capability-only", ["capabilityProbe", "1 Hz", "1 秒", "dryRun=true"]],
   ["hss-fresh-preflight-reuse", ["counter", "500 Hz", "3 秒"]],
   ["hss-rate-change-needs-preflight", ["expectedIncrement=1", "tolerance=0"]],
@@ -112,15 +112,16 @@ for (const [caseId, facts] of requiredGoalFacts) {
 assertFails("missing required tool", "read-variable-needs-target", (trace) => {
   trace.events = trace.events.filter((event) => event.tool !== "read_variable");
 });
-assertFails("wrong partial order", "gdb-command-requires-confirmation", (trace) => {
+assertFails("wrong partial order", "gdb-command-lifecycle", (trace) => {
   const open = trace.events.shift();
   trace.events.push(open);
 });
 assertFails("forbidden tool", "single-read-not-sequence", (trace) => {
   trace.events.push({ type: "tool_call", tool: "debug_sequence_execute", arguments: {} });
 });
-assertFails("missing user approval", "flash-requires-confirmation", (trace) => {
-  trace.events = trace.events.filter((event) => event.type !== "user_confirmation");
+assertFails("flash before configuration", "flash-after-configure", (trace) => {
+  const flash = trace.events.pop();
+  trace.events.unshift(flash);
 });
 assertFails("wrong dry-run mode", "hss-capability-only", (trace) => {
   trace.events[0].arguments.dryRun = false;
@@ -129,25 +130,14 @@ assertFails("preflight parameter drift", "hss-new-capture-preflight", (trace, de
   delete definition.expected.steps.find(({ id }) => id === "live").arguments.rateHz;
   trace.events.find((event) => event.tool === "hss_start" && event.arguments.dryRun === false).arguments.rateHz = 999;
 });
-assertFails("execution after rejection", "erase-requires-confirmation", (trace) => {
-  trace.events.splice(2, 0, {
-    type: "user_confirmation",
-    operationId: "erase-1",
-    source: "user",
-    approved: false,
-  });
+assertFails("forbidden alternate program operation", "erase-direct", (trace) => {
+  trace.events.push({ type: "tool_call", tool: "flash", arguments: { projectRoot: "<project-root>", path: "firmware.hex" } });
 });
-assertFails("confirmation argument substitution", "probe-command-requires-confirmation", (trace) => {
-  trace.events.find((event) => event.type === "tool_call").arguments.projectRoot = "<different-project-root>";
+assertFails("raw command argument substitution", "probe-command-direct", (trace) => {
+  trace.events.find((event) => event.type === "tool_call").arguments.commands = ["go"];
 });
-assertFails("unexpected confirmation", "capture-summary-may-repair", (trace) => {
-  trace.events.unshift({
-    type: "confirmation_request",
-    operationId: "unexpected-1",
-    tool: "capture_summary",
-    impact: "This query should not need destructive confirmation.",
-    arguments: trace.events[0].arguments,
-  });
+assertFails("unexpected extra status call", "capture-summary-may-repair", (trace) => {
+  trace.events.unshift({ type: "tool_call", tool: "target_status", arguments: { projectRoot: "<project-root>" } });
 });
 assertFails("missing real-agent metadata", "list-connected-probes", (trace) => {
   delete trace.agent;
@@ -159,11 +149,11 @@ assertFails("unexpected target mutation", "list-connected-probes", (trace) => {
     arguments: { projectRoot: "<project-root>", action: "reset" },
   });
 });
-assertFails("unconfirmed extra raw command", "flash-requires-confirmation", (trace) => {
+assertFails("unexpected extra raw command", "flash-after-configure", (trace) => {
   trace.events.push({
     type: "tool_call",
     tool: "gdb_command",
-    arguments: { projectRoot: "<project-root>", command: "monitor reset", timeoutMs: 15000, userConfirmed: true },
+    arguments: { projectRoot: "<project-root>", command: "monitor reset", timeoutMs: 15000 },
   });
 });
 assertFails("missing successful HSS preflight result", "hss-new-capture-preflight", (trace) => {
@@ -175,16 +165,16 @@ assertFails("invalid tool arguments", "single-read-not-sequence", (trace) => {
 assertFails("runId outside Acceptance", "single-read-not-sequence", (trace) => {
   trace.events[0].arguments.runId = "ordinary-debug-task";
 });
-assertFails("duplicate confirmation operation ID", "flash-requires-confirmation", (trace) => {
-  const request = clone(trace.events.find((event) => event.type === "confirmation_request"));
-  trace.events.splice(2, 0, request);
-});
-assertFails("confirmation replay", "flash-requires-confirmation", (trace, definition) => {
-  definition.expected.allowedExtraTools = ["flash"];
+assertFails("duplicate flash call", "flash-after-configure", (trace) => {
   trace.events.push(clone(trace.events.find((event) => event.type === "tool_call" && event.tool === "flash")));
 });
-assertFails("rejected request without impact", "erase-user-rejects", (trace) => {
-  delete trace.events.find((event) => event.type === "confirmation_request").impact;
+assertFails("flash call limit", "flash-after-configure", (trace, definition) => {
+  definition.expected.allowedExtraTools = ["flash"];
+  definition.expected.toolCallLimits = { flash: 1 };
+  trace.events.push(clone(trace.events.find((event) => event.type === "tool_call" && event.tool === "flash")));
+});
+assertFails("missing erase after status", "status-then-erase", (trace) => {
+  trace.events = trace.events.filter((event) => event.tool !== "erase");
 });
 assertFails("exclusive minimum schema violation", "read-variable-needs-target", (trace) => {
   trace.events.find((event) => event.tool === "target_configure").arguments.memoryRegions = [{

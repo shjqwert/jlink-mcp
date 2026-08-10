@@ -1,15 +1,38 @@
 import assert from "node:assert/strict";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { ProbeBackend } from "../../probe/backend";
-import { MemorySessionError, MemorySessionManager, resetPersistentMemorySession, selectMemorySessionAttachDevice, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
+import { findMemorySessionHelper, MemorySessionError, MemorySessionManager, resetPersistentMemorySession, selectMemorySessionAttachDevice, verifyMemorySessionHelper, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore, type StoredTarget } from "./target-store";
 
 test("persistent memory session uses an explicit Cortex-M4 attach profile without changing target identity", () => {
   assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
   assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: undefined }), "Z20K146M");
+});
+
+test("persistent memory session ignores a cwd Helper shadow and rejects it before execution", () => {
+  const originalCwd = process.cwd();
+  const root = mkdtempSync(join(os.tmpdir(), "memory-session-helper-shadow-"));
+  const shadow = join(root, "native", "hss-helper", "bin", "hss_helper.exe");
+  try {
+    mkdirSync(join(root, "native", "hss-helper", "bin"), { recursive: true });
+    writeFileSync(shadow, "not-the-pinned-helper");
+    process.chdir(root);
+    assert.notEqual(findMemorySessionHelper(), shadow);
+    assert.throws(
+      () => verifyMemorySessionHelper(shadow),
+      (error: unknown) => error instanceof MemorySessionError
+        && error.code === "MEMORY_SESSION_HELPER_IDENTITY_MISMATCH"
+        && !error.stateUnknown
+        && !error.dispatched,
+    );
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("reset resumes in the same persistent session only after a known halted ResetNoHalt mismatch", async () => {

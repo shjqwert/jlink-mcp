@@ -272,6 +272,29 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
   }
 });
 
+test("HSS stop is idempotent after the Helper completes naturally", async () => {
+  const fixture = await createFixture();
+  try {
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    const captureId = String((started.data as { captureId: string }).captureId);
+
+    fixture.adapter.completeLatest();
+    const settled = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal((settled.capture as { state: string }).state, "completed", JSON.stringify(settled));
+
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+    assert.equal((stopped.capture as { state: string }).state, "completed");
+    assert.equal((stopped.data as { alreadyTerminal: boolean }).alreadyTerminal, true);
+    assert.equal(stopped.verification?.method, "successful_terminal_jcap_state_idempotent_stop");
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+  } finally {
+    fixture.adapter.crashLatest();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("active HSS writes fail closed for unconfigured, unknown, crossing, and non-RAM regions", async () => {
   const fixture = await createFixture();
   try {
@@ -974,6 +997,7 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
   const target = await store.configure({
     projectRoot,
     device: "TEST_DEVICE",
+    gdbDevice: "Cortex-M4",
     probeSerial: "12345678",
     interface: "SWD",
     speed,
@@ -1119,6 +1143,7 @@ class FakeHssAdapter implements HssHelperAdapter {
   launchCount = 0;
   lastPlan?: {
     planFormatVersion: number;
+    device: string;
     initialTargetState: "running" | "halted";
     expectedTargetState: "running";
     resumeBeforeStart: boolean;
@@ -1189,7 +1214,9 @@ class FakeHssAdapter implements HssHelperAdapter {
     this.launchCount += 1;
     const plan = JSON.parse(readFileSync(control.planPath, "utf8")) as {
       planFormatVersion: number;
+      artifactMatchManifestPath: string;
       captureId: string;
+      device: string;
       helperInstanceNonce: string;
       outputFile: string;
       initialTargetState: "running" | "halted";
@@ -1203,6 +1230,10 @@ class FakeHssAdapter implements HssHelperAdapter {
       || this.targetState !== plan.initialTargetState
       || !Array.isArray(plan.symbols) || !Array.isArray(plan.writeSymbols)) {
       throw new Error("fake Helper plan contract mismatch");
+    }
+    const manifest = JSON.parse(readFileSync(plan.artifactMatchManifestPath, "utf8")) as { targetId?: string };
+    if (plan.device !== "Cortex-M4" || manifest.targetId !== plan.device) {
+      throw new Error("fake Helper attach profile and Artifact manifest binding mismatch");
     }
     if (plan.resumeBeforeStart) {
       this.resumeCount += 1;
@@ -1367,6 +1398,28 @@ class FakeHssAdapter implements HssHelperAdapter {
       rawWriteTimeNsMax: 2_000,
       rawWriteTimeNsAverage: 1_000,
       qualityEvidence: this.resultQualityEvidence,
+    }]);
+  }
+
+  completeLatest(): void {
+    const latest = [...this.pidForControl.entries()].at(-1);
+    if (!latest) throw new Error("no fake capture is available to complete");
+    const [planPath, pid] = latest;
+    const sampleCount = this.captureForControl.get(planPath)?.nextSampleIndex ?? 0;
+    const requestedSamples = 100;
+    this.alive.delete(pid);
+    this.stopSampling(pid);
+    this.records.set(planPath, [{
+      record: "result",
+      status: "ok",
+      durationValidated: true,
+      requestedSamples,
+      sampleCount,
+      missingSamples: Math.max(0, requestedSamples - sampleCount),
+      droppedSamples: 0,
+      overflows: 0,
+      readErrors: 0,
+      timeouts: 0,
     }]);
   }
 

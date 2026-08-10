@@ -18,8 +18,6 @@ export type AgentToolName = typeof AGENT_TOOL_NAMES[number];
 
 const configuredTarget = (description: string): string =>
   description + " Requires mcp_init and a current target_configure for this projectRoot before use.";
-const confirmedOperation = (description: string): string =>
-  `${description} Explain the exact target effects and obtain explicit user confirmation before setting userConfirmed=true.`;
 const repairingCaptureQuery = (description: string): string =>
   description + " Requires mcp_init for the engineering project that owns the capture. If the terminal JCAP v1 index is missing or invalid, this query may repair and atomically republish capture.db after Raw identity and SQLite integrity verification.";
 
@@ -38,8 +36,8 @@ export const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   core_register_access: configuredTarget("Read, list, or write bounded CPU-core registers without implicit target control."),
   peripheral_register_access: configuredTarget("Read or safely write bounded SVD peripheral register selectors."),
   target_control: configuredTarget("Explicitly halt, resume, reset, or reset-and-halt the configured target."),
-  flash: configuredTarget(confirmedOperation("Program and verify an explicit HEX, SREC, or addressed BIN image.")),
-  erase: configuredTarget(confirmedOperation("Erase target flash with optional explicit blank verification.")),
+  flash: configuredTarget("Program and verify an explicit HEX, SREC, or addressed BIN image."),
+  erase: configuredTarget("Erase target flash with optional explicit blank verification."),
   hss_start: configuredTarget("Validate or start a directly specified J-Link HSS capture. For a new or changed target, Artifact, variable set, writeVariables allowlist, rate, duration, or qualityOracle, first call hss_start with the same capture parameters and dryRun=true; start live capture only after that preflight succeeds. A capability-only request must remain dryRun=true and still provide at least one real variable plus valid rate and duration; never send an empty variables array."),
   hss_status: configuredTarget("Report an HSS capture lifecycle and quality counters."),
   hss_stop: configuredTarget("Stop an active HSS capture and finalize available data."),
@@ -51,7 +49,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   capture_event_window: repairingCaptureQuery("Return one event and bounded neighboring series data."),
   capture_export_csv: repairingCaptureQuery("Explicitly export a bounded CSV outside the JCAP package."),
   gdb_open: configuredTarget("Start one managed GDB Server and client using the current Artifact as symbols."),
-  gdb_command: configuredTarget(confirmedOperation("Execute one exact raw GDB command and report unknown effects.")),
+  gdb_command: configuredTarget("Execute one exact raw GDB command and report unknown effects."),
   gdb_breakpoint_list: configuredTarget("Read the managed GDB breakpoint table through one fixed read-only command while preserving only consistently known target execution state."),
   gdb_breakpoint_delete: configuredTarget("Delete one numbered managed GDB breakpoint only while the target is known halted; preserve execution-state evidence and invalidate memory mutation trust."),
   gdb_wait: configuredTarget("Wait for an already issued GDB run or step to stop."),
@@ -63,7 +61,7 @@ export const TOOL_DESCRIPTIONS: Record<AgentToolName, string> = {
   rtt_clear: configuredTarget("Clear only the local RTT buffer."),
   rtt_close: configuredTarget("Close only the managed RTT client."),
   diagnose_crash: configuredTarget("Collect bounded, no-hidden-side-effect Cortex-M crash evidence from an already halted target."),
-  probe_command: configuredTarget(confirmedOperation("Execute exact raw J-Link Commander commands and report unknown effects.")),
+  probe_command: configuredTarget("Execute exact raw J-Link Commander commands and report unknown effects."),
 };
 
 export type RegisterEnvelopeTool = (

@@ -5,7 +5,7 @@ import { SessionOperations } from "../runtime/session-operations";
 import { TargetStore, type StoredTarget } from "../runtime/target-store";
 import type { RegisterEnvelopeTool } from "./tool-contract";
 import { actionInputFailure, relabelEnvelope } from "./tool-envelope";
-import { projectRootInput, userConfirmation } from "./tool-schemas";
+import { projectRootInput } from "./tool-schemas";
 
 export interface SessionToolServices {
   targets: TargetStore;
@@ -28,12 +28,10 @@ export function registerSessionTools(register: RegisterEnvelopeTool, services: S
     ...projectRootInput,
     command: z.string().min(1),
     timeoutMs: z.number().int().min(1).max(120_000).default(15_000),
-    userConfirmed: userConfirmation,
   }, (input) => services.sessions.gdbCommand(
     String(input.projectRoot),
     String(input.command),
     Number(input.timeoutMs),
-    Boolean(input.userConfirmed),
   ));
   register("gdb_breakpoint_list", {
     ...projectRootInput,
@@ -90,6 +88,7 @@ export async function gdbOpen(
   services: SessionToolServices,
   projectRoot: string,
   restoreRunningStateAfterAttach: boolean,
+  retainClassifiedAttachHaltForManagedBreakpoint = false,
 ): Promise<OperationEnvelope> {
   let target: StoredTarget;
   try {
@@ -119,10 +118,11 @@ export async function gdbOpen(
   const server = await services.sessions.gdbServerStart(target.projectRoot);
   if (!server.ok) return relabelEnvelope(server, "gdb_open");
   const client = await services.sessions.gdbConnect(
-    target.projectRoot,
-    target.artifact.path,
-    restoreRunningStateAfterAttach,
-  );
+      target.projectRoot,
+      target.artifact.path,
+      restoreRunningStateAfterAttach,
+      retainClassifiedAttachHaltForManagedBreakpoint,
+    );
   const clientData = client.data;
   const envelope = relabelEnvelope(client, "gdb_open");
   envelope.requestedEffects = distinct([...server.requestedEffects, ...client.requestedEffects]);
@@ -147,7 +147,7 @@ export async function gdbOpen(
   return envelope;
 }
 
-async function diagnoseCrash(services: SessionToolServices, projectRoot: string): Promise<OperationEnvelope> {
+export async function diagnoseCrash(services: SessionToolServices, projectRoot: string): Promise<OperationEnvelope> {
   const managedBacktrace = await services.sessions.managedGdbBacktrace(projectRoot);
   if (managedBacktrace) {
     const envelope = relabelEnvelope(managedBacktrace, "diagnose_crash");

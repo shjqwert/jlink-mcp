@@ -12,6 +12,3 @@ export const acceptanceRunId = z.string().refine(
 
 export const variableRef = z.string().min(1).max(1024)
   .describe("Logical typed symbol selector; the server re-resolves it against the current Artifact generation");
-
-export const userConfirmation = z.boolean().default(false)
-  .describe("Set true only after the user explicitly confirms this exact operation and its effects.");

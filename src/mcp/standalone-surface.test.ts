@@ -4,7 +4,14 @@ import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { AGENT_TOOL_NAMES, applyEvidenceLogFailure, operationHadIssuedEffects } from "./server";
+import {
+  ADVANCED_TOOL_NAMES,
+  AGENT_TOOL_NAMES,
+  COMPACT_TOOL_NAMES,
+  applyEvidenceLogFailure,
+  compactToolResult,
+  operationHadIssuedEffects,
+} from "./server";
 import { createOperationEnvelope, failEnvelope } from "./runtime/operation-envelope";
 
 const EXPECTED_TOOLS = [
@@ -39,6 +46,107 @@ test("evidence failure classifies every observed explicit side effect as issued"
   assert.equal(evidenceFailed.error?.writeIssued, true);
   assert.equal(evidenceFailed.error?.retryable, false);
   assert.match(evidenceFailed.warnings.join("\n"), /do not retry/i);
+});
+
+test("compact result projection preserves safety fields under a total size budget", () => {
+  const envelope = failEnvelope(createOperationEnvelope("debug"), {
+    code: "DEBUG_FAILED",
+    stage: "managed_debug_workflow",
+    message: "m".repeat(20_000),
+    retryable: false,
+    writeIssued: true,
+    stateUnknown: true,
+  });
+  envelope.data = { output: "d".repeat(20_000) };
+  envelope.verification = { status: "observed", method: "v".repeat(20_000), details: "x".repeat(20_000) };
+  envelope.requestedEffects = Array.from({ length: 20 }, (_, index) => `requested-${index}-${"r".repeat(1_000)}`);
+  envelope.observedEffects = Array.from({ length: 20 }, (_, index) => `observed-${index}-${"o".repeat(1_000)}`);
+  envelope.outputFiles = Array.from({ length: 20 }, (_, index) => `C:\\fixture-${index}-${"p".repeat(1_000)}`);
+  envelope.warnings = Array.from({ length: 20 }, (_, index) => `warning-${index}-${"w".repeat(1_000)}`);
+
+  const result = compactToolResult(envelope);
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 8 * 1024, "whole MCP result must stay within the compact wire budget");
+  const error = (result.structuredContent.error as { writeIssued?: boolean; stateUnknown?: boolean; message?: string });
+  assert.equal(error.writeIssued, true);
+  assert.equal(error.stateUnknown, true);
+  assert.ok((error.message?.length ?? 0) <= 512);
+  assert.match(String(result.structuredContent.detailsUri), /^jlink:\/\/operation\//);
+});
+
+test("standalone defaults to the compact catalog and preserves explicit profiles", async (context) => {
+  const root = testDirectory(context, "profile-contract");
+  const compact = await connectClientWithEnvironment(root, "compact-default", compactEnvironment(join(root, "compact-queue")));
+  try {
+    const tools = (await compact.client.listTools()).tools;
+    assert.deepEqual(tools.map(({ name }) => name).sort(), [...COMPACT_TOOL_NAMES].sort());
+    assert.ok(JSON.stringify(tools).length <= 10_000, "compact tools/list payload must remain within the 10k-character budget");
+    for (const tool of tools) {
+      assert.equal(tool.inputSchema.properties?.runId, undefined, `${tool.name} must not expose runId`);
+      if (tool.name !== "project") assert.equal(tool.inputSchema.properties?.projectRoot, undefined, `${tool.name} must use the bound project root`);
+    }
+    const unbound = parseEnvelope(await compact.client.callTool({ name: "inspect", arguments: { action: "core" } }));
+    assert.equal(unbound.ok, false);
+    assert.equal((unbound.error as { code?: string }).code, "PROJECT_NOT_BOUND");
+
+    const implicit = parseEnvelope(await compact.client.callTool({ name: "project", arguments: { action: "bind" } }));
+    assert.equal(implicit.ok, false);
+    assert.equal((implicit.error as { code?: string }).code, "PROJECT_ROOT_REQUIRED");
+    assert.equal(existsSync(join(root, ".jlink-mcp")), false, "compact binding must never infer cwd");
+
+    const smuggled = parseEnvelope(await compact.client.callTool({
+      name: "project",
+      arguments: { action: "bind", projectRoot: root, params: { runId: "not-acceptance" } },
+    }));
+    assert.equal(smuggled.ok, false);
+    assert.equal((smuggled.error as { code?: string }).code, "ACTION_INPUT_INVALID");
+    assert.equal(existsSync(join(root, "storage")), false, "compact params must not smuggle acceptance routing");
+
+    const boundResult = await compact.client.callTool({ name: "project", arguments: { action: "bind", projectRoot: root } });
+    const bound = parseEnvelope(boundResult);
+    assert.equal(bound.ok, true, JSON.stringify(bound.error));
+    assert.ok(JSON.stringify(boundResult).length <= 1_024, "simple compact success must stay within 1 KiB on the wire");
+    assert.equal(existsSync(join(root, "storage")), true);
+    const detailsUri = String(bound.detailsUri);
+    assert.match(detailsUri, /^jlink:\/\/operation\/[0-9a-f-]+$/i);
+    const detail = await compact.client.readResource({ uri: detailsUri });
+    const detailText = (detail.contents[0] as { text?: string }).text;
+    assert.ok(detailText);
+    assert.equal((JSON.parse(detailText) as { operationId: string }).operationId, bound.operationId);
+    assert.deepEqual((await compact.client.listResourceTemplates()).resourceTemplates.map(({ uriTemplate }) => uriTemplate), [
+      "jlink://operation/{operationId}",
+    ]);
+
+    const listed = parseEnvelope(await compact.client.callTool({ name: "capture", arguments: { action: "list" } }));
+    assert.equal(listed.ok, true, JSON.stringify(listed.error));
+    assert.deepEqual((listed.data as { captures: unknown[] }).captures, []);
+  } finally {
+    await compact.client.close();
+  }
+
+  for (const [profile, expected] of [
+    ["advanced", [...ADVANCED_TOOL_NAMES]],
+    ["legacy", [...AGENT_TOOL_NAMES]],
+    ["acceptance", [...AGENT_TOOL_NAMES]],
+  ] as const) {
+    const connection = await connectClientWithEnvironment(
+      root,
+      `${profile}-surface`,
+      profileEnvironment(join(root, `${profile}-queue`), profile),
+    );
+    try {
+      const tools = (await connection.client.listTools()).tools;
+      assert.deepEqual(tools.map(({ name }) => name).sort(), [...expected].sort());
+      if (profile === "acceptance") {
+        assert.ok(tools.find(({ name }) => name === "target_status")?.inputSchema.properties?.runId);
+        const initialized = parseEnvelope(await connection.client.callTool({ name: "mcp_init", arguments: { projectRoot: root } }));
+        assert.equal(initialized.ok, true, JSON.stringify(initialized.error));
+        assert.ok(initialized.timestamps, "acceptance must retain the full operation envelope");
+        assert.equal(initialized.detailsUri, undefined, "acceptance results must not be compacted");
+      }
+    } finally {
+      await connection.client.close();
+    }
+  }
 });
 
 test("standalone defers project directories until mcp_init and rejects nested initialization", async (context) => {
@@ -120,7 +228,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
   try {
     await client.connect(transport);
     assert.equal(client.getServerVersion()?.name, "jlink-mcp");
-    assert.equal(client.getServerVersion()?.version, "1.1.5");
+    assert.equal(client.getServerVersion()?.version, "2.0.20");
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
     const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -138,11 +246,6 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     const hssVariablesSchema = toolByName.get("hss_start")?.inputSchema.properties?.variables as { description?: unknown } | undefined;
     const hssVariablesDescription = typeof hssVariablesSchema?.description === "string" ? hssVariablesSchema.description : "";
     assert.match(hssVariablesDescription, /capability-only.*non-empty/i);
-    for (const name of ["flash", "erase", "probe_command", "gdb_command"]) {
-      const description = toolByName.get(name)?.description ?? "";
-      assert.match(description, /explain the exact target effects/i, `${name} must explain confirmation effects`);
-      assert.match(description, /explicit user confirmation/i, `${name} must require explicit user confirmation`);
-    }
     for (const name of ["capture_summary", "capture_series", "capture_event_window", "capture_export_csv"]) {
       const description = toolByName.get(name)?.description ?? "";
       assert.match(description, /repair and atomically republish capture\.db/i, `${name} must disclose index repair`);
@@ -229,7 +332,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     }
     for (const name of ["flash", "erase", "probe_command", "gdb_command"] as const) {
       const properties = tools.find((tool) => tool.name === name)?.inputSchema.properties as Record<string, { default?: unknown }>;
-      assert.ok(properties.userConfirmed, `${name} must expose explicit user confirmation`);
+      assert.equal(properties.userConfirmed, undefined, `${name} must not expose a duplicate authorization token`);
     }
     for (const removed of [
       "hot_variable_add", "hot_variable_list", "hot_variable_refresh", "read_core_register", "read_core_registers", "write_core_register",
@@ -296,7 +399,8 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
       ["gdb_command", { projectRoot: root, command: "info registers" }],
     ] as const) {
       const envelope = parseEnvelope(await client.callTool({ name, arguments: argumentsValue }));
-      assert.equal((envelope.error as { code?: string } | undefined)?.code, "USER_CONFIRMATION_REQUIRED", `${name} must not execute without user confirmation`);
+      assert.equal(envelope.ok, false, `${name} must fail without a configured target`);
+      assert.equal((envelope.error as { code?: string } | undefined)?.code, "TARGET_NOT_CONFIGURED", `${name} must enter its ordinary prerequisite checks without an authorization-token gate`);
     }
     assert.equal(existsSync(join(root, "evidence")), false, "operations without runId must not create the lazy evidence root");
     const logged = parseEnvelope(await client.callTool({ name: "target_configure", arguments: { projectRoot: root, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000, runId: "surface-run" } }));
@@ -392,6 +496,7 @@ function queueOnlyEnvironment(queueRoot: string): Record<string, string> {
   return {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
     JLINK_MCP_QUEUE_ROOT: queueRoot,
+    JLINK_MCP_PROFILE: "legacy",
   };
 }
 
@@ -403,7 +508,18 @@ function childEnvironment(queueRoot: string): Record<string, string> {
     JLINK_MCP_QUEUE_ROOT: queueRoot,
     JLINK_MCP_STORAGE_ROOT: join(localRoot, "storage"),
     JLINK_MCP_EVIDENCE_ROOT: join(localRoot, "evidence"),
+    JLINK_MCP_PROFILE: "legacy",
   };
+}
+
+function compactEnvironment(queueRoot: string): Record<string, string> {
+  const result = childEnvironment(queueRoot);
+  delete result.JLINK_MCP_PROFILE;
+  return result;
+}
+
+function profileEnvironment(queueRoot: string, profile: "compact" | "advanced" | "legacy" | "acceptance"): Record<string, string> {
+  return { ...childEnvironment(queueRoot), JLINK_MCP_PROFILE: profile };
 }
 
 function parseEnvelope(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {

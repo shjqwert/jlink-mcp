@@ -1,1 +1,1 @@
-export const JLINK_MCP_VERSION = "1.1.5";
+export const JLINK_MCP_VERSION = "2.0.20";

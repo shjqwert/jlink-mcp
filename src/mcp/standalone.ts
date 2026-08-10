@@ -9,6 +9,7 @@
  *   J-Link:
  *     JLINK_DEVICE, JLINK_INSTALL_DIR, JLINK_INTERFACE, JLINK_SPEED,
  *     JLINK_SERIAL, JLINK_GDB_PORT, JLINK_RTT_PORT, JLINK_SWO_PORT
+ *   MCP surface: JLINK_MCP_PROFILE=compact|advanced|legacy|acceptance (default: compact)
  *   Local roots: JLINK_MCP_STORAGE_ROOT, JLINK_MCP_EVIDENCE_ROOT, JLINK_MCP_QUEUE_ROOT
  */
 
@@ -16,6 +17,7 @@ import { JLinkMcpServer } from "./server";
 import { ProbeFactoryConfig } from "../probe/factory";
 import { initLogger } from "../utils/logger";
 import { dirname } from "node:path";
+import { parseMcpProfile } from "./profile";
 
 // Stderr logger for standalone mode
 initLogger({ appendLine(msg: string) { process.stderr.write(msg + "\n"); } });
@@ -57,6 +59,7 @@ async function main() {
     storageRoot: env("JLINK_MCP_STORAGE_ROOT"),
     evidenceRoot: env("JLINK_MCP_EVIDENCE_ROOT"),
     queueRoot: env("JLINK_MCP_QUEUE_ROOT"),
+    profile: parseMcpProfile(env("JLINK_MCP_PROFILE")),
   });
 
   const shutdown = async () => { await server.dispose(); process.exit(0); };

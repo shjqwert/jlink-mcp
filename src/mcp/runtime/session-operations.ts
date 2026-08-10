@@ -94,7 +94,6 @@ export class SessionOperations {
     private readonly queue: ProbeQueue,
     private readonly runtimeFor: SessionRuntimeProvider,
     private readonly memorySessions?: MemorySessionManager,
-    private readonly requireUserConfirmation = true,
   ) {}
 
   gdbServerStart(projectRoot: string): Promise<OperationEnvelope> {
@@ -468,9 +467,15 @@ export class SessionOperations {
     }, owner);
   }
 
-  gdbConnect(projectRoot: string, symbolFile?: string, restoreRunningStateAfterAttach = false): Promise<OperationEnvelope> {
+  gdbConnect(
+    projectRoot: string,
+    symbolFile?: string,
+    restoreRunningStateAfterAttach = false,
+    retainClassifiedAttachHaltForManagedBreakpoint = false,
+  ): Promise<OperationEnvelope> {
     const requestedEffects = ["connect_gdb_client", "disable_gdb_flash_breakpoints"];
     if (restoreRunningStateAfterAttach) requestedEffects.push("restore_running_state_after_attach");
+    if (retainClassifiedAttachHaltForManagedBreakpoint) requestedEffects.push("retain_classified_attach_halt_for_managed_breakpoint");
     return this.withGdbOwner("gdb_connect", projectRoot, requestedEffects, async (envelope, target, runtime) => {
       const executionStateBeforeConnect = runtime.gdbServerTargetExecutionState ?? "unknown";
       const serverStatus = runtime.probe.getGDBServerStatus();
@@ -597,6 +602,34 @@ export class SessionOperations {
           );
         }
         const attachStopClassification = gdbAttachStopClassification(result);
+        if (retainClassifiedAttachHaltForManagedBreakpoint
+            && executionStateAfterConnect === "halted"
+            && targetExecutionStateExpectedAfterAttach === "running"
+            && attachStopClassification) {
+          envelope.observedEffects.push("gdb_client_connected", "gdb_attach_halted_target", "target_state_retained:halted_for_managed_breakpoint");
+          const flashBreakpointPrevention = await this.disableGdbFlashBreakpoints(
+            envelope,
+            target,
+            runtime,
+            executionStateAfterConnect,
+          );
+          envelope.data = {
+            ...result,
+            symbolFile: explicitSymbols ?? null,
+            targetExecutionStateBeforeConnect: executionStateBeforeConnect,
+            targetExecutionStateExpectedAfterAttach,
+            targetExecutionStateAfterConnect: executionStateAfterConnect,
+            attachStopClassification,
+            flashBreakpointPrevention,
+            retainedClassifiedAttachHaltForManagedBreakpoint: true,
+            gdbClientConnected: runtime.gdb.isConnected(),
+          };
+          if (attachStopClassification === "reasonless_attach_like_stop") {
+            envelope.warnings.push("The classified J-Link attach halt was retained only for the managed breakpoint transaction; explicit breakpoint, watchpoint, fault, and non-SIGTRAP stops remain rejected.");
+          }
+          envelope.verification = { status: "verified", method: "classified_gdb_attach_halt_retained_for_managed_breakpoint" };
+          return;
+        }
         if (restoreRunningStateAfterAttach
             && executionStateAfterConnect === "halted"
             && targetExecutionStateExpectedAfterAttach === "running"
@@ -688,15 +721,14 @@ export class SessionOperations {
     });
   }
 
-  gdbCommand(projectRoot: string, command: string, timeoutMs = 15_000, userConfirmed = false): Promise<OperationEnvelope> {
-    if (this.requireUserConfirmation && !userConfirmed) return userConfirmationRequired();
+  gdbCommand(projectRoot: string, command: string, timeoutMs = 15_000): Promise<OperationEnvelope> {
     if (!command || /[\0\r\n]/.test(command)) return Promise.resolve(validationFailure("gdb_command", "command must be one exact single-line GDB command"));
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) return Promise.resolve(validationFailure("gdb_command", "timeoutMs must be 1..120000"));
     return this.withGdbOwner("gdb_command", projectRoot, ["raw_gdb_command", "unknown_side_effects"], async (envelope, target, runtime) => {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
       const breakpointRequest = isGdbBreakpointInsertionRequest(command);
       const executionInterruptRequest = command.trim() === "-exec-interrupt --all";
-      const executionContinueRequest = command.trim() === "continue";
+      const executionContinueRequest = command.trim() === "continue" || command.trim() === "-exec-continue --all";
       const managedBreakpointPhaseBefore = runtime.gdbManagedBreakpointPhase;
       const currentFlashBreakpointPrevention = this.confirmedGdbFlashBreakpointPrevention(runtime, target);
       if (breakpointRequest && !currentFlashBreakpointPrevention) {
@@ -1004,6 +1036,87 @@ export class SessionOperations {
     });
   }
 
+  gdbAbortManagedBreakpoint(projectRoot: string, timeoutMs = 15_000): Promise<OperationEnvelope> {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+      return Promise.resolve(validationFailure("gdb_managed_breakpoint_abort", "timeoutMs must be 1..120000"));
+    }
+    return this.withGdbOwner(
+      "gdb_managed_breakpoint_abort",
+      projectRoot,
+      ["interrupt_running_target_if_needed", "clear_gdb_server_breakpoints", "restore_running_state_after_cleanup_if_needed"],
+      async (envelope, _target, runtime) => {
+        if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "managed breakpoint cleanup requires the connected GDB client", false, false);
+        const targetExecutionStateBefore = runtime.gdb.getTargetExecutionState();
+        if (targetExecutionStateBefore === "unknown") {
+          throw new SessionError("TARGET_STATE_UNKNOWN", "managed breakpoint cleanup cannot start from an unknown target state", false, false, true);
+        }
+        if (!runtime.gdbFlashBreakpointCleanupRequired
+            && runtime.gdbManagedBreakpointPhase === undefined
+            && runtime.gdbManagedBreakpointLifecycle === undefined) {
+          throw new SessionError("GDB_MANAGED_BREAKPOINT_REQUIRED", "no managed breakpoint transaction requires cleanup", false, false);
+        }
+        envelope.before = { ...(envelope.before as Record<string, unknown>), targetExecutionState: targetExecutionStateBefore };
+
+        let interrupt: GDBResponse | undefined;
+        if (targetExecutionStateBefore === "running") {
+          interrupt = await runtime.gdb.command("-exec-interrupt --all", timeoutMs);
+          runtime.gdbServerTargetExecutionState = runtime.gdb.getTargetExecutionState();
+          envelope.data = { targetExecutionStateBefore, interrupt, cleared: null, restored: null };
+          if (!interrupt.success || runtime.gdbServerTargetExecutionState !== "halted") {
+            throw new SessionError(
+              "GDB_MANAGED_CLEANUP_INTERRUPT_FAILED",
+              interrupt.error ?? "managed breakpoint cleanup could not halt the running target",
+              false,
+              interrupt.commandDispatched === true,
+              runtime.gdbServerTargetExecutionState === "unknown",
+            );
+          }
+          envelope.observedEffects.push("managed_cleanup_interrupt_issued", "target_halted_for_breakpoint_cleanup");
+        }
+
+        const cleared = await runtime.gdb.clearAllBreakpoints(timeoutMs);
+        runtime.gdbServerTargetExecutionState = runtime.gdb.getTargetExecutionState();
+        if (!cleared.success
+            || cleared.commandDispatched !== true
+            || runtime.gdbServerTargetExecutionState !== "halted"
+            || (cleared.observedTargetExecutionState !== "halted" && cleared.preservedTargetExecutionState !== "halted")) {
+          throw new SessionError(
+            "GDB_MANAGED_BREAKPOINT_CLEANUP_FAILED",
+            cleared.error ?? "managed breakpoint cleanup did not confirm breakpoint removal while halted",
+            false,
+            cleared.commandDispatched === true,
+            runtime.gdbServerTargetExecutionState === "unknown",
+          );
+        }
+        runtime.gdbFlashBreakpointCleanupEvidence = cleared;
+        envelope.data = { targetExecutionStateBefore, interrupt: interrupt ?? null, cleared, restored: null };
+        envelope.observedEffects.push("gdb_server_breakpoints_cleared");
+
+        let restored: GDBResponse | undefined;
+        if (targetExecutionStateBefore === "running") {
+          restored = await runtime.gdb.command("-exec-continue --all", timeoutMs);
+          runtime.gdbServerTargetExecutionState = runtime.gdb.getTargetExecutionState();
+          envelope.data = { targetExecutionStateBefore, interrupt: interrupt ?? null, cleared, restored };
+          if (!restored.success || runtime.gdbServerTargetExecutionState !== "running") {
+            throw new SessionError(
+              "GDB_MANAGED_CLEANUP_RESTORE_FAILED",
+              restored.error ?? "managed breakpoint cleanup could not restore the original running state",
+              false,
+              restored.commandDispatched === true,
+              runtime.gdbServerTargetExecutionState === "unknown",
+            );
+          }
+          envelope.observedEffects.push("target_state_restored:halted->running");
+        }
+        runtime.gdbManagedBreakpointLifecycle = undefined;
+        runtime.gdbManagedBreakpointPhase = undefined;
+        envelope.after = { ...(envelope.after as Record<string, unknown>), targetExecutionState: runtime.gdbServerTargetExecutionState };
+        envelope.data = { targetExecutionStateBefore, interrupt: interrupt ?? null, cleared, restored: restored ?? null };
+        envelope.verification = { status: "verified", method: "managed_interrupt_breakpoint_clear_and_state_restore" };
+      },
+    );
+  }
+
   gdbBacktrace(projectRoot: string, full = false): Promise<OperationEnvelope> {
     return this.withGdbOwner("gdb_backtrace", projectRoot, [], async (envelope, _target, runtime) => {
       if (!runtime.gdb.isConnected()) throw new SessionError("GDB_NOT_CONNECTED", "gdb_connect must be called first", false, false);
@@ -1065,6 +1178,15 @@ export class SessionOperations {
       envelope.observedEffects = [wasConnected ? "rtt_disconnected" : "no_op"];
       envelope.data = { wasConnected, ...runtime.rtt.getStats() };
     });
+  }
+
+  async rttIsConnected(projectRoot: string): Promise<boolean> {
+    try {
+      const target = this.targets.require(projectRoot);
+      return (await this.trackedRuntimeFor(target)).rtt.isConnected();
+    } catch {
+      return false;
+    }
   }
 
   rttRead(projectRoot: string, count = 50): Promise<OperationEnvelope> {
@@ -1379,17 +1501,6 @@ function gdbAttachStopClassification(
 function isGdbBreakpointInsertionRequest(command: string): boolean {
   const normalized = command.trim();
   return /^(?:break|b)\b/i.test(normalized) || /^-break-insert\b/.test(normalized);
-}
-
-function userConfirmationRequired(): Promise<OperationEnvelope> {
-  return Promise.resolve(failEnvelope(createOperationEnvelope("gdb_command"), {
-    code: "USER_CONFIRMATION_REQUIRED",
-    stage: "confirmation",
-    message: "gdb_command can have destructive or unknown side effects. Obtain explicit user approval for this exact command, then retry with userConfirmed=true.",
-    retryable: true,
-    writeIssued: false,
-    stateUnknown: false,
-  }));
 }
 
 function queueFailureCode(error: ProbeQueueError): string {

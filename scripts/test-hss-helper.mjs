@@ -1,9 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const executable = resolve("native", "hss-helper", "bin", "hss_helper.exe");
 const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+const expectedHelper = packageJson.jlinkMcp?.hssHelper;
+if (!expectedHelper || !/^[0-9a-f]{64}$/.test(String(expectedHelper.sha256 ?? ""))) {
+  throw new Error("package.json does not declare the pinned HSS Helper component");
+}
 
 const version = spawnSync(executable, ["version"], { encoding: "utf8", windowsHide: true });
 if (version.stdout) process.stdout.write(version.stdout);
@@ -15,9 +20,13 @@ const versionResponse = parseJson(version.stdout, "HSS Helper version");
 if (versionResponse.status !== "ok"
   || versionResponse.helperProtocolVersion !== 3
   || versionResponse.architecture !== "x64"
-  || versionResponse.helperVersion !== packageJson.version) {
+  || versionResponse.helperVersion !== expectedHelper.version
+  || versionResponse.helperProtocolVersion !== expectedHelper.protocolVersion
+  || versionResponse.architecture !== expectedHelper.architecture) {
   throw new Error(`HSS Helper version mismatch: ${JSON.stringify(versionResponse)}`);
 }
+const helperSha256 = createHash("sha256").update(readFileSync(executable)).digest("hex");
+if (helperSha256 !== expectedHelper.sha256) throw new Error(`HSS Helper SHA-256 mismatch: ${helperSha256}`);
 
 const result = spawnSync(executable, ["self-test"], { encoding: "utf8", windowsHide: true });
 

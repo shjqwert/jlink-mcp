@@ -45,11 +45,17 @@ const installed = resolve(installRoot, "node_modules", "jlink-mcp");
 const doctor = run(process.execPath, [resolve(installed, "out", "mcp", "doctor.js")], installRoot, true);
 assertDoctorReport(doctor.stdout, "installed");
 await assertMcpSurface(resolve(installed, "out", "mcp", "standalone.js"), installRoot, "installed");
+await assertLegacyMcpSurface(resolve(installed, "out", "mcp", "standalone.js"), installRoot, "installed");
 
 const helper = resolve(installed, "native", "hss-helper", "bin", "hss_helper.exe");
 const helperVersion = run(helper, ["version"], installRoot, true);
 const helperResult = JSON.parse(helperVersion.stdout);
-if (helperResult.status !== "ok" || helperResult.helperVersion !== version) {
+const expectedHelper = packageJson.jlinkMcp?.hssHelper;
+if (helperResult.status !== "ok"
+  || !expectedHelper
+  || helperResult.helperVersion !== expectedHelper.version
+  || helperResult.helperProtocolVersion !== expectedHelper.protocolVersion
+  || helperResult.architecture !== expectedHelper.architecture) {
   throw new Error("installed HSS Helper version check failed");
 }
 
@@ -78,6 +84,11 @@ const portableDoctor = run(process.env.ComSpec ?? "cmd.exe", [
 ], portableRoot, true);
 assertDoctorReport(portableDoctor.stdout, "portable");
 await assertMcpSurface(
+  resolve(portableRoot, "node_modules", "jlink-mcp", "out", "mcp", "standalone.js"),
+  portableRoot,
+  "portable",
+);
+await assertLegacyMcpSurface(
   resolve(portableRoot, "node_modules", "jlink-mcp", "out", "mcp", "standalone.js"),
   portableRoot,
   "portable",
@@ -119,19 +130,57 @@ async function assertMcpSurface(standalone, cwd, label) {
       throw new Error(`${label} MCP server identity mismatch`);
     }
     const tools = (await client.listTools()).tools;
-    if (tools.length !== 40) throw new Error(`${label} MCP exposed ${tools.length} tools instead of 40`);
-    for (const requiredTool of ["mcp_init", "gdb_breakpoint_list", "gdb_breakpoint_delete"]) {
+    if (tools.length !== 9) throw new Error(`${label} MCP exposed ${tools.length} default tools instead of 9`);
+    for (const requiredTool of ["project", "debug", "trace", "capture"]) {
       if (!tools.some(({ name }) => name === requiredTool)) throw new Error(`${label} MCP did not expose ${requiredTool}`);
     }
-    const initialized = parseEnvelope(await client.callTool({ name: "mcp_init", arguments: { projectRoot: cwd } }));
+    const initialized = parseEnvelope(await client.callTool({ name: "project", arguments: { action: "bind", projectRoot: cwd } }));
     if (!initialized.ok) throw new Error(`${label} MCP project initialization failed: ${JSON.stringify(initialized)}`);
-    const listed = parseEnvelope(await client.callTool({ name: "capture_list", arguments: { limit: 10 } }));
-    if (!listed.ok || !listed.data?.captures?.some((entry) => entry.captureId === captureId && entry.formatStatus === "supported")) {
+    const listed = parseEnvelope(await client.callTool({ name: "capture", arguments: { action: "list", params: { limit: 10 } } }));
+    const listedData = await expandedEnvelopeData(client, listed);
+    if (!listed.ok || !listedData?.captures?.some((entry) => entry.captureId === captureId && entry.formatStatus === "supported")) {
       throw new Error(`${label} MCP did not list the JCAP v1 release fixture`);
     }
-    const summary = parseEnvelope(await client.callTool({ name: "capture_summary", arguments: { captureId } }));
-    if (!summary.ok || summary.data?.sampleCount !== 1 || summary.data?.indexStatus !== "ready") {
+    const summary = parseEnvelope(await client.callTool({ name: "capture", arguments: { action: "summary", params: { captureId } } }));
+    const summaryData = await expandedEnvelopeData(client, summary);
+    if (!summary.ok || summaryData?.sampleCount !== 1 || summaryData?.indexStatus !== "ready") {
       throw new Error(`${label} MCP could not query and rebuild the JCAP v1 release fixture: ${JSON.stringify(summary)}`);
+    }
+  } finally {
+    await client.close();
+  }
+}
+
+async function expandedEnvelopeData(client, envelope) {
+  if (envelope.data?.omitted !== true || typeof envelope.detailsUri !== "string") return envelope.data;
+  const resource = await client.readResource({ uri: envelope.detailsUri });
+  const text = resource.contents?.find((content) => typeof content.text === "string")?.text;
+  if (typeof text !== "string") throw new Error(`operation details resource ${envelope.detailsUri} has no text content`);
+  return JSON.parse(text).data;
+}
+
+async function assertLegacyMcpSurface(standalone, cwd, label) {
+  const localRoot = resolve(cwd, ".jlink-mcp-release-smoke-legacy");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [standalone],
+    cwd,
+    stderr: "pipe",
+    env: {
+      ...Object.fromEntries(Object.entries(process.env).filter((entry) => entry[1] !== undefined)),
+      JLINK_MCP_PROFILE: "legacy",
+      JLINK_MCP_QUEUE_ROOT: resolve(localRoot, "queue"),
+      JLINK_MCP_STORAGE_ROOT: resolve(localRoot, "storage"),
+      JLINK_MCP_EVIDENCE_ROOT: resolve(localRoot, "evidence"),
+    },
+  });
+  const client = new Client({ name: `jlink-mcp-${label}-legacy-release-smoke`, version: "1" });
+  try {
+    await client.connect(transport);
+    const tools = (await client.listTools()).tools;
+    if (tools.length !== 40) throw new Error(`${label} legacy MCP exposed ${tools.length} tools instead of 40`);
+    for (const requiredTool of ["mcp_init", "gdb_breakpoint_list", "gdb_breakpoint_delete"]) {
+      if (!tools.some(({ name }) => name === requiredTool)) throw new Error(`${label} legacy MCP did not expose ${requiredTool}`);
     }
   } finally {
     await client.close();
@@ -171,6 +220,7 @@ function writeReleaseFixture(capturesDir) {
 }
 
 function parseEnvelope(result) {
+  if (result.structuredContent) return result.structuredContent;
   const text = result.content?.find((item) => item.type === "text")?.text;
   if (typeof text !== "string") throw new Error("MCP tool result did not include a text envelope");
   return JSON.parse(text);

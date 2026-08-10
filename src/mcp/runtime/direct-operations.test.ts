@@ -327,7 +327,7 @@ test("read_memory fails closed when closeForTarget cannot confirm a session", as
     probeFor: async () => probe,
     closeForTarget: async () => undefined,
   } as unknown as MemorySessionManager;
-  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions, false);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), undefined, sessions);
 
   const result = await service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
 
@@ -2457,7 +2457,7 @@ async function fixture(context: TestContext, name: string, cleanupFlashSnapshot?
   const queue = new ProbeQueue(join(root, "queue"));
   const sessions = new MemorySessionManager(queue, new FakeMemorySessionLauncher(probe), 10_000);
   context.after(async () => { await sessions.dispose(); });
-  const service = new DirectMcuService(targets, queue, async () => ({ probe }), cleanupFlashSnapshot, sessions, false);
+  const service = new DirectMcuService(targets, queue, async () => ({ probe }), cleanupFlashSnapshot, sessions);
   return { service, probe, targets, queue, projectRoot };
 }
 

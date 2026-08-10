@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
   type GDBServerInfo,
   type TargetStateObservation,
 } from "../../probe/backend";
+import { findPinnedHssHelperPath, matchesPinnedHssHelperVersion, PINNED_HSS_HELPER_RELEASE } from "../hss-helper-release";
 import type { QueueMetadata, ProbeOwner } from "./probe-queue";
 import { ProbeQueue } from "./probe-queue";
 import type { StoredTarget } from "./target-store";
@@ -267,16 +268,17 @@ export function persistentMemorySessionEvidence(probe: ProbeBackend): Record<str
 class NativeMemorySessionLauncher implements MemorySessionLauncher {
   async open(target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession | undefined> {
     if (process.platform !== "win32") return undefined;
-    const helperPath = findHelper();
+    const helperPath = findMemorySessionHelper();
     const runtimePath = findRuntime(target);
     if (!helperPath || !runtimePath) return undefined;
     let helperSha256: string;
     let runtimeSha256: string;
     try {
-      helperSha256 = memorySessionHash(helperPath);
+      helperSha256 = verifyMemorySessionHelper(helperPath);
       runtimeSha256 = memorySessionHash(runtimePath);
-    } catch {
-      throw new MemorySessionError("MEMORY_SESSION_RUNTIME_UNAVAILABLE", "native memory-session runtime identity could not be established", true, true);
+    } catch (error) {
+      if (error instanceof MemorySessionError && error.code.startsWith("MEMORY_SESSION_HELPER_")) throw error;
+      throw new MemorySessionError("MEMORY_SESSION_RUNTIME_UNAVAILABLE", "native memory-session runtime identity could not be established", true, false);
     }
     const runtime: MemorySessionRuntimeFacts = { helperPath, runtimePath, helperSha256, runtimeSha256 };
     return NativePersistentMemorySession.open(target, runtime, onStarted);
@@ -760,13 +762,35 @@ function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): 
   });
 }
 
-function findHelper(): string | undefined {
-  const candidates = [
-    resolve(process.cwd(), "native", "hss-helper", "bin", "hss_helper.exe"),
-    resolve(__dirname, "..", "..", "native", "hss-helper", "bin", "hss_helper.exe"),
-    resolve(__dirname, "..", "..", "..", "native", "hss-helper", "bin", "hss_helper.exe"),
-  ];
-  return candidates.find(regularFile);
+export function findMemorySessionHelper(): string | undefined {
+  return findPinnedHssHelperPath();
+}
+
+export function verifyMemorySessionHelper(helperPath: string): string {
+  let helperSha256: string;
+  try { helperSha256 = sha256File(helperPath); }
+  catch {
+    throw new MemorySessionError("MEMORY_SESSION_HELPER_IDENTITY_UNAVAILABLE", "native memory helper identity could not be established", true, false);
+  }
+  if (helperSha256 !== PINNED_HSS_HELPER_RELEASE.sha256) {
+    throw new MemorySessionError("MEMORY_SESSION_HELPER_IDENTITY_MISMATCH", "native memory helper does not match the pinned release identity", false, false);
+  }
+  const version = spawnSync(helperPath, ["version"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+  if (version.error || version.status !== 0) {
+    throw new MemorySessionError("MEMORY_SESSION_HELPER_VERSION_UNAVAILABLE", version.error?.message ?? `native memory helper version check exited ${String(version.status)}`, true, false);
+  }
+  let response: Record<string, unknown>;
+  try { response = JSON.parse(version.stdout.trim()) as Record<string, unknown>; }
+  catch {
+    throw new MemorySessionError("MEMORY_SESSION_HELPER_VERSION_INVALID", "native memory helper returned invalid version metadata", false, false);
+  }
+  if (!matchesPinnedHssHelperVersion(response)) {
+    throw new MemorySessionError("MEMORY_SESSION_HELPER_INCOMPATIBLE", "native memory helper version, protocol, or architecture is incompatible", false, false);
+  }
+  if (sha256File(helperPath) !== helperSha256) {
+    throw new MemorySessionError("MEMORY_SESSION_HELPER_IDENTITY_CHANGED", "native memory helper changed during version inspection", true, false);
+  }
+  return helperSha256;
 }
 
 function findRuntime(target: StoredTarget): string | undefined {
@@ -781,6 +805,9 @@ function findRuntime(target: StoredTarget): string | undefined {
 }
 
 function assertRuntimeIdentity(runtime: MemorySessionRuntimeFacts): void {
+  if (runtime.helperSha256 !== PINNED_HSS_HELPER_RELEASE.sha256) {
+    throw new MemorySessionError("MEMORY_SESSION_HELPER_IDENTITY_MISMATCH", "the active native memory helper does not match the pinned release identity", false, true);
+  }
   if (memorySessionHash(runtime.helperPath) !== runtime.helperSha256 || memorySessionHash(runtime.runtimePath) !== runtime.runtimeSha256) {
     throw new MemorySessionError("MEMORY_SESSION_RUNTIME_IDENTITY_CHANGED", "the native helper or J-Link runtime changed while the memory session was active", true, true);
   }

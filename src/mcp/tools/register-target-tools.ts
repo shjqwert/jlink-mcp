@@ -18,7 +18,7 @@ import type { VariableRefInput, VariableWriteInput } from "../runtime/variable-a
 import { VariableAccessRouter } from "../runtime/variable-access-router";
 import type { RegisterEnvelopeTool } from "./tool-contract";
 import { actionInputFailure, relabelEnvelope } from "./tool-envelope";
-import { projectRootInput, userConfirmation, variableRef } from "./tool-schemas";
+import { projectRootInput, variableRef } from "./tool-schemas";
 
 interface TargetToolServices {
   discoveryProbe: ProbeBackend;
@@ -277,21 +277,18 @@ export function registerTargetTools(register: RegisterEnvelopeTool, services: Ta
     ...projectRootInput,
     path: z.string().min(1),
     baseAddress: uint32.optional(),
-    userConfirmed: userConfirmation,
   }, (input) => services.direct.flash(input as unknown as FlashInput));
   register("erase", {
     ...projectRootInput,
     verifyBlank: z.boolean().default(false),
-    userConfirmed: userConfirmation,
   }, (input) => services.direct.erase(input as unknown as EraseInput));
   register("probe_command", {
     ...projectRootInput,
     commands: z.array(z.string().min(1)).min(1).max(100),
-    userConfirmed: userConfirmation,
   }, (input) => services.direct.probeCommand(input as unknown as ProbeCommandInput));
 }
 
-async function listDevices(discoveryProbe: ProbeBackend): Promise<OperationEnvelope> {
+export async function listDevices(discoveryProbe: ProbeBackend): Promise<OperationEnvelope> {
   const envelope = createOperationEnvelope("list_devices");
   try {
     envelope.before = { probe: discoveryProbe.getStatus() };

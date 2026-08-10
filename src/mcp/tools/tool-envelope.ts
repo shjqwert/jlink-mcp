@@ -1,12 +1,11 @@
 import { createOperationEnvelope, failEnvelope, type OperationEnvelope } from "../runtime/operation-envelope";
-import type { AgentToolName } from "./tool-contract";
 
-export function relabelEnvelope(envelope: OperationEnvelope, tool: AgentToolName): OperationEnvelope {
+export function relabelEnvelope(envelope: OperationEnvelope, tool: string): OperationEnvelope {
   envelope.tool = tool;
   return envelope;
 }
 
-export function actionInputFailure(tool: AgentToolName, message: string): OperationEnvelope {
+export function actionInputFailure(tool: string, message: string): OperationEnvelope {
   return failEnvelope(createOperationEnvelope(tool), {
     code: "ACTION_INPUT_INVALID",
     stage: "validation",

@@ -7,23 +7,11 @@
       "events": [{ "type": "tool_call", "tool": "list_devices", "arguments": {} }]
     },
     {
-      "caseId": "erase-user-rejects",
+      "caseId": "status-then-erase",
       "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
       "events": [
         { "type": "tool_call", "tool": "target_status", "arguments": { "projectRoot": "<project-root>" } },
-        {
-          "type": "confirmation_request",
-          "operationId": "erase-denied-1",
-          "tool": "erase",
-          "impact": "Erases target Flash and removes the programmed firmware.",
-          "arguments": { "projectRoot": "<project-root>", "verifyBlank": false }
-        },
-        {
-          "type": "user_confirmation",
-          "operationId": "erase-denied-1",
-          "source": "user",
-          "approved": false
-        }
+        { "type": "tool_call", "tool": "erase", "arguments": { "projectRoot": "<project-root>", "verifyBlank": false } }
       ]
     },
     {
@@ -65,7 +53,7 @@
       }]
     },
     {
-      "caseId": "flash-requires-confirmation",
+      "caseId": "flash-after-configure",
       "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
       "events": [
         {
@@ -80,83 +68,46 @@
           }
         },
         {
-          "type": "confirmation_request",
-          "operationId": "flash-1",
+          "type": "tool_call",
           "tool": "flash",
-          "impact": "Programs target Flash and replaces the current firmware image.",
           "arguments": { "projectRoot": "<project-root>", "path": "firmware.hex" }
-        },
-        { "type": "user_confirmation", "operationId": "flash-1", "source": "user", "approved": true },
-        {
-          "type": "tool_call",
-          "operationId": "flash-1",
-          "tool": "flash",
-          "arguments": { "projectRoot": "<project-root>", "path": "firmware.hex", "userConfirmed": true }
         }
       ]
     },
     {
-      "caseId": "erase-requires-confirmation",
+      "caseId": "erase-direct",
       "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
       "events": [
         {
-          "type": "confirmation_request",
-          "operationId": "erase-1",
+          "type": "tool_call",
           "tool": "erase",
-          "impact": "Erases target Flash and removes the programmed firmware.",
           "arguments": { "projectRoot": "<project-root>", "verifyBlank": false }
-        },
-        { "type": "user_confirmation", "operationId": "erase-1", "source": "user", "approved": true },
-        {
-          "type": "tool_call",
-          "operationId": "erase-1",
-          "tool": "erase",
-          "arguments": { "projectRoot": "<project-root>", "verifyBlank": false, "userConfirmed": true }
         }
       ]
     },
     {
-      "caseId": "probe-command-requires-confirmation",
+      "caseId": "probe-command-direct",
       "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
       "events": [
         {
-          "type": "confirmation_request",
-          "operationId": "probe-1",
-          "tool": "probe_command",
-          "impact": "Issues a raw reset command that changes the target execution state.",
-          "arguments": { "projectRoot": "<project-root>", "commands": ["reset"] }
-        },
-        { "type": "user_confirmation", "operationId": "probe-1", "source": "user", "approved": true },
-        {
           "type": "tool_call",
-          "operationId": "probe-1",
           "tool": "probe_command",
-          "arguments": { "projectRoot": "<project-root>", "commands": ["reset"], "userConfirmed": true }
+          "arguments": { "projectRoot": "<project-root>", "commands": ["reset"] }
         }
       ]
     },
     {
-      "caseId": "gdb-command-requires-confirmation",
+      "caseId": "gdb-command-lifecycle",
       "agent": { "provider": "reference", "model": "reference", "host": "offline", "adapterVersion": "1" },
       "events": [
         { "type": "tool_call", "tool": "gdb_open", "arguments": { "projectRoot": "<project-root>" } },
         {
-          "type": "confirmation_request",
-          "operationId": "gdb-1",
-          "tool": "gdb_command",
-          "impact": "Changes the program counter and therefore the next executed instruction.",
-          "arguments": { "projectRoot": "<project-root>", "command": "set $pc=0x1000", "timeoutMs": 15000 }
-        },
-        { "type": "user_confirmation", "operationId": "gdb-1", "source": "user", "approved": true },
-        {
           "type": "tool_call",
-          "operationId": "gdb-1",
           "tool": "gdb_command",
           "arguments": {
             "projectRoot": "<project-root>",
             "command": "set $pc=0x1000",
-            "timeoutMs": 15000,
-            "userConfirmed": true
+            "timeoutMs": 15000
           }
         },
         { "type": "tool_call", "tool": "gdb_close", "arguments": { "projectRoot": "<project-root>" } }

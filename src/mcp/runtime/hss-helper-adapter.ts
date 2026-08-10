@@ -14,9 +14,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
+import { findPinnedHssHelperPath, matchesPinnedHssHelperVersion, PINNED_HSS_HELPER_RELEASE } from "../hss-helper-release";
 import type { StoredTarget } from "./target-store";
 
-export const HSS_HELPER_PROTOCOL_VERSION = 3;
+export const HSS_HELPER_PROTOCOL_VERSION = PINNED_HSS_HELPER_RELEASE.protocolVersion;
 export const HSS_EFFECTIVE_LIMITS = { maxVariables: 10, maxWriteVariables: 32, maxRateHz: 1_000, maxDurationSec: 60 } as const;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -153,6 +154,10 @@ export function assertNonIntrusiveConnectPreflight(observed: Record<string, unkn
   }
 }
 
+export function selectHssAttachDevice(target: Pick<StoredTarget, "device" | "gdbDevice">): string {
+  return target.gdbDevice === "Cortex-M4" ? target.gdbDevice : target.device;
+}
+
 export class NativeHssHelperAdapter implements HssHelperAdapter {
   readonly backend = "jlink-hss" as const;
 
@@ -166,8 +171,16 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
     if (!runtimePath) return unavailable("HSS_RUNTIME_NOT_CONFIGURED", "no J-Link DLL was found beside an explicitly configured J-Link tool", helperPath, runtimePath);
     try {
       const [helperSha256, runtimeSha256] = [sha256File(helperPath), sha256File(runtimePath)];
+      if (helperSha256 !== PINNED_HSS_HELPER_RELEASE.sha256) {
+        return unavailable(
+          "HSS_HELPER_IDENTITY_MISMATCH",
+          "the selected HSS helper does not match the pinned release identity",
+          helperPath,
+          runtimePath,
+        );
+      }
       const version = await runJson(helperPath, ["version"], 10_000);
-      if (version.status !== "ok" || version.helperProtocolVersion !== HSS_HELPER_PROTOCOL_VERSION) {
+      if (!matchesPinnedHssHelperVersion(version)) {
         return unavailable("HSS_HELPER_ABI_INCOMPATIBLE", "the helper protocol is incompatible", helperPath, runtimePath, version);
       }
       if (sha256File(helperPath) !== helperSha256 || sha256File(runtimePath) !== runtimeSha256) throw new HssAdapterError("HSS_RUNTIME_IDENTITY_CHANGED", "the helper or J-Link runtime changed during ABI inspection", true);
@@ -207,7 +220,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       const observed = await runJson(runtime.helperPath, [
         "getcaps",
         "--dll", runtime.runtimePath,
-        "--device", target.device,
+        "--device", selectHssAttachDevice(target),
         "--interface", target.interface,
         "--serial", target.probeSerial,
         "--speed", String(target.speed),
@@ -265,7 +278,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
     const observed = await runJson(runtime.helperPath, [
       "connect-preflight",
       "--dll", runtime.runtimePath,
-      "--device", target.device,
+      "--device", selectHssAttachDevice(target),
       "--interface", target.interface,
       "--serial", target.probeSerial,
       "--speed", String(target.speed),
@@ -284,7 +297,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       "cpu-control",
       "--dll", runtime.runtimePath,
       "--dll-sha256", runtime.runtimeSha256,
-      "--device", target.device,
+      "--device", selectHssAttachDevice(target),
       "--interface", target.interface,
       "--serial", target.probeSerial,
       "--speed", String(target.speed),
@@ -508,13 +521,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
   }
 
   private findHelper(): string | undefined {
-    const candidates = [
-      this.helperOverride,
-      resolve(process.cwd(), "native", "hss-helper", "bin", "hss_helper.exe"),
-      resolve(__dirname, "..", "..", "native", "hss-helper", "bin", "hss_helper.exe"),
-      resolve(__dirname, "..", "..", "..", "native", "hss-helper", "bin", "hss_helper.exe"),
-    ].filter((value): value is string => Boolean(value));
-    return candidates.find((candidate) => regularFile(candidate));
+    return findPinnedHssHelperPath(this.helperOverride);
   }
 }
 
@@ -683,6 +690,7 @@ function readBoundedJson(file: string, maxBytes: number, code: string): Record<s
 
 function assertRuntimeIdentity(runtime: HssRuntimeFacts): asserts runtime is HssRuntimeFacts & Required<Pick<HssRuntimeFacts, "helperPath" | "runtimePath" | "helperSha256" | "runtimeSha256">> {
   if (!runtime.available || !runtime.helperPath || !runtime.runtimePath || !runtime.helperSha256 || !runtime.runtimeSha256) throw new HssAdapterError(runtime.errorCode ?? "HSS_UNAVAILABLE", runtime.reason ?? "HSS runtime identity is unavailable");
+  if (runtime.helperSha256 !== PINNED_HSS_HELPER_RELEASE.sha256) throw new HssAdapterError("HSS_HELPER_IDENTITY_MISMATCH", "the HSS helper does not match the pinned release identity");
   if (sha256File(runtime.helperPath) !== runtime.helperSha256 || sha256File(runtime.runtimePath) !== runtime.runtimeSha256) throw new HssAdapterError("HSS_RUNTIME_IDENTITY_CHANGED", "the helper or J-Link runtime changed after ABI inspection", true);
 }
 

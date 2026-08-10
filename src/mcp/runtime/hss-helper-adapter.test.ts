@@ -9,6 +9,7 @@ import {
   HssAdapterError,
   NativeHssHelperAdapter,
   hssTargetStateFromConnectPreflight,
+  selectHssAttachDevice,
   type HssCaptureControlFiles,
   type HssMemoryRequest,
 } from "./hss-helper-adapter";
@@ -17,6 +18,12 @@ const captureId = "51000000-0000-4000-8000-000000000001";
 const helperNonce = "52000000-0000-4000-8000-000000000001";
 const operationId1 = "54000000-0000-4000-8000-000000000001";
 const operationId2 = "54000000-0000-4000-8000-000000000002";
+
+test("HSS helper uses the validated Cortex-M4 attach profile instead of the Flash device", () => {
+  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
+  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: undefined }), "Z20K146M");
+  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Other" }), "Z20K146M");
+});
 
 test("HSS connect preflight accepts only explicit halted-state observations", () => {
   assert.equal(hssTargetStateFromConnectPreflight({ targetWasHaltedRaw: 0 }), "running");
@@ -48,6 +55,25 @@ test("HSS connect preflight requires a non-intrusive attach policy without infer
       () => assertNonIntrusiveConnectPreflight(observed),
       (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_CONNECT_PREFLIGHT_SIDE_EFFECT" && error.stateUnknown,
     );
+  }
+});
+
+test("native adapter rejects an unpinned Helper before executing it", { skip: process.platform !== "win32" }, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-identity-"));
+  const helperPath = path.join(root, "hss_helper.exe");
+  const runtimePath = path.join(root, "JLink_x64.dll");
+  try {
+    writeFileSync(helperPath, "not-the-pinned-helper");
+    writeFileSync(runtimePath, "runtime");
+    const adapter = new NativeHssHelperAdapter(helperPath);
+    const observed = await adapter.inspectRuntime({
+      jlinkPath: { path: path.join(root, "JLink.exe") },
+    } as never);
+    assert.equal(observed.available, false);
+    assert.equal(observed.errorCode, "HSS_HELPER_IDENTITY_MISMATCH");
+    assert.equal(observed.helperPath, helperPath);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -92,10 +118,9 @@ test("native adapter rejects a v2 capture plan before spawning the Helper", asyn
   const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-plan-version-"));
   const control = controlFiles(root);
   const adapter = new NativeHssHelperAdapter();
-  const helperPath = path.join(root, "hss_helper.exe");
+  const helperPath = path.resolve("native", "hss-helper", "prebuilt", "windows-x64", "hss_helper.exe");
   const runtimePath = path.join(root, "JLink_x64.dll");
   try {
-    writeFileSync(helperPath, "helper");
     writeFileSync(runtimePath, "runtime");
     const digest = (value: string) => createHash("sha256").update(value).digest("hex");
     writeFileSync(control.planPath, JSON.stringify({
@@ -112,7 +137,7 @@ test("native adapter rejects a v2 capture plan before spawning the Helper", asyn
         available: true,
         helperPath,
         runtimePath,
-        helperSha256: digest("helper"),
+        helperSha256: createHash("sha256").update(readFileSync(helperPath)).digest("hex"),
         runtimeSha256: digest("runtime"),
         helperProtocolVersion: 3,
       }, control),

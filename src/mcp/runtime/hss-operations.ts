@@ -46,6 +46,7 @@ import {
   HSS_EFFECTIVE_LIMITS,
   HssAdapterError,
   NativeHssHelperAdapter,
+  selectHssAttachDevice,
   type HssCapabilityFacts,
   type HssCaptureLaunch,
   type HssCaptureControlFiles,
@@ -747,6 +748,21 @@ export class HssOperations implements CaptureVariableAccess {
       session = await this.reconcileSession(session.captureId);
       if (session.helperPid !== originalPid) envelope.observedEffects.push("helper_pid_recovered_from_start_journal");
       if (session.ownerToken !== originalOwnerToken) envelope.observedEffects.push("probe_owner_reconciled");
+      if ((session.state === "completed" || session.state === "stopped") && !this.adapter.isAlive(session.helperPid)) {
+        const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
+        const statePreservationPending = session.statePreservationPending;
+        await this.settle(session.captureId);
+        session = this.sessionStore.read(session.captureId);
+        envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false };
+        envelope.capture = captureSummary(session);
+        envelope.data = { session, metadata: safeMetadata(session.packageDir), alreadyTerminal: true };
+        envelope.outputFiles = packageFiles(session.packageDir);
+        if (statePreservationPending) envelope.observedEffects.push("target_state_reconciled");
+        if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
+        envelope.warnings.push(`Capture was already ${session.state}; no stop request was needed.`);
+        envelope.verification = { status: "verified", method: "successful_terminal_jcap_state_idempotent_stop" };
+        return finishEnvelope(envelope, session.state === "completed" || session.state === "stopped");
+      }
       if (!isActiveHssSessionState(session.state)) throw new HssOperationError("CAPTURE_NOT_ACTIVE", `capture ${session.captureId} is ${session.state}`);
       if (this.startupJournalPending(session)) {
         session = await this.sessionStore.withExclusiveCapture(session.captureId, async () => {
@@ -1364,7 +1380,7 @@ export class HssOperations implements CaptureVariableAccess {
       sessionRoot: sessionDir,
       artifact,
       captureId,
-      targetId: target.device,
+      targetId: selectHssAttachDevice(target),
       probeSerial: target.probeSerial,
       runtimeIdentitySha256: runtime.runtimeSha256,
       nonvolatileRanges,
@@ -1429,7 +1445,7 @@ export class HssOperations implements CaptureVariableAccess {
       helperInstanceNonce: helperNonce,
       qpcEpochCounter: timebase.qpcCounter,
       qpcFrequency: timebase.qpcFrequency,
-      device: target.device,
+      device: selectHssAttachDevice(target),
       interface: target.interface,
       serial: target.probeSerial,
       speedKhz: target.speed,

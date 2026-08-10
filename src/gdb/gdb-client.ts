@@ -273,6 +273,9 @@ export class GDBClient {
     if (!this.proc || !this.connected) {
       return { success: false, output: "", error: "GDB is not connected", code: "GDB_NOT_CONNECTED" };
     }
+    if (cmd.trim() === "-exec-interrupt --all" && this.targetExecutionState === "running") {
+      return this.interruptRunningTarget(timeout);
+    }
     const executionStateBefore = this.targetExecutionState;
     let commandDispatched = false;
     const result = await this.commandInternal(cmd, timeout, () => { commandDispatched = true; });
@@ -450,6 +453,147 @@ export class GDBClient {
     };
   }
 
+  private async interruptRunningTarget(timeout: number): Promise<GDBResponse> {
+    const dispatchedCommand = "-exec-interrupt --all";
+    const deadline = Date.now() + timeout;
+    const remaining = () => Math.max(1, deadline - Date.now());
+    const rawParts: string[] = [];
+    const timedOut = async (phase: string, exchange: GDBCommandExchange): Promise<GDBResponse> => {
+      rawParts.push(exchange.output);
+      await this.terminateGdbProcess();
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        commandDispatched: phase !== "pre-interrupt drain",
+        error: `GDB interrupt transaction timed out during ${phase} after ${timeout}ms; the GDB client was terminated before releasing the Probe queue`,
+        code: "GDB_COMMAND_TIMEOUT",
+        ...this.exitFacts(),
+      };
+    };
+    const processExited = (phase: string, exchange: GDBCommandExchange): GDBResponse => {
+      rawParts.push(exchange.output);
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        commandDispatched: phase !== "pre-interrupt drain",
+        error: `GDB exited during the ${phase} phase of the interrupt transaction`,
+        code: "GDB_PROCESS_EXITED",
+        ...this.exitFacts(),
+      };
+    };
+
+    const preInterrupt = await this.drainPendingOutputBeforeInterrupt(remaining());
+    if (preInterrupt.processExited) return processExited("pre-interrupt drain", preInterrupt);
+    if (preInterrupt.timedOut) return timedOut("pre-interrupt drain", preInterrupt);
+    rawParts.push(preInterrupt.output);
+    if (this.targetExecutionState !== "running" || hasMiAsyncRecord(preInterrupt.output, "stopped")) {
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        commandDispatched: false,
+        stopReason: this.stopEvent ?? undefined,
+        error: "target stopped before exec-interrupt was dispatched",
+        code: "GDB_INTERRUPT_STOP_UNSAFE",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
+    }
+
+    const interruptedExecutionToken = this.activeExecutionToken;
+    const interruptToken = this.allocateMiToken();
+    let interrupt: GDBCommandExchange;
+    try {
+      interrupt = await this.sendCommand(dispatchedCommand, remaining(), true, true, interruptToken);
+    } catch (error) {
+      await this.terminateGdbProcess();
+      return {
+        success: false,
+        output: "",
+        rawOutput: this.outputBuffer,
+        dispatchedCommand,
+        commandDispatched: true,
+        error: error instanceof Error ? error.message : String(error),
+        code: "GDB_IO_FAILED",
+        ...this.exitFacts(),
+      };
+    }
+    if (interrupt.processExited) return processExited("interrupt", interrupt);
+    if (
+      interrupt.timedOut
+      && interrupt.output.trim().length === 0
+      && this.proc
+      && this.connected
+      && this.targetExecutionState === "running"
+    ) {
+      this.commandStreamTainted = true;
+      return {
+        success: false,
+        output: "",
+        rawOutput: "",
+        dispatchedCommand,
+        commandDispatched: true,
+        error: `GDB produced no MI result, prompt, or async stop for exec-interrupt within ${timeout}ms; the live client and last observed running state were preserved for explicit cleanup`,
+        code: "GDB_INTERRUPT_EMPTY_WINDOW",
+        observedTargetExecutionState: "running",
+      };
+    }
+    if (interrupt.timedOut) return timedOut("interrupt", interrupt);
+    rawParts.push(interrupt.output);
+    const interruptError = findMiResult(interrupt.output, "error");
+    if (interruptError) {
+      const rawOutput = rawParts.join("");
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        commandDispatched: true,
+        error: miErrorMessage(interruptError),
+        code: "GDB_INTERRUPT_FAILED",
+        observedTargetExecutionState: "running",
+      };
+    }
+
+    const stopped = await this.waitForInterruptStop(interrupt.output, remaining());
+    rawParts.push(stopped.output);
+    if (stopped.processExited) return processExited("interrupt observation", { ...stopped, output: "" });
+    if (stopped.timedOut) return timedOut("interrupt observation", { ...stopped, output: "" });
+    const rawOutput = rawParts.join("");
+    if (
+      !hasIntentionalInterruptStop(rawOutput)
+      && !hasIsolatedRemoteInterruptStop(rawOutput, interruptedExecutionToken, interruptToken)
+    ) {
+      return {
+        success: false,
+        output: this.cleanMI(rawOutput),
+        rawOutput,
+        dispatchedCommand,
+        commandDispatched: true,
+        stopReason: this.stopEvent ?? undefined,
+        error: "target stopped for a reason other than the requested SIGINT",
+        code: "GDB_INTERRUPT_STOP_UNSAFE",
+        observedTargetExecutionState: this.targetExecutionState,
+      };
+    }
+    return {
+      success: true,
+      output: this.cleanMI(rawOutput),
+      rawOutput,
+      dispatchedCommand,
+      commandDispatched: true,
+      stopReason: this.stopEvent ?? undefined,
+      observedTargetExecutionState: "halted",
+    };
+  }
+
   private async insertBreakpointWhileRunning(dispatchedCommand: string, timeout: number): Promise<GDBResponse> {
     const deadline = Date.now() + timeout;
     const remaining = () => Math.max(1, deadline - Date.now());
@@ -464,6 +608,7 @@ export class GDBClient {
         output: this.cleanMI(rawOutput),
         rawOutput,
         dispatchedCommand,
+        commandDispatched: breakpointCommandDispatched,
         error: `GDB breakpoint transaction timed out during ${phase} after ${timeout}ms; the GDB client was terminated before releasing the Probe queue`,
         code: "GDB_COMMAND_TIMEOUT",
         ...this.exitFacts(),
@@ -477,6 +622,7 @@ export class GDBClient {
         output: this.cleanMI(rawOutput),
         rawOutput,
         dispatchedCommand,
+        commandDispatched: breakpointCommandDispatched,
         error: `GDB exited during the ${phase} phase of the running-target breakpoint transaction`,
         code: "GDB_PROCESS_EXITED",
         ...this.exitFacts(),
@@ -1139,10 +1285,10 @@ function hasIsolatedRemoteInterruptStop(
   const interruptDoneIndex = lines.findIndex((line) => line.startsWith(`${interruptToken}^done`));
   const stop = stops[0];
   if (interruptDoneIndex < 0 || stop.index <= interruptDoneIndex) return false;
-  const stopHasExpectedExecutionToken = stop.line.startsWith(`${executionToken}*stopped`);
-  // Temporal ordering after interrupt ^done cannot prove that an un-tokened
-  // async stop was caused by this transaction rather than a real target stop.
-  if (!stopHasExpectedExecutionToken) return false;
+  const stopToken = stop.line.match(/^(\d+)\*stopped/)?.[1];
+  // GDB/MI permits asynchronous records without a token. Accept that documented
+  // form only after the unique interrupt result and reject any conflicting token.
+  if (stopToken !== undefined && stopToken !== executionToken) return false;
   if (!/(?:^|,)reason="signal-received"(?:,|$)/.test(stop.line)) return false;
   if (!/(?:^|,)signal-name="SIGTRAP"(?:,|$)/.test(stop.line)) return false;
   return /(?:^|,)stopped-threads="all"(?:,|$)/.test(stop.line);

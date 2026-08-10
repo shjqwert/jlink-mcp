@@ -1,12 +1,12 @@
 # Agent Routing Evaluation
 
-This suite checks whether an Agent selects the correct J-Link MCP tools, preserves required ordering, avoids forbidden tools, and obtains causal user confirmation for high-impact operations.
+This suite checks whether an Agent selects the correct J-Link MCP tools, preserves required ordering, avoids forbidden tools, and keeps bounded HSS preflight relationships.
 
 ## Two evaluation modes
 
-`npm run test:agent-routing` is deterministic and offline. It loads the tool catalog from the compiled MCP server, validates 20 routing cases, scores checked-in reference traces, and proves the scorer rejects negative controls. This command is suitable for CI and never contacts a model or a debug probe.
+`npm run test:agent-routing` is deterministic and offline. It first validates the default 9-tool compact catalog and its 2/1/1/1 interaction budgets, then loads the explicit `legacy` profile for the retained 20-case direct-tool suite, scores checked-in reference traces, and proves the scorer rejects negative controls. This command is suitable for CI and never contacts a model or a debug probe.
 
-`npm run eval:agent-routing` runs the same cases through an external real-Agent adapter. It is opt-in because provider credentials, model selection, and host integration are environment-specific:
+`npm run eval:agent-routing` runs the retained legacy cases through an external real-Agent adapter. It is opt-in because provider credentials, model selection, and host integration are environment-specific:
 
 ```text
 npm run eval:agent-routing -- --adapter node --adapter-arg path/to/adapter.mjs --output agent-routing-report.json
@@ -47,7 +47,7 @@ The evaluator writes one JSON request to adapter stdin. It contains:
 }
 ```
 
-Expected tools, ordering, forbidden tools, and confirmation answers are intentionally excluded. `evaluationId` is opaque. The adapter may use `harnessPolicy` to simulate the environment and user decisions, but must pass only `modelInput` to the model. The adapter returns one JSON trace on stdout:
+Expected tools, ordering, and forbidden tools are intentionally excluded. `evaluationId` is opaque. The adapter may use `harnessPolicy` to simulate the environment, but must pass only `modelInput` to the model. The adapter returns one JSON trace on stdout:
 
 ```json
 {
@@ -67,20 +67,14 @@ Expected tools, ordering, forbidden tools, and confirmation answers are intentio
 
 Supported event forms are:
 
-- `tool_call`: `tool`, `arguments`, and, for confirmed operations, `operationId`.
+- `tool_call`: `callId`, `tool`, and `arguments`.
 - `tool_result`: the matching `callId`, `ok`, and a simulated `result`.
-- `confirmation_request`: `operationId`, `tool`, exact `arguments`, and a concrete `impact`.
-- `user_confirmation`: the same `operationId`, `source: "user"`, and `approved`.
-
-A destructive or raw command passes only when the confirmation request precedes the call, the user approval precedes the call, the operation ID and arguments remain unchanged, and the executed call sets `userConfirmed=true`. A call after rejection fails.
-
-The Codex adapter uses fixed host mediation for these operations: the Agent first calls with `userConfirmed=false`, the shim obtains the simulated explicit user decision without exposing it in the initial model input, and only an approval permits an exact retry with `userConfirmed=true`. A missing or non-boolean harness decision is treated as rejection.
 
 For a new or changed HSS capture, the scorer requires a successful `dryRun=true` result before the live call. `projectRoot`, `variables`, `writeVariables`, `rateHz`, `durationSec`, and `qualityOracle` must remain unchanged. The live call may omit `dryRun` because its Schema default is `false`. Capability-only checks remain dry-run operations. A fresh matching preflight may be reused when the case explicitly provides that state.
 
 ## Case data
 
-- `cases.json` defines user goals, simulated state, expected partial order, forbidden tools, confirmations, and HSS preflight relationships.
+- `cases.json` defines user goals, simulated state, expected partial order, forbidden tools, and HSS preflight relationships.
 - `reference-traces.json` is deterministic scorer test data, not a model benchmark result.
 
 Real-Agent reports retain provider, model, host, adapter version, isolation label, and a sanitized event trace for each case. Report serialization removes non-contract event fields and redacts structured project-root, path, probe-serial, and credential-like fields plus strings that are entirely absolute paths. It does not guarantee removal of secrets embedded inside arbitrary free-text messages; run `test:privacy` before sharing a report and prefer an externally isolated harness. Scoring always uses the original in-memory trace before redaction so unexpected calls remain detectable.
