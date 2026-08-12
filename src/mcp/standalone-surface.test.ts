@@ -344,7 +344,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
   try {
     await client.connect(transport);
     assert.equal(client.getServerVersion()?.name, "jlink-mcp");
-    assert.equal(client.getServerVersion()?.version, "2.0.20");
+    assert.equal(client.getServerVersion()?.version, "2.1.0");
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
     const toolByName = new Map(tools.map((tool) => [tool.name, tool]));

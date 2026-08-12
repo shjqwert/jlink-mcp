@@ -6,6 +6,12 @@ The server serializes physical Probe access and reports observed state and side 
 
 Current source keeps the original 40-tool protocol in the opt-in `legacy` and `acceptance` profiles while making `compact` the default. `advanced` adds one explicit raw-command escape hatch.
 
+## v2.1.0 changes
+
+- MCP result modes now separate canonical structured output, full diagnostics, and text compatibility without limiting the available tool surface.
+- HSS windows can serialize timestamped variable reads, variable writes, and capture-owner `resume`/`continue` actions in one workflow.
+- Newly finalized captures retain metadata plus binary Raw facts and materialize the verified SQLite query index only when analysis is requested.
+
 ## v2.0.20 changes
 
 - The default MCP surface is reduced from 40 direct tools to nine task tools: `project`, `inspect`, `write`, `control`, `program`, `debug`, `trace`, `capture`, and `diagnose_crash`.
@@ -75,7 +81,7 @@ npm run test:release-install
 `build:release` verifies the pinned statically linked Windows x64 HSS Helper, its component and
 protocol versions, runs its self-test, and builds the Node entry points. `pack:release` runs the
 complete release gate, then creates the installable npm archive, portable ZIP, and SHA-256 manifest
-under `release/v2.0.20/`. The package is marked private to prevent accidental npm Registry
+under `release/v<package-version>/`. The package is marked private to prevent accidental npm Registry
 publication; release artifacts are distributed only through GitHub Releases.
 
 ## Portable MCP configuration
