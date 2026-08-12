@@ -10,6 +10,7 @@
  *     JLINK_DEVICE, JLINK_INSTALL_DIR, JLINK_INTERFACE, JLINK_SPEED,
  *     JLINK_SERIAL, JLINK_GDB_PORT, JLINK_RTT_PORT, JLINK_SWO_PORT
  *   MCP surface: JLINK_MCP_PROFILE=compact|advanced|legacy|acceptance (default: compact)
+ *   MCP result: JLINK_MCP_RESULT_MODE=normal|full|text (default: compact receipt for task profiles; text for legacy)
  *   Local roots: JLINK_MCP_STORAGE_ROOT, JLINK_MCP_EVIDENCE_ROOT, JLINK_MCP_QUEUE_ROOT
  */
 
@@ -18,6 +19,7 @@ import { ProbeFactoryConfig } from "../probe/factory";
 import { initLogger } from "../utils/logger";
 import { dirname } from "node:path";
 import { parseMcpProfile } from "./profile";
+import { parseMcpResultMode } from "./result-mode";
 
 // Stderr logger for standalone mode
 initLogger({ appendLine(msg: string) { process.stderr.write(msg + "\n"); } });
@@ -53,6 +55,7 @@ async function main() {
     return;
   }
   const probeConfig = buildProbeConfig();
+  const resultModeValue = env("JLINK_MCP_RESULT_MODE");
   process.stderr.write(`Starting MCP server with probe: ${probeConfig.type}\n`);
 
   const server = new JLinkMcpServer(probeConfig, {
@@ -60,6 +63,7 @@ async function main() {
     evidenceRoot: env("JLINK_MCP_EVIDENCE_ROOT"),
     queueRoot: env("JLINK_MCP_QUEUE_ROOT"),
     profile: parseMcpProfile(env("JLINK_MCP_PROFILE")),
+    resultMode: resultModeValue ? parseMcpResultMode(resultModeValue) : undefined,
   });
 
   const shutdown = async () => { await server.dispose(); process.exit(0); };

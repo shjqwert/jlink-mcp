@@ -1271,6 +1271,7 @@ function validateEvent(event: JcapV1Event, previousSequence: number, previousTic
     };
     if (lifecycleState ? !allowed[lifecycleState].includes(next) : next !== "active") throw new Error(`invalid JCAP lifecycle transition ${lifecycleState ?? "none"} -> ${next}`);
   }
+  if (event.type === "target_control") validateTargetControlEvent(event);
   if (event.type === "variable_write") validateVariableWriteEvent(event, variables);
   if (event.type === "quality") validateQualityEvent(event);
   validateJsonNumbers(event);
@@ -1328,6 +1329,61 @@ function assertQualityFacts(metadata: JcapV1Metadata, events: readonly JcapV1Eve
   if (metadata.state === "completed" && quality.durationValidated !== true) throw new Error("completed capture lacks validated duration evidence");
 }
 
+function validateTargetControlEvent(event: JcapV1Event): void {
+  if (event.action !== "resume" || !["resume", "continue"].includes(String(event.requestedAction))) {
+    throw new Error("JCAP target_control action is invalid");
+  }
+  if (!isU64(event.operationStartTick) || !isU64(event.operationEndTick)
+    || BigInt(event.operationEndTick) < BigInt(event.operationStartTick) || event.tick !== event.operationEndTick
+    || !["helper_qpc", "controller_fallback"].includes(String(event.timingSource))) {
+    throw new Error("JCAP target_control timing evidence is invalid");
+  }
+  if (!validTimestamp(event.startedAt) || !validTimestamp(event.endedAt) || Date.parse(event.endedAt) < Date.parse(event.startedAt)) {
+    throw new Error("JCAP target_control wall-clock evidence is invalid");
+  }
+  if (typeof event.timingDegraded !== "boolean"
+    || event.timingSource === "helper_qpc" && event.timingDegraded
+    || event.timingSource === "controller_fallback" && !event.timingDegraded) {
+    throw new Error("JCAP target_control timing-source evidence is inconsistent");
+  }
+  const helperTicksValid = isU64(event.helperOperationStartTick) && isU64(event.helperOperationEndTick)
+    && BigInt(event.helperOperationEndTick) >= BigInt(event.helperOperationStartTick);
+  if (event.timingSource === "helper_qpc" && !helperTicksValid
+    || event.timingSource === "controller_fallback" && !(event.helperOperationStartTick === null && event.helperOperationEndTick === null || helperTicksValid)) {
+    throw new Error("JCAP target_control Helper timing evidence is invalid");
+  }
+  if (typeof event.controlAttempted !== "boolean" || typeof event.controlIssued !== "boolean"
+    || typeof event.resumeIssued !== "boolean" || typeof event.stateUnknown !== "boolean"
+    || event.controlIssued && !event.controlAttempted || event.resumeIssued && !event.controlIssued) {
+    throw new Error("JCAP target_control execution evidence is invalid");
+  }
+  if (typeof event.operationId !== "string" || !UUID.test(event.operationId)) throw new Error("JCAP target_control operation identity is invalid");
+  if (!Array.isArray(event.ipcRequestIds) || event.ipcRequestIds.length > 1
+    || event.ipcRequestIds.some((requestId) => typeof requestId !== "string" || !UUID.test(requestId))
+    || new Set(event.ipcRequestIds).size !== event.ipcRequestIds.length) {
+    throw new Error("JCAP target_control IPC identities are invalid");
+  }
+  if (!["running", "halted", "unknown"].includes(String(event.beforeState))
+    || !["running", "halted", "unknown"].includes(String(event.afterState))) {
+    throw new Error("JCAP target_control target-state evidence is invalid");
+  }
+  if (!["completed", "failed"].includes(String(event.outcome))) throw new Error("JCAP target_control outcome is invalid");
+  if (event.error !== null && (!isRecord(event.error) || typeof event.error.code !== "string" || !event.error.code
+    || typeof event.error.message !== "string" || typeof event.error.controlIssued !== "boolean" || typeof event.error.stateUnknown !== "boolean"
+    || event.error.controlIssued !== event.controlIssued || event.error.stateUnknown !== event.stateUnknown)) {
+    throw new Error("JCAP target_control error evidence is invalid");
+  }
+  if (event.outcome === "completed") {
+    if (event.error !== null || event.afterState !== "running" || event.stateUnknown) throw new Error("JCAP target_control completed outcome lacks running-state evidence");
+  } else if (event.error === null) {
+    throw new Error("JCAP target_control failed outcome lacks error evidence");
+  }
+  if (event.recoveredTransaction !== undefined
+    && (!isRecord(event.recoveredTransaction) || event.recoveredTransaction.source !== "durable_hss_memory_receipt")) {
+    throw new Error("JCAP target_control recovery evidence is invalid");
+  }
+}
+
 function validateVariableWriteEvent(event: JcapV1Event, variables: readonly JcapV1VariableDescriptor[]): void {
   const selector = event.selector;
   const descriptor = event.descriptor;
@@ -1365,7 +1421,8 @@ function validateVariableWriteEvent(event: JcapV1Event, variables: readonly Jcap
   }
   if (!["completed", "failed", "restore_failed"].includes(String(event.outcome))) throw new Error("JCAP variable_write outcome is invalid");
   if (event.error !== null && (!isRecord(event.error) || typeof event.error.code !== "string" || !event.error.code || typeof event.error.message !== "string"
-    || typeof event.error.writeIssued !== "boolean" || typeof event.error.stateUnknown !== "boolean")) throw new Error("JCAP variable_write error evidence is invalid");
+    || typeof event.error.writeIssued !== "boolean" || typeof event.error.stateUnknown !== "boolean"
+    || event.error.writeIssued !== event.writeIssued || event.error.stateUnknown !== event.stateUnknown)) throw new Error("JCAP variable_write error evidence is invalid");
   if (event.outcome === "completed" && event.error !== null || event.outcome !== "completed" && event.error === null) throw new Error("JCAP variable_write outcome and error evidence disagree");
 }
 

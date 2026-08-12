@@ -104,9 +104,11 @@ The default `compact` profile registers exactly nine task tools:
 project, inspect, write, control, program, debug, trace, capture, diagnose_crash
 ```
 
-Each task uses a small `action` plus `params` contract. `project` binds the explicit root and handles `devices`, `configure`, `status`, `verify`, and `artifacts`; all other tools consume the bound root internally. `debug.run_to`, `trace.rtt_window`, and `trace.hss_window` each provide one-call managed workflows. Compact results contain the outcome and `jlink://operation/{operationId}` link; the bounded process-local resource retains the full operation envelope.
+Each task uses a small `action` plus `params` contract. `project` binds the explicit root and handles `devices`, `configure`, `status`, `verify`, and `artifacts`; all other tools consume the bound root internally. `debug.run_to`, `trace.rtt_window`, and `trace.hss_window` each provide one-call managed workflows. With no result-mode override, compact/advanced return a bounded receipt plus `jlink://operation/{operationId}`; the bounded process-local resource retains the complete operation envelope when it fits its advertised limits.
 
 The `advanced` profile exposes those nine tools plus `raw`. The raw `gdb` and `probe` actions keep unknown-effect and state-uncertainty reporting without adding a second authorization token to the request.
+
+`JLINK_MCP_RESULT_MODE` controls only the returned representation, not which MCP tools may be called. `normal` returns one structured envelope with defaults, aliases, and nested `details` removed while preserving semantic `data`; `full` returns the complete structured envelope; `text` preserves the original single JSON-text representation. An explicit mode applies to task and direct profiles. Without an override, legacy/acceptance remain text-compatible while compact/advanced use the bounded receipt above.
 
 The `legacy` profile preserves these 40 direct tools and their schemas unchanged. `acceptance` uses the same direct surface so `runId` and full evidence envelopes remain available:
 
@@ -134,27 +136,26 @@ All profiles expose the read-only `rtt://output`, `probe://gdb-server-log`, and 
 - Hardware-action policy belongs to the Agent or MCP client. The server does not require a duplicate confirmation field; it still enforces exact Target identity, bounded inputs, Probe ownership, Artifact freshness, verification, cleanup, and explicit unknown-state reporting.
 - If the target was halted before `flash`, the server verifies that it remains halted and issues a safety halt when the vendor tool leaves its state running or unknown. This recovery is reported explicitly and never resumes a target that was running before Flash.
 - Typed variable and HSS requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
-- HSS is capped at ten synchronized capture variables, 1 kHz, and 60 seconds. Optional `writeVariables` are resolved before start and do not consume capture slots; sampled variables remain writable for compatibility.
+- HSS is capped at ten synchronized capture variables, 1 kHz, and 60 seconds. Optional `writeVariables` are resolved before start and do not consume capture slots; sampled variables remain writable for compatibility. `trace.hss_window` also accepts up to 30 monotonic `actions`: typed writes, typed reads, and capture-owner `resume`/`continue`. Read and write selectors are added to the immutable descriptor plan automatically.
 - Call `hss_start` with `dryRun=true` to obtain capability, configured link speed, and capacity diagnostics without starting a Helper or creating a capture. The server reports requested and effective rates without automatically changing SWD speed or sample rate; falling below 95% is diagnostic, not by itself a corrupt-capture verdict.
 - HSS capability, dry-run, start, and stop preserve the observed target execution state. Native capability discovery restores an unexpected attach-time transition in the same connection with explicit Halt/Go evidence and still fails the operation; later ambiguous state changes remain fail-closed.
-- `debug_sequence_execute` synchronously runs a prevalidated 1–30 second sequence of 2–32 HSS and typed-variable operations. It uses absolute monotonic timing and only executes declared RAM restore/HSS stop cleanup actions after failure, cancellation, or timeout.
+- `debug_sequence_execute` synchronously runs a prevalidated 1–30 second sequence of 2–32 HSS, typed-variable, and capture-owner target-control operations. During an active HSS interval only `resume`/`continue` is allowed; stop the capture before halt, pause, reset, or recover. It uses absolute monotonic timing and only executes declared RAM restore/HSS stop cleanup actions after failure, cancellation, or timeout.
 - Use `read_variable` or `write_variable` for one variable operation. Use `debug_sequence_execute` only when multiple operations require fixed intervals over at least one second; the Agent waits until the complete sequence result is returned.
 - Peripheral register access requires a configured, validated SVD. There is no inferred raw-memory substitute.
 - GDB and RTT sessions are explicit and never start each other. Crash diagnosis inspects an already halted target only.
 
 ## Capture package
 
-JCAP v1 retains exactly four durable files:
+A newly finalized JCAP v1 capture retains three fact-source files:
 
 ```text
 <captureId>.jcap/
   capture.json
   raw/samples.bin
   raw/events.bin
-  capture.db
 ```
 
-Capture queries use `capture.db`; a verified package can rebuild a missing or damaged index from metadata and Raw files. Explicit CSV exports are written outside the package.
+`capture.json` contains bounded metadata, not the sample stream. Samples and events remain in the compact binary Raw files. Finalization verifies and seals those files without building SQLite. The first summary, series, event-window, or export query atomically creates `capture.db` as a derived index; a missing or damaged index can be rebuilt from verified metadata and Raw without changing them. Clients that require the previous indexed four-file package can call `capture.summary` immediately after stop to materialize and verify the fourth file. Explicit CSV exports are written outside the package.
 
 JCAP v1 is the only supported Capture format. Discoverable legacy JCAP v0 packages remain untouched on disk, appear as unsupported in `capture_list`, and cannot be queried or exported.
 

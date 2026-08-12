@@ -9,7 +9,7 @@ import {
   type MemoryWriteInput,
   type ProbeCommandInput,
 } from "./direct-operations";
-import { DebugSequenceExecutor, type DebugSequenceInput } from "./debug-sequence";
+import { DebugSequenceExecutor, type DebugSequenceInput, type DebugSequenceStep } from "./debug-sequence";
 import { HssOperations, type HssCaptureInput } from "./hss-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
 import { CaptureQueryOperations, type CaptureEventWindowInput, type CaptureSeriesInput } from "./capture-query-operations";
@@ -17,7 +17,7 @@ import { SessionOperations } from "./session-operations";
 import { SvdRegisterService, type RegisterWriteInput } from "./svd-operations";
 import { TargetRuntimeRegistry } from "./target-runtime";
 import { TargetStore, type TargetConfigureInput } from "./target-store";
-import type { VariableWriteInput } from "./variable-access-contract";
+import type { VariableRefInput, VariableWriteInput } from "./variable-access-contract";
 import { VariableAccessRouter } from "./variable-access-router";
 import { diagnoseCrash, gdbOpen } from "../tools/register-session-tools";
 import { listDevices } from "../tools/register-target-tools";
@@ -232,14 +232,23 @@ export class TaskOperations {
       if (!Array.isArray(params.variables) || params.variables.length === 0) {
         return inputFailure("trace", "params.variables must contain at least one typed variable selector");
       }
+      let actions: DebugSequenceStep[];
+      try {
+        actions = hssWindowActions(params.actions, durationSec * 1_000);
+      } catch (error) {
+        return inputFailure("trace", error instanceof Error ? error.message : String(error));
+      }
       const capture = {
         ...pickParams(params, ["variables", "writeVariables", "rateHz", "qualityOracle"]),
+        variables: hssWindowVariables(params.variables, actions),
+        writeVariables: hssWindowWriteVariables(params.writeVariables, actions),
         durationSec,
       } as unknown as Omit<HssCaptureInput, "projectRoot" | "dryRun" | "runId">;
       const sequence: DebugSequenceInput = {
         projectRoot,
         steps: [
           { atMs: 0, action: "hss_start", ...capture },
+          ...actions,
           { atMs: durationSec * 1_000, action: "hss_stop" },
         ],
         cleanup: [{ action: "hss_stop" }],
@@ -442,6 +451,82 @@ function requireInteger(tool: string, params: Record<string, unknown>, field: st
   return Number(value);
 }
 
+function hssWindowActions(value: unknown, durationMs: number): DebugSequenceStep[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 30) throw new Error("params.actions must contain at most 30 scheduled actions");
+  let previousAtMs = -1;
+  return value.map((candidate, index) => {
+    if (!isRecord(candidate)) throw new Error(`params.actions[${index}] must be an object`);
+    const atMs = candidate.atMs;
+    if (!Number.isSafeInteger(atMs) || Number(atMs) < 0 || Number(atMs) >= durationMs || Number(atMs) < previousAtMs) {
+      throw new Error(`params.actions[${index}].atMs must be a monotonic integer within 0..${durationMs - 1}`);
+    }
+    previousAtMs = Number(atMs);
+    if (candidate.action === "write_variable") {
+      const ref = hssWindowRef(candidate.ref, index);
+      if (typeof candidate.value !== "number" || !Number.isFinite(candidate.value)) throw new Error(`params.actions[${index}].value must be finite`);
+      for (const flag of ["captureOld", "verify", "restore"] as const) {
+        if (candidate[flag] !== undefined && typeof candidate[flag] !== "boolean") throw new Error(`params.actions[${index}].${flag} must be boolean`);
+      }
+      return {
+        atMs: Number(atMs), action: "write_variable", ref, value: candidate.value,
+        ...(typeof candidate.captureOld === "boolean" ? { captureOld: candidate.captureOld } : {}),
+        ...(typeof candidate.verify === "boolean" ? { verify: candidate.verify } : {}),
+        ...(typeof candidate.restore === "boolean" ? { restore: candidate.restore } : {}),
+      };
+    }
+    if (candidate.action === "read_variable") {
+      return { atMs: Number(atMs), action: "read_variable", ref: hssWindowRef(candidate.ref, index) };
+    }
+    if (candidate.action === "target_control") {
+      if (candidate.control !== "resume" && candidate.control !== "continue") {
+        throw new Error(`params.actions[${index}].control supports only resume or continue; stop capture before halt, pause, reset, or recover`);
+      }
+      return { atMs: Number(atMs), action: "target_control", control: candidate.control };
+    }
+    throw new Error(`params.actions[${index}].action must be write_variable, read_variable, or target_control`);
+  });
+}
+
+function hssWindowRef(value: unknown, index: number): VariableRefInput {
+  if (typeof value === "string" && value.length > 0) return value;
+  if (isRecord(value) && typeof value.artifactGeneration === "string" && typeof value.qualifiedName === "string"
+    && typeof value.layoutHash === "string" && (value.memberPath === undefined || typeof value.memberPath === "string")) {
+    return value as unknown as VariableRefInput;
+  }
+  throw new Error(`params.actions[${index}].ref must be a variable selector`);
+}
+
+function hssWindowVariables(value: unknown, actions: DebugSequenceStep[]): unknown[] {
+  const variables = Array.isArray(value) ? [...value] : [];
+  const seen = new Set(variables.flatMap((entry) => isRecord(entry) && entry.ref !== undefined ? [hssWindowRefKey(entry.ref)] : []));
+  for (const step of actions) {
+    if (step.action !== "read_variable") continue;
+    const key = hssWindowRefKey(step.ref);
+    if (seen.has(key)) continue;
+    variables.push({ ref: step.ref });
+    seen.add(key);
+  }
+  return variables;
+}
+
+function hssWindowWriteVariables(value: unknown, actions: DebugSequenceStep[]): VariableRefInput[] {
+  const writeVariables = Array.isArray(value) ? value.map((entry, index) => hssWindowRef(entry, index)) : [];
+  const seen = new Set(writeVariables.map(hssWindowRefKey));
+  for (const step of actions) {
+    if (step.action !== "write_variable") continue;
+    const key = hssWindowRefKey(step.ref);
+    if (seen.has(key)) continue;
+    writeVariables.push(step.ref);
+    seen.add(key);
+  }
+  return writeVariables;
+}
+
+function hssWindowRefKey(ref: unknown): string {
+  return typeof ref === "string" ? ref : JSON.stringify(ref);
+}
+
 function optionalInteger(value: unknown, fallback: number): number {
   return Number.isSafeInteger(value) ? Number(value) : fallback;
 }
@@ -508,17 +593,11 @@ function composeWorkflow(
   envelope.warnings = distinct(envelope.warnings);
   envelope.data = {
     ...summary,
-    steps: steps.map((step) => ({
-      tool: step.tool,
-      operationId: step.operationId,
-      ok: step.ok,
-      verification: step.verification,
-      before: step.before,
-      after: step.after,
-      observedEffects: step.observedEffects,
-      data: step.data,
-      error: step.error,
-    })),
+    steps: steps.map(workflowStepReceipt),
+  };
+  envelope.details = {
+    kind: "task_workflow",
+    steps,
   };
   envelope.verification = failed
     ? { status: "failed", method: "managed_task_workflow" }
@@ -540,6 +619,73 @@ function composeWorkflow(
     });
   }
   return finishEnvelope(envelope, true);
+}
+
+function workflowStepReceipt(step: OperationEnvelope, index: number): Record<string, unknown> {
+  const verification: Record<string, unknown> = { status: step.verification.status };
+  if (step.verification.method) verification.method = step.verification.method;
+  const receipt: Record<string, unknown> = {
+    index,
+    tool: step.tool,
+    operationId: step.operationId,
+    ok: step.ok,
+    verification,
+  };
+  if (Object.keys(step.before).length) receipt.before = step.before;
+  if (Object.keys(step.after).length) receipt.after = step.after;
+  if (step.requestedEffects.length) receipt.requestedEffects = step.requestedEffects;
+  if (step.observedEffects.length) receipt.observedEffects = step.observedEffects;
+  const data = workflowStepData(step);
+  if (data !== undefined) receipt.data = data;
+  if (step.capture) {
+    const { packageDir: _packageDir, ...capture } = step.capture;
+    receipt.capture = capture;
+  }
+  if (step.error) receipt.error = step.error;
+  return receipt;
+}
+
+function workflowStepData(step: OperationEnvelope): unknown {
+  if (step.data === null || step.data === undefined) return undefined;
+  if (
+    step.tool === "gdb_wait"
+    || step.tool === "gdb_backtrace"
+    || step.tool === "gdb_breakpoint_list"
+    || step.tool === "rtt_read"
+    || step.tool === "rtt_search"
+  ) return step.data;
+  if (!isRecord(step.data)) return undefined;
+  const selected = pickDefined(step.data, [
+    "commandDispatched",
+    "dispatchedCommand",
+    "breakpointId",
+    "targetExecutionStateAfterConnect",
+    "retainedClassifiedAttachHaltForManagedBreakpoint",
+    "observedTargetExecutionState",
+    "preservedTargetExecutionState",
+    "stopReason",
+    "stopReasonDetails",
+    "restored",
+    "skipped",
+    "reason",
+  ]);
+  if (step.tool === "gdb_command") {
+    const managedBreakpointId = breakpointNumber(step);
+    if (managedBreakpointId !== undefined) selected.managedBreakpointId = managedBreakpointId;
+  }
+  return Object.keys(selected).length ? selected : undefined;
+}
+
+function pickDefined(source: Record<string, unknown>, fields: readonly string[]): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (source[field] !== undefined && source[field] !== null) result[field] = source[field];
+  }
+  return result;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function workflowStepIssuedWrite(step: OperationEnvelope): boolean {

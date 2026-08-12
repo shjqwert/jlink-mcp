@@ -378,7 +378,7 @@ export class AcceptanceEvidenceStore {
 
   private recordMcpCommandUnlocked(directory: string, runIdValue: string, tool: string, request: Record<string, unknown>, envelope: OperationEnvelope): void {
     const outputHashes = envelope.outputFiles.map((file) => hashRecord(file));
-    this.appendCommandUnlocked(directory, {
+    const command: CommandRecordInput = {
       schemaVersion: 1,
       runId: runIdValue,
       kind: "mcp",
@@ -392,7 +392,14 @@ export class AcceptanceEvidenceStore {
       target: envelope.target,
       artifact: envelope.artifact,
       outputHashes,
-    });
+    };
+    try {
+      this.appendCommandUnlocked(directory, command);
+    } catch (error) {
+      if (!(error instanceof AcceptanceEvidenceError) || error.code !== "COMMAND_RECORD_TOO_LARGE") throw error;
+      this.appendCommandUnlocked(directory, compactMcpCommandRecord(command, envelope));
+      throw error;
+    }
   }
 
   private appendCommandUnlocked(directory: string, input: CommandRecordInput): z.infer<typeof commandRecordSchema> {
@@ -566,6 +573,68 @@ function hashRecord(file: string, recordedPath = resolve(file)): z.infer<typeof 
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
+}
+
+function compactMcpCommandRecord(command: CommandRecordInput, envelope: OperationEnvelope): CommandRecordInput {
+  return {
+    ...command,
+    request: {
+      evidenceOmitted: true,
+      reason: "command_record_too_large",
+      originalBytes: jsonByteLength(command.request),
+    },
+    result: {
+      evidenceSummary: true,
+      omitted: {
+        reason: "command_record_too_large",
+        originalBytes: jsonByteLength(command.result),
+      },
+      ok: envelope.ok,
+      operationId: envelope.operationId,
+      tool: envelope.tool,
+      verification: {
+        status: envelope.verification.status,
+        ...(envelope.verification.method ? { method: truncateEvidenceText(envelope.verification.method, 1024) } : {}),
+      },
+      requestedEffects: envelope.requestedEffects.slice(0, 128).map((value) => truncateEvidenceText(value, 512)),
+      observedEffects: envelope.observedEffects.slice(0, 128).map((value) => truncateEvidenceText(value, 512)),
+      warnings: envelope.warnings.slice(0, 32).map((value) => truncateEvidenceText(value, 2048)),
+      error: envelope.error ? {
+        code: truncateEvidenceText(envelope.error.code, 256),
+        stage: truncateEvidenceText(envelope.error.stage, 256),
+        message: truncateEvidenceText(envelope.error.message, 4096),
+        retryable: envelope.error.retryable,
+        writeIssued: envelope.error.writeIssued,
+        stateUnknown: envelope.error.stateUnknown,
+      } : null,
+      capture: compactEvidenceIdentity(envelope.capture, ["captureId", "state", "runId", "sampleCount", "actualRateHz"]),
+    },
+    target: compactEvidenceIdentity(envelope.target, ["projectRoot", "generation", "device", "gdbDevice", "probeSerial", "interface", "speed"]),
+    artifact: compactEvidenceIdentity(envelope.artifact, ["path", "generation", "sha256", "match"]),
+  };
+}
+
+function compactEvidenceIdentity(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const key of keys) {
+    const field = source[key];
+    if (typeof field === "string") result[key] = truncateEvidenceText(field, 4096);
+    else if (typeof field === "number" && Number.isFinite(field) || typeof field === "boolean" || field === null) result[key] = field;
+  }
+  return result;
+}
+
+function jsonByteLength(value: unknown): number | null {
+  try { return Buffer.byteLength(JSON.stringify(value) ?? "null"); }
+  catch { return null; }
+}
+
+function truncateEvidenceText(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= maxBytes) return value;
+  return `${bytes.subarray(0, Math.max(0, maxBytes - 3)).toString("utf8").replace(/\uFFFD+$/u, "")}...`;
 }
 
 function nextCommandSequence(file: string): number {

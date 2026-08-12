@@ -1,5 +1,8 @@
 export function parseMcpToolResult(result) {
   const raw = result?.content?.find((entry) => entry.type === "text")?.text ?? "";
+  if (result?.structuredContent && typeof result.structuredContent === "object") {
+    return { raw, response: result.structuredContent };
+  }
   try {
     return { raw, response: JSON.parse(raw) };
   } catch {

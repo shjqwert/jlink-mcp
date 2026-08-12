@@ -13,6 +13,14 @@ export interface OperationDetailStoreOptions {
   now?: () => number;
 }
 
+export interface OperationDetailPutResult {
+  available: boolean;
+  complete: boolean;
+  storedBytes: number;
+  originalBytes?: number;
+  reason?: "not_json_serializable" | "max_bytes" | "store_bounds";
+}
+
 export class OperationDetailStore {
   private readonly entries = new Map<string, StoredOperationDetail>();
   private readonly maxEntries: number;
@@ -28,29 +36,38 @@ export class OperationDetailStore {
     this.now = options.now ?? Date.now;
   }
 
-  put(envelope: OperationEnvelope): void {
+  put(envelope: OperationEnvelope): OperationDetailPutResult {
     this.pruneExpired();
     let json: string;
+    let complete = true;
+    let originalBytes: number | undefined;
+    let reason: OperationDetailPutResult["reason"];
     try { json = JSON.stringify(envelope); }
     catch {
+      complete = false;
+      reason = "not_json_serializable";
       json = JSON.stringify({
         ok: envelope.ok,
         operationId: envelope.operationId,
         tool: envelope.tool,
         error: envelope.error,
         detailTruncated: true,
-        reason: "not_json_serializable",
+        reason,
       });
     }
     let bytes = Buffer.byteLength(json);
     if (bytes > this.maxBytes) {
+      complete = false;
+      reason = "max_bytes";
+      originalBytes = bytes;
       json = JSON.stringify({
         ok: envelope.ok,
         operationId: envelope.operationId,
         tool: envelope.tool,
         error: envelope.error,
         detailTruncated: true,
-        originalBytes: bytes,
+        reason,
+        originalBytes,
       });
       bytes = Buffer.byteLength(json);
     }
@@ -60,6 +77,14 @@ export class OperationDetailStore {
     this.entries.set(envelope.operationId, { json, storedAt: this.now(), bytes });
     this.totalBytes += bytes;
     this.pruneBounds();
+    const available = this.entries.has(envelope.operationId);
+    return {
+      available,
+      complete: available && complete,
+      storedBytes: available ? bytes : 0,
+      originalBytes,
+      reason: available ? reason : "store_bounds",
+    };
   }
 
   get(operationId: string): string | undefined {

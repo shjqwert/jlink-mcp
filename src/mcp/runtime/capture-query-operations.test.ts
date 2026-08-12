@@ -20,6 +20,7 @@ test("Capture queries report index repair side effects after integrity verificat
   const packageDir = path.join(root, "captures", `${captureId}.jcap`);
   try {
     writeTerminalCapture(packageDir, captureId);
+    assert.equal(existsSync(path.join(packageDir, "capture.db")), false);
     const result = await new CaptureQueryOperations(root).summary(captureId);
     assert.equal(result.ok, true, JSON.stringify(result.error));
     assert.deepEqual(result.requestedEffects, ["read_bounded_capture_index", "repair_capture_index_if_required"]);
@@ -28,6 +29,7 @@ test("Capture queries report index repair side effects after integrity verificat
       "capture_metadata_atomically_published",
     ]);
     assert.equal((result.data as { indexRebuilt?: boolean }).indexRebuilt, true);
+    assert.equal(existsSync(path.join(packageDir, "capture.db")), true);
     assert.deepEqual(result.verification, {
       status: "verified",
       method: "bounded_jcap_v1_query_after_integrity",

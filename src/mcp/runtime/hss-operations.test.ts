@@ -221,6 +221,16 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal(fixture.adapter.valueAt(0x20000000), 11);
     assert.equal(fixture.adapter.writeCount, 3);
 
+    fixture.adapter.targetState = "halted";
+    const resumeCountBeforeControl = fixture.adapter.resumeCount;
+    const continued = await fixture.hss.controlTarget({ projectRoot: fixture.projectRoot, captureId, action: "continue" });
+    assert.equal(continued.ok, true, JSON.stringify(continued.error));
+    assert.equal((continued.data as { requestedAction: string }).requestedAction, "continue");
+    assert.equal((continued.data as { action: string }).action, "resume");
+    assert.equal((continued.data as { beforeState: string }).beforeState, "halted");
+    assert.equal((continued.data as { afterState: string }).afterState, "running");
+    assert.equal(fixture.adapter.resumeCount, resumeCountBeforeControl + 1);
+
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(stopped.ok, true, JSON.stringify(stopped));
     assert.equal((stopped.capture as { state: string }).state, "stopped");
@@ -229,12 +239,26 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal((stopped.capture as { sampleThresholdMet: boolean }).sampleThresholdMet, false);
     assert.equal((stopped.capture as { readStatistics: { emptyReads: number } }).readStatistics.emptyReads, 44);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
-    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.db", "capture.json", "raw"]);
+    assert.equal(stopped.requestedEffects.includes("rebuild_capture_index"), false);
+    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.json", "raw"]);
     assert.deepEqual(readdirSync(join(packageDir, "raw")).sort(), ["events.bin", "samples.bin"]);
 
     const raw = readJcapV1Raw(packageDir);
+    assert.equal(raw.metadata.state, "stopped");
+    assert.equal(raw.metadata.indexStatus, "rebuild_required");
+    assert.equal(raw.metadata.raw.samples.sha256?.length, 64);
+    assert.equal(raw.metadata.raw.events.sha256?.length, 64);
+    const rawBeforeQuery = rawHashes(packageDir);
     const writeEvents = raw.events.filter((event) => event.type === "variable_write");
+    const controlEvents = raw.events.filter((event) => event.type === "target_control");
     assert.equal(writeEvents.length, 3);
+    assert.equal(controlEvents.length, 1);
+    assert.equal(controlEvents[0].requestedAction, "continue");
+    assert.equal(controlEvents[0].action, "resume");
+    assert.equal(controlEvents[0].beforeState, "halted");
+    assert.equal(controlEvents[0].afterState, "running");
+    assert.equal(controlEvents[0].timingSource, "helper_qpc");
+    assert.equal(controlEvents[0].tick, controlEvents[0].operationEndTick);
     const defaultEvent = writeEvents[1];
     const writeEvent = writeEvents[2];
     assert.deepEqual((defaultEvent.old as { state: string }).state, "captured");
@@ -247,8 +271,13 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.deepEqual(writeEvent.sampleAlignment, { method: "terminal_raw_nearest", status: "derive_on_rebuild" });
     assert.equal(Object.hasOwn(writeEvent, "neighbors"), false);
 
+    assert.equal(readdirSync(packageDir).includes("capture.db"), false);
     const summary = await fixture.captures.summary(captureId);
-    assert.equal(summary.ok, true);
+    assert.equal(summary.ok, true, JSON.stringify(summary.error));
+    assert.equal((summary.data as { indexRebuilt?: boolean }).indexRebuilt, true);
+    assert.deepEqual(summary.observedEffects, ["capture_db_atomically_published", "capture_metadata_atomically_published"]);
+    assert.equal(readdirSync(packageDir).includes("capture.db"), true);
+    assert.deepEqual(rawHashes(packageDir), rawBeforeQuery);
     const series = await fixture.captures.series({ captureId, variables: ["var0"], startTick: "0", endTick: "100000000", bucketCount: 4 });
     assert.equal(series.ok, true);
     const window = await fixture.captures.eventWindow({ captureId, eventId: writeEvent.eventId, variables: ["var0"], beforeMs: 20, afterMs: 20, bucketCount: 4 });
@@ -282,12 +311,16 @@ test("HSS stop is idempotent after the Helper completes naturally", async () => 
     fixture.adapter.completeLatest();
     const settled = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
     assert.equal((settled.capture as { state: string }).state, "completed", JSON.stringify(settled));
+    const packageDir = String((settled.capture as { packageDir: string }).packageDir);
+    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.json", "raw"]);
+    assert.equal(readJcapV1Raw(packageDir).metadata.indexStatus, "rebuild_required");
 
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
     assert.equal((stopped.capture as { state: string }).state, "completed");
     assert.equal((stopped.data as { alreadyTerminal: boolean }).alreadyTerminal, true);
     assert.equal(stopped.verification?.method, "successful_terminal_jcap_state_idempotent_stop");
+    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.json", "raw"]);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
   } finally {
     fixture.adapter.crashLatest();
@@ -807,7 +840,15 @@ test("dead fake helper becomes interrupted and recovers the trustworthy Raw pref
     const recovered = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(recovered.ok, true, JSON.stringify(recovered.error));
     assert.deepEqual(rawHashes(packageDir), before);
-    assert.equal(((recovered.data as { index: { indexStatus: string } }).index).indexStatus, "ready");
+    assert.equal(((recovered.data as { index: { indexStatus: string } }).index).indexStatus, "rebuild_required");
+    assert.equal(readdirSync(packageDir).includes("capture.db"), false);
+    assert.equal(recovered.observedEffects.includes("capture_index_rebuilt"), false);
+    assert.equal(recovered.verification.method, "terminal_raw_integrity_with_deferred_index");
+    const summary = await fixture.captures.summary(captureId);
+    assert.equal(summary.ok, true, JSON.stringify(summary.error));
+    assert.equal((summary.data as { indexRebuilt?: boolean }).indexRebuilt, true);
+    assert.equal(readdirSync(packageDir).includes("capture.db"), true);
+    assert.deepEqual(rawHashes(packageDir), before);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -865,6 +906,34 @@ test("event persistence before receipt ACK is recovered idempotently without dup
     const retried = await fixture.variables.writeVariable({ projectRoot: fixture.projectRoot, ref: fixture.ref(0), value: 13 });
     assert.equal(retried.ok, true, JSON.stringify(retried.error));
     assert.equal(fixture.adapter.writeCount, 2);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("target-control receipt ACK recovery is idempotent and preserves one durable event", async () => {
+  const fixture = await createFixture();
+  try {
+    const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    const captureId = String((started.data as { captureId: string }).captureId);
+    const packageDir = String((started.data as { packageDir: string }).packageDir);
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failNextMemoryAcknowledge = true;
+
+    const controlled = await fixture.hss.controlTarget({ projectRoot: fixture.projectRoot, captureId, action: "resume" });
+    assert.equal(controlled.ok, true, JSON.stringify(controlled.error));
+    assert.equal(controlled.warnings.some((warning) => warning.includes("receipt cleanup is pending")), true);
+    assert.equal(readJcapV1Raw(packageDir).events.filter((event) => event.type === "target_control").length, 1);
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true, JSON.stringify(status.error));
+    assert.equal(status.observedEffects.includes("capture_target_control_event_recovered"), true);
+    assert.equal(status.observedEffects.includes("memory_receipt_acknowledged"), true);
+    assert.equal(readJcapV1Raw(packageDir).events.filter((event) => event.type === "target_control").length, 1);
+
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -1316,7 +1385,23 @@ class FakeHssAdapter implements HssHelperAdapter {
     const elapsedQpc = 1_000_000n + BigInt(Math.max(0, Date.now() - this.qpcEpochMs)) * 1_000n;
     if (this.qpc < elapsedQpc) this.qpc = elapsedQpc;
     const requestId = `56000000-0000-4000-8000-${String(this.nextRequestId++).padStart(12, "0")}`;
-    if (request.op === "resume") return { requestId, status: "ok" };
+    if (request.op === "resume") {
+      const beforeState = this.targetState;
+      const before = this.qpc += 1_000n;
+      const resumeIssued = beforeState === "halted";
+      if (resumeIssued) {
+        this.targetState = "running";
+        this.resumeCount += 1;
+      }
+      const after = this.qpc += 1_000n;
+      const response = {
+        requestId, status: "ok" as const, op: "resume" as const,
+        beforeState, afterState: this.targetState, resumeIssued,
+        operationBeforeQpcCounter: before.toString(), operationAfterQpcCounter: after.toString(),
+      };
+      this.rememberMemoryTransaction(control, request, response);
+      return response;
+    }
     const address = Number.parseInt(request.address ?? "", 16);
     const length = request.length ?? 0;
     const declared = this.captureForControl.get(control.planPath)?.declared ?? [];
@@ -1442,7 +1527,7 @@ class FakeHssAdapter implements HssHelperAdapter {
   readRecords(control: HssCaptureControlFiles): Array<Record<string, unknown>> { return this.records.get(control.planPath) ?? []; }
 
   private rememberMemoryTransaction(control: HssCaptureControlFiles, request: HssMemoryRequest, response: HssMemoryResponse): void {
-    if (request.op !== "write") return;
+    if (request.op !== "write" && request.op !== "resume") return;
     const now = new Date().toISOString();
     const transaction: HssMemoryTransaction = {
       formatVersion: 1,

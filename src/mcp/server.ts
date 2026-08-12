@@ -22,7 +22,7 @@ import { HssOperations } from "./runtime/hss-operations";
 import { DebugSequenceExecutor } from "./runtime/debug-sequence";
 import { VariableAccessRouter } from "./runtime/variable-access-router";
 import { CaptureQueryOperations } from "./runtime/capture-query-operations";
-import { OperationDetailStore } from "./runtime/operation-detail-store";
+import { OperationDetailStore, type OperationDetailPutResult } from "./runtime/operation-detail-store";
 import { TaskOperations } from "./runtime/task-operations";
 import {
   AGENT_TOOL_NAMES,
@@ -44,11 +44,14 @@ import {
   type TaskToolName,
 } from "./tools/task-tool-contract";
 import { DEFAULT_MCP_PROFILE, type McpProfile, usesLegacySurface } from "./profile";
+import { DEFAULT_MCP_RESULT_MODE, type McpResultMode } from "./result-mode";
+import { operationToolResult } from "./runtime/operation-result";
 import { JLINK_MCP_VERSION } from "./version";
 
 export { AGENT_TOOL_NAMES } from "./tools/tool-contract";
 export { ADVANCED_TOOL_NAMES, COMPACT_TOOL_NAMES } from "./tools/task-tool-contract";
 export { MCP_PROFILES, parseMcpProfile } from "./profile";
+export { MCP_RESULT_MODES, parseMcpResultMode } from "./result-mode";
 
 export interface JLinkMcpServerOptions {
   cwd?: string;
@@ -56,6 +59,7 @@ export interface JLinkMcpServerOptions {
   evidenceRoot?: string;
   queueRoot?: string;
   profile?: McpProfile;
+  resultMode?: McpResultMode;
 }
 
 interface ProjectContext {
@@ -121,6 +125,7 @@ export class JLinkMcpServer {
   private readonly runtimes = new TargetRuntimeRegistry();
   private readonly options: JLinkMcpServerOptions;
   private readonly profile: McpProfile;
+  private readonly resultMode?: McpResultMode;
   private readonly operationDetails = new OperationDetailStore();
   private projectContext?: ProjectContext;
   private readonly implemented = new Set<string>();
@@ -128,6 +133,7 @@ export class JLinkMcpServer {
   constructor(probeConfig?: ProbeFactoryConfig, options: JLinkMcpServerOptions = {}) {
     this.options = options;
     this.profile = options.profile ?? DEFAULT_MCP_PROFILE;
+    this.resultMode = options.resultMode;
     this.discoveryProbe = createProbeBackend(probeConfig ?? { type: "jlink" }, this.discoveryProcesses);
     this.queue = new ProbeQueue(options.queueRoot);
     this.memorySessions = new MemorySessionManager(this.queue);
@@ -214,7 +220,7 @@ export class JLinkMcpServer {
       : { ...inputSchema, runId: acceptanceRunId.optional() };
     this.server.registerTool(name, { description: TOOL_DESCRIPTIONS[name], inputSchema: schemaWithRunId }, async (input, extra) => {
       const gateFailure = this.projectGateFailure(name, input as Record<string, unknown>);
-      if (gateFailure) return toolResult(gateFailure);
+      if (gateFailure) return operationToolResult(gateFailure, this.resultMode ?? DEFAULT_MCP_RESULT_MODE);
       const requestedRunId = (input as Record<string, unknown>).runId;
       const execute = async (): Promise<OperationEnvelope> => {
         try { return await handler(input as Record<string, unknown>, extra.signal); }
@@ -249,7 +255,7 @@ export class JLinkMcpServer {
           });
         }
       }
-      return toolResult(envelope);
+      return operationToolResult(envelope, this.resultMode ?? DEFAULT_MCP_RESULT_MODE);
     });
   }
 
@@ -262,7 +268,7 @@ export class JLinkMcpServer {
     this.implemented.add(name);
     this.server.registerTool(name, { description: TASK_TOOL_DESCRIPTIONS[name], inputSchema }, async (input, extra) => {
       if (name !== "project" && !this.projectContext) {
-        return this.compactToolResult(failEnvelope(createOperationEnvelope(name), {
+        return this.taskToolResult(failEnvelope(createOperationEnvelope(name), {
           code: "PROJECT_NOT_BOUND",
           stage: "project_binding",
           message: "call project with action=bind or configure before using project-scoped tools",
@@ -286,8 +292,14 @@ export class JLinkMcpServer {
           stateUnknown: false,
         });
       }
-      return this.compactToolResult(envelope);
+      return this.taskToolResult(envelope);
     });
+  }
+
+  private taskToolResult(envelope: OperationEnvelope) {
+    return this.resultMode
+      ? operationToolResult(envelope, this.resultMode)
+      : this.compactToolResult(envelope);
   }
 
   private async handleTaskProject(
@@ -505,7 +517,7 @@ export class JLinkMcpServer {
         runningDiscoveryProcesses: this.discoveryProcesses.listRunning(),
       }, null, 2), mimeType: "application/json" }] }));
 
-    if (!usesLegacySurface(this.profile)) {
+    if (!usesLegacySurface(this.profile) && this.resultMode === undefined) {
       this.server.resource(
         "operation-detail",
         new ResourceTemplate("jlink://operation/{operationId}", { list: undefined }),
@@ -521,8 +533,8 @@ export class JLinkMcpServer {
   }
 
   private compactToolResult(envelope: OperationEnvelope) {
-    this.operationDetails.put(envelope);
-    return compactToolResult(envelope);
+    const detail = this.operationDetails.put(envelope);
+    return compactToolResult(envelope, detail);
   }
 
   async startStdio(): Promise<void> {
@@ -594,17 +606,12 @@ function projectContextData(context: ProjectContext, stateRootCreated: boolean):
   };
 }
 
-function toolResult(envelope: OperationEnvelope) {
-  return {
-    isError: !envelope.ok,
-    content: [{ type: "text" as const, text: JSON.stringify(envelope) }],
-    structuredContent: envelope as unknown as Record<string, unknown>,
-  };
-}
-
 const COMPACT_RESULT_MAX_BYTES = 6 * 1024;
 
-export function compactToolResult(envelope: OperationEnvelope) {
+export function compactToolResult(
+  envelope: OperationEnvelope,
+  detail: OperationDetailPutResult = { available: true, complete: true, storedBytes: 0 },
+) {
   const detailsUri = `jlink://operation/${envelope.operationId}`;
   const result: Record<string, unknown> = {
     ok: envelope.ok,
@@ -618,6 +625,13 @@ export function compactToolResult(envelope: OperationEnvelope) {
   if (envelope.observedEffects.length) result.observedEffects = envelope.observedEffects.slice(0, 6).map((effect) => truncate(effect, 120));
   if (envelope.outputFiles.length) result.outputFiles = envelope.outputFiles.slice(0, 4).map((path) => truncate(path, 200));
   if (envelope.warnings.length) result.warnings = envelope.warnings.slice(0, 4).map((warning) => truncate(warning, 200));
+  if (!detail.complete) result.details = {
+    available: detail.available,
+    complete: false,
+    storedBytes: detail.storedBytes,
+    originalBytes: detail.originalBytes,
+    reason: detail.reason,
+  };
   if (envelope.error) result.error = {
     code: truncate(envelope.error.code, 96),
     stage: truncate(envelope.error.stage, 96),

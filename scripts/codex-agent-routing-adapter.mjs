@@ -228,7 +228,7 @@ function resolveToolName(requestedName, toolMap) {
 
 function toolResult(result) {
   return {
-    content: [{ type: "text", text: JSON.stringify(result) }],
+    content: [{ type: "text", text: result.ok === false ? "ERROR simulated tool result" : "OK simulated tool result" }],
     structuredContent: result,
     isError: result.ok === false,
   };

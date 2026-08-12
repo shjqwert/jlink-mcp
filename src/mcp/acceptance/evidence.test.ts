@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -214,6 +214,40 @@ test("run evidence is local, append-only for commands, bounded, and immutable fo
     );
     await assert.rejects(store.writeHashes("run-001", []), (error: unknown) => error instanceof AcceptanceEvidenceError && error.code === "RUN_ID_COMPLETE");
     assert.equal(readFileSync(path.join(runDir, "commands.ndjson"), "utf8").trim().split(/\r?\n/).length, 4);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("oversized MCP results append an explicit bounded audit summary with the same operation identity", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "jlink-acceptance-oversized-"));
+  const store = new AcceptanceEvidenceStore(path.join(root, "test-output"), "a".repeat(40));
+  try {
+    const runDir = store.createRun("run-oversized");
+    const envelope = createOperationEnvelope("debug_sequence_execute");
+    envelope.details = { payload: "x".repeat(17 * 1024 * 1024) };
+    envelope.requestedEffects = ["execute_timed_debug_sequence"];
+    envelope.observedEffects = ["sequence_hss_start_completed", "sequence_hss_stop_completed"];
+    envelope.verification = { status: "observed", method: "fixture" };
+    finishEnvelope(envelope, true);
+
+    const recorded = await store.executeAndRecordMcpCommand("run-oversized", "debug_sequence_execute", { fixture: true }, async () => envelope);
+    assert.equal(recorded.envelope.operationId, envelope.operationId);
+    assert.equal(recorded.evidenceError instanceof AcceptanceEvidenceError, true);
+    assert.equal((recorded.evidenceError as AcceptanceEvidenceError).code, "COMMAND_RECORD_TOO_LARGE");
+
+    const commandsPath = path.join(runDir, "commands.ndjson");
+    const lines = readFileSync(commandsPath, "utf8").trim().split(/\r?\n/);
+    assert.equal(lines.length, 1);
+    const summary = JSON.parse(lines[0]) as Record<string, unknown>;
+    assert.equal(summary.operationId, envelope.operationId);
+    assert.equal((summary.request as { evidenceOmitted: boolean }).evidenceOmitted, true);
+    const result = summary.result as { evidenceSummary: boolean; omitted: { reason: string; originalBytes: number }; observedEffects: string[] };
+    assert.equal(result.evidenceSummary, true);
+    assert.equal(result.omitted.reason, "command_record_too_large");
+    assert.ok(result.omitted.originalBytes > 16 * 1024 * 1024);
+    assert.deepEqual(result.observedEffects, envelope.observedEffects);
+    assert.ok(statSync(commandsPath).size < 1024 * 1024);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

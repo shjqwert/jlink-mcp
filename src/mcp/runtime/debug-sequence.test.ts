@@ -37,7 +37,59 @@ test("debug sequence executes absolute steps synchronously and reports timing", 
   assert.deepEqual(data.steps.map(({ delayMs }) => delayMs), [0, 0, 0, 0, 0]);
   assert.deepEqual(data.steps.map(({ queueDelayMs }) => queueDelayMs), [3, 3, 3, 3, 3]);
   assert.deepEqual(data.cleanup, []);
+  const receipts = (result.data as { steps: Array<{ action: string; result: Record<string, unknown> }> }).steps;
+  const startReceipt = receipts.find(({ action }) => action === "hss_start")?.result;
+  assert.deepEqual(startReceipt?.capture, { captureId: "capture-1" });
+  assert.equal(startReceipt?.data, undefined, "normal HSS step receipt must omit session/package internals");
+  assert.deepEqual(receipts.find(({ action }) => action === "read_variable")?.result.data, { typedValue: 1 });
+  assert.deepEqual(receipts.filter(({ action }) => action === "write_variable").map(({ result: stepResult }) => stepResult.data), [
+    { requestedValue: 1 },
+    { requestedValue: 0 },
+  ]);
+  const details = result.details as {
+    kind: string;
+    steps: Array<{ action: string; result: OperationEnvelope }>;
+    cleanup: unknown[];
+  };
+  assert.equal(details.kind, "debug_sequence");
+  assert.deepEqual(details.steps.find(({ action }) => action === "hss_start")?.result.data, { captureId: "capture-1" });
+  assert.equal(details.steps.length, receipts.length);
+  assert.deepEqual(details.cleanup, []);
   assert.deepEqual(fixture.actions, ["plan", "start", "write:1", "read", "write:0", "stop:capture-1"]);
+});
+
+test("debug sequence routes resume and continue through the active capture owner", async () => {
+  const fixture = sequenceFixture();
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "hss_start", variables: [{ ref: "sample" }], rateHz: 100, durationSec: 2 },
+      { atMs: 500, action: "target_control", control: "continue" },
+      { atMs: 1_000, action: "hss_stop" },
+    ],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.deepEqual(fixture.actions, ["plan", "start", "control:continue:capture-1", "stop:capture-1"]);
+  const controlReceipt = (result.data as { steps: Array<{ action: string; result: Record<string, unknown> }> }).steps
+    .find(({ action }) => action === "target_control")?.result;
+  assert.deepEqual(controlReceipt?.data, { captureId: "capture-1", requestedAction: "continue", action: "resume", afterState: "running" });
+});
+
+test("debug sequence rejects target control outside a sequence-owned HSS interval", async () => {
+  const fixture = sequenceFixture();
+  const result = await fixture.executor.execute({
+    projectRoot: "D:\\fixture",
+    steps: [
+      { atMs: 0, action: "target_control", control: "resume" },
+      { atMs: 1_000, action: "read_variable", ref: "control" },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.code, "DEBUG_SEQUENCE_INVALID");
+  assert.match(result.error?.message ?? "", /active sequence-owned HSS capture/);
+  assert.deepEqual(fixture.actions, []);
 });
 
 test("debug sequence anchors timed HSS steps after a slow leading capture startup", async () => {
@@ -181,6 +233,9 @@ test("debug sequence stops normal steps on failure and executes bounded cleanup"
     { action: "hss_stop", ok: true },
   ]);
   assert.equal(data.cleanup[0].result.data?.skipped, true);
+  const details = result.details as { cleanup: Array<{ action: string; result: OperationEnvelope }> };
+  assert.equal((details.cleanup[0].result.data as { skipped?: boolean }).skipped, true);
+  assert.equal(details.cleanup[1].result.tool, "hss_stop");
   assert.deepEqual(fixture.actions, ["plan", "start", "write:1", "stop:capture-1"]);
 });
 
@@ -431,6 +486,11 @@ function sequenceFixture(options: {
       dispatches.push({ action: "start", at: now });
       now += options.startDurationMs ?? 0;
       return operation("hss_start", { captureId: "capture-1" });
+    },
+    controlTarget: async ({ captureId, action }) => {
+      actions.push(`control:${action}:${captureId}`);
+      dispatches.push({ action: `control:${action}:${captureId}`, at: now });
+      return operation("target_control", { captureId, requestedAction: action, action: "resume", afterState: "running" });
     },
     stop: async ({ captureId }) => {
       actions.push(`stop:${captureId}`);

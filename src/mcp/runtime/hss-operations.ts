@@ -22,7 +22,6 @@ import {
   JcapV1Writer,
   readJcapV1Metadata,
   readJcapV1Raw,
-  rebuildJcapV1Index,
   refreshActiveJcapV1Metadata,
   verifyJcapV1Index,
   type JcapV1CaptureState,
@@ -96,6 +95,10 @@ export interface HssCaptureInput {
 export interface HssCaptureSelector {
   projectRoot: string;
   captureId?: string;
+}
+
+export interface HssTargetControlInput extends HssCaptureSelector {
+  action: "resume" | "continue";
 }
 
 interface PreparedVariable {
@@ -639,7 +642,7 @@ export class HssOperations implements CaptureVariableAccess {
         };
         envelope.outputFiles = packageFiles(settled.packageDir);
         envelope.observedEffects = ["hss_helper_started", "probe_owner_claimed", "helper_exited_during_start", "capture_finalized", "probe_owner_released"];
-        if (settlement.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
+        recordMemoryRecoveryEffects(envelope, settlement);
         envelope.verification = { status: settled.state === "completed" || settled.state === "stopped" ? "verified" : "observed", method: "terminal_jcap_state_after_start_probe" };
         if (settled.state === "failed" || settled.state === "interrupted") {
           return this.failure(envelope, new HssOperationError(settled.lastError?.code ?? "HSS_START_FAILED", settled.lastError?.message ?? "HSS helper exited during start", false, false, false), "start");
@@ -698,30 +701,28 @@ export class HssOperations implements CaptureVariableAccess {
         envelope.observedEffects.push("target_state_reconciled");
         if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
       } else if (isActiveHssSessionState(session.state) && !this.adapter.isAlive(session.helperPid) && !this.startupJournalPending(session)) {
-        const databaseExisted = existsSync(join(session.packageDir, "capture.db"));
         const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
         const settlement = await this.settle(session.captureId);
         session = this.sessionStore.read(session.captureId);
         envelope.observedEffects.push("capture_finalized");
-        if (settlement.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
-        if (!databaseExisted && existsSync(join(session.packageDir, "capture.db"))) envelope.observedEffects.push("capture_index_rebuilt");
+        recordMemoryRecoveryEffects(envelope, settlement);
         if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
         if (!existsSync(session.sessionDir)) envelope.observedEffects.push("session_work_cleaned");
       } else if (isActiveHssSessionState(session.state) && existsSync(join(session.packageDir, "raw", "samples.bin"))) {
         const progressPublished = await this.sessionStore.withExclusiveCapture(session.captureId, async () => {
           const current = this.sessionStore.read(session.captureId);
-          if (!isActiveHssSessionState(current.state) || !this.captureHelperAlive(current)) return { published: false, recovered: 0 };
-          const recovered = this.recoverDurableMemoryTransactions(current);
+          if (!isActiveHssSessionState(current.state) || !this.captureHelperAlive(current)) return { published: false, recovery: emptyMemoryRecoverySummary() };
+          const recovery = this.recoverDurableMemoryTransactions(current);
           let published = false;
           try {
             refreshActiveJcapV1Metadata(current.packageDir);
             published = true;
           } catch { /* an in-flight partial frame is reported on terminal recovery */ }
-          return { published, recovered: recovered.count };
+          return { published, recovery };
         });
         session = this.sessionStore.read(session.captureId);
         if (progressPublished.published) envelope.observedEffects.push("capture_progress_published");
-        if (progressPublished.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
+        recordMemoryRecoveryEffects(envelope, progressPublished.recovery);
       }
       envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid) };
       envelope.capture = captureSummary(session);
@@ -740,7 +741,7 @@ export class HssOperations implements CaptureVariableAccess {
     try {
       const target = this.targets.require(input.projectRoot);
       envelope = createOperationEnvelope("hss_stop", target);
-      envelope.requestedEffects = ["reconcile_durable_memory_transactions", "request_hss_stop", "finalize_capture", "rebuild_capture_index", "release_probe_owner"];
+      envelope.requestedEffects = ["reconcile_durable_memory_transactions", "request_hss_stop", "finalize_capture", "release_probe_owner"];
       session = this.sessionStore.select(target.projectRoot, input.captureId, true);
       envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid) };
       const originalPid = session.helperPid;
@@ -785,7 +786,6 @@ export class HssOperations implements CaptureVariableAccess {
         throw new HssOperationError("HSS_STOP_PENDING_STARTUP", "the stop request is durable while helper startup identity is still pending; query hss_status until terminal", true, false, true);
       }
       if (!this.adapter.isAlive(session.helperPid)) {
-        const databaseExisted = existsSync(join(session.packageDir, "capture.db"));
         const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
         const settlement = await this.settle(session.captureId);
         session = this.sessionStore.read(session.captureId);
@@ -794,8 +794,7 @@ export class HssOperations implements CaptureVariableAccess {
         envelope.data = { session, metadata: safeMetadata(session.packageDir) };
         envelope.outputFiles = packageFiles(session.packageDir);
         envelope.observedEffects.push("capture_finalized");
-        if (settlement.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
-        if (!databaseExisted && existsSync(join(session.packageDir, "capture.db"))) envelope.observedEffects.push("capture_index_rebuilt");
+        recordMemoryRecoveryEffects(envelope, settlement);
         if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
         if (!existsSync(session.sessionDir)) envelope.observedEffects.push("session_work_cleaned");
         envelope.warnings.push("The helper had already exited; available Raw data was finalized without issuing a stop request.");
@@ -807,7 +806,9 @@ export class HssOperations implements CaptureVariableAccess {
       }
       const guarded = await this.sessionStore.withExclusiveCapture(session.captureId, async () => {
         let current = this.sessionStore.read(session!.captureId);
-        if (!isActiveHssSessionState(current.state) || !this.adapter.isAlive(current.helperPid)) return { session: current, stopRequested: false, recovered: 0 };
+        if (!isActiveHssSessionState(current.state) || !this.adapter.isAlive(current.helperPid)) {
+          return { session: current, stopRequested: false, recovery: emptyMemoryRecoverySummary() };
+        }
         current = await this.ensureSessionOwner(current);
         const recovered = this.recoverDurableMemoryTransactions(current);
         const owner = this.requiredOwner(current);
@@ -818,15 +819,15 @@ export class HssOperations implements CaptureVariableAccess {
           await this.adapter.requestStop(latest.control);
           return this.sessionStore.update(latest.captureId, (record) => ({ ...record, state: "stopping", stopRequestedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }));
         }, { allowedOwnerKinds: ["hss"], ownerTarget: { projectRoot: target.projectRoot, targetGeneration: target.generation }, requiredOwner: owner });
-        return { session: execution.value, stopRequested: execution.value.state === "stopping", execution, recovered: recovered.count };
+        return { session: execution.value, stopRequested: execution.value.state === "stopping", execution, recovery: recovered };
       });
       session = guarded.session;
       if (guarded.execution) applyQueue(envelope, guarded.execution);
-      if (guarded.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
+      recordMemoryRecoveryEffects(envelope, guarded.recovery);
       if (guarded.stopRequested) envelope.observedEffects.push("hss_stop_requested", "capture_marked_stopping");
       if (!guarded.stopRequested && !this.adapter.isAlive(session.helperPid)) {
         const settlement = await this.settle(session.captureId);
-        if (settlement.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
+        recordMemoryRecoveryEffects(envelope, settlement);
         session = this.sessionStore.read(session.captureId);
       }
       const deadline = Date.now() + 15_000;
@@ -841,7 +842,7 @@ export class HssOperations implements CaptureVariableAccess {
         throw new HssOperationError("HSS_STOP_TIMEOUT", "the helper did not finish within 15 seconds; capture remains owned and can be queried again", true, false, true);
       }
       const settlement = await this.settle(session.captureId);
-      if (settlement.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
+      recordMemoryRecoveryEffects(envelope, settlement);
       session = this.sessionStore.read(session.captureId);
       envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false };
       envelope.capture = captureSummary(session);
@@ -866,7 +867,7 @@ export class HssOperations implements CaptureVariableAccess {
     try {
       const target = this.targets.require(input.projectRoot);
       envelope = createOperationEnvelope("hss_recover", target);
-      envelope.requestedEffects = ["reconcile_durable_memory_transactions", "finalize_interrupted_capture_if_needed", "rebuild_capture_index_from_raw"];
+      envelope.requestedEffects = ["reconcile_durable_memory_transactions", "finalize_interrupted_capture_if_needed", "verify_raw_integrity"];
       let session = this.sessionStore.select(target.projectRoot, input.captureId);
       session = await this.reconcileSession(session.captureId);
       envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid), raw: safeMetadata(session.packageDir) };
@@ -880,27 +881,205 @@ export class HssOperations implements CaptureVariableAccess {
         const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
         const settlement = await this.settle(session.captureId);
         envelope.observedEffects.push("capture_finalized");
-        if (settlement.recovered > 0) envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
+        recordMemoryRecoveryEffects(envelope, settlement);
         if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
       }
       session = this.sessionStore.read(session.captureId);
       if (session.state === "failed") throw new HssOperationError(session.lastError?.code ?? "CAPTURE_FAILED", session.lastError?.message ?? "failed capture has no trustworthy rebuild source");
       if (session.state !== "interrupted") throw new HssOperationError("CAPTURE_NOT_INTERRUPTED", `hss_recover applies only to interrupted captures; capture is ${session.state}`);
-      let index = await verifyJcapV1Index(session.packageDir);
-      if (index.indexStatus !== "ready") {
-        const rebuilt = await rebuildJcapV1Index(session.packageDir);
-        index = { captureState: rebuilt.captureState, indexStatus: rebuilt.indexStatus };
-        envelope.observedEffects.push("capture_index_rebuilt");
-      }
+      const index = await verifyJcapV1Index(session.packageDir);
       envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false, raw: readJcapV1Metadata(session.packageDir).raw };
       envelope.capture = captureSummary(session);
       envelope.data = { session, metadata: readJcapV1Metadata(session.packageDir), index };
       envelope.outputFiles = packageFiles(session.packageDir);
-      if (index.indexStatus === "ready") envelope.observedEffects.push("valid_raw_prefix_indexed");
-      envelope.verification = { status: "verified", method: "raw_integrity_and_atomic_db_rebuild" };
+      if (index.indexStatus === "ready") envelope.observedEffects.push("capture_index_ready");
+      envelope.verification = { status: "verified", method: "terminal_raw_integrity_with_deferred_index" };
       return finishEnvelope(envelope, true);
     } catch (error) {
       return this.failure(envelope, error, "recover");
+    }
+  }
+
+  async controlTarget(input: HssTargetControlInput): Promise<OperationEnvelope> {
+    let envelope = createOperationEnvelope("target_control");
+    try {
+      if (!["resume", "continue"].includes(input.action)) {
+        throw new HssOperationError("HSS_TARGET_CONTROL_UNSUPPORTED", "active HSS capture supports only resume or continue; stop capture before halt, pause, reset, or recover");
+      }
+      const target = this.targets.require(input.projectRoot);
+      envelope = createOperationEnvelope("target_control", target);
+      envelope.requestedEffects = ["reconcile_durable_memory_transactions", "resume_target", "append_capture_event"];
+      const selected = this.sessionStore.select(target.projectRoot, input.captureId, true);
+      if (selected.state !== "capturing") throw new HssOperationError("CAPTURE_NOT_WRITABLE", `capture is ${selected.state}`);
+      const captureId = selected.captureId;
+      return this.sessionStore.withExclusiveCapture(captureId, async () => {
+        let session: HssSessionRecord;
+        try {
+          session = this.sessionStore.read(captureId);
+          if (session.state !== "capturing") throw new HssOperationError("CAPTURE_NOT_WRITABLE", `capture is ${session.state}`);
+          session = this.discoverHelperPid(session);
+          if (!this.captureHelperAlive(session)) throw new HssOperationError("HSS_HELPER_IDENTITY_UNVERIFIED", "capture Helper identity or heartbeat is unavailable", true, false, true);
+          session = await this.ensureSessionOwner(session);
+          const recovered = this.recoverDurableMemoryTransactions(session);
+          if (recovered.count > 0) {
+            recordMemoryRecoveryEffects(envelope, recovered);
+            envelope.data = { captureId, recoveredTransactions: recovered.count, currentControlIssued: false };
+            throw new HssOperationError(
+              "HSS_MEMORY_LATE_RESPONSE_RECONCILED",
+              `${recovered.count} durable capture-owner transaction(s) were recorded; the current control action was not issued`,
+              true,
+              recovered.effectIssued,
+              recovered.stateUnknown,
+            );
+          }
+        } catch (error) {
+          return this.failure(envelope, error, "capture_state");
+        }
+
+        const requestedAction = input.action;
+        const operationId = randomUUID();
+        const owner = this.requiredOwner(session);
+        const transactionIds: string[] = [];
+        const startedAt = new Date().toISOString();
+        const fallbackStartTick = elapsedTick(session.startedAt);
+        let response: HssMemoryResponse | undefined;
+        let requestDispatched = false;
+        let controlIssued = false;
+        let stateUnknown = false;
+        let operationError: Error | undefined;
+        let eventAppended = false;
+        let helperOperationStartTick: string | undefined;
+        let helperOperationEndTick: string | undefined;
+
+        try {
+          const execution = await this.queue.runExclusive(target.probeSerial, async () => {
+            this.targets.requireCurrent(target);
+            if (!this.captureHelperAlive(session)) throw new HssOperationError("HSS_HELPER_IDENTITY_UNVERIFIED", "capture Helper identity or heartbeat is unavailable", true, false, true);
+            requestDispatched = true;
+            const memoryResponse = await this.adapter.requestMemory(session.control, {
+              captureId,
+              op: "resume",
+              operationId,
+              eventContext: {
+                kind: "target_control",
+                requestedAction,
+                canonicalAction: "resume",
+              },
+            });
+            response = memoryResponse;
+            transactionIds.push(memoryResponse.requestId);
+            controlIssued = memoryResponse.resumeIssued === true || memoryResponse.writeIssued === true;
+            stateUnknown = memoryResponse.stateUnknown === true || memoryResponse.status === "error" && controlIssued;
+            if (stateUnknown && memoryResponse.stateUnknown !== true) memoryResponse.stateUnknown = true;
+            helperOperationStartTick = qpcTick(session, memoryResponse.operationBeforeQpcCounter);
+            helperOperationEndTick = qpcTick(session, memoryResponse.operationAfterQpcCounter);
+            requireMemoryOk(memoryResponse, "HSS_TARGET_CONTROL_FAILED", controlIssued);
+            if (memoryResponse.op !== "resume" || !["running", "halted"].includes(String(memoryResponse.beforeState))
+              || memoryResponse.afterState !== "running" || typeof memoryResponse.resumeIssued !== "boolean") {
+              stateUnknown ||= controlIssued;
+              throw new HssOperationError("HSS_MEMORY_RESPONSE_INVALID", "successful capture-owner resume returned invalid state evidence", false, controlIssued, stateUnknown);
+            }
+          }, {
+            allowedOwnerKinds: ["hss"],
+            ownerTarget: { projectRoot: target.projectRoot, targetGeneration: target.generation },
+            requiredOwner: owner,
+          });
+          applyQueue(envelope, execution);
+        } catch (error) {
+          if (requestDispatched && error instanceof HssAdapterError && error.stateUnknown) {
+            controlIssued ||= error.currentRequestIssued;
+            stateUnknown = true;
+          }
+          if (error instanceof HssOperationError) {
+            controlIssued ||= error.writeIssued;
+            stateUnknown ||= error.stateUnknown;
+          }
+          operationError = error instanceof Error ? error : new Error(String(error));
+        }
+
+        const endedAt = new Date().toISOString();
+        const tail = jcapTail(session.packageDir);
+        const helperTimingValid = helperOperationStartTick !== undefined && helperOperationEndTick !== undefined
+          && BigInt(helperOperationEndTick) >= BigInt(helperOperationStartTick)
+          && BigInt(helperOperationEndTick) >= BigInt(tail.lastEventTick);
+        const operationStartTick = helperTimingValid
+          ? helperOperationStartTick!
+          : maxTick(tail.lastEventTick, fallbackStartTick);
+        const operationEndTick = helperTimingValid
+          ? helperOperationEndTick!
+          : maxTick(operationStartTick, elapsedTick(session.startedAt));
+        const timingSource = helperTimingValid ? "helper_qpc" : "controller_fallback";
+        const completed = !operationError && response?.status === "ok" && response.afterState === "running" && !stateUnknown;
+        try {
+          this.appendTargetControlEvent(session, {
+            requestedAction,
+            action: "resume",
+            startedAt,
+            endedAt,
+            tick: operationEndTick,
+            operationStartTick,
+            operationEndTick,
+            timingSource,
+            helperOperationStartTick: helperTimingValid ? helperOperationStartTick! : null,
+            helperOperationEndTick: helperTimingValid ? helperOperationEndTick! : null,
+            timingDegraded: !helperTimingValid,
+            operationId,
+            ipcRequestIds: transactionIds,
+            controlAttempted: requestDispatched,
+            controlIssued,
+            resumeIssued: response?.resumeIssued === true,
+            stateUnknown,
+            beforeState: response?.beforeState ?? "unknown",
+            afterState: response?.afterState ?? "unknown",
+            outcome: completed ? "completed" : "failed",
+            error: completed ? null : {
+              code: errorCode(operationError, "HSS_TARGET_CONTROL_FAILED"),
+              message: operationError?.message ?? response?.reason ?? "capture-owner target control failed",
+              controlIssued,
+              stateUnknown,
+            },
+          });
+          eventAppended = true;
+        } catch (eventError) {
+          operationError = new HssOperationError("CAPTURE_EVENT_PERSIST_FAILED", eventError instanceof Error ? eventError.message : String(eventError), false, controlIssued, stateUnknown);
+        }
+        if (eventAppended && transactionIds.length > 0) {
+          try { this.adapter.acknowledgeMemoryTransactions(session.control, transactionIds); }
+          catch (error) { envelope.warnings.push(`The target-control event is durable, but receipt cleanup is pending: ${error instanceof Error ? error.message : String(error)}`); }
+        }
+
+        envelope.before = { captureId, targetExecutionState: response?.beforeState ?? "unknown" };
+        envelope.after = { captureId, targetExecutionState: response?.afterState ?? "unknown" };
+        envelope.capture = captureSummary(this.sessionStore.read(captureId));
+        envelope.data = {
+          captureId,
+          requestedAction,
+          action: "resume",
+          controlAttempted: requestDispatched,
+          controlIssued,
+          resumeIssued: response?.resumeIssued === true,
+          stateUnknown,
+          beforeState: response?.beforeState ?? "unknown",
+          afterState: response?.afterState ?? "unknown",
+          timingSource,
+          timingDegraded: !helperTimingValid,
+        };
+        envelope.observedEffects = [
+          ...(controlIssued ? [stateUnknown ? "target_resume_maybe_issued" : "target_resumed"] : []),
+          ...(eventAppended ? ["capture_event_appended"] : []),
+        ];
+        envelope.verification = completed
+          ? { status: "verified", method: response?.resumeIssued ? "helper_resume_and_running_state_observation" : "helper_running_state_observation" }
+          : { status: stateUnknown ? "state_unknown" : "failed", method: "capture_owner_target_control" };
+        if (!helperTimingValid) envelope.warnings.push("Target-control timing used the controller fallback because a valid Helper QPC interval was unavailable.");
+        if (operationError) {
+          const normalized = normalizeHssError(operationError, "HSS_TARGET_CONTROL_FAILED", controlIssued);
+          return this.failure(envelope, new HssOperationError(normalized.code, normalized.message, normalized.retryable, controlIssued || normalized.writeIssued, stateUnknown || normalized.stateUnknown), "capture_control");
+        }
+        return finishEnvelope(envelope, true);
+      });
+    } catch (error) {
+      return this.failure(envelope, error, "control");
     }
   }
 
@@ -988,13 +1167,13 @@ export class HssOperations implements CaptureVariableAccess {
         activeSession = await this.ensureSessionOwner(activeSession);
         const recovered = this.recoverDurableMemoryTransactions(activeSession);
         if (recovered.count > 0) {
-          envelope.observedEffects.push("capture_write_event_recovered", "memory_receipt_acknowledged");
+          recordMemoryRecoveryEffects(envelope, recovered);
           envelope.data = { captureId: activeSession.captureId, recoveredTransactions: recovered.count, currentWriteIssued: false };
           throw new HssOperationError(
             "HSS_MEMORY_LATE_RESPONSE_RECONCILED",
-            `${recovered.count} durable capture-owner write transaction(s) were recorded; the current write was not issued`,
+            `${recovered.count} durable capture-owner transaction(s) were recorded; the current write was not issued`,
             true,
-            recovered.writeIssued,
+            recovered.effectIssued,
             recovered.stateUnknown,
           );
         }
@@ -1613,7 +1792,7 @@ export class HssOperations implements CaptureVariableAccess {
     return this.sessionStore.update(session.captureId, (current) => ({ ...current, state: current.state === "starting" ? "capturing" : current.state, ownerToken: owner.token, updatedAt: new Date().toISOString() }));
   }
 
-  private async settle(captureId: string): Promise<{ recovered: number }> {
+  private async settle(captureId: string): Promise<DurableMemoryRecoverySummary> {
     return this.sessionStore.withExclusiveCapture(captureId, async () => {
       let session = this.sessionStore.read(captureId);
       if (isTerminalHssSessionState(session.state)) {
@@ -1625,9 +1804,9 @@ export class HssOperations implements CaptureVariableAccess {
         } else {
           try { this.queue.releaseOwner(session.probeSerial, session.ownerToken); } catch { /* another live MCP may still own the record */ }
         }
-        return { recovered: 0 };
+        return emptyMemoryRecoverySummary();
       }
-      if (this.adapter.isAlive(session.helperPid)) return { recovered: 0 };
+      if (this.adapter.isAlive(session.helperPid)) return emptyMemoryRecoverySummary();
       const memoryRecovery = this.recoverDurableMemoryTransactions(session);
       const samplesFile = join(session.packageDir, "raw", "samples.bin");
       if (!existsSync(samplesFile)) writeFileSync(samplesFile, Buffer.alloc(0), { flag: "wx" });
@@ -1677,7 +1856,6 @@ export class HssOperations implements CaptureVariableAccess {
           });
         }
         finalizeJcapV1Metadata(session.packageDir, state, qualityEvidence.counters, qualityEvidence.status, qualityEvidence.source);
-        if (state !== "failed") await rebuildJcapV1Index(session.packageDir);
         session = {
           ...session,
           state,
@@ -1703,7 +1881,7 @@ export class HssOperations implements CaptureVariableAccess {
       session = this.sessionStore.read(captureId);
       this.preserveSessionLogs(session);
       this.cleanupSessionWork(session);
-      return { recovered: memoryRecovery.count };
+      return memoryRecovery;
     });
   }
 
@@ -1782,35 +1960,47 @@ export class HssOperations implements CaptureVariableAccess {
     }
   }
 
-  private recoverDurableMemoryTransactions(session: HssSessionRecord): { count: number; writeIssued: boolean; stateUnknown: boolean } {
+  private recoverDurableMemoryTransactions(session: HssSessionRecord): DurableMemoryRecoverySummary {
     const transactions = this.adapter.listMemoryTransactions(session.control);
-    if (transactions.length === 0) return { count: 0, writeIssued: false, stateUnknown: false };
+    if (transactions.length === 0) return { count: 0, writeCount: 0, controlCount: 0, effectIssued: false, stateUnknown: false };
     const recorded = new Set(readJcapV1Raw(session.packageDir).events.flatMap((event) => Array.isArray(event.ipcRequestIds)
       ? event.ipcRequestIds.filter((value): value is string => typeof value === "string")
       : []));
-    let writeIssued = false;
+    let writeCount = 0;
+    let controlCount = 0;
+    let effectIssued = false;
     let stateUnknown = false;
     for (const transaction of transactions) {
       const requestId = transaction.request.requestId;
-      const responseIssued = transaction.response.writeIssued === true;
-      const responseUnknown = transaction.response.stateUnknown === true;
-      writeIssued ||= responseIssued;
+      const isControl = transaction.request.op === "resume";
+      if (isControl) controlCount += 1;
+      else writeCount += 1;
+      const responseIssued = transaction.response.writeIssued === true || transaction.response.resumeIssued === true;
+      const responseUnknown = transaction.response.stateUnknown === true
+        || isControl && transaction.response.status === "error" && responseIssued;
+      effectIssued ||= responseIssued;
       stateUnknown ||= responseUnknown;
-      if (!recorded.has(requestId)) this.appendRecoveredMemoryTransaction(session, transaction);
+      if (!recorded.has(requestId)) {
+        if (isControl) this.appendRecoveredTargetControlTransaction(session, transaction);
+        else this.appendRecoveredMemoryTransaction(session, transaction);
+      }
       this.adapter.acknowledgeMemoryTransactions(session.control, [requestId]);
       recorded.add(requestId);
     }
-    return { count: transactions.length, writeIssued, stateUnknown };
+    return { count: transactions.length, writeCount, controlCount, effectIssued, stateUnknown };
   }
 
   private appendRecoveredMemoryTransaction(session: HssSessionRecord, transaction: HssMemoryTransaction): void {
     const request = transaction.request;
     const context = request.eventContext;
-    const descriptor = context && [...session.descriptors, ...(session.writeDescriptors ?? [])].find((candidate) => candidate.logicalIdentity === context.logicalIdentity
+    if (request.op !== "write" || !context || context.kind === "target_control") {
+      throw new HssOperationError("HSS_MEMORY_RECEIPT_INVALID", "durable write transaction has invalid event context", false, true, true);
+    }
+    const descriptor = [...session.descriptors, ...(session.writeDescriptors ?? [])].find((candidate) => candidate.logicalIdentity === context.logicalIdentity
       && candidate.address.toLowerCase() === String(request.address ?? "").toLowerCase()
       && candidate.size === request.length);
     const bytesHex = request.bytesHex;
-    if (!context || !descriptor || typeof bytesHex !== "string" || !new RegExp(`^[0-9a-fA-F]{${descriptor.size * 2}}$`).test(bytesHex)) {
+    if (!descriptor || typeof bytesHex !== "string" || !new RegExp(`^[0-9a-fA-F]{${descriptor.size * 2}}$`).test(bytesHex)) {
       throw new HssOperationError("HSS_MEMORY_RECEIPT_INVALID", "durable write transaction does not match an immutable capture descriptor", false, true, true);
     }
     if (!NATIVE_HSS_SCALAR_TYPES.has(descriptor.type)
@@ -1839,8 +2029,8 @@ export class HssOperations implements CaptureVariableAccess {
       operationStartTick,
       operationEndTick,
       timingSource: helperTimingValid ? "helper_qpc" : "controller_fallback",
-      helperOperationStartTick: helperStartTick ?? null,
-      helperOperationEndTick: helperEndTick ?? null,
+      helperOperationStartTick: helperTimingValid ? helperStartTick! : null,
+      helperOperationEndTick: helperTimingValid ? helperEndTick! : null,
       timingDegraded: !helperTimingValid,
       operationId: request.operationId,
       ipcRequestIds: [request.requestId],
@@ -1860,6 +2050,61 @@ export class HssOperations implements CaptureVariableAccess {
         message: String(transaction.response.reason ?? "durable Helper write response was recovered after controller interruption"),
         writeIssued,
         stateUnknown: unknown,
+      },
+    });
+  }
+
+  private appendRecoveredTargetControlTransaction(session: HssSessionRecord, transaction: HssMemoryTransaction): void {
+    const request = transaction.request;
+    const context = request.eventContext;
+    if (request.op !== "resume" || !context || context.kind !== "target_control"
+      || !["resume", "continue"].includes(context.requestedAction) || context.canonicalAction !== "resume") {
+      throw new HssOperationError("HSS_MEMORY_RECEIPT_INVALID", "durable target-control transaction has invalid event context", false, true, true);
+    }
+    const response = transaction.response;
+    const tail = jcapTail(session.packageDir);
+    const helperStartTick = qpcTick(session, response.operationBeforeQpcCounter);
+    const helperEndTick = qpcTick(session, response.operationAfterQpcCounter);
+    const helperTimingValid = helperStartTick !== undefined && helperEndTick !== undefined
+      && BigInt(helperEndTick) >= BigInt(helperStartTick) && BigInt(helperEndTick) >= BigInt(tail.lastEventTick);
+    const operationStartTick = helperTimingValid ? helperStartTick : maxTick(tail.lastEventTick, elapsedTick(session.startedAt));
+    const operationEndTick = helperTimingValid ? helperEndTick : operationStartTick;
+    const controlIssued = response.resumeIssued === true || response.writeIssued === true;
+    const stateUnknown = response.stateUnknown === true || response.status === "error" && controlIssued;
+    const completed = response.status === "ok"
+      && (response.beforeState === "running" || response.beforeState === "halted")
+      && response.afterState === "running"
+      && typeof response.resumeIssued === "boolean"
+      && !stateUnknown;
+    const endedAt = Date.parse(transaction.receivedAt) >= Date.parse(request.createdAt) ? transaction.receivedAt : request.createdAt;
+    this.appendTargetControlEvent(session, {
+      eventId: request.requestId,
+      requestedAction: context.requestedAction,
+      action: "resume",
+      startedAt: request.createdAt,
+      endedAt,
+      tick: operationEndTick,
+      operationStartTick,
+      operationEndTick,
+      timingSource: helperTimingValid ? "helper_qpc" : "controller_fallback",
+      helperOperationStartTick: helperTimingValid ? helperStartTick! : null,
+      helperOperationEndTick: helperTimingValid ? helperEndTick! : null,
+      timingDegraded: !helperTimingValid,
+      operationId: request.operationId,
+      ipcRequestIds: [request.requestId],
+      recoveredTransaction: { source: "durable_hss_memory_receipt" },
+      controlAttempted: true,
+      controlIssued,
+      resumeIssued: response.resumeIssued === true,
+      stateUnknown,
+      beforeState: response.beforeState ?? "unknown",
+      afterState: response.afterState ?? "unknown",
+      outcome: completed ? "completed" : "failed",
+      error: completed ? null : {
+        code: String(response.errorCode ?? "HSS_TARGET_CONTROL_DURABLE_RESPONSE_RECOVERED"),
+        message: String(response.reason ?? "durable Helper target-control response was recovered after controller interruption"),
+        controlIssued,
+        stateUnknown,
       },
     });
   }
@@ -1908,6 +2153,22 @@ export class HssOperations implements CaptureVariableAccess {
     try { refreshActiveJcapV1Metadata(session.packageDir); } catch { /* terminal status will publish exact identities */ }
   }
 
+  private appendTargetControlEvent(session: HssSessionRecord, data: Record<string, unknown> & { tick: string }): void {
+    const tail = jcapTail(session.packageDir);
+    if (BigInt(data.tick) < BigInt(tail.lastEventTick)) {
+      throw new HssOperationError("CAPTURE_EVENT_TICK_REGRESSION", "target-control event tick regressed behind the durable event timeline", false, data.controlIssued === true, false);
+    }
+    appendJcapV1Event(session.packageDir, {
+      eventId: randomUUID(),
+      eventSequence: tail.nextEventSequence,
+      type: "target_control",
+      ...data,
+      operationEndTick: data.tick,
+      tick: data.tick,
+    });
+    try { refreshActiveJcapV1Metadata(session.packageDir); } catch { /* terminal status will publish exact identities */ }
+  }
+
   private requiredOwner(session: HssSessionRecord): Pick<ProbeOwner, "kind" | "token" | "projectRoot" | "targetGeneration"> {
     const owner = this.queue.getOwner(session.probeSerial);
     if (!owner || owner.kind !== "hss" || owner.token !== session.ownerToken || owner.projectRoot !== session.projectRoot || owner.targetGeneration !== session.targetGeneration) throw new HssOperationError("CAPTURE_OWNER_CHANGED", "the active capture no longer owns the configured Probe", true);
@@ -1943,6 +2204,14 @@ function attachQueueOwner(envelope: OperationEnvelope, error: ProbeQueueError): 
     ? envelope.before as Record<string, unknown>
     : {};
   envelope.before = { ...before, owner: error.owner };
+}
+
+interface DurableMemoryRecoverySummary {
+  count: number;
+  writeCount: number;
+  controlCount: number;
+  effectIssued: boolean;
+  stateUnknown: boolean;
 }
 
 class HssOperationError extends Error {
@@ -1988,6 +2257,16 @@ function frameLayout(prepared: PreparedCapture): {
 }
 
 export const isValidHssRunId = isValidAcceptanceRunId;
+
+function emptyMemoryRecoverySummary(): DurableMemoryRecoverySummary {
+  return { count: 0, writeCount: 0, controlCount: 0, effectIssued: false, stateUnknown: false };
+}
+
+function recordMemoryRecoveryEffects(envelope: OperationEnvelope, recovery: DurableMemoryRecoverySummary): void {
+  if (recovery.writeCount > 0) envelope.observedEffects.push("capture_write_event_recovered");
+  if (recovery.controlCount > 0) envelope.observedEffects.push("capture_target_control_event_recovered");
+  if (recovery.count > 0) envelope.observedEffects.push("memory_receipt_acknowledged");
+}
 
 function applyQueue<T>(envelope: OperationEnvelope, execution: { queueSequence: number; queuedAt: string; startedAt: string; endedAt: string; value: T }): void {
   envelope.queueSequence = execution.queueSequence;

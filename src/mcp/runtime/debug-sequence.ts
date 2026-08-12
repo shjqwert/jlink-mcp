@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 import { symbolLogicalIdentity, type ResolvedSymbol } from "../artifact/symbol-catalog";
 import { encodeHssValue } from "../hss/hss-typed-value";
-import type { HssCaptureInput } from "./hss-operations";
+import type { HssCaptureInput, HssTargetControlInput } from "./hss-operations";
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
 import type { VariableAccess, VariableRefInput } from "./variable-access-contract";
 
@@ -9,6 +9,7 @@ export type DebugSequenceStep =
   | ({ atMs: number; action: "hss_start" } & Omit<HssCaptureInput, "projectRoot" | "dryRun" | "runId">)
   | { atMs: number; action: "write_variable"; ref: VariableRefInput; value: number; captureOld?: boolean; verify?: boolean; restore?: boolean }
   | { atMs: number; action: "read_variable"; ref: VariableRefInput }
+  | { atMs: number; action: "target_control"; control: "resume" | "continue" }
   | { atMs: number; action: "hss_stop" };
 
 export type DebugSequenceCleanup =
@@ -31,6 +32,7 @@ export interface DebugSequenceVariableAccess extends Pick<VariableAccess, "readV
 export interface DebugSequenceHssOperations {
   plan(input: HssCaptureInput): Promise<OperationEnvelope>;
   start(input: HssCaptureInput): Promise<OperationEnvelope>;
+  controlTarget(input: HssTargetControlInput): Promise<OperationEnvelope>;
   stop(input: { projectRoot: string; captureId?: string }): Promise<OperationEnvelope>;
 }
 
@@ -92,7 +94,9 @@ export class DebugSequenceExecutor {
     let setupDurationMs = 0;
     let previousCompletedAt = executionStartedAt;
     const steps: StepResult[] = [];
+    const stepDetails: Array<Record<string, unknown>> = [];
     const cleanup: Array<{ action: DebugSequenceCleanup["action"]; automatic?: boolean; ok: boolean; result: Record<string, unknown> }> = [];
+    const cleanupDetails: Array<Record<string, unknown>> = [];
     const captures: SequenceCaptureState = { createdIds: [] };
     const possiblyWrittenRefs = new Set<string>();
     let failure: { code: string; message: string; state: "failed" | "timed_out" | "cancelled" } | undefined;
@@ -134,7 +138,7 @@ export class DebugSequenceExecutor {
       }
       const completedAt = this.scheduler.now();
       const stepTimelineEpoch = timelineEpoch;
-      steps.push({
+      const timing = {
         index,
         action: step.action,
         plannedAtMs: step.atMs,
@@ -143,8 +147,9 @@ export class DebugSequenceExecutor {
         queueDelayMs: queueDelayMs(result),
         durationMs: Math.max(0, Math.round(completedAt - dispatchedAt)),
         ok: result.ok,
-        result: boundedResult(result),
-      });
+      };
+      steps.push({ ...timing, result: sequenceResultReceipt(step.action, result) });
+      stepDetails.push({ ...timing, result });
       if (!result.ok) {
         failedStepStateUnknown = result.error?.stateUnknown === true;
         failure = {
@@ -170,11 +175,13 @@ export class DebugSequenceExecutor {
     if (failure) {
       for (const action of input.cleanup ?? []) {
         const result = await this.executeCleanup(input.projectRoot, action, captures, possiblyWrittenRefs);
-        cleanup.push({ action: action.action, ok: result.ok, result: boundedResult(result) });
+        cleanup.push({ action: action.action, ok: result.ok, result: sequenceResultReceipt(action.action, result) });
+        cleanupDetails.push({ action: action.action, ok: result.ok, result });
       }
       if (captures.activeId) {
         const result = await this.executeCleanup(input.projectRoot, { action: "hss_stop" }, captures, possiblyWrittenRefs);
-        cleanup.push({ action: "hss_stop", automatic: true, ok: result.ok, result: boundedResult(result) });
+        cleanup.push({ action: "hss_stop", automatic: true, ok: result.ok, result: sequenceResultReceipt("hss_stop", result) });
+        cleanupDetails.push({ action: "hss_stop", automatic: true, ok: result.ok, result });
       }
     }
 
@@ -189,6 +196,11 @@ export class DebugSequenceExecutor {
       steps,
       cleanup,
       createdCaptureIds: captures.createdIds,
+    };
+    envelope.details = {
+      kind: "debug_sequence",
+      steps: stepDetails,
+      cleanup: cleanupDetails,
     };
     envelope.observedEffects = steps.filter(({ ok }) => ok).map(({ action }) => `sequence_${action}_completed`);
     if (cleanup.length > 0) envelope.observedEffects.push("sequence_cleanup_executed");
@@ -232,6 +244,11 @@ export class DebugSequenceExecutor {
         activeCaptureDescriptors = plannedDescriptorIdentities(planned);
         activeCaptureInterval = { descriptors: activeCaptureDescriptors, startIndex: index };
         captureIntervals.push(activeCaptureInterval);
+      } else if (step.action === "target_control") {
+        if (!activeCapturePlanned) throw new Error("target_control requires an active sequence-owned HSS capture");
+        if (!["resume", "continue"].includes(step.control)) {
+          throw new Error("active HSS target_control supports only resume or continue; stop capture before halt, pause, reset, or recover");
+        }
       } else if (step.action === "hss_stop") {
         if (!activeCapturePlanned) throw new Error("hss_stop requires a preceding sequence hss_start");
         if (index !== input.steps.length - 1) {
@@ -302,6 +319,11 @@ export class DebugSequenceExecutor {
         });
       case "read_variable":
         return this.variables.readVariable(projectRoot, step.ref);
+      case "target_control": {
+        const captureId = captures.activeId;
+        if (!captureId) return failEnvelope(createOperationEnvelope("target_control"), sequenceError("DEBUG_SEQUENCE_CAPTURE_MISSING", "target_control", new Error("no sequence-created HSS capture is available")));
+        return this.hss.controlTarget({ projectRoot, captureId, action: step.control });
+      }
       case "hss_stop": {
         const captureId = captures.activeId;
         if (!captureId) return failEnvelope(createOperationEnvelope("hss_stop"), sequenceError("DEBUG_SEQUENCE_CAPTURE_MISSING", "hss_stop", new Error("no sequence-created HSS capture is available")));
@@ -400,14 +422,55 @@ function queueDelayMs(envelope: OperationEnvelope): number {
   return Number.isFinite(queued) && Number.isFinite(started) ? Math.max(0, started - queued) : 0;
 }
 
-function boundedResult(envelope: OperationEnvelope): Record<string, unknown> {
-  return {
+function sequenceResultReceipt(
+  action: DebugSequenceStep["action"] | DebugSequenceCleanup["action"],
+  envelope: OperationEnvelope,
+): Record<string, unknown> {
+  const verification: Record<string, unknown> = { status: envelope.verification.status };
+  if (envelope.verification.method) verification.method = envelope.verification.method;
+  const receipt: Record<string, unknown> = {
     ok: envelope.ok,
-    error: envelope.error ?? null,
-    verification: envelope.verification ?? null,
-    data: envelope.data ?? null,
-    capture: envelope.capture ?? null,
+    verification,
   };
+  if (Object.keys(envelope.before).length) receipt.before = envelope.before;
+  if (Object.keys(envelope.after).length) receipt.after = envelope.after;
+  if (envelope.requestedEffects.length) receipt.requestedEffects = envelope.requestedEffects;
+  if (envelope.observedEffects.length) receipt.observedEffects = envelope.observedEffects;
+  if (action === "hss_start" || action === "hss_stop") {
+    const capture = sequenceCaptureReceipt(envelope);
+    if (Object.keys(capture).length) receipt.capture = capture;
+  } else if (envelope.data !== null && envelope.data !== undefined) {
+    receipt.data = envelope.data;
+  }
+  if (envelope.error) receipt.error = envelope.error;
+  return receipt;
+}
+
+function sequenceCaptureReceipt(envelope: OperationEnvelope): Record<string, unknown> {
+  const data = isRecord(envelope.data) ? envelope.data : {};
+  const session = isRecord(data.session) ? data.session : {};
+  const sources = [session, data, isRecord(envelope.capture) ? envelope.capture : {}];
+  const result: Record<string, unknown> = {};
+  const fields = [
+    "captureId",
+    "state",
+    "requestedRateHz",
+    "actualRateHz",
+    "requestedSamples",
+    "sampleCount",
+    "sampleRatio",
+    "sampleThresholdMet",
+    "readStatistics",
+    "durationSec",
+    "variables",
+    "qualityOracle",
+  ] as const;
+  for (const source of sources) {
+    for (const field of fields) {
+      if (source[field] !== undefined && source[field] !== null) result[field] = source[field];
+    }
+  }
+  return result;
 }
 
 function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {

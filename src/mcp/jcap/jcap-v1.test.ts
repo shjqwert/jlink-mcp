@@ -360,6 +360,13 @@ test("JCAP v1 finalizes exactly four durable files and round-trips bounded queri
       sampleAlignment: { method: "terminal_raw_nearest", status: "derive_on_rebuild" },
       outcome: "completed", error: null,
     });
+    const persistedWrite = readJcapV1Raw(packageDir).events[1];
+    assert.throws(() => writer.appendEvent({
+      ...persistedWrite,
+      eventId: eventId(7), eventSequence: 2, tick: "21", operationEndTick: "21",
+      outcome: "failed", stateUnknown: true,
+      error: { code: "WRITE_FAILED", message: "fixture", writeIssued: false, stateUnknown: false },
+    }), /error evidence/);
     writer.appendEvent({
       eventId: eventId(3), eventSequence: 2, type: "quality", tick: "30", qualityStatus: "reported", qualitySource: "jlink",
       missingSamples: 0, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0,
@@ -413,6 +420,41 @@ test("JCAP v1 finalizes exactly four durable files and round-trips bounded queri
     const bounded = await query.series({ captureId, variables: Array.from({ length: 33 }, (_, index) => `v${index}`), startTick: "0", endTick: "1", bucketCount: 1 });
     assert.equal(bounded.ok, false);
     assert.equal(bounded.error?.code, "JCAP_BOUNDS");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("JCAP v1 persists and strictly validates capture-owner target-control events", () => {
+  const root = workspace();
+  const packageDir = path.join(root, "captures", `${captureId}.jcap`);
+  try {
+    const writer = new JcapV1Writer({ packageDir, metadata: metadata() });
+    writer.appendEvent({ eventId: eventId(1), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" });
+    const controlEvent = {
+      eventId: eventId(2), eventSequence: 1, type: "target_control", tick: "20",
+      requestedAction: "continue", action: "resume",
+      startedAt: "2026-01-01T00:00:00.000Z", endedAt: "2026-01-01T00:00:00.001Z",
+      operationStartTick: "10", operationEndTick: "20", timingSource: "helper_qpc",
+      helperOperationStartTick: "10", helperOperationEndTick: "20", timingDegraded: false,
+      operationId: eventId(7), ipcRequestIds: [eventId(8)],
+      controlAttempted: true, controlIssued: true, resumeIssued: true, stateUnknown: false,
+      beforeState: "halted", afterState: "running", outcome: "completed", error: null,
+    } as const;
+    writer.appendEvent(controlEvent);
+    const persisted = readJcapV1Raw(packageDir).events[1];
+    assert.equal(persisted.type, "target_control");
+    assert.equal(persisted.requestedAction, "continue");
+    assert.equal(persisted.afterState, "running");
+
+    assert.throws(() => writer.appendEvent({ ...controlEvent, eventId: eventId(3), eventSequence: 2, tick: "21", operationEndTick: "21", requestedAction: "reset" }), /target_control action/);
+    assert.throws(() => writer.appendEvent({ ...controlEvent, eventId: eventId(4), eventSequence: 2, tick: "21", operationEndTick: "21", afterState: "halted" }), /completed outcome/);
+    assert.throws(() => writer.appendEvent({ ...controlEvent, eventId: eventId(5), eventSequence: 2, tick: "21", operationEndTick: "21", timingSource: "controller_fallback", timingDegraded: false }), /timing-source evidence/);
+    assert.throws(() => writer.appendEvent({
+      ...controlEvent, eventId: eventId(6), eventSequence: 2, tick: "21", operationEndTick: "21",
+      outcome: "failed", stateUnknown: true,
+      error: { code: "CONTROL_FAILED", message: "fixture", controlIssued: false, stateUnknown: false },
+    }), /error evidence/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

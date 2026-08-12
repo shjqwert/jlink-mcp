@@ -74,6 +74,11 @@ export function registerHssTools(
       action: z.literal("read_variable"),
       ref: variableRef,
     }).strict(),
+    z.object({
+      atMs: z.number().int().min(0).max(30_000),
+      action: z.literal("target_control"),
+      control: z.enum(["resume", "continue"]),
+    }).strict(),
     z.object({ atMs: z.number().int().min(0).max(30_000), action: z.literal("hss_stop") }).strict(),
   ]);
   const sequenceCleanup = z.discriminatedUnion("action", [

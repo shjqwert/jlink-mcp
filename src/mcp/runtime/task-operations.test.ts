@@ -15,8 +15,18 @@ test("debug run_to composes a complete managed breakpoint lifecycle in one task 
   assert.equal(result.ok, true, JSON.stringify(result.error));
   assert.equal(result.tool, "debug");
   assert.deepEqual(calls, ["server_start", "connect:false:true", "break", "continue", "wait", "backtrace", "delete:3", "list", "server_stop"]);
-  assert.equal((result.data as { action: string }).action, "run_to");
+  const data = result.data as { action: string; steps: Array<Record<string, unknown>> };
+  assert.equal(data.action, "run_to");
   assert.equal(result.verification.method, "managed_task_workflow");
+  const insertReceipt = data.steps.find((step) => step.tool === "gdb_command" && (step.data as { managedBreakpointId?: number } | undefined)?.managedBreakpointId === 3);
+  assert.ok(insertReceipt);
+  assert.equal((insertReceipt.data as { rawOutput?: string }).rawOutput, undefined, "normal workflow receipt must omit internal GDB transport output");
+  assert.deepEqual((data.steps.find((step) => step.tool === "gdb_backtrace")?.data as { frames: unknown[] }).frames, []);
+  assert.equal((data.steps.find((step) => step.tool === "gdb_breakpoint_list")?.data as { output: string }).output, "No breakpoints or watchpoints.");
+  const details = result.details as { kind: string; steps: OperationEnvelope[] };
+  assert.equal(details.kind, "task_workflow");
+  assert.equal(details.steps.length, data.steps.length);
+  assert.match((details.steps.find((step) => step.tool === "gdb_command" && String((step.data as { rawOutput?: string }).rawOutput).includes("number=\"3\""))?.data as { rawOutput: string }).rawOutput, /number="3"/);
 });
 
 test("debug run_to closes its managed session after breakpoint failure", async () => {
@@ -184,7 +194,9 @@ test("RTT window preserves an existing session and owns a temporary session othe
 
     assert.equal(result.ok, true, JSON.stringify(result.error));
     assert.deepEqual(calls, alreadyConnected ? ["rtt_read:7"] : ["rtt_connect", "rtt_read:7", "rtt_disconnect"]);
-    assert.equal((result.data as { preservedExistingSession: boolean }).preservedExistingSession, alreadyConnected);
+    const data = result.data as { preservedExistingSession: boolean; steps: Array<Record<string, unknown>> };
+    assert.equal(data.preservedExistingSession, alreadyConnected);
+    assert.deepEqual(data.steps.find((step) => step.tool === "rtt_read")?.data, { lines: [] });
   }
 });
 
@@ -228,15 +240,49 @@ test("HSS window delegates preflight, timed capture, and final cleanup to DebugS
     variables: [{ ref: "counter" }],
     rateHz: 10,
     durationSec: 2,
+    actions: [
+      { atMs: 500, action: "write_variable", ref: "control", value: 1, verify: true },
+      { atMs: 1_000, action: "read_variable", ref: "feedback" },
+      { atMs: 1_500, action: "target_control", control: "continue" },
+    ],
   });
 
   assert.equal(result.ok, true, JSON.stringify(result.error));
   assert.equal(result.tool, "trace");
   assert.deepEqual(sequenceInput?.steps, [
-    { atMs: 0, action: "hss_start", variables: [{ ref: "counter" }], rateHz: 10, durationSec: 2 },
+    {
+      atMs: 0, action: "hss_start", variables: [{ ref: "counter" }, { ref: "feedback" }],
+      writeVariables: ["control"], rateHz: 10, durationSec: 2,
+    },
+    { atMs: 500, action: "write_variable", ref: "control", value: 1, verify: true },
+    { atMs: 1_000, action: "read_variable", ref: "feedback" },
+    { atMs: 1_500, action: "target_control", control: "continue" },
     { atMs: 2_000, action: "hss_stop" },
   ]);
   assert.deepEqual(sequenceInput?.cleanup, [{ action: "hss_stop" }]);
+});
+
+test("HSS window rejects active halt, pause, reset, and recover actions before dispatch", async () => {
+  let dispatched = false;
+  const operations = taskOperations({
+    sequence: {
+      execute: async () => {
+        dispatched = true;
+        return succeeded("debug_sequence_execute");
+      },
+    },
+  });
+
+  for (const control of ["halt", "pause", "reset", "recover"]) {
+    const result = await operations.trace("C:\\project", "hss_window", {
+      variables: [{ ref: "counter" }], rateHz: 10, durationSec: 2,
+      actions: [{ atMs: 500, action: "target_control", control }],
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "ACTION_INPUT_INVALID");
+    assert.match(result.error?.message ?? "", /supports only resume or continue/);
+  }
+  assert.equal(dispatched, false);
 });
 
 function taskOperations(overrides: Record<string, unknown>): TaskOperations {

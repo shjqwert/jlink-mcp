@@ -75,12 +75,19 @@ export interface HssMemoryRequest {
   captureId: string;
   op: "read" | "write" | "resume";
   operationId?: string;
-  eventContext?: {
-    logicalIdentity: string;
-    requestedValue: number;
-    phase: "write" | "restore";
-    endian: "little" | "big";
-  };
+  eventContext?:
+    | {
+      kind?: "variable_write";
+      logicalIdentity: string;
+      requestedValue: number;
+      phase: "write" | "restore";
+      endian: "little" | "big";
+    }
+    | {
+      kind: "target_control";
+      requestedAction: "resume" | "continue";
+      canonicalAction: "resume";
+    };
   address?: string;
   length?: number;
   accessSize?: 1 | 2 | 4;
@@ -96,6 +103,9 @@ export interface HssMemoryResponse extends Record<string, unknown> {
   bytesHex?: string;
   writeIssued?: boolean;
   stateUnknown?: boolean;
+  resumeIssued?: boolean;
+  beforeState?: HssTargetState;
+  afterState?: HssTargetState;
   operationBeforeQpcCounter?: string;
   operationAfterQpcCounter?: string;
 }
@@ -399,12 +409,12 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
         "HSS_MEMORY_LATE_RESPONSE_RECONCILED",
         `the previous timed-out ${reconciled.request.op} request completed late; its durable transaction must be recorded before another memory operation`,
         true,
-        reconciled.request.op === "write" || reconciled.response.writeIssued === true,
+        targetEffectIssued(reconciled),
         false,
       );
     }
     const unrelated = readMemoryTransactions(control).find((transaction) => transaction.request.operationId !== request.operationId);
-    if (unrelated) throw new HssAdapterError("HSS_MEMORY_RECOVERY_REQUIRED", "a durable write transaction must be recorded before another memory operation", true, true, false);
+    if (unrelated) throw new HssAdapterError("HSS_MEMORY_RECOVERY_REQUIRED", "a durable capture-owner transaction must be recorded before another operation", true, true, false);
     if (existsSync(control.requestFile) || existsSync(control.claimFile) || existsSync(control.responseFile)) throw new HssAdapterError("HSS_MEMORY_REQUEST_BUSY", "another capture-owner memory request is pending", true, request.op === "write");
     const requestId = randomUUID();
     const temporary = `${control.requestFile}.${process.pid}.${requestId}.tmp`;
@@ -429,19 +439,19 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
         const claimed = readBoundedJson(control.claimFile, 1024 * 1024, "HSS_MEMORY_CLAIM_INVALID");
         const journal = memoryRequestJournal(claimed);
         if (!journal || journal.requestId !== requestId || journal.captureId !== request.captureId || journal.op !== request.op) throw new HssAdapterError("HSS_MEMORY_CLAIM_INVALID", "the Helper response is not bound to the claimed request", false, true, true);
-        if (journal.op === "write") persistMemoryTransaction(control, journal, parsed);
+        if (journal.op === "write" || journal.op === "resume") persistMemoryTransaction(control, journal, parsed);
         try {
           rmSync(control.responseFile);
           rmSync(control.claimFile);
           rmSync(control.requestFile, { force: true });
         } catch (error) {
-          throw new HssAdapterError("HSS_MEMORY_ACK_CLEANUP_FAILED", error instanceof Error ? error.message : String(error), true, request.op === "write", true);
+          throw new HssAdapterError("HSS_MEMORY_ACK_CLEANUP_FAILED", error instanceof Error ? error.message : String(error), true, request.op === "write" || request.op === "resume", true);
         }
         return parsed;
       }
       await delay(10);
     }
-    throw new HssAdapterError("HSS_MEMORY_REQUEST_TIMEOUT", "capture-owner memory request timed out", true, request.op === "write", true);
+    throw new HssAdapterError("HSS_MEMORY_REQUEST_TIMEOUT", "capture-owner request timed out", true, true, request.op === "write" || request.op === "resume");
   }
 
   listMemoryTransactions(control: HssCaptureControlFiles): HssMemoryTransaction[] {
@@ -538,7 +548,7 @@ function reconcileMemoryTransaction(control: HssCaptureControlFiles): HssMemoryT
       if (!journal) {
         throw new HssAdapterError("HSS_MEMORY_CLAIM_INVALID", "the claimed request journal is malformed", false, true);
       }
-      throw new HssAdapterError("HSS_MEMORY_REQUEST_INDETERMINATE", "the Helper claimed the prior request but no durable response exists", true, journal.op === "write", false);
+      throw new HssAdapterError("HSS_MEMORY_REQUEST_INDETERMINATE", "the Helper claimed the prior request but no durable response exists", true, memoryOperationMayAffectTarget(journal.op), false);
     }
     if (existsSync(control.requestFile)) {
       const pending = readBoundedJson(control.requestFile, 1024 * 1024, "HSS_MEMORY_REQUEST_INVALID");
@@ -555,7 +565,7 @@ function reconcileMemoryTransaction(control: HssCaptureControlFiles): HssMemoryT
     || journal.requestId !== response.requestId) {
     throw new HssAdapterError("HSS_MEMORY_RESPONSE_INVALID", "the late response is not bound to its claimed request", false, true);
   }
-  const transaction = journal.op === "write" ? persistMemoryTransaction(control, journal, response) : {
+  const transaction = memoryOperationMayAffectTarget(journal.op) ? persistMemoryTransaction(control, journal, response) : {
     formatVersion: 1 as const,
     request: journal,
     response,
@@ -566,16 +576,23 @@ function reconcileMemoryTransaction(control: HssCaptureControlFiles): HssMemoryT
     rmSync(control.claimFile);
     rmSync(control.requestFile, { force: true });
   } catch (error) {
-    throw new HssAdapterError("HSS_MEMORY_ACK_CLEANUP_FAILED", error instanceof Error ? error.message : String(error), true, journal.op === "write", false);
+    throw new HssAdapterError("HSS_MEMORY_ACK_CLEANUP_FAILED", error instanceof Error ? error.message : String(error), true, memoryOperationMayAffectTarget(journal.op), false);
   }
   return transaction;
 }
 
 function validateMemoryRequestContext(request: HssMemoryRequest): void {
-  if (request.operationId !== undefined && !UUID.test(request.operationId)) throw new HssAdapterError("HSS_MEMORY_REQUEST_INVALID", "memory operationId must be a UUID");
-  if (request.op !== "write") return;
+  if (request.operationId !== undefined && !UUID.test(request.operationId)) throw new HssAdapterError("HSS_MEMORY_REQUEST_INVALID", "capture-owner operationId must be a UUID");
   const context = request.eventContext;
-  if (!request.operationId || !context || !context.logicalIdentity || context.logicalIdentity.length > 512
+  if (request.op === "resume") {
+    if (!request.operationId || !context || context.kind !== "target_control"
+      || !["resume", "continue"].includes(context.requestedAction) || context.canonicalAction !== "resume") {
+      throw new HssAdapterError("HSS_MEMORY_REQUEST_INVALID", "capture-owner resume requires durable target-control context");
+    }
+    return;
+  }
+  if (request.op !== "write") return;
+  if (!request.operationId || !context || context.kind === "target_control" || !context.logicalIdentity || context.logicalIdentity.length > 512
     || typeof context.requestedValue !== "number" || !Number.isFinite(context.requestedValue)
     || !["write", "restore"].includes(context.phase) || !["little", "big"].includes(context.endian)
     || typeof request.address !== "string" || !/^0x[0-9a-f]{1,8}$/i.test(request.address)
@@ -639,19 +656,27 @@ function persistMemoryTransaction(control: HssCaptureControlFiles, request: HssM
   return transaction;
 }
 
+function memoryOperationMayAffectTarget(operation: HssMemoryRequest["op"]): boolean {
+  return operation === "write" || operation === "resume";
+}
+
+function targetEffectIssued(transaction: HssMemoryTransaction): boolean {
+  return transaction.response.writeIssued === true || transaction.response.resumeIssued === true;
+}
+
 function readMemoryTransactions(control: HssCaptureControlFiles): HssMemoryTransaction[] {
   const directory = memoryReceiptDirectory(control);
   if (!existsSync(directory)) return [];
   const entries = readdirSync(directory, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
-  if (entries.length > 32) throw new HssAdapterError("HSS_MEMORY_RECEIPT_LIMIT", "durable memory transaction count exceeds 32", false, true);
+  if (entries.length > 32) throw new HssAdapterError("HSS_MEMORY_RECEIPT_LIMIT", "durable capture-owner transaction count exceeds 32", false, true);
   return entries.map((entry) => {
     const value = readBoundedJson(join(directory, entry.name), 1024 * 1024, "HSS_MEMORY_RECEIPT_INVALID") as unknown as HssMemoryTransaction;
     const request = value && value.formatVersion === 1 && value.request && typeof value.request === "object" && !Array.isArray(value.request)
       ? memoryRequestJournal(value.request as unknown as Record<string, unknown>)
       : undefined;
-    if (!request || request.op !== "write" || !value.response || value.response.requestId !== request.requestId
+    if (!request || !memoryOperationMayAffectTarget(request.op) || !value.response || value.response.requestId !== request.requestId
       || !["ok", "error"].includes(value.response.status) || typeof value.receivedAt !== "string" || !Number.isFinite(Date.parse(value.receivedAt))
-      || entry.name !== `${request.requestId}.json`) throw new HssAdapterError("HSS_MEMORY_RECEIPT_INVALID", "durable memory transaction receipt is malformed", false, true);
+      || entry.name !== `${request.requestId}.json`) throw new HssAdapterError("HSS_MEMORY_RECEIPT_INVALID", "durable capture-owner transaction receipt is malformed", false, true);
     return { ...value, request };
   }).sort((left, right) => left.request.createdAt.localeCompare(right.request.createdAt) || left.request.requestId.localeCompare(right.request.requestId));
 }

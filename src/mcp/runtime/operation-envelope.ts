@@ -38,6 +38,8 @@ export interface OperationEnvelope {
   observedEffects: string[];
   verification: { status: string; method?: string; details?: unknown };
   data: unknown;
+  /** Exact, potentially large diagnostic data omitted from normal-mode results. */
+  details?: unknown;
   outputFiles: string[];
   warnings: string[];
   error?: OperationError;

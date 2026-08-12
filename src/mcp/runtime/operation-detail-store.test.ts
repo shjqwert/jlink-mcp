@@ -25,7 +25,11 @@ test("operation detail store replaces an oversized envelope with explicit trunca
   const store = new OperationDetailStore({ maxEntries: 2, maxBytes: 512 });
   const envelope = detail("large");
   envelope.data = { output: "x".repeat(2_000) };
-  store.put(envelope);
+  const putResult = store.put(envelope);
+  assert.equal(putResult.available, true);
+  assert.equal(putResult.complete, false);
+  assert.equal(putResult.reason, "max_bytes");
+  assert.ok((putResult.originalBytes ?? 0) > 512);
 
   const stored = store.get(envelope.operationId);
   assert.ok(stored);

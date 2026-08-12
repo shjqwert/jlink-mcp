@@ -6,6 +6,7 @@ import {
   completeManagedBreakpointCleanup,
   parseBacktraceFrames,
   parseBreakpointRecords,
+  parseMcpToolResult,
   recoverManagedBreakpointFailure,
 } from "./managed-gdb-session-guard.mjs";
 
@@ -45,6 +46,21 @@ function haltedDelete(breakpointId) {
     verification: { status: "observed", method: "typed_gdb_breakpoint_delete_and_state_preservation" },
   };
 }
+
+test("MCP result parser prefers structured content and keeps text fallback", () => {
+  const structured = { ok: true, data: { value: 1 } };
+  assert.deepEqual(parseMcpToolResult({
+    content: [{ type: "text", text: "OK inspect operation-id" }],
+    structuredContent: structured,
+  }), {
+    raw: "OK inspect operation-id",
+    response: structured,
+  });
+  assert.deepEqual(parseMcpToolResult(textResult(structured)), {
+    raw: JSON.stringify(structured),
+    response: structured,
+  });
+});
 
 test("strict GDB text parsers accept frames and breakpoint tables", () => {
   assert.deepEqual(parseBacktraceFrames("#0  fixture ()\n#1  caller ()"), [

@@ -71,6 +71,122 @@ test("compact result projection preserves safety fields under a total size budge
   assert.equal(error.stateUnknown, true);
   assert.ok((error.message?.length ?? 0) <= 512);
   assert.match(String(result.structuredContent.detailsUri), /^jlink:\/\/operation\//);
+
+  const incomplete = compactToolResult(envelope, {
+    available: true,
+    complete: false,
+    storedBytes: 256,
+    originalBytes: 80_000,
+    reason: "max_bytes",
+  });
+  assert.deepEqual(incomplete.structuredContent.details, {
+    available: true,
+    complete: false,
+    storedBytes: 256,
+    originalBytes: 80_000,
+    reason: "max_bytes",
+  });
+});
+
+test("legacy result modes carry one envelope representation and preserve explicit compatibility", async (context) => {
+  const root = testDirectory(context, "result-mode-contract");
+  for (const mode of ["normal", "full", "text"] as const) {
+    const environment = profileEnvironment(join(root, `${mode}-queue`), "legacy");
+    environment.JLINK_MCP_RESULT_MODE = mode;
+    const connection = await connectClientWithEnvironment(root, `${mode}-result`, environment);
+    try {
+      const rawResult = await connection.client.callTool({ name: "mcp_init", arguments: { projectRoot: root } });
+      const result = rawResult as unknown as {
+        content: Array<{ type: string; text?: string }>;
+        structuredContent?: Record<string, unknown>;
+      };
+      const text = result.content.find((item) => item.type === "text") as { type: "text"; text: string } | undefined;
+      assert.ok(text?.text);
+      if (mode === "text") {
+        assert.equal(result.structuredContent, undefined);
+        assert.equal((JSON.parse(text.text) as { ok: boolean }).ok, true);
+      } else {
+        assert.ok(result.structuredContent);
+        assert.throws(() => JSON.parse(text.text));
+        assert.match(text.text, /^OK mcp_init /);
+        assert.equal((result.structuredContent as { ok: boolean }).ok, true);
+        assert.equal(
+          (result.structuredContent as { timestamps?: unknown }).timestamps === undefined,
+          mode === "normal",
+          "normal omits audit timestamps while full retains them",
+        );
+      }
+    } finally {
+      await connection.client.close();
+    }
+  }
+});
+
+test("task profiles honor explicit result modes without changing the compact default", async (context) => {
+  const root = testDirectory(context, "task-result-mode-contract");
+  for (const mode of ["normal", "full", "text"] as const) {
+    const environment = profileEnvironment(join(root, `${mode}-queue`), "compact");
+    environment.JLINK_MCP_RESULT_MODE = mode;
+    const connection = await connectClientWithEnvironment(root, `compact-${mode}-result`, environment);
+    try {
+      const rawResult = await connection.client.callTool({ name: "inspect", arguments: { action: "core" } });
+      const result = rawResult as unknown as {
+        content: Array<{ type: string; text?: string }>;
+        structuredContent?: Record<string, unknown>;
+      };
+      const content = result.content.find((item) => item.type === "text") as { type: "text"; text: string } | undefined;
+      assert.ok(content?.text);
+      if (mode === "text") {
+        assert.equal(result.structuredContent, undefined);
+        assert.equal((JSON.parse(content.text) as { error: { code: string } }).error.code, "PROJECT_NOT_BOUND");
+      } else {
+        assert.ok(result.structuredContent);
+        assert.equal((result.structuredContent?.error as { code: string }).code, "PROJECT_NOT_BOUND");
+        assert.equal(result.structuredContent?.detailsUri, undefined);
+        assert.equal(result.structuredContent?.timestamps === undefined, mode === "normal");
+      }
+      const boundRaw = await connection.client.callTool({ name: "project", arguments: { action: "bind", projectRoot: root } });
+      const boundResult = boundRaw as unknown as {
+        content: Array<{ type: string; text?: string }>;
+        structuredContent?: Record<string, unknown>;
+      };
+      const boundText = boundResult.content.find((item) => item.type === "text") as { type: "text"; text: string } | undefined;
+      const boundEnvelope = mode === "text" ? JSON.parse(boundText!.text) as Record<string, unknown> : boundResult.structuredContent!;
+      assert.equal(boundEnvelope.ok, true);
+
+      const workflows = [
+        { name: "debug", arguments: { action: "run_to", params: { location: "MainTask", timeoutMs: 1_000 } }, detailKind: "task_workflow" },
+        { name: "trace", arguments: { action: "rtt_window", params: { durationMs: 0, count: 1 } }, detailKind: "task_workflow" },
+        { name: "trace", arguments: { action: "hss_window", params: { variables: [{ ref: "counter" }], rateHz: 10, durationSec: 1 } }, detailKind: undefined },
+      ] as const;
+      for (const workflow of workflows) {
+        const rawWorkflow = await connection.client.callTool({ name: workflow.name, arguments: workflow.arguments });
+        const wire = rawWorkflow as unknown as {
+          content: Array<{ type: string; text?: string }>;
+          structuredContent?: Record<string, unknown>;
+        };
+        const receipt = wire.content.find((item) => item.type === "text") as { type: "text"; text: string } | undefined;
+        assert.ok(receipt?.text);
+        const workflowEnvelope = mode === "text"
+          ? JSON.parse(receipt.text) as Record<string, unknown>
+          : wire.structuredContent!;
+        if (mode === "text") assert.equal(wire.structuredContent, undefined);
+        else {
+          assert.ok(wire.structuredContent);
+          assert.throws(() => JSON.parse(receipt.text));
+          assert.equal(workflowEnvelope.timestamps === undefined, mode === "normal");
+        }
+        assert.equal(workflowEnvelope.tool, workflow.name);
+        if (mode === "normal") assert.equal(workflowEnvelope.details, undefined);
+        else if (workflow.detailKind) {
+          assert.equal((workflowEnvelope.details as { kind?: string } | undefined)?.kind, workflow.detailKind);
+        }
+      }
+      assert.deepEqual((await connection.client.listResourceTemplates()).resourceTemplates, []);
+    } finally {
+      await connection.client.close();
+    }
+  }
 });
 
 test("standalone defaults to the compact catalog and preserves explicit profiles", async (context) => {

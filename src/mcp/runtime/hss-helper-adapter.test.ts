@@ -188,13 +188,50 @@ test("timed-out IPC reconciles a late response without issuing or attributing th
     assert.equal(existsSync(control.claimFile), false);
     const recovered = adapter.listMemoryTransactions(control);
     assert.equal(recovered.length, 1);
-    assert.equal(recovered[0].request.eventContext?.requestedValue, 1);
+    assert.equal(recovered[0].request.eventContext?.kind !== "target_control" ? recovered[0].request.eventContext?.requestedValue : undefined, 1);
     adapter.acknowledgeMemoryTransactions(control, [recovered[0].request.requestId]);
 
     const secondResponder = respondOnce(control, 0);
     const response = await adapter.requestMemory(control, writeRequest("02000000", 2, operationId2), 500);
     assert.equal(response.status, "ok");
     assert.equal((await secondResponder).bytesHex, "02000000");
+    assert.equal(adapter.listMemoryTransactions(control).length, 1);
+    adapter.acknowledgeMemoryTransactions(control, [response.requestId]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("timed-out resume is durably reconciled before another target-control request", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-resume-ipc-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  try {
+    const firstResponder = respondResumeOnce(control, 40);
+    await assert.rejects(
+      () => adapter.requestMemory(control, resumeRequest("continue", operationId1), 10),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_REQUEST_TIMEOUT" && error.currentRequestIssued && error.stateUnknown,
+    );
+    assert.equal(await firstResponder, "continue");
+
+    await assert.rejects(
+      () => adapter.requestMemory(control, resumeRequest("resume", operationId2), 100),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_MEMORY_LATE_RESPONSE_RECONCILED" && !error.currentRequestIssued && error.stateUnknown,
+    );
+    assert.equal(existsSync(control.requestFile), false);
+    assert.equal(existsSync(control.claimFile), false);
+    const recovered = adapter.listMemoryTransactions(control);
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].request.op, "resume");
+    assert.equal(recovered[0].request.eventContext?.kind, "target_control");
+    assert.equal(recovered[0].response.resumeIssued, true);
+    adapter.acknowledgeMemoryTransactions(control, [recovered[0].request.requestId]);
+
+    const secondResponder = respondResumeOnce(control, 0);
+    const response = await adapter.requestMemory(control, resumeRequest("resume", operationId2), 500);
+    assert.equal(response.status, "ok");
+    assert.equal(response.afterState, "running");
+    assert.equal(await secondResponder, "resume");
     assert.equal(adapter.listMemoryTransactions(control).length, 1);
     adapter.acknowledgeMemoryTransactions(control, [response.requestId]);
   } finally {
@@ -305,6 +342,15 @@ function writeRequest(bytesHex: string, requestedValue: number, operationId: str
   };
 }
 
+function resumeRequest(requestedAction: "resume" | "continue", operationId: string): HssMemoryRequest {
+  return {
+    captureId,
+    op: "resume",
+    operationId,
+    eventContext: { kind: "target_control", requestedAction, canonicalAction: "resume" },
+  };
+}
+
 function controlFiles(root: string): HssCaptureControlFiles {
   const file = (name: string) => path.join(root, name);
   return {
@@ -331,6 +377,31 @@ async function respondOnce(control: HssCaptureControlFiles, delayMs: number): Pr
   await delay(delayMs);
   writeFileSync(control.responseFile, JSON.stringify({ requestId: request.requestId, status: "ok", writeIssued: true }), { encoding: "utf8", flag: "wx" });
   return { bytesHex: request.bytesHex };
+}
+
+async function respondResumeOnce(control: HssCaptureControlFiles, delayMs: number): Promise<"resume" | "continue"> {
+  const deadline = Date.now() + 1_000;
+  while (!existsSync(control.requestFile)) {
+    if (Date.now() >= deadline) throw new Error("fixture request did not appear");
+    await delay(2);
+  }
+  const request = JSON.parse(readFileSync(control.requestFile, "utf8")) as {
+    requestId: string;
+    eventContext: { requestedAction: "resume" | "continue" };
+  };
+  renameSync(control.requestFile, control.claimFile);
+  await delay(delayMs);
+  writeFileSync(control.responseFile, JSON.stringify({
+    requestId: request.requestId,
+    status: "ok",
+    op: "resume",
+    beforeState: "halted",
+    afterState: "running",
+    resumeIssued: true,
+    operationBeforeQpcCounter: "10",
+    operationAfterQpcCounter: "20",
+  }), { encoding: "utf8", flag: "wx" });
+  return request.eventContext.requestedAction;
 }
 
 function delay(milliseconds: number): Promise<void> {
