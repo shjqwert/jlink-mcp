@@ -2117,49 +2117,24 @@ static bool read_bounded_text_file(const std::wstring& path, size_t maximum_byte
   return static_cast<bool>(file.read(bytes->data(), size));
 }
 
-static std::string lowercase_ascii(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
-    return static_cast<char>(std::tolower(character));
-  });
-  return value;
-}
-
-static bool resolve_non_intrusive_attach_device_from_catalog(
-    const std::string& requested_device,
-    const std::string& catalog,
-    std::string* attach_device) {
-  static const std::regex name_attribute("\\bName\\s*=\\s*\"([^\"]*)\"");
-  size_t offset = 0;
-  while ((offset = catalog.find("<ChipInfo", offset)) != std::string::npos) {
-    const size_t end = catalog.find('>', offset);
-    if (end == std::string::npos) break;
-    const std::string chip = catalog.substr(offset, end - offset + 1U);
-    std::smatch name;
-    if (std::regex_search(chip, name, name_attribute)
-        && lowercase_ascii(name[1].str()) == lowercase_ascii(requested_device)) {
-      *attach_device = requested_device;
-      return true;
-    }
-    offset = end + 1U;
-  }
-  return false;
-}
-
 static bool resolve_non_intrusive_attach_device(
     const std::wstring& dll_path,
     const std::string& requested_device,
     std::string* attach_device,
     std::string* reason) {
-  const std::filesystem::path catalog_path = std::filesystem::path(dll_path).parent_path() / L"JLinkDevices.xml";
-  std::string catalog;
-  if (!read_bounded_text_file(catalog_path.native(), 32U * 1024U * 1024U, &catalog)) {
-    *reason = "JLinkDevices.xml beside the selected J-Link DLL is unavailable or exceeds the 32 MiB safety bound";
+  (void)dll_path;
+  if (requested_device.empty() || requested_device.size() > 256U) {
+    *reason = "selected device name must contain between 1 and 256 bytes";
     return false;
   }
-  if (!resolve_non_intrusive_attach_device_from_catalog(requested_device, catalog, attach_device)) {
-    *reason = "selected device is not present in the active J-Link device catalog";
+  if (std::any_of(requested_device.begin(), requested_device.end(), [](unsigned char character) {
+        return character < 0x20U || character == 0x7FU;
+      })) {
+    *reason = "selected device name contains a control character";
     return false;
   }
+  *attach_device = requested_device;
+  reason->clear();
   return true;
 }
 
@@ -4001,20 +3976,21 @@ static bool self_test_probe_selection_and_close_policy() {
 }
 
 static bool self_test_non_intrusive_attach_profile() {
-  const std::string catalog =
-    "<ChipInfo Vendor=\"ZhiXin\" Name=\"Z20K146M\" Core=\"JLINK_CORE_CORTEX_M4\" />"
-    "<ChipInfo Vendor=\"Example\" Name=\"Other\" Core=\"JLINK_CORE_CORTEX_M3\" />"
-    "<ChipInfo Vendor=\"Example\" Name=\"MysteryDevice\" Core=\"JLINK_CORE_UNKNOWN\" />";
   std::string attach_device;
   std::string attach_reason;
-  return resolve_non_intrusive_attach_device_from_catalog("Z20K146M", catalog, &attach_device)
+  const std::string oversized_device(257U, 'A');
+  return resolve_non_intrusive_attach_device(L"C:\\missing\\JLink_x64.dll", "Z20K146M", &attach_device, &attach_reason)
     && attach_device == "Z20K146M"
-    && resolve_non_intrusive_attach_device_from_catalog("Other", catalog, &attach_device)
+    && attach_reason.empty()
+    && resolve_non_intrusive_attach_device(L"", "Other", &attach_device, &attach_reason)
     && attach_device == "Other"
-    && resolve_non_intrusive_attach_device_from_catalog("MysteryDevice", catalog, &attach_device)
+    && resolve_non_intrusive_attach_device(L"", "MysteryDevice", &attach_device, &attach_reason)
     && attach_device == "MysteryDevice"
-    && !resolve_non_intrusive_attach_device_from_catalog("Cortex-M4", catalog, &attach_device)
-    && !resolve_non_intrusive_attach_device(L"C:\\missing\\JLink_x64.dll", "Z20K146M", &attach_device, &attach_reason);
+    && resolve_non_intrusive_attach_device(L"", "Cortex-M4", &attach_device, &attach_reason)
+    && attach_device == "Cortex-M4"
+    && !resolve_non_intrusive_attach_device(L"", "", &attach_device, &attach_reason)
+    && !resolve_non_intrusive_attach_device(L"", "Bad\nDevice", &attach_device, &attach_reason)
+    && !resolve_non_intrusive_attach_device(L"", oversized_device, &attach_device, &attach_reason);
 }
 
 static std::string ready_heartbeat_json(
@@ -4123,7 +4099,7 @@ static int self_test() {
     return 0;
   }
   if (!self_test_non_intrusive_attach_profile()) {
-    error_json("HSS_SELF_TEST_NON_INTRUSIVE_ATTACH_FAILED", "selected device catalog resolution or unknown-core acceptance failed closed");
+    error_json("HSS_SELF_TEST_NON_INTRUSIVE_ATTACH_FAILED", "selected device forwarding and syntax bounds failed");
     return 0;
   }
   if (!prepare_jlink_script("none", L"", "", &no_script, &script_error_code, &script_error_reason)
