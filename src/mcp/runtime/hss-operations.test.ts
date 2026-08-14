@@ -546,22 +546,62 @@ test("HSS terminal settlement restores the authorized halted state after an alre
   }
 });
 
-test("HSS never resumes an initially running target to repair a state mismatch", async () => {
-  const fixture = await createFixture();
+test("HSS restores a running target after invasive capability probing and selects polling fallback", async () => {
+  const fixture = await createFixture("uint32", true);
   try {
     fixture.adapter.targetState = "running";
     fixture.adapter.capabilityStateAfter = "halted";
-    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
-    assert.equal(dryRun.error?.code, "HSS_TARGET_STATE_CHANGED");
-    assert.equal(fixture.adapter.restoreCount, 0);
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    assert.equal((started.capture as { backend?: string }).backend, "background_poll");
+    assert.equal((started.data as { fallbackCode?: string }).fallbackCode, "JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE");
+    assert.equal(fixture.adapter.runningRestoreCount, 1);
+    assert.equal(fixture.adapter.targetState, "running");
+    assert.equal(fixture.adapter.launchCount, 0);
+
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS remains fail-closed when running-state restoration after capability probing is unconfirmed", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.targetState = "running";
+    fixture.adapter.capabilityStateAfter = "halted";
+    fixture.adapter.failRunningRestore = true;
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.error?.code, "HSS_TARGET_STATE_RESTORE_FAILED");
+    assert.equal(started.error?.writeIssued, true);
+    assert.equal(started.error?.stateUnknown, true);
+    assert.equal(fixture.adapter.runningRestoreCount, 1);
     assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.launchCount, 0);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
 test("HSS surfaces native running-state restoration evidence after capability failure", async () => {
-  const fixture = await createFixture();
+  const fixture = await createFixture("uint32", true);
   try {
     fixture.adapter.targetState = "running";
     fixture.adapter.capabilityFailure = {
@@ -579,12 +619,12 @@ test("HSS surfaces native running-state restoration evidence after capability fa
     };
 
     const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
-    const helperEvidence = (dryRun.data as { helperEvidence?: Record<string, unknown> })?.helperEvidence;
-    assert.equal(dryRun.error?.code, "HSS_TARGET_STATE_CHANGED");
-    assert.equal(dryRun.error?.stateUnknown, false);
-    assert.equal(helperEvidence?.resumeIssued, true);
-    assert.equal(helperEvidence?.restored, true);
-    assert.equal(helperEvidence?.finalTargetStateRaw, 0);
+    const data = dryRun.data as { fallbackCode?: string; fallbackEvidence?: Record<string, unknown> };
+    assert.equal(dryRun.ok, true, JSON.stringify(dryRun.error));
+    assert.equal(data.fallbackCode, "JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE");
+    assert.equal(data.fallbackEvidence?.resumeIssued, true);
+    assert.equal(data.fallbackEvidence?.restored, true);
+    assert.equal(data.fallbackEvidence?.finalTargetStateRaw, 0);
     assert.equal(fixture.adapter.targetState, "running");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -1727,8 +1767,10 @@ class FakeHssAdapter implements HssHelperAdapter {
   capabilityFailure?: { code: string; reason: string; observed: Record<string, unknown> };
   stopStateAfter?: HssTargetState;
   restoreCount = 0;
+  runningRestoreCount = 0;
   resumeCount = 0;
   failRestore = false;
+  failRunningRestore = false;
   counterGapAt?: number;
   counterGapFrames = 0;
   counterStart = 0;
@@ -1774,6 +1816,16 @@ class FakeHssAdapter implements HssHelperAdapter {
     if (this.failRestore) throw new Error("fixture halted-state restoration failed");
     this.targetState = "halted";
     return "halted";
+  }
+
+  async restoreRunningState(): Promise<"running"> {
+    this.runningRestoreCount += 1;
+    if (this.failRunningRestore) {
+      throw new HssAdapterError("HSS_TARGET_STATE_RESTORE_FAILED", "fixture running-state restoration failed", false, true, true);
+    }
+    this.targetState = "running";
+    this.resumeCount += 1;
+    return "running";
   }
 
   async qpcTimebase(): Promise<HssTimebase> {

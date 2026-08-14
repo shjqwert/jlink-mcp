@@ -123,6 +123,7 @@ export interface HssHelperAdapter {
   capability(target: StoredTarget, runtime: HssRuntimeFacts | undefined, expectedTargetState: Exclude<HssTargetState, "unknown">): Promise<HssCapabilityFacts>;
   observeTargetState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState>;
   restoreHaltedState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState>;
+  restoreRunningState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState>;
   qpcTimebase(runtime: HssRuntimeFacts): Promise<HssTimebase>;
   launchCapture(runtime: HssRuntimeFacts, control: HssCaptureControlFiles): Promise<HssCaptureLaunch>;
   waitUntilReady(control: HssCaptureControlFiles, launch: HssCaptureLaunch, timeoutMs?: number): Promise<void>;
@@ -323,6 +324,32 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       );
     }
     return "halted";
+  }
+
+  async restoreRunningState(target: StoredTarget, runtime: HssRuntimeFacts): Promise<HssTargetState> {
+    assertRuntimeIdentity(runtime);
+    const observed = await runJson(runtime.helperPath, [
+      "cpu-control",
+      "--dll", runtime.runtimePath,
+      "--dll-sha256", runtime.runtimeSha256,
+      "--device", selectHssAttachDevice(target),
+      "--interface", target.interface,
+      "--serial", target.probeSerial,
+      "--speed", String(target.speed),
+      "--operation", "resume",
+      "--jlink-script-mode", "none",
+    ], 30_000);
+    const resumeIssued = observed.resumeIssued === true;
+    if (observed.status !== "ok" || observed.afterState !== "running" || !resumeIssued) {
+      throw new HssAdapterError(
+        String(observed.errorCode ?? "HSS_TARGET_STATE_RESTORE_FAILED"),
+        String(observed.reason ?? "HSS target state could not be restored to running"),
+        false,
+        true,
+        resumeIssued,
+      );
+    }
+    return "running";
   }
 
   async qpcTimebase(runtime: HssRuntimeFacts): Promise<HssTimebase> {

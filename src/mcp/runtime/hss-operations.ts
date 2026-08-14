@@ -240,6 +240,53 @@ export class HssOperations implements CaptureVariableAccess {
       observationError = error;
     }
     if (after !== before || observationError) {
+      if (observationError) {
+        throw new HssOperationError(
+          "HSS_TARGET_STATE_OBSERVE_FAILED",
+          "HSS capability completed without a trustworthy post-operation target-state observation",
+          false,
+          false,
+          true,
+        );
+      }
+      if (before === "running" && after === "halted") {
+        try {
+          const restored = await this.adapter.restoreRunningState(target, runtime);
+          if (restored !== "running") throw new Error(`restoration returned ${restored}`);
+        } catch (error) {
+          throw new HssOperationError(
+            "HSS_TARGET_STATE_RESTORE_FAILED",
+            `HSS capability halted the running target and running-state restoration failed: ${error instanceof Error ? error.message : String(error)}`,
+            false,
+            error instanceof HssAdapterError && error.currentRequestIssued,
+            true,
+            undefined,
+            {
+              ...(capability?.observed ?? {}),
+              targetStateBefore: before,
+              targetStateAfter: after,
+              restorationAttempted: true,
+              restored: false,
+            },
+          );
+        }
+        throw new HssOperationError(
+          "JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE",
+          "HSS capability attach halted the running target; running state was restored and polling fallback is required",
+          true,
+          false,
+          false,
+          undefined,
+          {
+            ...(capability?.observed ?? {}),
+            targetStateBefore: before,
+            targetStateAfter: after,
+            restorationAttempted: true,
+            restored: true,
+            restoredTargetState: "running",
+          },
+        );
+      }
       if (before === "halted") {
         try {
           const restored = await this.adapter.restoreHaltedState(target, runtime);
@@ -247,21 +294,26 @@ export class HssOperations implements CaptureVariableAccess {
         } catch (error) {
           throw new HssOperationError(
             "HSS_TARGET_STATE_RESTORE_FAILED",
-            `HSS capability changed or obscured the halted target state and restoration failed: ${error instanceof Error ? error.message : String(error)}`,
+            `HSS capability changed the halted target state and restoration failed: ${error instanceof Error ? error.message : String(error)}`,
             false,
-            false,
+            error instanceof HssAdapterError && error.currentRequestIssued,
             true,
           );
         }
+        throw new HssOperationError(
+          "HSS_TARGET_STATE_CHANGED",
+          `HSS capability changed target state from ${before} to ${after}; halted state was restored`,
+          false,
+          false,
+          false,
+        );
       }
       throw new HssOperationError(
-        observationError ? "HSS_TARGET_STATE_OBSERVE_FAILED" : "HSS_TARGET_STATE_CHANGED",
-        observationError
-          ? "HSS capability completed without a trustworthy post-operation target-state observation"
-          : `HSS capability changed target state from ${before} to ${after}; halted state was restored when authorized`,
+        "HSS_TARGET_STATE_CHANGED",
+        `HSS capability changed target state from ${before} to ${after}`,
         false,
         false,
-        Boolean(observationError) || before !== "halted",
+        true,
       );
     }
     if (capabilityError) throw capabilityError;
@@ -270,6 +322,22 @@ export class HssOperations implements CaptureVariableAccess {
       || capability.errorCode === "HSS_TARGET_STATE_RESTORE_FAILED"
       || capability.errorCode === "HSS_TARGET_STATE_OBSERVE_FAILED"
     )) {
+      const helperRestoredRunning = capability.errorCode === "HSS_TARGET_STATE_CHANGED"
+        && capability.observed?.stateUnknown !== true
+        && capability.observed?.restored === true
+        && capability.observed?.initialTargetStateRaw === 0
+        && capability.observed?.finalTargetStateRaw === 0;
+      if (helperRestoredRunning) {
+        throw new HssOperationError(
+          "JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE",
+          capability.reason ?? "HSS capability attach halted the running target before restoring it",
+          true,
+          false,
+          false,
+          undefined,
+          capability.observed,
+        );
+      }
       throw new HssOperationError(
         capability.errorCode,
         capability.reason ?? "HSS capability changed or obscured target state",
@@ -444,6 +512,7 @@ export class HssOperations implements CaptureVariableAccess {
     const envelope = createOperationEnvelope("hss_start", prepared.target);
     const fallbackCode = errorCode(hssError, "HSS_UNAVAILABLE");
     const fallbackReason = hssError instanceof Error ? hssError.message : String(hssError);
+    const fallbackEvidence = hssError instanceof HssOperationError ? hssError.evidence : undefined;
     const layout = frameLayout(prepared);
     const owner = this.memorySessions?.localOwnerForTarget(prepared.target) ?? this.queue.getOwner(prepared.target.probeSerial) ?? null;
     envelope.before = {
@@ -459,6 +528,7 @@ export class HssOperations implements CaptureVariableAccess {
       rejectedBackend: forcedBackend ? null : "hss",
       fallbackCode,
       fallbackReason,
+      ...(fallbackEvidence ? { fallbackEvidence } : {}),
       variables: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed })),
       writeVariables: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed })),
       rateHz: prepared.rateHz,
@@ -778,6 +848,7 @@ export class HssOperations implements CaptureVariableAccess {
       const runtime = await this.adapter.inspectRuntime(prepared.target);
       const fallbackCode = errorCode(hssError, "HSS_UNAVAILABLE");
       const fallbackReason = hssError instanceof Error ? hssError.message : String(hssError);
+      const fallbackEvidence = hssError instanceof HssOperationError ? hssError.evidence : undefined;
       const session = await this.pollingRunner.start({
         target: prepared.target,
         variables: prepared.variables.map(({ descriptor, resolved }) => ({ descriptor, resolved })),
@@ -792,6 +863,7 @@ export class HssOperations implements CaptureVariableAccess {
           effective: HSS_EFFECTIVE_LIMITS,
           errorCode: fallbackCode,
           reason: fallbackReason,
+          ...(fallbackEvidence ? { observed: fallbackEvidence } : {}),
         },
         fallbackCode,
         fallbackReason,
@@ -805,6 +877,7 @@ export class HssOperations implements CaptureVariableAccess {
         state: session.state,
         backend: session.backend,
         fallbackCode,
+        ...(fallbackEvidence ? { fallbackEvidence } : {}),
         configuredInterface: prepared.target.interface,
         configuredSpeedKHz: prepared.target.speed,
         variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
