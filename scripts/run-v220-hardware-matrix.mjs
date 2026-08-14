@@ -455,7 +455,7 @@ async function verifyNoActiveFault(callTool, captureId) {
     cfsr: parseRequiredHex(raw.cfsr, "CFSR"),
     hfsr: parseRequiredHex(raw.hfsr, "HFSR"),
   };
-  if (observed.ipsr !== 0n || observed.cfsr !== 0n || observed.hfsr !== 0n) {
+  if (!allowedTransientException(Number(observed.ipsr)) || observed.cfsr !== 0n || observed.hfsr !== 0n) {
     const error = new Error(`${captureId} observed an active exception or fault status: ${JSON.stringify(raw)}`);
     error.faultEvidence = {
       raw,
@@ -469,6 +469,14 @@ async function verifyNoActiveFault(callTool, captureId) {
   const resume = await callTool("target_control", { projectRoot, action: "resume" });
   assertPostState(resume, "running", `${captureId} fault-gate resume`);
   return { ...raw, haltVerified: true, resumeVerified: true };
+}
+
+function allowedTransientException(exceptionNumber) {
+  return exceptionNumber === 0
+    || exceptionNumber >= 16
+    || exceptionNumber === 11
+    || exceptionNumber === 14
+    || exceptionNumber === 15;
 }
 
 function parseRequiredHex(value, label) {

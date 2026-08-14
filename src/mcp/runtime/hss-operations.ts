@@ -2868,6 +2868,24 @@ function applyQueue<T>(envelope: OperationEnvelope, execution: { queueSequence: 
   envelope.timestamps.endedAt = execution.endedAt;
 }
 
+function hssAnomalyCodes(result: Record<string, unknown>, requestedRateHz: number): string[] {
+  const codes = new Set(
+    Array.isArray(result.anomalies)
+      ? result.anomalies.filter((value): value is string => typeof value === "string")
+      : [],
+  );
+  const actualRateHz = typeof result.actualRateHz === "number" && Number.isFinite(result.actualRateHz)
+    ? result.actualRateHz
+    : undefined;
+  if (result.sampleThresholdMet === false
+      || actualRateHz !== undefined && actualRateHz < requestedRateHz * 0.95) {
+    codes.add("RATE_DEGRADED");
+  }
+  if (typeof result.missingSamples === "number" && result.missingSamples > 0) codes.add("SAMPLES_MISSING");
+  if (typeof result.droppedSamples === "number" && result.droppedSamples > 0) codes.add("SAMPLES_DROPPED");
+  return [...codes].sort();
+}
+
 function captureSummary(session: HssSessionRecord): Record<string, unknown> {
   const result = session.result ?? {};
   const requestedSamples = Number.isSafeInteger(result.requestedSamples)
@@ -2891,7 +2909,7 @@ function captureSummary(session: HssSessionRecord): Record<string, unknown> {
     configuredSpeedKHz: session.configuredSpeedKHz ?? null,
     actualRateHz: typeof result.actualRateHz === "number" ? result.actualRateHz : null,
     pauseTotalUs: session.pauseTotalUs ?? 0,
-    anomalies: Array.isArray(result.anomalies) ? result.anomalies : [],
+    anomalies: hssAnomalyCodes(result, session.rateHz),
     stateUnknown: session.stateUnknown ?? false,
     requestedSamples,
     sampleCount,

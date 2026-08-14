@@ -299,6 +299,7 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal((stopped.capture as { actualRateHz: number }).actualRateHz, 56);
     assert.equal((stopped.capture as { sampleRatio: number }).sampleRatio, 0.56);
     assert.equal((stopped.capture as { sampleThresholdMet: boolean }).sampleThresholdMet, false);
+    assert.deepEqual((stopped.capture as { anomalies: string[] }).anomalies, ["RATE_DEGRADED", "SAMPLES_MISSING"]);
     assert.equal((stopped.capture as { readStatistics: { emptyReads: number } }).readStatistics.emptyReads, 44);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
     assert.equal(stopped.requestedEffects.includes("rebuild_capture_index"), false);
