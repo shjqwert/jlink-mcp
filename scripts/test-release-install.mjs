@@ -137,12 +137,12 @@ async function assertMcpSurface(standalone, cwd, label) {
     const initialized = parseEnvelope(await client.callTool({ name: "project", arguments: { action: "bind", projectRoot: cwd } }));
     if (!initialized.ok) throw new Error(`${label} MCP project initialization failed: ${JSON.stringify(initialized)}`);
     const listed = parseEnvelope(await client.callTool({ name: "capture", arguments: { action: "list", params: { limit: 10 } } }));
-    const listedData = await expandedEnvelopeData(client, listed);
+    const listedData = await visibleResultData(client, listed);
     if (!listed.ok || !listedData?.captures?.some((entry) => entry.captureId === captureId && entry.formatStatus === "supported")) {
       throw new Error(`${label} MCP did not list the JCAP v1 release fixture`);
     }
     const summary = parseEnvelope(await client.callTool({ name: "capture", arguments: { action: "summary", params: { captureId } } }));
-    const summaryData = await expandedEnvelopeData(client, summary);
+    const summaryData = await visibleResultData(client, summary);
     if (!summary.ok || summaryData?.sampleCount !== 1 || summaryData?.indexStatus !== "ready") {
       throw new Error(`${label} MCP could not query and rebuild the JCAP v1 release fixture: ${JSON.stringify(summary)}`);
     }
@@ -159,6 +159,12 @@ async function expandedEnvelopeData(client, envelope) {
   return JSON.parse(text).data;
 }
 
+async function visibleResultData(client, envelope) {
+  if (envelope.result && typeof envelope.result === "object" && !Array.isArray(envelope.result)) {
+    return envelope.result;
+  }
+  return expandedEnvelopeData(client, envelope);
+}
 async function assertLegacyMcpSurface(standalone, cwd, label) {
   const localRoot = resolve(cwd, ".jlink-mcp-release-smoke-legacy");
   const transport = new StdioClientTransport({
