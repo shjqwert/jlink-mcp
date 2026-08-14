@@ -167,7 +167,14 @@ export function assertNonIntrusiveConnectPreflight(observed: Record<string, unkn
 }
 
 export function selectHssAttachDevice(target: Pick<StoredTarget, "device" | "gdbDevice">): string {
-  return target.device;
+  const attachDevice = target.gdbDevice?.trim();
+  if (!attachDevice) {
+    throw new HssAdapterError(
+      "HSS_ATTACH_PROFILE_REQUIRED",
+      "HSS runtime access requires an explicit attach profile (gdbDevice)",
+    );
+  }
+  return attachDevice;
 }
 
 export class NativeHssHelperAdapter implements HssHelperAdapter {

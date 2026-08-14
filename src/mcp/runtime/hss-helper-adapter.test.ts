@@ -19,10 +19,15 @@ const helperNonce = "52000000-0000-4000-8000-000000000001";
 const operationId1 = "54000000-0000-4000-8000-000000000001";
 const operationId2 = "54000000-0000-4000-8000-000000000002";
 
-test("HSS helper uses the selected J-Link device without a core allowlist", () => {
-  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Z20K146M");
-  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: undefined }), "Z20K146M");
-  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Other" }), "Z20K146M");
+test("HSS helper uses the explicit runtime attach profile without a core allowlist", () => {
+  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
+  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: " Other " }), "Other");
+  for (const gdbDevice of [undefined, "", "   "]) {
+    assert.throws(
+      () => selectHssAttachDevice({ device: "Z20K146M", gdbDevice }),
+      (error: unknown) => error instanceof HssAdapterError && error.code === "HSS_ATTACH_PROFILE_REQUIRED" && !error.stateUnknown,
+    );
+  }
 });
 
 test("HSS connect preflight accepts only explicit halted-state observations", () => {

@@ -308,6 +308,9 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
 
     const snapshot = await jcapV2CaptureSnapshot(captureFile);
     assert.equal(snapshot.metadata.state, "stopped");
+    assert.equal(snapshot.provenance.target?.device, "TEST_DEVICE");
+    assert.equal(snapshot.provenance.target?.configuredDevice, "TEST_DEVICE");
+    assert.equal(snapshot.provenance.target?.attachDevice, "Cortex-M4");
     assert.equal(snapshot.integrity.source_samples_sha256.length, 64);
     assert.equal(snapshot.integrity.source_events_sha256.length, 64);
     const writeEvents = snapshot.events.filter((event) => event.type === "variable_write");
@@ -2641,6 +2644,7 @@ class FakeHssAdapter implements HssHelperAdapter {
       planFormatVersion: number;
       artifactMatchManifestPath: string;
       captureId: string;
+      configuredDevice: string;
       device: string;
       helperInstanceNonce: string;
       outputFile: string;
@@ -2657,8 +2661,8 @@ class FakeHssAdapter implements HssHelperAdapter {
       throw new Error("fake Helper plan contract mismatch");
     }
     const manifest = JSON.parse(readFileSync(plan.artifactMatchManifestPath, "utf8")) as { targetId?: string };
-    if (plan.device !== "TEST_DEVICE" || manifest.targetId !== plan.device) {
-      throw new Error("fake Helper attach profile and Artifact manifest binding mismatch");
+    if (plan.configuredDevice !== "TEST_DEVICE" || plan.device !== "Cortex-M4" || manifest.targetId !== plan.configuredDevice) {
+      throw new Error("fake Helper attach profile and Artifact manifest identity mismatch");
     }
     if (plan.resumeBeforeStart) {
       this.resumeCount += 1;

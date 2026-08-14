@@ -5408,6 +5408,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::string helper_instance_nonce = json_string(plan, "helperInstanceNonce");
   const std::string qpc_epoch_text = json_string(plan, "qpcEpochCounter");
   const std::string qpc_frequency_text = json_string(plan, "qpcFrequency");
+  const std::string configured_device = json_string(plan, "configuredDevice", "");
   const std::string device = json_string(plan, "device", "");
   const std::string iface = json_string(plan, "interface", "SWD");
   const std::string serial_text = json_string(plan, "serial");
@@ -5442,7 +5443,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const std::regex uuid("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}");
   if (dll_utf8.empty() || output_file.empty() || pid_file.empty() || ready_file.empty() || write_request_file.empty() || write_claim_file.empty() || write_response_file.empty()
       || !std::regex_match(capture_id, uuid) || !std::regex_match(helper_instance_nonce, uuid)
-      || plan_format_version != 3 || !symbol_arrays_valid
+      || plan_format_version != 3 || configured_device.empty() || !symbol_arrays_valid
       || !valid_jcap_symbols(symbols) || !valid_write_symbols(write_symbols, symbols)
       || !capture_sample_budget(requested_rate, duration_sec, &requested_samples)
       || !valid_jcap_samples_path(output_file, capture_id, &output_path)
@@ -5536,7 +5537,7 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
       plan_it->second,
       artifact_match_manifest_sha256,
       capture_id,
-      device,
+      configured_device,
       serial_text,
       artifact_match_runtime_identity_sha256,
       artifact_generation,

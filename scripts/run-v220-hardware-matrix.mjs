@@ -328,11 +328,11 @@ async function runBackend(backend, index) {
     }
 
     const finalReset = await requireRunningReset(callTool, `${backend} final reset`);
-    const finalStatus = await callTool("target_status", { projectRoot });
-    assertOwnerReleased(finalStatus, `${backend} final status`);
     const captureFiles = await validateCaptureFiles(path.join(backendRoot, "evidence", "captures"), captures.map(({ captureId }) => captureId));
     await client.close();
     clientConnected = false;
+    const finalStatus = await statusAfterClientClose(backendRoot, backend);
+    assertOwnerReleased(finalStatus, `${backend} post-client-close status`);
     return {
       backend,
       serverVersion,
@@ -491,6 +491,35 @@ function assertPostState(response, expected, label) {
   ].filter(([, value]) => typeof value === "string");
   if (!states.length || states.some(([, value]) => value !== expected)) {
     throw new Error(`${label} did not authoritatively confirm ${expected}: ${JSON.stringify(states)}`);
+  }
+}
+
+async function statusAfterClientClose(backendRoot, backend) {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [standalonePath],
+    cwd: repositoryRoot,
+    stderr: "pipe",
+    env: {
+      ...Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== undefined)),
+      JLINK_INSTALL_DIR: jlinkDir,
+      JLINK_MCP_STORAGE_ROOT: path.join(backendRoot, "storage"),
+      JLINK_MCP_EVIDENCE_ROOT: path.join(backendRoot, "evidence"),
+      JLINK_MCP_QUEUE_ROOT: path.join(backendRoot, "queue"),
+      JLINK_MCP_PROFILE: "acceptance",
+      JLINK_MCP_RESULT_MODE: "full",
+    },
+  });
+  const observer = new Client({ name: `v220-owner-audit-${backend}`, version: expectedVersion }, { capabilities: {} });
+  try {
+    await observer.connect(transport);
+    const initialized = parseEnvelope(await observer.callTool({ name: "mcp_init", arguments: { projectRoot } }));
+    if (initialized.ok !== true) throw new Error(`${backend} post-close observer initialization failed`);
+    const status = parseEnvelope(await observer.callTool({ name: "target_status", arguments: { projectRoot } }));
+    if (status.ok !== true || status.error?.stateUnknown === true) throw new Error(`${backend} post-close owner status failed: ${JSON.stringify(status.error ?? status)}`);
+    return status;
+  } finally {
+    await observer.close();
   }
 }
 
