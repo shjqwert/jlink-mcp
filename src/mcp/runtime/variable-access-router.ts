@@ -15,6 +15,7 @@ import {
 import { TargetStore, TargetStoreError, type StoredTarget } from "./target-store";
 import {
   VariableResolutionError,
+  type CaptureExternalWriteToken,
   type CaptureVariableAccess,
   type ResolvedVariableContext,
   type VariableAccess,
@@ -128,6 +129,8 @@ export class VariableAccessRouter implements VariableAccess {
         stateUnknown: false,
       });
     }
+
+    let externalWriteToken: CaptureExternalWriteToken | undefined;
     try {
       const captureEnvelope = await this.capture.tryWriteVariable(normalizedInput, target, resolved, requested, comparator);
       if (captureEnvelope !== undefined) {
@@ -135,11 +138,12 @@ export class VariableAccessRouter implements VariableAccess {
         appendCacheState(captureEnvelope, cacheRefreshed);
         return captureEnvelope;
       }
+      externalWriteToken = this.capture.beginExternalWrite?.(target, resolved);
     } catch (error) {
       return this.failure(createOperationEnvelope("write_variable", target), error, "capture_write");
     }
 
-    const envelope = await this.direct.structuredWrite({
+    let envelope = await this.direct.structuredWrite({
       projectRoot: target.projectRoot,
       address: resolved.address,
       width: resolved.size * 8 as 8 | 16 | 32,
@@ -157,6 +161,20 @@ export class VariableAccessRouter implements VariableAccess {
       allowedArtifactMatch: ["verified"],
       semanticData: { resolved, requestedValue: normalizedInput.value },
     });
+    if (externalWriteToken && this.capture.completeExternalWrite) {
+      try {
+        envelope = await this.capture.completeExternalWrite(
+          externalWriteToken,
+          normalizedInput,
+          target,
+          resolved,
+          requested,
+          envelope,
+        );
+      } catch (error) {
+        envelope = this.failure(envelope, error, "capture_event");
+      }
+    }
     decorateTypedWrite(envelope, resolved);
     appendCacheState(envelope, cacheRefreshed);
     return envelope;

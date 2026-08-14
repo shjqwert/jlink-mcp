@@ -8,8 +8,8 @@ import { findMemorySessionHelper, MemorySessionError, MemorySessionManager, rese
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore, type StoredTarget } from "./target-store";
 
-test("persistent memory session uses an explicit Cortex-M4 attach profile without changing target identity", () => {
-  assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
+test("persistent memory session uses the selected J-Link device without changing target identity", () => {
+  assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Z20K146M");
   assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: undefined }), "Z20K146M");
 });
 

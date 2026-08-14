@@ -442,7 +442,7 @@ export class DirectMcuService {
           readFailure = memoryReadCommandError(result, "read");
         } else {
           try {
-            bytes = memoryBytes(runtime.probe, result, input.address, input.byteCount, input.width / 8 as 1 | 2 | 4);
+            bytes = decodeProbeMemoryBytes(runtime.probe, result, input.address, input.byteCount, input.width / 8 as 1 | 2 | 4);
             if (bytes.length < input.byteCount) throw executionError("READ_LENGTH_MISMATCH", "decode", `requested ${input.byteCount} bytes but decoded ${bytes.length}`);
           } catch (error) {
             readFailure = unexpectedReadError(error, "memory read decode failed");
@@ -501,7 +501,7 @@ export class DirectMcuService {
           command = await runtime.probe.readMemory(request.address, request.byteCount, request.width / 8 as 1 | 2 | 4);
           if (!command.success) readFailure = memoryReadCommandError(command, "read");
           else {
-            const decoded = memoryBytes(runtime.probe, command, request.address, request.byteCount, request.width / 8 as 1 | 2 | 4);
+            const decoded = decodeProbeMemoryBytes(runtime.probe, command, request.address, request.byteCount, request.width / 8 as 1 | 2 | 4);
             if (decoded.length < request.byteCount) readFailure = executionError("READ_LENGTH_MISMATCH", "decode", `requested ${request.byteCount} bytes but decoded ${decoded.length}`);
             else bytes = decoded.subarray(0, request.byteCount);
           }
@@ -2108,7 +2108,7 @@ function envelopeTargetState(value: unknown): "running" | "halted" | "unknown" |
   return state === "running" || state === "halted" || state === "unknown" ? state : undefined;
 }
 
-function memoryBytes(probe: ProbeBackend, result: CommandResult, address: number, byteCount: number, accessSize: 1 | 2 | 4): Buffer {
+export function decodeProbeMemoryBytes(probe: ProbeBackend, result: CommandResult, address: number, byteCount: number, accessSize: 1 | 2 | 4): Buffer {
   const rawDump = probe.parseMemoryDump(result.rawOutput);
   const dump = rawDump.length > 0 ? rawDump : probe.parseMemoryDump(result.output);
   const byAddress = new Map<number, number>();
@@ -2147,7 +2147,7 @@ async function readExact(
   const result = await probe.readMemory(address, byteCount, accessSize);
   record?.(result);
   if (!result.success) throw memoryReadCommandError(result, stage);
-  const bytes = memoryBytes(probe, result, address, byteCount, accessSize);
+  const bytes = decodeProbeMemoryBytes(probe, result, address, byteCount, accessSize);
   if (bytes.length < byteCount) {
     const afterWrite = stage !== "old_value_read";
     throw executionError("READ_LENGTH_MISMATCH", stage, `requested ${byteCount} bytes but decoded ${bytes.length}`, { writeIssued: afterWrite, stateUnknown: afterWrite });

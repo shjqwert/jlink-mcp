@@ -11,8 +11,8 @@ import { ProcessManager } from "../utils/process-manager";
 import { ProbeErrorCode, type CommandResult } from "./backend";
 import { JLinkBackend, selectJLinkNonIntrusiveAttachDevice, waitForGdbServerReady, type JLinkSpawn } from "./jlink";
 
-test("non-intrusive helper uses an explicit Cortex-M4 attach profile", () => {
-  assert.equal(selectJLinkNonIntrusiveAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
+test("non-intrusive helper uses the selected J-Link device without a core allowlist", () => {
+  assert.equal(selectJLinkNonIntrusiveAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Z20K146M");
   assert.equal(selectJLinkNonIntrusiveAttachDevice({ device: "Z20K146M" }), "Z20K146M");
 });
 

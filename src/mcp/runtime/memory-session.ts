@@ -286,7 +286,7 @@ class NativeMemorySessionLauncher implements MemorySessionLauncher {
 }
 
 export function selectMemorySessionAttachDevice(target: Pick<StoredTarget, "device" | "gdbDevice">): string {
-  return target.gdbDevice === "Cortex-M4" ? target.gdbDevice : target.device;
+  return target.device;
 }
 
 class NativePersistentMemorySession implements PersistentMemorySession {

@@ -272,10 +272,10 @@ export class TaskOperations {
     if (action === "list") return relabelEnvelope(await this.services.captures.list(pickParams(params, ["limit", "cursor"])), "capture");
     if (action === "summary") return relabelEnvelope(await this.services.captures.summary(requireString("capture", params, "captureId")), "capture");
     if (action === "series") return relabelEnvelope(await this.services.captures.series(
-      pickParams(params, ["captureId", "variables", "startTick", "endTick", "bucketCount"]) as unknown as CaptureSeriesInput,
+      pickParams(params, ["captureId", "variables", "timeRange", "resolution", "statistics", "cursor", "startTick", "endTick", "bucketCount"]) as unknown as CaptureSeriesInput,
     ), "capture");
     if (action === "event_window") return relabelEnvelope(await this.services.captures.eventWindow(
-      pickParams(params, ["captureId", "eventId", "variables", "beforeMs", "afterMs", "bucketCount"]) as unknown as CaptureEventWindowInput,
+      pickParams(params, ["captureId", "eventId", "variables", "beforeMs", "afterMs", "resolution", "statistics", "cursor", "bucketCount"]) as unknown as CaptureEventWindowInput,
     ), "capture");
     if (action === "export_csv") return relabelEnvelope(await this.services.captures.exportCsv(requireString("capture", params, "captureId")), "capture");
     return invalidAction("capture", action);

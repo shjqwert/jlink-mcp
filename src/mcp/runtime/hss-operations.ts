@@ -19,11 +19,13 @@ import {
   appendJcapV1Event,
   createJcapV1Metadata,
   finalizeJcapV1Metadata,
+  finalizeJcapV2FromV1Package,
   JcapV1Writer,
   readJcapV1Metadata,
   readJcapV1Raw,
   refreshActiveJcapV1Metadata,
   verifyJcapV1Index,
+  verifyJcapV2,
   type JcapV1CaptureState,
   type JcapV1Event,
   type JcapV1Metadata,
@@ -58,9 +60,11 @@ import {
 import { createOperationEnvelope, failEnvelope, finishEnvelope, type OperationEnvelope } from "./operation-envelope";
 import { ProbeQueue, ProbeQueueError, type ProbeOwner } from "./probe-queue";
 import { MemorySessionError, type MemorySessionManager } from "./memory-session";
+import { PollingCaptureError, PollingCaptureRunner, type PollingCaptureBackend } from "./polling-capture";
 import { assertArtifactBindingsCurrent, TargetStore, TargetStoreError, type StoredTarget } from "./target-store";
 import type {
   CaptureVariableAccess,
+  CaptureExternalWriteToken,
   VariableRefInput,
   VariableResolver,
   VariableWriteInput,
@@ -134,6 +138,7 @@ export class HssOperations implements CaptureVariableAccess {
   private readonly outputRoot: string;
   private readonly sessionWorkRoot: string;
   private readonly monitoredCaptures = new Set<string>();
+  private readonly pollingRunner?: PollingCaptureRunner;
 
   constructor(
     private readonly targets: TargetStore,
@@ -144,9 +149,13 @@ export class HssOperations implements CaptureVariableAccess {
     stateRoot = dirname(targets.filePath),
     sessionWorkRoot = resolve(tmpdir(), "jlink-mcp-hss"),
     private readonly memorySessions?: MemorySessionManager,
+    private readonly allowCaptureBackendTestOverride = false,
   ) {
     this.outputRoot = resolve(outputRoot);
     this.sessionStore = new HssSessionStore(stateRoot);
+    this.pollingRunner = memorySessions
+      ? new PollingCaptureRunner(this.targets, this.queue, memorySessions, this.sessionStore, this.outputRoot)
+      : undefined;
     this.sessionWorkRoot = resolve(sessionWorkRoot);
     mkdirSync(this.sessionWorkRoot, { recursive: true });
     try {
@@ -376,7 +385,7 @@ export class HssOperations implements CaptureVariableAccess {
     return { artifact, nonvolatileRanges, ramRanges };
   }
 
-  private async dryRun(prepared: PreparedCapture): Promise<OperationEnvelope> {
+  private async dryRun(prepared: PreparedCapture, allowPollingFallback = true): Promise<OperationEnvelope> {
     const envelope = createOperationEnvelope("hss_start", prepared.target);
     try {
       const localMemoryOwner = this.memorySessions?.localOwnerForTarget(prepared.target);
@@ -422,8 +431,53 @@ export class HssOperations implements CaptureVariableAccess {
       if (linkRateDiagnostic(prepared).warning) envelope.warnings.push("LINK_SPEED_MAY_LIMIT_RATE: the configured debug-link speed may limit the requested HSS rate and variable count.");
       return finishEnvelope(envelope, true);
     } catch (error) {
+      if (allowPollingFallback && this.pollingRunner && isPollingFallbackEligible(error)) return this.pollingDryRun(prepared, error);
       return this.failure(envelope, error, "dry_run");
     }
+  }
+
+  private pollingDryRun(
+    prepared: PreparedCapture,
+    hssError: unknown,
+    forcedBackend?: PollingCaptureBackend,
+  ): OperationEnvelope {
+    const envelope = createOperationEnvelope("hss_start", prepared.target);
+    const fallbackCode = errorCode(hssError, "HSS_UNAVAILABLE");
+    const fallbackReason = hssError instanceof Error ? hssError.message : String(hssError);
+    const layout = frameLayout(prepared);
+    const owner = this.memorySessions?.localOwnerForTarget(prepared.target) ?? this.queue.getOwner(prepared.target.probeSerial) ?? null;
+    envelope.before = {
+      targetGeneration: prepared.target.generation,
+      artifactGeneration: prepared.target.artifact!.generation,
+      owner,
+    };
+    envelope.after = { ...envelope.before };
+    envelope.data = {
+      dryRun: true,
+      backend: forcedBackend ?? "automatic",
+      backendOrder: forcedBackend ? [forcedBackend] : ["hss", "background_poll", "stop_poll"],
+      rejectedBackend: forcedBackend ? null : "hss",
+      fallbackCode,
+      fallbackReason,
+      variables: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed })),
+      writeVariables: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ ...descriptor, cacheRefreshed })),
+      rateHz: prepared.rateHz,
+      durationSec: prepared.durationSec,
+      requestedSamples: prepared.rateHz * prepared.durationSec,
+      configuredInterface: prepared.target.interface,
+      configuredSpeedKHz: prepared.target.speed,
+      linkRate: linkRateDiagnostic(prepared),
+      frameLayout: layout,
+      estimatedDataBytes: layout.hssSampleStrideBytes * prepared.rateHz * prepared.durationSec,
+      blockCount: prepared.blockCount,
+      qualityOracle: prepared.qualityOracle ?? null,
+      limits: HSS_EFFECTIVE_LIMITS,
+    };
+    envelope.warnings.push(forcedBackend
+      ? `Acceptance test backend forced: ${forcedBackend}`
+      : `HSS fallback planned: ${fallbackCode}`);
+    envelope.verification = { status: "planned", method: "typed_resolution_and_automatic_backend_order" };
+    return finishEnvelope(envelope, true);
   }
 
   async start(input: HssCaptureInput): Promise<OperationEnvelope> {
@@ -431,7 +485,26 @@ export class HssOperations implements CaptureVariableAccess {
     let prepared: PreparedCapture;
     try { prepared = await this.prepare(input); }
     catch (error) { return this.failure(initial, error, "validation"); }
-    if (input.dryRun) return this.dryRun(prepared);
+    let forcedBackend: CaptureBackendTestOverride | undefined;
+    try { forcedBackend = captureBackendTestOverride(this.allowCaptureBackendTestOverride); }
+    catch (error) { return this.failure(initial, error, "validation"); }
+    if (input.dryRun) {
+      if (forcedBackend === "background_poll" || forcedBackend === "stop_poll") {
+        return this.pollingDryRun(
+          prepared,
+          new HssOperationError("HSS_TEST_BACKEND_FORCED", `${forcedBackend} was selected by the acceptance-only test switch`),
+          forcedBackend,
+        );
+      }
+      return this.dryRun(prepared, forcedBackend !== "hss");
+    }
+    if (forcedBackend === "background_poll" || forcedBackend === "stop_poll") {
+      return this.startPollingFallback(
+        prepared,
+        new HssOperationError("HSS_TEST_BACKEND_FORCED", `${forcedBackend} was selected by the acceptance-only test switch`),
+        forcedBackend,
+      );
+    }
     const envelope = createOperationEnvelope("hss_start", prepared.target);
     envelope.requestedEffects = ["connect_probe", "start_hss_capture", "create_jcap_package", "conditionally_resume_for_hss", "restore_initial_target_state_after_capture"];
     try {
@@ -466,6 +539,7 @@ export class HssOperations implements CaptureVariableAccess {
           startedAt: created.createdAt,
           ...(prepared.runId ? { runId: prepared.runId } : {}),
           packageDir: created.packageDir,
+          captureFile: created.captureFile,
           sessionDir: created.sessionDir,
           control: created.control,
           helperPid: 0,
@@ -483,6 +557,9 @@ export class HssOperations implements CaptureVariableAccess {
           ...(prepared.qualityOracle ? { qualityOracle: prepared.qualityOracle } : {}),
           runtime,
           capability,
+          backend: "hss",
+          intrusive: false,
+          pauseTotalUs: 0,
         };
         this.sessionStore.write(session);
         let launch: HssCaptureLaunch | undefined;
@@ -572,13 +649,40 @@ export class HssOperations implements CaptureVariableAccess {
                 ).stateUnknown;
               }
             }
-            this.finalizeCreatedFailure(created.packageDir, terminalError);
+            let failedCapture: Awaited<ReturnType<typeof finalizeJcapV2FromV1Package>> | undefined;
+            try {
+              failedCapture = await this.finalizeCreatedFailure(
+                created.packageDir,
+                created.captureFile,
+                created.sessionDir,
+                created.createdAt,
+                prepared.rateHz,
+                terminalError,
+              );
+            } catch (finalizeError) {
+              terminalError = new HssOperationError(
+                "HSS_START_JCAP_FINALIZE_FAILED",
+                `failed to publish the terminal JCAP after ${errorCode(terminalError, "HSS_START_FAILED")}: ${finalizeError instanceof Error ? finalizeError.message : String(finalizeError)}`,
+                false,
+                false,
+                statePreservationPending,
+              );
+            }
             this.sessionStore.update(created.captureId, (provisional) => ({
               ...provisional,
               state: "failed",
               statePreservationPending,
               updatedAt: new Date().toISOString(),
               endedAt: new Date().toISOString(),
+              ...(failedCapture ? {
+                result: {
+                  ...(provisional.result ?? {}),
+                  sampleCount: failedCapture.sampleCount,
+                  jcapFormatVersion: 2,
+                  jcapChunkCount: failedCapture.chunkCount,
+                  jcapContentSha256: failedCapture.contentSha256,
+                },
+              } : {}),
               lastError: { code: errorCode(terminalError, "HSS_START_FAILED"), message: terminalError instanceof Error ? terminalError.message : String(terminalError) },
             }));
             if (!statePreservationPending && claimedOwner) {
@@ -611,7 +715,7 @@ export class HssOperations implements CaptureVariableAccess {
         variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
         writeVariableResolution: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
       };
-      envelope.outputFiles = packageFiles(execution.value.packageDir);
+      envelope.outputFiles = packageFiles(execution.value.packageDir, execution.value.captureFile);
       envelope.observedEffects = ["hss_helper_started", "hss_helper_ready", "probe_owner_claimed", "jcap_capture_active"];
       if (execution.value.expectedTargetState === "halted") envelope.observedEffects.push("target_resumed_for_hss");
       envelope.verification = { status: "observed", method: "helper_ready_journal_pid_owner_and_active_jcap_metadata" };
@@ -640,7 +744,7 @@ export class HssOperations implements CaptureVariableAccess {
           variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
           writeVariableResolution: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
         };
-        envelope.outputFiles = packageFiles(settled.packageDir);
+        envelope.outputFiles = packageFiles(settled.packageDir, settled.captureFile);
         envelope.observedEffects = ["hss_helper_started", "probe_owner_claimed", "helper_exited_during_start", "capture_finalized", "probe_owner_released"];
         recordMemoryRecoveryEffects(envelope, settlement);
         envelope.verification = { status: settled.state === "completed" || settled.state === "stopped" ? "verified" : "observed", method: "terminal_jcap_state_after_start_probe" };
@@ -651,17 +755,73 @@ export class HssOperations implements CaptureVariableAccess {
       return finishEnvelope(envelope, true);
     } catch (error) {
       const evidence = error instanceof HssOperationError ? error.captureEvidence : undefined;
+      if (!evidence && forcedBackend !== "hss" && isPollingFallbackEligible(error)) return this.startPollingFallback(prepared, error);
       if (evidence) {
         try {
           const session = this.sessionStore.read(evidence.captureId);
           envelope.capture = captureSummary(session);
           envelope.data = { captureId: session.captureId, state: session.state, packageDir: session.packageDir };
-          envelope.outputFiles = packageFiles(session.packageDir);
+          envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
           envelope.after = { owner: this.queue.getOwner(session.probeSerial) ?? null, targetGeneration: session.targetGeneration };
           envelope.observedEffects = ["jcap_package_created", ...(session.helperPid > 0 ? ["hss_helper_started"] : []), ...(isTerminalHssSessionState(session.state) ? ["capture_finalized"] : [])];
         } catch { /* retain the originating start failure when evidence inspection also fails */ }
       }
       return this.failure(envelope, error, "start");
+    }
+  }
+
+  private async startPollingFallback(prepared: PreparedCapture, hssError: unknown, forcedBackend?: PollingCaptureBackend): Promise<OperationEnvelope> {
+    const envelope = createOperationEnvelope("hss_start", prepared.target);
+    envelope.requestedEffects = ["connect_probe", "select_capture_backend", "create_jcap_file"];
+    if (!this.pollingRunner) return this.failure(envelope, hssError, "start");
+    try {
+      const runtime = await this.adapter.inspectRuntime(prepared.target);
+      const fallbackCode = errorCode(hssError, "HSS_UNAVAILABLE");
+      const fallbackReason = hssError instanceof Error ? hssError.message : String(hssError);
+      const session = await this.pollingRunner.start({
+        target: prepared.target,
+        variables: prepared.variables.map(({ descriptor, resolved }) => ({ descriptor, resolved })),
+        writeDescriptors: prepared.writeVariables.map(({ descriptor }) => descriptor),
+        rateHz: prepared.rateHz,
+        durationSec: prepared.durationSec,
+        ...(prepared.runId ? { runId: prepared.runId } : {}),
+        runtime,
+        capability: {
+          ...runtime,
+          available: false,
+          effective: HSS_EFFECTIVE_LIMITS,
+          errorCode: fallbackCode,
+          reason: fallbackReason,
+        },
+        fallbackCode,
+        fallbackReason,
+        ...(forcedBackend ? { initialBackend: forcedBackend } : {}),
+      });
+      envelope.before = { owner: null, targetGeneration: prepared.target.generation, rejectedBackend: "hss", fallbackCode };
+      envelope.after = { owner: this.queue.getOwner(prepared.target.probeSerial) ?? null, targetGeneration: prepared.target.generation };
+      envelope.capture = captureSummary(session);
+      envelope.data = {
+        captureId: session.captureId,
+        state: session.state,
+        backend: session.backend,
+        fallbackCode,
+        configuredInterface: prepared.target.interface,
+        configuredSpeedKHz: prepared.target.speed,
+        variableResolution: prepared.variables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
+        writeVariableResolution: prepared.writeVariables.map(({ descriptor, cacheRefreshed }) => ({ logicalIdentity: descriptor.logicalIdentity, cacheRefreshed })),
+      };
+      envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
+      envelope.observedEffects = [
+        forcedBackend ? "acceptance_test_backend_forced" : "hss_unavailable",
+        `${session.backend}_started`,
+        "memory_session_owner_claimed",
+        "jcap_capture_active",
+      ];
+      envelope.warnings.push(forcedBackend ? `Acceptance test backend forced: ${forcedBackend}` : `HSS fallback: ${fallbackCode}`);
+      envelope.verification = { status: "observed", method: "persistent_memory_session_ready_and_active_jcap_metadata" };
+      return finishEnvelope(envelope, true);
+    } catch (error) {
+      return this.failure(envelope, error, "polling_start");
     }
   }
 
@@ -688,6 +848,27 @@ export class HssOperations implements CaptureVariableAccess {
       envelope = createOperationEnvelope("hss_status", target);
       envelope.requestedEffects = ["read_capture_state", "reconcile_capture_if_helper_exited", "reconcile_durable_memory_transactions"];
       let session = this.sessionStore.select(target.projectRoot, input.captureId);
+      if (this.pollingRunner?.isPollingSession(session)) {
+        const activeBefore = this.pollingRunner.isActive(session.captureId);
+        envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, captureWorkerAlive: activeBefore };
+        session = await this.pollingRunner.reconcileOrphan(session);
+        const activeAfter = this.pollingRunner.isActive(session.captureId);
+        envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, captureWorkerAlive: activeAfter };
+        envelope.capture = captureSummary(session);
+        envelope.data = { session, metadata: safeCaptureMetadata(session), captureWorkerAlive: activeAfter };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
+        envelope.verification = { status: session.stateUnknown ? "state_unknown" : isTerminalHssSessionState(session.state) ? "verified" : "observed", method: "polling_worker_session_and_jcap_metadata" };
+        if (session.stateUnknown || session.state === "failed" || session.state === "interrupted") {
+          return this.failure(envelope, new HssOperationError(
+            session.lastError?.code ?? "POLLING_CAPTURE_FAILED",
+            session.lastError?.message ?? `polling capture ended as ${session.state}`,
+            false,
+            false,
+            session.stateUnknown === true,
+          ), "status");
+        }
+        return finishEnvelope(envelope, true);
+      }
       const initialSession = session;
       const initialOwner = this.queue.getOwner(target.probeSerial) ?? null;
       envelope.before = { owner: initialOwner, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid) };
@@ -726,8 +907,8 @@ export class HssOperations implements CaptureVariableAccess {
       }
       envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid) };
       envelope.capture = captureSummary(session);
-      envelope.data = { session, metadata: safeMetadata(session.packageDir), helperAlive: this.adapter.isAlive(session.helperPid) };
-      envelope.outputFiles = packageFiles(session.packageDir);
+      envelope.data = { session, metadata: safeCaptureMetadata(session), helperAlive: this.adapter.isAlive(session.helperPid) };
+      envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
       envelope.verification = { status: "observed", method: "durable_session_helper_pid_owner_and_jcap_metadata" };
       return finishEnvelope(envelope, true);
     } catch (error) {
@@ -743,6 +924,26 @@ export class HssOperations implements CaptureVariableAccess {
       envelope = createOperationEnvelope("hss_stop", target);
       envelope.requestedEffects = ["reconcile_durable_memory_transactions", "request_hss_stop", "finalize_capture", "release_probe_owner"];
       session = this.sessionStore.select(target.projectRoot, input.captureId, true);
+      if (this.pollingRunner?.isPollingSession(session)) {
+        const activeBefore = this.pollingRunner.isActive(session.captureId);
+        envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, captureWorkerAlive: activeBefore };
+        session = isTerminalHssSessionState(session.state)
+          ? await this.pollingRunner.reconcileOrphan(session)
+          : await this.pollingRunner.stop(session.captureId);
+        envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, captureWorkerAlive: this.pollingRunner.isActive(session.captureId) };
+        envelope.capture = captureSummary(session);
+        envelope.data = { session, metadata: safeCaptureMetadata(session), alreadyTerminal: !activeBefore };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
+        envelope.observedEffects.push("polling_stop_requested", "capture_finalized", "memory_session_owner_released");
+        envelope.verification = {
+          status: session.state === "completed" || session.state === "stopped" ? "verified" : session.stateUnknown ? "state_unknown" : "observed",
+          method: "terminal_polling_jcap_state_and_memory_session_close",
+        };
+        if (session.stateUnknown) {
+          throw new HssOperationError(session.lastError?.code ?? "POLLING_STATE_UNKNOWN", session.lastError?.message ?? "polling capture ended with unknown target state", false, false, true);
+        }
+        return finishEnvelope(envelope, session.state === "completed" || session.state === "stopped");
+      }
       envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid) };
       const originalPid = session.helperPid;
       const originalOwnerToken = session.ownerToken;
@@ -756,8 +957,8 @@ export class HssOperations implements CaptureVariableAccess {
         session = this.sessionStore.read(session.captureId);
         envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false };
         envelope.capture = captureSummary(session);
-        envelope.data = { session, metadata: safeMetadata(session.packageDir), alreadyTerminal: true };
-        envelope.outputFiles = packageFiles(session.packageDir);
+        envelope.data = { session, metadata: safeCaptureMetadata(session), alreadyTerminal: true };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
         if (statePreservationPending) envelope.observedEffects.push("target_state_reconciled");
         if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
         envelope.warnings.push(`Capture was already ${session.state}; no stop request was needed.`);
@@ -780,8 +981,8 @@ export class HssOperations implements CaptureVariableAccess {
         envelope.observedEffects.push("hss_stop_requested", "capture_marked_stopping");
         envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false };
         envelope.capture = captureSummary(session);
-        envelope.data = { session, metadata: safeMetadata(session.packageDir) };
-        envelope.outputFiles = packageFiles(session.packageDir);
+        envelope.data = { session, metadata: safeCaptureMetadata(session) };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
         envelope.verification = { status: "state_unknown", method: "durable_stop_request_waiting_for_helper_pid_journal" };
         throw new HssOperationError("HSS_STOP_PENDING_STARTUP", "the stop request is durable while helper startup identity is still pending; query hss_status until terminal", true, false, true);
       }
@@ -791,8 +992,8 @@ export class HssOperations implements CaptureVariableAccess {
         session = this.sessionStore.read(session.captureId);
         envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false };
         envelope.capture = captureSummary(session);
-        envelope.data = { session, metadata: safeMetadata(session.packageDir) };
-        envelope.outputFiles = packageFiles(session.packageDir);
+        envelope.data = { session, metadata: safeCaptureMetadata(session) };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
         envelope.observedEffects.push("capture_finalized");
         recordMemoryRecoveryEffects(envelope, settlement);
         if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
@@ -836,8 +1037,8 @@ export class HssOperations implements CaptureVariableAccess {
         session = this.sessionStore.read(session.captureId);
         envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: true };
         envelope.capture = captureSummary(session);
-        envelope.data = { session, metadata: safeMetadata(session.packageDir) };
-        envelope.outputFiles = packageFiles(session.packageDir);
+        envelope.data = { session, metadata: safeCaptureMetadata(session) };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
         envelope.verification = { status: "state_unknown", method: "stop_request_persisted_but_helper_remained_alive" };
         throw new HssOperationError("HSS_STOP_TIMEOUT", "the helper did not finish within 15 seconds; capture remains owned and can be queried again", true, false, true);
       }
@@ -846,8 +1047,8 @@ export class HssOperations implements CaptureVariableAccess {
       session = this.sessionStore.read(session.captureId);
       envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false };
       envelope.capture = captureSummary(session);
-      envelope.data = { session, metadata: safeMetadata(session.packageDir) };
-      envelope.outputFiles = packageFiles(session.packageDir);
+      envelope.data = { session, metadata: safeCaptureMetadata(session) };
+      envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
       if (isTerminalHssSessionState(session.state)) envelope.observedEffects.push("capture_finalized");
       if (!this.queue.getOwner(session.probeSerial)) envelope.observedEffects.push("probe_owner_released");
       if (!existsSync(session.sessionDir)) envelope.observedEffects.push("session_work_cleaned");
@@ -870,8 +1071,9 @@ export class HssOperations implements CaptureVariableAccess {
       envelope.requestedEffects = ["reconcile_durable_memory_transactions", "finalize_interrupted_capture_if_needed", "verify_raw_integrity"];
       let session = this.sessionStore.select(target.projectRoot, input.captureId);
       session = await this.reconcileSession(session.captureId);
-      envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: this.adapter.isAlive(session.helperPid), raw: safeMetadata(session.packageDir) };
-      if (this.adapter.isAlive(session.helperPid) || this.startupJournalPending(session)) throw new HssOperationError("CAPTURE_ACTIVE", "an active or starting helper cannot be recovered; call hss_stop or hss_status", true);
+      const captureWorkerAlive = this.captureHelperAlive(session);
+      envelope.before = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: captureWorkerAlive, raw: safeCaptureMetadata(session) };
+      if (captureWorkerAlive || this.startupJournalPending(session)) throw new HssOperationError("CAPTURE_ACTIVE", "an active or starting helper cannot be recovered; call hss_stop or hss_status", true);
       if (isTerminalHssSessionState(session.state) && session.statePreservationPending) {
         const ownerExisted = Boolean(this.queue.getOwner(target.probeSerial));
         await this.settle(session.captureId);
@@ -885,13 +1087,36 @@ export class HssOperations implements CaptureVariableAccess {
         if (ownerExisted && !this.queue.getOwner(target.probeSerial)) envelope.observedEffects.push("probe_owner_released");
       }
       session = this.sessionStore.read(session.captureId);
+      if (session.stateUnknown) {
+        envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, captureWorkerAlive: false };
+        envelope.capture = captureSummary(session);
+        envelope.data = { session, metadata: safeCaptureMetadata(session) };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
+        envelope.verification = { status: "state_unknown", method: "polling_terminal_target_state_unconfirmed" };
+        throw new HssOperationError(
+          session.lastError?.code ?? "POLLING_TARGET_STATE_UNKNOWN",
+          session.lastError?.message ?? "polling capture ended without confirmed target state",
+          false,
+          false,
+          true,
+        );
+      }
       if (session.state === "failed") throw new HssOperationError(session.lastError?.code ?? "CAPTURE_FAILED", session.lastError?.message ?? "failed capture has no trustworthy rebuild source");
       if (session.state !== "interrupted") throw new HssOperationError("CAPTURE_NOT_INTERRUPTED", `hss_recover applies only to interrupted captures; capture is ${session.state}`);
+      if (session.captureFile && existsSync(session.captureFile)) {
+        const integrity = await verifyJcapV2(session.captureFile);
+        envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, captureWorkerAlive: false };
+        envelope.capture = captureSummary(session);
+        envelope.data = { session, metadata: safeCaptureMetadata(session), integrity };
+        envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
+        envelope.verification = { status: "verified", method: "terminal_jcap_v2_integrity" };
+        return finishEnvelope(envelope, true);
+      }
       const index = await verifyJcapV1Index(session.packageDir);
       envelope.after = { owner: this.queue.getOwner(target.probeSerial) ?? null, captureState: session.state, helperPid: session.helperPid, helperAlive: false, raw: readJcapV1Metadata(session.packageDir).raw };
       envelope.capture = captureSummary(session);
       envelope.data = { session, metadata: readJcapV1Metadata(session.packageDir), index };
-      envelope.outputFiles = packageFiles(session.packageDir);
+      envelope.outputFiles = packageFiles(session.packageDir, session.captureFile);
       if (index.indexStatus === "ready") envelope.observedEffects.push("capture_index_ready");
       envelope.verification = { status: "verified", method: "terminal_raw_integrity_with_deferred_index" };
       return finishEnvelope(envelope, true);
@@ -912,6 +1137,35 @@ export class HssOperations implements CaptureVariableAccess {
       const selected = this.sessionStore.select(target.projectRoot, input.captureId, true);
       if (selected.state !== "capturing") throw new HssOperationError("CAPTURE_NOT_WRITABLE", `capture is ${selected.state}`);
       const captureId = selected.captureId;
+      if (this.pollingRunner?.isPollingSession(selected)) {
+        envelope.requestedEffects = ["resume_target", "append_capture_event"];
+        try {
+          const controlled = await this.pollingRunner.controlTarget(captureId, input.action);
+          const current = this.sessionStore.read(captureId);
+          envelope.capture = captureSummary(current);
+          envelope.before = { targetState: controlled.beforeState };
+          envelope.after = { targetState: controlled.afterState };
+          envelope.data = {
+            captureId,
+            requestedAction: input.action,
+            canonicalAction: "resume",
+            noOp: controlled.noOp,
+            controlIssued: controlled.controlIssued,
+            beforeState: controlled.beforeState,
+            afterState: controlled.afterState,
+            backend: current.backend,
+          };
+          if (controlled.controlIssued) envelope.observedEffects.push("target_resume_issued");
+          envelope.observedEffects.push("capture_event_appended");
+          envelope.verification = { status: "verified", method: "polling_owner_post_control_state_and_jcap_event" };
+          return finishEnvelope(envelope, true);
+        } catch (error) {
+          const current = this.sessionStore.read(captureId);
+          envelope.capture = captureSummary(current);
+          envelope.data = { captureId, requestedAction: input.action, backend: current.backend };
+          return this.failure(envelope, error, "capture_control");
+        }
+      }
       return this.sessionStore.withExclusiveCapture(captureId, async () => {
         let session: HssSessionRecord;
         try {
@@ -1095,6 +1349,7 @@ export class HssOperations implements CaptureVariableAccess {
       && current.type === resolved.type
       && current.size === resolved.size);
     if (!descriptor) return this.failure(envelope, new HssOperationError("VARIABLE_NOT_IN_CAPTURE", "capture-aware reads require an immutable descriptor-declared variable"), "capture_descriptor");
+    if (this.pollingRunner?.isPollingSession(session)) return undefined;
     if (session.state !== "capturing") return this.failure(envelope, new HssOperationError("CAPTURE_NOT_READABLE", `capture is ${session.state}`), "capture_state");
     return this.sessionStore.withExclusiveCapture(session.captureId, async () => {
       try {
@@ -1155,6 +1410,12 @@ export class HssOperations implements CaptureVariableAccess {
       && current.size === resolved.size);
     if (!descriptor) return this.failure(envelope, new HssOperationError("VARIABLE_NOT_IN_CAPTURE", "capture-aware writes require an immutable descriptor-declared variable"), "capture_descriptor");
     if (session.state !== "capturing") return this.failure(envelope, new HssOperationError("CAPTURE_NOT_WRITABLE", `capture is ${session.state}`), "capture_state");
+    if (this.pollingRunner?.isPollingSession(session)) {
+      if (input.verificationConnection === "independent_session") {
+        return this.failure(envelope, new HssOperationError("VERIFICATION_CONNECTION_INVALID", "independent-session verification cannot close the persistent memory owner during polling capture"), "validation");
+      }
+      return undefined;
+    }
     envelope.requestedEffects = ["reconcile_durable_memory_transactions", "write_variable", ...(input.restore ? ["restore_variable"] : [])];
     const captureId = session.captureId;
     return this.sessionStore.withExclusiveCapture(captureId, async () => {
@@ -1409,6 +1670,56 @@ export class HssOperations implements CaptureVariableAccess {
     });
   }
 
+  beginExternalWrite(target: StoredTarget, resolved: ResolvedSymbol): CaptureExternalWriteToken | undefined {
+    const session = this.sessionStore.active(target.projectRoot);
+    if (!session || !this.pollingRunner?.isPollingSession(session)) return undefined;
+    if (session.state !== "capturing") {
+      throw new HssOperationError("CAPTURE_NOT_WRITABLE", `capture is ${session.state}`, true);
+    }
+    if (session.targetGeneration !== target.generation) {
+      throw new HssOperationError("TARGET_GENERATION_CHANGED", "target generation changed before polling-capture write", true);
+    }
+    const logicalIdentity = symbolLogicalIdentity(resolved.ref);
+    const descriptor = [...session.descriptors, ...(session.writeDescriptors ?? [])]
+      .find((candidate) => candidate.logicalIdentity === logicalIdentity
+        && candidate.artifactGeneration === resolved.ref.artifactGeneration
+        && candidate.layoutHash === resolved.ref.layoutHash
+        && candidate.address.toLowerCase() === hexAddress(resolved.address)
+        && candidate.type === resolved.type
+        && candidate.size === resolved.size);
+    if (!descriptor) {
+      throw new HssOperationError("VARIABLE_NOT_IN_CAPTURE", "polling-capture write requires an immutable descriptor-declared variable");
+    }
+    return this.pollingRunner.beginExternalWrite(session.captureId, logicalIdentity);
+  }
+
+  async completeExternalWrite(
+    token: CaptureExternalWriteToken,
+    input: VariableWriteInput,
+    _target: StoredTarget,
+    resolved: ResolvedSymbol,
+    requested: Buffer,
+    envelope: OperationEnvelope,
+  ): Promise<OperationEnvelope> {
+    try {
+      await this.pollingRunner!.recordExternalWrite(token, input, resolved, requested, envelope);
+      return envelope;
+    } catch (error) {
+      const normalized = error instanceof PollingCaptureError
+        ? error
+        : new PollingCaptureError("CAPTURE_EVENT_PERSIST_FAILED", error instanceof Error ? error.message : String(error));
+      const writeIssued = envelope.error?.writeIssued === true
+        || envelope.ok
+        || envelope.observedEffects.includes("structured_memory_write_issued");
+      const stateUnknown = envelope.error?.stateUnknown === true || normalized.stateUnknown;
+      return this.failure(
+        envelope,
+        new HssOperationError(normalized.code, normalized.message, normalized.retryable, writeIssued, stateUnknown),
+        "capture_event",
+      );
+    }
+  }
+
   private async prepare(input: HssCaptureInput): Promise<PreparedCapture> {
     if (!Number.isSafeInteger(input.rateHz) || input.rateHz < 1 || input.rateHz > HSS_EFFECTIVE_LIMITS.maxRateHz) throw new HssOperationError("HSS_RATE_BOUNDS", `rateHz must be 1..${HSS_EFFECTIVE_LIMITS.maxRateHz}`);
     if (!Number.isSafeInteger(input.durationSec) || input.durationSec < 1 || input.durationSec > HSS_EFFECTIVE_LIMITS.maxDurationSec) throw new HssOperationError("HSS_DURATION_BOUNDS", `durationSec must be 1..${HSS_EFFECTIVE_LIMITS.maxDurationSec}`);
@@ -1523,6 +1834,7 @@ export class HssOperations implements CaptureVariableAccess {
     captureId: string;
     createdAt: string;
     packageDir: string;
+    captureFile: string;
     sessionDir: string;
     control: HssCaptureControlFiles;
     helperNonce: string;
@@ -1540,8 +1852,9 @@ export class HssOperations implements CaptureVariableAccess {
     const createdAt = new Date().toISOString();
     const capturesDir = prepared.runId ? join(this.outputRoot, prepared.runId, "captures") : join(this.outputRoot, "captures");
     mkdirSync(capturesDir, { recursive: true });
-    const packageDir = join(capturesDir, `${captureId}.jcap`);
-    const sessionDir = mkdtempSync(join(this.sessionWorkRoot, `${captureId}-`));
+    const captureFile = join(capturesDir, `${captureId}.jcap`);
+    const sessionDir = mkdtempSync(join(capturesDir, `.staging-${captureId}-`));
+    const packageDir = join(sessionDir, `${captureId}.jcap`);
     const control: HssCaptureControlFiles = {
       planPath: join(sessionDir, "capture-plan.json"),
       pidFile: join(sessionDir, "helper.owner.json"),
@@ -1641,10 +1954,23 @@ export class HssOperations implements CaptureVariableAccess {
       writeSymbols: prepared.writeVariables.map(({ descriptor, resolved }) => ({ name: descriptor.logicalIdentity, address: hexAddress(resolved.address), size: resolved.size, type: descriptor.type })),
     };
     writeFileSync(control.planPath, JSON.stringify(plan), { encoding: "utf8", flag: "wx" });
-    return { captureId, createdAt, packageDir, sessionDir, control, helperNonce, qpcEpochCounter: timebase.qpcCounter, qpcFrequency: timebase.qpcFrequency };
+    return { captureId, createdAt, packageDir, captureFile, sessionDir, control, helperNonce, qpcEpochCounter: timebase.qpcCounter, qpcFrequency: timebase.qpcFrequency };
     } catch (error) {
-      if (existsSync(join(packageDir, "capture.json"))) this.finalizeCreatedFailure(packageDir, error);
-      else rmSync(packageDir, { recursive: true, force: true });
+      let failedCapture: Awaited<ReturnType<typeof finalizeJcapV2FromV1Package>> | undefined;
+      if (existsSync(join(packageDir, "capture.json"))) {
+        try {
+          failedCapture = await this.finalizeCreatedFailure(
+            packageDir,
+            captureFile,
+            sessionDir,
+            createdAt,
+            prepared.rateHz,
+            error,
+          );
+        } catch { /* retain the valid Raw prefix when final publication also fails */ }
+      } else {
+        rmSync(packageDir, { recursive: true, force: true });
+      }
       const failed: HssSessionRecord = {
         formatVersion: 1,
         captureId,
@@ -1659,6 +1985,7 @@ export class HssOperations implements CaptureVariableAccess {
         endedAt: new Date().toISOString(),
         ...(prepared.runId ? { runId: prepared.runId } : {}),
         packageDir,
+        captureFile,
         sessionDir,
         control,
         helperPid: 0,
@@ -1675,11 +2002,19 @@ export class HssOperations implements CaptureVariableAccess {
         ...(prepared.qualityOracle ? { qualityOracle: prepared.qualityOracle } : {}),
         runtime,
         capability,
+        ...(failedCapture ? {
+          result: {
+            sampleCount: failedCapture.sampleCount,
+            jcapFormatVersion: 2,
+            jcapChunkCount: failedCapture.chunkCount,
+            jcapContentSha256: failedCapture.contentSha256,
+          },
+        } : {}),
         lastError: { code: errorCode(error, "HSS_CREATE_FAILED"), message: error instanceof Error ? error.message : String(error) },
       };
       this.sessionStore.write(failed);
       this.preserveSessionLogs(failed);
-      this.cleanupSessionWork(failed);
+      if (failedCapture || !existsSync(join(packageDir, "capture.json"))) this.cleanupSessionWork(failed);
       throw new HssOperationError(errorCode(error, "HSS_CREATE_FAILED"), error instanceof Error ? error.message : String(error), false, false, false, { captureId, packageDir });
     }
   }
@@ -1696,6 +2031,11 @@ export class HssOperations implements CaptureVariableAccess {
     for (;;) {
       let session: HssSessionRecord;
       try { session = this.sessionStore.read(captureId); } catch { return; }
+      if (this.pollingRunner?.isPollingSession(session)) {
+        if (this.pollingRunner.isActive(captureId)) { await delay(100); continue; }
+        await this.pollingRunner.reconcileOrphan(session);
+        return;
+      }
       if (isTerminalHssSessionState(session.state)) {
         if (session.statePreservationPending) {
           try { await this.settle(captureId); }
@@ -1747,6 +2087,8 @@ export class HssOperations implements CaptureVariableAccess {
   }
 
   private reconcileSession(captureId: string): Promise<HssSessionRecord> {
+    const selected = this.sessionStore.read(captureId);
+    if (this.pollingRunner?.isPollingSession(selected)) return this.pollingRunner.reconcileOrphan(selected);
     return this.sessionStore.withExclusiveCapture(captureId, async () => {
       let session = this.sessionStore.read(captureId);
       session = this.discoverHelperPid(session);
@@ -1800,7 +2142,7 @@ export class HssOperations implements CaptureVariableAccess {
           await this.settleTargetStateAndOwner(session);
           session = this.sessionStore.read(captureId);
           this.preserveSessionLogs(session);
-          this.cleanupSessionWork(session);
+          if (!session.captureFile || existsSync(session.captureFile)) this.cleanupSessionWork(session);
         } else {
           try { this.queue.releaseOwner(session.probeSerial, session.ownerToken); } catch { /* another live MCP may still own the record */ }
         }
@@ -1856,12 +2198,34 @@ export class HssOperations implements CaptureVariableAccess {
           });
         }
         finalizeJcapV1Metadata(session.packageDir, state, qualityEvidence.counters, qualityEvidence.status, qualityEvidence.source);
+        const endedAt = new Date().toISOString();
+        const finalCapture = session.captureFile
+          ? await finalizeJcapV2FromV1Package({
+            packageDir: session.packageDir,
+            captureFile: session.captureFile,
+            backend: "hss",
+            intrusive: false,
+            requestedRateHz: session.rateHz,
+            actualRateHz: typeof result?.actualRateHz === "number" ? result.actualRateHz : undefined,
+            pauseTotalUs: 0,
+            hostStartNs: String(BigInt(Date.parse(session.startedAt)) * 1_000_000n),
+            hostEndNs: String(BigInt(Date.parse(endedAt)) * 1_000_000n),
+          })
+          : undefined;
         session = {
           ...session,
           state,
-          updatedAt: new Date().toISOString(),
-          endedAt: new Date().toISOString(),
-          result: result ? sanitizeResult(result) : undefined,
+          updatedAt: endedAt,
+          endedAt,
+          result: {
+            ...(result ? sanitizeResult(result) : {}),
+            ...(finalCapture ? {
+              sampleCount: finalCapture.sampleCount,
+              jcapFormatVersion: 2,
+              jcapChunkCount: finalCapture.chunkCount,
+              jcapContentSha256: finalCapture.contentSha256,
+            } : {}),
+          },
           statePreservationPending: Boolean(session.expectedTargetState),
           ...(state === "failed" ? { lastError: { code: String(result?.errorCode ?? session.lastError?.code ?? "HSS_CAPTURE_FAILED"), message: String(result?.reason ?? session.lastError?.message ?? "HSS capture failed") } } : {}),
         };
@@ -1880,12 +2244,13 @@ export class HssOperations implements CaptureVariableAccess {
       await this.settleTargetStateAndOwner(session);
       session = this.sessionStore.read(captureId);
       this.preserveSessionLogs(session);
-      this.cleanupSessionWork(session);
+      if (!session.captureFile || existsSync(session.captureFile)) this.cleanupSessionWork(session);
       return memoryRecovery;
     });
   }
 
   private captureHelperAlive(session: HssSessionRecord): boolean {
+    if (this.pollingRunner?.isPollingSession(session)) return this.pollingRunner.isActive(session.captureId);
     return this.adapter.isCaptureAlive(session.control, session.helperPid, session.captureId, session.helperNonce);
   }
 
@@ -1926,21 +2291,45 @@ export class HssOperations implements CaptureVariableAccess {
     });
   }
 
-  private finalizeCreatedFailure(packageDir: string, error: unknown): void {
-    try {
-      const samplesFile = join(packageDir, "raw", "samples.bin");
-      if (!existsSync(samplesFile)) writeFileSync(samplesFile, Buffer.alloc(0), { flag: "wx" });
-      const tail = jcapTail(packageDir);
-      appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence, type: "lifecycle", tick: tail.lastEventTick, state: "finalizing" });
-      appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence + 1, type: "lifecycle", tick: tail.lastEventTick, state: "failed", errorCode: errorCode(error, "HSS_START_FAILED") });
-      finalizeJcapV1Metadata(packageDir, "failed");
-    } catch { /* preserve the original start error; the package remains inspectable for diagnostics */ }
+  private async finalizeCreatedFailure(
+    packageDir: string,
+    captureFile: string,
+    sessionDir: string,
+    createdAt: string,
+    rateHz: number,
+    error: unknown,
+  ): Promise<Awaited<ReturnType<typeof finalizeJcapV2FromV1Package>>> {
+    const samplesFile = join(packageDir, "raw", "samples.bin");
+    if (!existsSync(samplesFile)) writeFileSync(samplesFile, Buffer.alloc(0), { flag: "wx" });
+    const tail = jcapTail(packageDir);
+    appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence, type: "lifecycle", tick: tail.lastEventTick, state: "finalizing" });
+    appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence + 1, type: "lifecycle", tick: tail.lastEventTick, state: "failed", errorCode: errorCode(error, "HSS_START_FAILED") });
+    finalizeJcapV1Metadata(packageDir, "failed");
+    const endedAt = new Date().toISOString();
+    const final = await finalizeJcapV2FromV1Package({
+      packageDir,
+      captureFile,
+      backend: "hss",
+      intrusive: false,
+      requestedRateHz: rateHz,
+      pauseTotalUs: 0,
+      hostStartNs: String(BigInt(Date.parse(createdAt)) * 1_000_000n),
+      hostEndNs: String(BigInt(Date.parse(endedAt)) * 1_000_000n),
+    });
+    if (existsSync(final.captureFile)) rmSync(sessionDir, { recursive: true, force: true });
+    return final;
   }
 
   private cleanupSessionWork(session: HssSessionRecord): void {
-    const rel = relative(this.sessionWorkRoot, resolve(session.sessionDir));
-    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return;
-    try { rmSync(resolve(session.sessionDir), { recursive: true, force: true }); } catch { /* terminal JCAP remains authoritative */ }
+    const resolvedSessionDir = resolve(session.sessionDir);
+    const isWithin = (root: string): boolean => {
+      const rel = relative(resolve(root), resolvedSessionDir);
+      return Boolean(rel) && !rel.startsWith("..") && !isAbsolute(rel);
+    };
+    const managedStaging = isWithin(this.outputRoot)
+      && basename(resolvedSessionDir).startsWith(`.staging-${session.captureId}-`);
+    if (!isWithin(this.sessionWorkRoot) && !managedStaging) return;
+    try { rmSync(resolvedSessionDir, { recursive: true, force: true }); } catch { /* terminal JCAP remains authoritative */ }
   }
 
   private preserveSessionLogs(session: HssSessionRecord): void {
@@ -2180,6 +2569,7 @@ export class HssOperations implements CaptureVariableAccess {
       if (error.evidence) envelope.data = { helperEvidence: error.evidence };
       return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: error.writeIssued, stateUnknown: error.stateUnknown });
     }
+    if (error instanceof PollingCaptureError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: error.writeIssued, stateUnknown: error.stateUnknown });
     if (error instanceof HssAdapterError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
     if (error instanceof TargetStoreError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: false, writeIssued: false, stateUnknown: false });
     if (error instanceof MemorySessionError) return failEnvelope(envelope, { code: error.code, stage, message: error.message, retryable: error.retryable, writeIssued: false, stateUnknown: error.stateUnknown });
@@ -2289,11 +2679,17 @@ function captureSummary(session: HssSessionRecord): Record<string, unknown> {
   return {
     captureId: session.captureId,
     state: session.state,
-    packageDir: session.packageDir,
+    packageDir: session.captureFile ?? session.packageDir,
+    captureFile: session.captureFile ?? session.packageDir,
+    backend: session.backend ?? "hss",
+    intrusive: session.intrusive ?? false,
     requestedRateHz: session.rateHz,
     configuredInterface: session.configuredInterface ?? null,
     configuredSpeedKHz: session.configuredSpeedKHz ?? null,
     actualRateHz: typeof result.actualRateHz === "number" ? result.actualRateHz : null,
+    pauseTotalUs: session.pauseTotalUs ?? 0,
+    anomalies: Array.isArray(result.anomalies) ? result.anomalies : [],
+    stateUnknown: session.stateUnknown ?? false,
     requestedSamples,
     sampleCount,
     sampleRatio,
@@ -2333,12 +2729,23 @@ function linkRateDiagnostic(prepared: PreparedCapture): Record<string, unknown> 
   };
 }
 
-function packageFiles(packageDir: string): string[] {
-  return ["capture.json", join("raw", "samples.bin"), join("raw", "events.bin"), "capture.db"].map((file) => join(packageDir, file)).filter(existsSync);
+function packageFiles(packageDir: string, captureFile?: string): string[] {
+  if (captureFile && existsSync(captureFile)) return [captureFile];
+  return ["capture.json", join("raw", "samples.bin"), join("raw", "events.bin"), "capture.db"]
+    .map((file) => join(packageDir, file))
+    .filter(existsSync);
 }
 
-function safeMetadata(packageDir: string): JcapV1Metadata | { error: string } {
-  try { return readJcapV1Metadata(packageDir); }
+function safeCaptureMetadata(session: HssSessionRecord): JcapV1Metadata | Record<string, unknown> {
+  if (session.captureFile && existsSync(session.captureFile)) {
+    return {
+      formatVersion: 2,
+      captureId: session.captureId,
+      state: session.state,
+      sampleCount: Number.isSafeInteger(session.result?.sampleCount) ? session.result!.sampleCount : null,
+    };
+  }
+  try { return readJcapV1Metadata(session.packageDir); }
   catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
 }
 
@@ -2405,6 +2812,44 @@ function requireMemoryOk(response: HssMemoryResponse, fallbackCode: string, writ
     writeIssued || response.writeIssued === true,
     response.stateUnknown === true,
   );
+}
+
+type CaptureBackendTestOverride = "hss" | PollingCaptureBackend;
+
+function captureBackendTestOverride(allowed: boolean): CaptureBackendTestOverride | undefined {
+  const value = process.env.JLINK_MCP_TEST_CAPTURE_BACKEND;
+  if (!value) return undefined;
+  if (!allowed) {
+    throw new HssOperationError(
+      "TEST_BACKEND_OVERRIDE_FORBIDDEN",
+      "JLINK_MCP_TEST_CAPTURE_BACKEND is available only in the acceptance profile",
+    );
+  }
+  if (value !== "hss" && value !== "background_poll" && value !== "stop_poll") {
+    throw new HssOperationError(
+      "TEST_BACKEND_OVERRIDE_INVALID",
+      "JLINK_MCP_TEST_CAPTURE_BACKEND must be hss, background_poll, or stop_poll",
+    );
+  }
+  return value;
+}
+
+function isPollingFallbackEligible(error: unknown): boolean {
+  const code = errorCode(error, "HSS_UNAVAILABLE");
+  const safety = error as { stateUnknown?: unknown; writeIssued?: unknown };
+  if (safety?.stateUnknown === true || safety?.writeIssued === true) return false;
+  if (code.startsWith("HSS_TARGET_STATE_") || code === "POST_OPERATION_STATE_UNKNOWN" || code === "HIDDEN_STATE_CHANGE") return false;
+  return code === "HSS_UNAVAILABLE"
+    || code === "HSS_RATE_UNSUPPORTED"
+    || code === "HSS_BLOCK_LIMIT"
+    || code === "HSS_HELPER_MISSING"
+    || code === "HSS_HELPER_IDENTITY_MISMATCH"
+    || code === "HSS_HELPER_ABI_INCOMPATIBLE"
+    || code === "HSS_PLATFORM_UNSUPPORTED"
+    || code === "JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE"
+    || code.startsWith("HSS_RUNTIME_")
+    || code.startsWith("HSS_CAPABILITY_")
+    || code.startsWith("HSS_GETCAPS_");
 }
 
 function normalizeHssError(error: Error, fallbackCode: string, writeIssued: boolean): HssOperationError {

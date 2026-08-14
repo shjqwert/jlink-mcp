@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -11,15 +11,20 @@ import {
   createJcapV1Metadata,
   finalizeJcapV1Capture,
   finalizeJcapV1Metadata,
+  finalizeJcapV2FromV1Package,
   inspectCapturePackage,
   jcapCaptureEventWindow,
   jcapCaptureExportCsv,
   jcapCaptureSeries,
   jcapCaptureSummary,
+  jcapV2CaptureEventWindow,
+  jcapV2CaptureSeries,
+  jcapV2CaptureSummary,
   readJcapV1Metadata,
   readJcapV1Raw,
   rebuildJcapV1Index,
   verifyJcapV1Index,
+  verifyJcapV2,
   writeJcapV1Raw,
   type JcapV1Event,
   type JcapV1Metadata,
@@ -117,6 +122,166 @@ function stableSummary(value: Record<string, unknown>): Record<string, unknown> 
   if (copy.metadata && typeof copy.metadata === "object" && !Array.isArray(copy.metadata)) delete (copy.metadata as Record<string, unknown>).updatedAt;
   return copy;
 }
+
+test("JCAP v2 finalizes one SQLite file and supports bounded aligned queries", async () => {
+  const root = workspace();
+  const id = "44000000-0000-4000-8000-000000000001";
+  const workingDir = path.join(root, "work", `${id}.jcap`);
+  const captureFile = path.join(root, "captures", `${id}.jcap`);
+  const captureEventId = eventId(50);
+  const writer = new JcapV1Writer({
+    packageDir: workingDir,
+    metadata: metadata(id, "active", 1, 300),
+  });
+  try {
+    writer.appendEvent({ eventId: eventId(49), eventSequence: 0, type: "lifecycle", tick: "0", state: "active" });
+    for (let sampleIndex = 0; sampleIndex < 300; sampleIndex += 1) {
+      assert.equal(writer.appendSample({
+        sampleIndex,
+        tick: String(sampleIndex * 1_000_000),
+        statusFlags: 1,
+        values: { counter: sampleIndex, feedback: sampleIndex + 1_000 },
+      }), true);
+    }
+    writer.appendEvent({ eventId: captureEventId, eventSequence: 1, type: "lifecycle", tick: "150000000", state: "finalizing" });
+    writer.appendEvent({
+      eventId: eventId(51),
+      eventSequence: 2,
+      type: "quality",
+      tick: "299000000",
+      qualityStatus: "reported",
+      qualitySource: "jlink",
+      missingSamples: 3,
+      droppedSamples: 0,
+      overflows: 0,
+      readErrors: 0,
+      timeouts: 0,
+      durationValidated: true,
+      qualityEvidence: { source: "fixture" },
+    });
+    writer.appendEvent({ eventId: eventId(52), eventSequence: 3, type: "lifecycle", tick: "299000000", state: "completed" });
+    writer.close();
+    finalizeJcapV1Metadata(
+      workingDir,
+      "completed",
+      { missingSamples: 3, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0 },
+      "reported",
+    );
+
+    const finalized = await finalizeJcapV2FromV1Package({
+      packageDir: workingDir,
+      captureFile,
+      backend: "hss",
+      intrusive: false,
+      requestedRateHz: 300,
+      actualRateHz: 300,
+      pauseTotalUs: 0,
+    });
+    assert.deepEqual(
+      { sampleCount: finalized.sampleCount, eventCount: finalized.eventCount, state: finalized.state },
+      { sampleCount: 300, eventCount: 4, state: "completed" },
+    );
+    assert.equal((await verifyJcapV2(captureFile)).chunkCount > 0, true);
+    assert.deepEqual(readdirSync(path.dirname(captureFile)).sort(), [`${id}.jcap`]);
+    assert.equal(existsSync(`${captureFile}-wal`), false);
+    assert.equal(existsSync(`${captureFile}-shm`), false);
+
+    const summary = await jcapV2CaptureSummary(captureFile);
+    assert.equal(summary.captureId, id);
+    assert.equal(summary.sampleCount, 300);
+    assert.deepEqual((summary.variables as Array<Record<string, unknown>>).map((variable) => variable.name), ["counter", "feedback"]);
+
+    const raw = await jcapV2CaptureSeries({
+      captureFile,
+      captureId: id,
+      variables: ["counter", "feedback"],
+      timeRange: { startMs: 100, endMs: 110 },
+      resolution: { mode: "raw" },
+      statistics: ["last"],
+    });
+    assert.deepEqual((raw.time as Record<string, unknown>).start, [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]);
+    assert.deepEqual((raw.variables as Array<Record<string, unknown>>)[0]!.last, [100, 101, 102, 103, 104, 105, 106, 107, 108, 109]);
+    assert.equal((raw.quality as Record<string, unknown>).missing, 3);
+
+    const interval = await jcapV2CaptureSeries({
+      captureFile,
+      captureId: id,
+      variables: ["counter"],
+      timeRange: { startMs: 0, endMs: 100 },
+      resolution: { mode: "interval", intervalMs: 10 },
+      statistics: ["last", "min", "max"],
+    });
+    assert.deepEqual((interval.variables as Array<Record<string, unknown>>)[0]!.last, [9, 19, 29, 39, 49, 59, 69, 79, 89, 99]);
+    assert.deepEqual((interval.variables as Array<Record<string, unknown>>)[0]!.min, [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
+
+    const points = await jcapV2CaptureSeries({
+      captureFile,
+      captureId: id,
+      variables: ["counter"],
+      timeRange: { startMs: 0, endMs: 100 },
+      resolution: { mode: "points", maxPoints: 5 },
+      statistics: ["max"],
+    });
+    assert.equal((points.time as Record<string, unknown>).start instanceof Array, true);
+    assert.equal(((points.time as Record<string, unknown>).start as unknown[]).length, 5);
+
+    const missing = await jcapV2CaptureSeries({
+      captureFile,
+      captureId: id,
+      variables: ["counter", "feedback"],
+      timeRange: { startMs: 300, endMs: 320 },
+      resolution: { mode: "interval", intervalMs: 10 },
+      statistics: ["last", "min", "max"],
+    });
+    assert.deepEqual((missing.variables as Array<Record<string, unknown>>)[0]!.last, [null, null]);
+    assert.equal((missing.quality as Record<string, unknown>).missing, 7);
+
+    let cursor: string | undefined;
+    let returnedPoints = 0;
+    do {
+      const page = await jcapV2CaptureSeries({
+        captureFile,
+        captureId: id,
+        variables: ["counter", "feedback"],
+        timeRange: { startMs: 0, endMs: 300 },
+        resolution: { mode: "raw" },
+        statistics: ["last", "min", "max"],
+        maxBytes: 1_024,
+        cursor,
+      });
+      assert.equal(Buffer.byteLength(JSON.stringify(page), "utf8") <= 1_024, true);
+      returnedPoints += ((page.time as Record<string, unknown>).start as unknown[]).length;
+      cursor = typeof page.nextCursor === "string" ? page.nextCursor : undefined;
+    } while (cursor);
+    assert.equal(returnedPoints, 300);
+
+    const eventWindow = await jcapV2CaptureEventWindow({
+      captureFile,
+      captureId: id,
+      eventId: captureEventId,
+      variables: ["counter"],
+      beforeMs: 5,
+      afterMs: 5,
+      resolution: { mode: "raw" },
+      statistics: ["last"],
+    });
+    assert.equal((eventWindow.event as Record<string, unknown>).eventId, captureEventId);
+
+    await assert.rejects(() => jcapV2CaptureSeries({
+      captureFile,
+      captureId: id,
+      variables: ["counter"],
+      timeRange: { startMs: 0, endMs: 10 },
+      startTick: "0",
+      endTick: "10",
+      bucketCount: 1,
+    }), /conflicts/);
+  } finally {
+    writer.close();
+    if (existsSync(captureFile)) chmodSync(captureFile, 0o666);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function updateIndexSchemaVersion(databaseFile: string, version: string): Promise<void> {
   return new Promise((resolve, reject) => {

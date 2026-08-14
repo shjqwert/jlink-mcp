@@ -2128,24 +2128,16 @@ static bool resolve_non_intrusive_attach_device_from_catalog(
     const std::string& requested_device,
     const std::string& catalog,
     std::string* attach_device) {
-  if (lowercase_ascii(requested_device) == "cortex-m4") {
-    *attach_device = "Cortex-M4";
-    return true;
-  }
   static const std::regex name_attribute("\\bName\\s*=\\s*\"([^\"]*)\"");
-  static const std::regex core_attribute("\\bCore\\s*=\\s*\"([^\"]*)\"");
   size_t offset = 0;
   while ((offset = catalog.find("<ChipInfo", offset)) != std::string::npos) {
     const size_t end = catalog.find('>', offset);
     if (end == std::string::npos) break;
     const std::string chip = catalog.substr(offset, end - offset + 1U);
     std::smatch name;
-    std::smatch core;
     if (std::regex_search(chip, name, name_attribute)
-        && std::regex_search(chip, core, core_attribute)
-        && lowercase_ascii(name[1].str()) == lowercase_ascii(requested_device)
-        && core[1].str() == "JLINK_CORE_CORTEX_M4") {
-      *attach_device = "Cortex-M4";
+        && lowercase_ascii(name[1].str()) == lowercase_ascii(requested_device)) {
+      *attach_device = requested_device;
       return true;
     }
     offset = end + 1U;
@@ -2158,10 +2150,6 @@ static bool resolve_non_intrusive_attach_device(
     const std::string& requested_device,
     std::string* attach_device,
     std::string* reason) {
-  if (lowercase_ascii(requested_device) == "cortex-m4") {
-    *attach_device = "Cortex-M4";
-    return true;
-  }
   const std::filesystem::path catalog_path = std::filesystem::path(dll_path).parent_path() / L"JLinkDevices.xml";
   std::string catalog;
   if (!read_bounded_text_file(catalog_path.native(), 32U * 1024U * 1024U, &catalog)) {
@@ -2169,7 +2157,7 @@ static bool resolve_non_intrusive_attach_device(
     return false;
   }
   if (!resolve_non_intrusive_attach_device_from_catalog(requested_device, catalog, attach_device)) {
-    *reason = "selected device has no verified non-intrusive generic attach profile; refusing to run its device script";
+    *reason = "selected device is not present in the active J-Link device catalog";
     return false;
   }
   return true;
@@ -4015,16 +4003,18 @@ static bool self_test_probe_selection_and_close_policy() {
 static bool self_test_non_intrusive_attach_profile() {
   const std::string catalog =
     "<ChipInfo Vendor=\"ZhiXin\" Name=\"Z20K146M\" Core=\"JLINK_CORE_CORTEX_M4\" />"
-    "<ChipInfo Vendor=\"Example\" Name=\"Other\" Core=\"JLINK_CORE_CORTEX_M3\" />";
+    "<ChipInfo Vendor=\"Example\" Name=\"Other\" Core=\"JLINK_CORE_CORTEX_M3\" />"
+    "<ChipInfo Vendor=\"Example\" Name=\"MysteryDevice\" Core=\"JLINK_CORE_UNKNOWN\" />";
   std::string attach_device;
   std::string attach_reason;
   return resolve_non_intrusive_attach_device_from_catalog("Z20K146M", catalog, &attach_device)
-    && attach_device == "Cortex-M4"
-    && resolve_non_intrusive_attach_device_from_catalog("cortex-m4", "", &attach_device)
-    && attach_device == "Cortex-M4"
-    && resolve_non_intrusive_attach_device(L"C:\\missing\\JLink_x64.dll", "Cortex-M4", &attach_device, &attach_reason)
-    && attach_device == "Cortex-M4"
-    && !resolve_non_intrusive_attach_device_from_catalog("Other", catalog, &attach_device);
+    && attach_device == "Z20K146M"
+    && resolve_non_intrusive_attach_device_from_catalog("Other", catalog, &attach_device)
+    && attach_device == "Other"
+    && resolve_non_intrusive_attach_device_from_catalog("MysteryDevice", catalog, &attach_device)
+    && attach_device == "MysteryDevice"
+    && !resolve_non_intrusive_attach_device_from_catalog("Cortex-M4", catalog, &attach_device)
+    && !resolve_non_intrusive_attach_device(L"C:\\missing\\JLink_x64.dll", "Z20K146M", &attach_device, &attach_reason);
 }
 
 static std::string ready_heartbeat_json(
@@ -4133,7 +4123,7 @@ static int self_test() {
     return 0;
   }
   if (!self_test_non_intrusive_attach_profile()) {
-    error_json("HSS_SELF_TEST_NON_INTRUSIVE_ATTACH_FAILED", "generic Cortex-M4 attach profile selection failed closed");
+    error_json("HSS_SELF_TEST_NON_INTRUSIVE_ATTACH_FAILED", "selected device catalog resolution or unknown-core acceptance failed closed");
     return 0;
   }
   if (!prepare_jlink_script("none", L"", "", &no_script, &script_error_code, &script_error_reason)

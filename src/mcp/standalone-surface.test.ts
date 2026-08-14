@@ -107,14 +107,16 @@ test("legacy result modes carry one envelope representation and preserve explici
         assert.equal((JSON.parse(text.text) as { ok: boolean }).ok, true);
       } else {
         assert.ok(result.structuredContent);
-        assert.throws(() => JSON.parse(text.text));
-        assert.match(text.text, /^OK mcp_init /);
         assert.equal((result.structuredContent as { ok: boolean }).ok, true);
-        assert.equal(
-          (result.structuredContent as { timestamps?: unknown }).timestamps === undefined,
-          mode === "normal",
-          "normal omits audit timestamps while full retains them",
-        );
+        if (mode === "normal") {
+          assert.deepEqual(JSON.parse(text.text), result.structuredContent);
+          assert.ok(result.structuredContent?.result);
+          assert.equal(result.structuredContent?.timestamps, undefined);
+        } else {
+          assert.throws(() => JSON.parse(text.text));
+          assert.match(text.text, /^OK mcp_init /);
+          assert.ok(result.structuredContent?.timestamps);
+        }
       }
     } finally {
       await connection.client.close();
@@ -142,8 +144,13 @@ test("task profiles honor explicit result modes without changing the compact def
       } else {
         assert.ok(result.structuredContent);
         assert.equal((result.structuredContent?.error as { code: string }).code, "PROJECT_NOT_BOUND");
-        assert.equal(result.structuredContent?.detailsUri, undefined);
-        assert.equal(result.structuredContent?.timestamps === undefined, mode === "normal");
+        if (mode === "normal") {
+          assert.equal(result.structuredContent?.timestamps, undefined);
+          assert.deepEqual(JSON.parse(content.text), result.structuredContent);
+          assert.match(String(result.structuredContent?.diagnosticRef), /^jlink:\/\/operation\//);
+        } else {
+          assert.throws(() => JSON.parse(content.text));
+        }
       }
       const boundRaw = await connection.client.callTool({ name: "project", arguments: { action: "bind", projectRoot: root } });
       const boundResult = boundRaw as unknown as {
@@ -170,19 +177,27 @@ test("task profiles honor explicit result modes without changing the compact def
         const workflowEnvelope = mode === "text"
           ? JSON.parse(receipt.text) as Record<string, unknown>
           : wire.structuredContent!;
-        if (mode === "text") assert.equal(wire.structuredContent, undefined);
-        else {
+        if (mode === "text") {
+          assert.equal(wire.structuredContent, undefined);
+          assert.equal(workflowEnvelope.tool, workflow.name);
+        } else if (mode === "normal") {
+          assert.ok(wire.structuredContent);
+          assert.deepEqual(JSON.parse(receipt.text), wire.structuredContent);
+          assert.equal(workflowEnvelope.timestamps, undefined);
+          assert.equal(workflowEnvelope.details, undefined);
+        } else {
           assert.ok(wire.structuredContent);
           assert.throws(() => JSON.parse(receipt.text));
-          assert.equal(workflowEnvelope.timestamps === undefined, mode === "normal");
-        }
-        assert.equal(workflowEnvelope.tool, workflow.name);
-        if (mode === "normal") assert.equal(workflowEnvelope.details, undefined);
-        else if (workflow.detailKind) {
-          assert.equal((workflowEnvelope.details as { kind?: string } | undefined)?.kind, workflow.detailKind);
+          assert.equal(workflowEnvelope.tool, workflow.name);
+          if (workflow.detailKind) {
+            assert.equal((workflowEnvelope.details as { kind?: string } | undefined)?.kind, workflow.detailKind);
+          }
         }
       }
-      assert.deepEqual((await connection.client.listResourceTemplates()).resourceTemplates, []);
+      const templates = (await connection.client.listResourceTemplates()).resourceTemplates;
+      assert.deepEqual(templates.map(({ uriTemplate }) => uriTemplate), mode === "normal"
+        ? ["jlink://operation/{operationId}"]
+        : []);
     } finally {
       await connection.client.close();
     }
@@ -200,9 +215,18 @@ test("standalone defaults to the compact catalog and preserves explicit profiles
       assert.equal(tool.inputSchema.properties?.runId, undefined, `${tool.name} must not expose runId`);
       if (tool.name !== "project") assert.equal(tool.inputSchema.properties?.projectRoot, undefined, `${tool.name} must use the bound project root`);
     }
-    const unbound = parseEnvelope(await compact.client.callTool({ name: "inspect", arguments: { action: "core" } }));
+    const unboundResult = await compact.client.callTool({ name: "inspect", arguments: { action: "core" } });
+    const unbound = parseEnvelope(unboundResult);
     assert.equal(unbound.ok, false);
     assert.equal((unbound.error as { code?: string }).code, "PROJECT_NOT_BOUND");
+    const unboundWire = unboundResult as unknown as {
+      content: Array<{ type: string; text?: string }>;
+      structuredContent?: Record<string, unknown>;
+    };
+    assert.deepEqual(
+      JSON.parse((unboundWire.content.find((item) => item.type === "text") as { text: string }).text),
+      unboundWire.structuredContent,
+    );
 
     const implicit = parseEnvelope(await compact.client.callTool({ name: "project", arguments: { action: "bind" } }));
     assert.equal(implicit.ok, false);
@@ -222,19 +246,20 @@ test("standalone defaults to the compact catalog and preserves explicit profiles
     assert.equal(bound.ok, true, JSON.stringify(bound.error));
     assert.ok(JSON.stringify(boundResult).length <= 1_024, "simple compact success must stay within 1 KiB on the wire");
     assert.equal(existsSync(join(root, "storage")), true);
-    const detailsUri = String(bound.detailsUri);
-    assert.match(detailsUri, /^jlink:\/\/operation\/[0-9a-f-]+$/i);
-    const detail = await compact.client.readResource({ uri: detailsUri });
+    assert.equal(bound.diagnosticRef, undefined, "successful normal results must not expose diagnostics");
+    const diagnosticRef = String(unbound.diagnosticRef);
+    assert.match(diagnosticRef, /^jlink:\/\/operation\/[0-9a-f-]+$/i);
+    const detail = await compact.client.readResource({ uri: diagnosticRef });
     const detailText = (detail.contents[0] as { text?: string }).text;
     assert.ok(detailText);
-    assert.equal((JSON.parse(detailText) as { operationId: string }).operationId, bound.operationId);
+    assert.equal((JSON.parse(detailText) as { error: { code: string } }).error.code, "PROJECT_NOT_BOUND");
     assert.deepEqual((await compact.client.listResourceTemplates()).resourceTemplates.map(({ uriTemplate }) => uriTemplate), [
       "jlink://operation/{operationId}",
     ]);
 
     const listed = parseEnvelope(await compact.client.callTool({ name: "capture", arguments: { action: "list" } }));
     assert.equal(listed.ok, true, JSON.stringify(listed.error));
-    assert.deepEqual((listed.data as { captures: unknown[] }).captures, []);
+    assert.deepEqual((listed.result as { captures: unknown[] }).captures, []);
   } finally {
     await compact.client.close();
   }
@@ -256,8 +281,8 @@ test("standalone defaults to the compact catalog and preserves explicit profiles
         assert.ok(tools.find(({ name }) => name === "target_status")?.inputSchema.properties?.runId);
         const initialized = parseEnvelope(await connection.client.callTool({ name: "mcp_init", arguments: { projectRoot: root } }));
         assert.equal(initialized.ok, true, JSON.stringify(initialized.error));
-        assert.ok(initialized.timestamps, "acceptance must retain the full operation envelope");
-        assert.equal(initialized.detailsUri, undefined, "acceptance results must not be compacted");
+        assert.equal(initialized.timestamps, undefined, "acceptance must not bypass the default normal result mode");
+        assert.equal(initialized.diagnosticRef, undefined, "successful normal results do not expose diagnostics");
       }
     } finally {
       await connection.client.close();
@@ -344,7 +369,7 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
   try {
     await client.connect(transport);
     assert.equal(client.getServerVersion()?.name, "jlink-mcp");
-    assert.equal(client.getServerVersion()?.version, "2.1.0");
+    assert.equal(client.getServerVersion()?.version, "2.2.0");
     assert.deepEqual((await client.listTools()).tools.map(({ name }) => name).sort(), EXPECTED_TOOLS);
     const tools = (await client.listTools()).tools;
     const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -356,12 +381,9 @@ test("standalone stdio exposes only the Agent-first MCP surface", async (context
     assert.match(sequenceDescription, /not.*single variable read or write/i);
     const hssStartDescription = toolByName.get("hss_start")?.description ?? "";
     assert.match(hssStartDescription, /dryRun=true/i);
-    assert.match(hssStartDescription, /same capture parameters/i);
-    assert.match(hssStartDescription, /capability-only.*dryRun=true/i);
-    assert.match(hssStartDescription, /capability-only.*at least one.*variable/i);
-    const hssVariablesSchema = toolByName.get("hss_start")?.inputSchema.properties?.variables as { description?: unknown } | undefined;
-    const hssVariablesDescription = typeof hssVariablesSchema?.description === "string" ? hssVariablesSchema.description : "";
-    assert.match(hssVariablesDescription, /capability-only.*non-empty/i);
+    assert.match(hssStartDescription, /real variable set.*rate.*duration/i);
+    assert.match(hssStartDescription, /background polling.*stop polling/i);
+    assert.match(hssStartDescription, /without a device\/core allowlist/i);
     for (const name of ["capture_summary", "capture_series", "capture_event_window", "capture_export_csv"]) {
       const description = toolByName.get(name)?.description ?? "";
       assert.match(description, /repair and atomically republish capture\.db/i, `${name} must disclose index repair`);
@@ -613,6 +635,7 @@ function queueOnlyEnvironment(queueRoot: string): Record<string, string> {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
     JLINK_MCP_QUEUE_ROOT: queueRoot,
     JLINK_MCP_PROFILE: "legacy",
+    JLINK_MCP_RESULT_MODE: "full",
   };
 }
 
@@ -625,17 +648,21 @@ function childEnvironment(queueRoot: string): Record<string, string> {
     JLINK_MCP_STORAGE_ROOT: join(localRoot, "storage"),
     JLINK_MCP_EVIDENCE_ROOT: join(localRoot, "evidence"),
     JLINK_MCP_PROFILE: "legacy",
+    JLINK_MCP_RESULT_MODE: "full",
   };
 }
 
 function compactEnvironment(queueRoot: string): Record<string, string> {
   const result = childEnvironment(queueRoot);
   delete result.JLINK_MCP_PROFILE;
+  delete result.JLINK_MCP_RESULT_MODE;
   return result;
 }
 
 function profileEnvironment(queueRoot: string, profile: "compact" | "advanced" | "legacy" | "acceptance"): Record<string, string> {
-  return { ...childEnvironment(queueRoot), JLINK_MCP_PROFILE: profile };
+  const result: Record<string, string> = { ...childEnvironment(queueRoot), JLINK_MCP_PROFILE: profile };
+  delete result.JLINK_MCP_RESULT_MODE;
+  return result;
 }
 
 function parseEnvelope(result: Awaited<ReturnType<Client["callTool"]>>): Record<string, unknown> {

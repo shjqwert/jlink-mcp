@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   existsSync,
   fsyncSync,
@@ -65,7 +66,7 @@ export interface JcapV1Metadata {
   updatedAt: string;
   state: JcapV1CaptureState;
   indexStatus: JcapV1IndexStatus;
-  backend: "jlink-hss" | "fake-jlink-hss";
+  backend: "jlink-hss" | "fake-jlink-hss" | "jlink-poll";
   requestedRateHz: number;
   durationSec: number;
   recordSize: number;
@@ -1153,7 +1154,7 @@ function validateMetadata(value: JcapV1Metadata, packageDir?: string): void {
   }
   if (packageDir && path.basename(packageDir).toLowerCase() !== `${value.captureId}.jcap`.toLowerCase()) throw new Error("capture.json captureId does not match its package directory");
   if (!Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.updatedAt)) || Date.parse(value.updatedAt) < Date.parse(value.createdAt)) throw new Error("capture.json timestamps are invalid");
-  if (!["jlink-hss", "fake-jlink-hss"].includes(value.backend) || !Number.isInteger(value.requestedRateHz) || value.requestedRateHz < 1 || value.requestedRateHz > 1_000 || !Number.isSafeInteger(value.durationSec) || value.durationSec < 1 || value.durationSec > 60) throw new Error("capture.json HSS bounds are invalid");
+  if (!["jlink-hss", "fake-jlink-hss", "jlink-poll"].includes(value.backend) || !Number.isInteger(value.requestedRateHz) || value.requestedRateHz < 1 || value.requestedRateHz > 1_000 || !Number.isSafeInteger(value.durationSec) || value.durationSec < 1 || value.durationSec > 60) throw new Error("capture.json HSS bounds are invalid");
   if (!Array.isArray(value.variables) || value.variables.length < 1 || value.variables.length > 10) throw new Error("capture.json must declare 1..10 variables");
   const logical = new Set<string>();
   for (const variable of value.variables) {
@@ -1878,4 +1879,1102 @@ function each<T>(database: sqlite3.Database, sql: string, params: unknown[], onR
 
 function closeDatabase(database: sqlite3.Database): Promise<void> {
   return new Promise((resolve, reject) => database.close((error) => error ? reject(error) : resolve()));
+}
+
+
+export const JCAP_V2_FORMAT_VERSION = 2 as const;
+export const JCAP_V2_QUERY_MAX_BYTES = 128 * 1024;
+const JCAP_V2_CHUNK_MAX_BYTES = 64 * 1024;
+const JCAP_V2_CHUNK_HEADER_BYTES = 16;
+const JCAP_V2_CHUNK_MAGIC = "JCV2";
+
+export type JcapV2Statistic = "last" | "min" | "max";
+export type JcapV2Resolution =
+  | { mode: "raw" }
+  | { mode: "interval"; intervalMs: number }
+  | { mode: "points"; maxPoints: number };
+
+export interface JcapV2SeriesInput {
+  captureFile: string;
+  captureId: string;
+  variables: string[];
+  timeRange?: { startMs?: number; endMs?: number };
+  resolution?: JcapV2Resolution;
+  statistics?: JcapV2Statistic[];
+  cursor?: string;
+  maxBytes?: number;
+  startTick?: string;
+  endTick?: string;
+  bucketCount?: number;
+}
+
+export interface JcapV2EventWindowInput {
+  captureFile: string;
+  captureId: string;
+  eventId: string;
+  variables: string[];
+  beforeMs: number;
+  afterMs: number;
+  resolution?: JcapV2Resolution;
+  statistics?: JcapV2Statistic[];
+  cursor?: string;
+  maxBytes?: number;
+  bucketCount?: number;
+}
+
+export interface JcapV2FinalizeInput {
+  packageDir: string;
+  captureFile: string;
+  backend?: "hss" | "background_poll" | "stop_poll";
+  intrusive?: boolean;
+  requestedRateHz?: number;
+  actualRateHz?: number;
+  pauseTotalUs?: number;
+  hostStartNs?: string;
+  hostEndNs?: string;
+}
+
+interface JcapV2ManifestRow {
+  capture_id: string;
+  format_version: number;
+  state: JcapV1CaptureState;
+  created_at: string;
+  updated_at: string;
+  backend: string;
+  intrusive: number;
+  requested_rate_hz: number;
+  actual_rate_hz: number | null;
+  pause_total_us: number;
+  sample_count: number;
+  event_count: number;
+  tick_frequency_hz: number;
+  host_start_ns: string | null;
+  host_end_ns: string | null;
+  provenance_json: string;
+}
+
+interface JcapV2VariableRow {
+  ordinal: number;
+  name: string;
+  type: string;
+  width: number;
+  unit: string | null;
+  descriptor_json: string;
+}
+
+interface JcapV2ChunkRow {
+  chunk_index: number;
+  first_sample_index: number;
+  last_sample_index: number;
+  start_tick: string;
+  end_tick: string;
+  sample_count: number;
+  payload: Buffer;
+  crc32: string;
+  payload_sha256: string;
+}
+
+interface JcapV2EventRow {
+  event_id: string;
+  event_sequence: number;
+  type: string;
+  tick: string;
+  json: string;
+}
+
+interface JcapV2QualityRow {
+  key: string;
+  value_json: string;
+}
+
+interface JcapV2IntegrityValueRow {
+  key: string;
+  value: string;
+}
+
+interface DecodedJcapV2Sample {
+  sampleIndex: number;
+  tick: bigint;
+  statusFlags: number;
+  values: number[];
+}
+
+interface NormalizedJcapV2Query {
+  captureId: string;
+  variables: JcapV2VariableRow[];
+  variableIndexes: number[];
+  startTick: bigint;
+  endTick: bigint;
+  resolution: JcapV2Resolution;
+  statistics: JcapV2Statistic[];
+  cursorOffset: number;
+  fingerprint: string;
+  maxBytes: number;
+  tickFrequencyHz: number;
+}
+
+interface JcapV2Bucket {
+  startTick: bigint;
+  endTick: bigint;
+  samples: DecodedJcapV2Sample[];
+}
+
+export async function finalizeJcapV2FromV1Package(input: JcapV2FinalizeInput): Promise<{
+  captureFile: string;
+  captureId: string;
+  state: JcapV1CaptureState;
+  sampleCount: number;
+  eventCount: number;
+  chunkCount: number;
+  contentSha256: string;
+}> {
+  const raw = readJcapV1Raw(input.packageDir);
+  if (raw.metadata.state === "active" || raw.metadata.state === "finalizing") {
+    throw new JcapPackageInvalidError("JCAP v2 finalization requires a terminal capture state");
+  }
+  const captureFile = path.resolve(input.captureFile);
+  if (path.extname(captureFile).toLowerCase() !== ".jcap") {
+    throw new JcapPackageInvalidError("JCAP v2 final file must use the .jcap extension");
+  }
+  mkdirSync(path.dirname(captureFile), { recursive: true });
+  const temporary = `${captureFile}.tmp-${randomUUID()}`;
+  removeSqliteFamily(temporary);
+  let database: sqlite3.Database | undefined;
+  try {
+    database = await openDatabase(temporary);
+    await exec(database, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;");
+    await run(database, "BEGIN IMMEDIATE");
+    try {
+      await exec(database, `
+        CREATE TABLE manifest (
+          capture_id TEXT PRIMARY KEY,
+          format_version INTEGER NOT NULL,
+          state TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          backend TEXT NOT NULL,
+          intrusive INTEGER NOT NULL CHECK(intrusive IN (0,1)),
+          requested_rate_hz REAL NOT NULL,
+          actual_rate_hz REAL,
+          pause_total_us INTEGER NOT NULL,
+          sample_count INTEGER NOT NULL,
+          event_count INTEGER NOT NULL,
+          tick_frequency_hz INTEGER NOT NULL,
+          host_start_ns TEXT,
+          host_end_ns TEXT,
+          provenance_json TEXT NOT NULL
+        );
+        CREATE TABLE variables (
+          ordinal INTEGER PRIMARY KEY,
+          name TEXT UNIQUE NOT NULL,
+          type TEXT NOT NULL,
+          width INTEGER NOT NULL,
+          unit TEXT,
+          descriptor_json TEXT NOT NULL
+        );
+        CREATE TABLE sample_chunks (
+          chunk_index INTEGER PRIMARY KEY,
+          first_sample_index INTEGER NOT NULL,
+          last_sample_index INTEGER NOT NULL,
+          start_tick TEXT NOT NULL,
+          end_tick TEXT NOT NULL,
+          sample_count INTEGER NOT NULL,
+          payload BLOB NOT NULL,
+          crc32 TEXT NOT NULL,
+          payload_sha256 TEXT NOT NULL
+        );
+        CREATE INDEX sample_chunks_time ON sample_chunks(start_tick,end_tick,chunk_index);
+        CREATE TABLE events (
+          event_id TEXT PRIMARY KEY,
+          event_sequence INTEGER UNIQUE NOT NULL,
+          type TEXT NOT NULL,
+          tick TEXT NOT NULL,
+          json TEXT NOT NULL
+        );
+        CREATE INDEX events_time ON events(tick,event_sequence);
+        CREATE TABLE quality (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+        CREATE TABLE integrity (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      `);
+
+      const backend = input.backend ?? (raw.metadata.backend === "fake-jlink-hss" ? "hss" : "hss");
+      const requestedRateHz = input.requestedRateHz ?? raw.metadata.requestedRateHz;
+      const actualRateHz = input.actualRateHz
+        ?? (raw.metadata.durationSec > 0 ? raw.samples.length / raw.metadata.durationSec : undefined);
+      await run(database, `
+        INSERT INTO manifest(
+          capture_id,format_version,state,created_at,updated_at,backend,intrusive,
+          requested_rate_hz,actual_rate_hz,pause_total_us,sample_count,event_count,
+          tick_frequency_hz,host_start_ns,host_end_ns,provenance_json
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `, [
+        raw.metadata.captureId,
+        JCAP_V2_FORMAT_VERSION,
+        raw.metadata.state,
+        raw.metadata.createdAt,
+        raw.metadata.updatedAt,
+        backend,
+        (input.intrusive ?? backend === "stop_poll") ? 1 : 0,
+        requestedRateHz,
+        actualRateHz ?? null,
+        input.pauseTotalUs ?? 0,
+        raw.samples.length,
+        raw.events.length,
+        raw.metadata.timebase.tickFrequencyHz,
+        input.hostStartNs ?? null,
+        input.hostEndNs ?? null,
+        JSON.stringify(raw.provenance),
+      ]);
+
+      for (const [ordinal, variable] of raw.metadata.variables.entries()) {
+        await run(database, "INSERT INTO variables(ordinal,name,type,width,unit,descriptor_json) VALUES(?,?,?,?,?,?)", [
+          ordinal,
+          variable.logicalIdentity,
+          variable.type,
+          variable.size,
+          variable.unit ?? null,
+          JSON.stringify(variable),
+        ]);
+      }
+
+      const inferredDroppedBefore = new Set<number>(raw.events
+        .filter((event) => event.type === "quality" && Array.isArray(event.inferredDroppedBeforeSampleIndexes))
+        .flatMap((event) => event.inferredDroppedBeforeSampleIndexes as number[]));
+      const persistedSamples = raw.samples.map((sample) => inferredDroppedBefore.has(sample.sampleIndex)
+        ? { ...sample, statusFlags: sample.statusFlags | HSS_STATUS_FLAGS.dropped_before_this_sample }
+        : sample);
+      const chunks = encodeJcapV2Chunks(persistedSamples, raw.metadata.variables.map((variable) => variable.logicalIdentity));
+      for (const chunk of chunks) {
+        await run(database, `
+          INSERT INTO sample_chunks(
+            chunk_index,first_sample_index,last_sample_index,start_tick,end_tick,
+            sample_count,payload,crc32,payload_sha256
+          ) VALUES(?,?,?,?,?,?,?,?,?)
+        `, [
+          chunk.chunkIndex,
+          chunk.firstSampleIndex,
+          chunk.lastSampleIndex,
+          chunk.startTick,
+          chunk.endTick,
+          chunk.sampleCount,
+          chunk.payload,
+          chunk.crc32,
+          chunk.payloadSha256,
+        ]);
+      }
+
+      for (const event of raw.events) {
+        await run(database, "INSERT INTO events(event_id,event_sequence,type,tick,json) VALUES(?,?,?,?,?)", [
+          event.eventId,
+          event.eventSequence,
+          event.type,
+          event.tick,
+          JSON.stringify(event),
+        ]);
+      }
+      for (const [key, value] of Object.entries({
+        status: raw.metadata.qualityStatus,
+        source: raw.metadata.qualitySource,
+        missing: raw.metadata.quality.missingSamples,
+        dropped: raw.metadata.quality.droppedSamples,
+        overflows: raw.metadata.quality.overflows,
+        readErrors: raw.metadata.quality.readErrors,
+        timeouts: raw.metadata.quality.timeouts,
+        diagnostics: raw.diagnostics,
+      })) {
+        await run(database, "INSERT INTO quality(key,value_json) VALUES(?,?)", [key, JSON.stringify(value)]);
+      }
+      await run(database, "INSERT INTO integrity(key,value) VALUES(?,?)", ["valid_prefix_samples", String(raw.samples.length)]);
+      await run(database, "INSERT INTO integrity(key,value) VALUES(?,?)", ["chunk_count", String(chunks.length)]);
+      await run(database, "INSERT INTO integrity(key,value) VALUES(?,?)", ["source_samples_sha256", raw.sources.find((source) => source.file === "raw/samples.bin")?.sha256 ?? ""]);
+      await run(database, "INSERT INTO integrity(key,value) VALUES(?,?)", ["source_events_sha256", raw.sources.find((source) => source.file === "raw/events.bin")?.sha256 ?? ""]);
+      const contentSha256 = await jcapV2ContentSha256(database);
+      await run(database, "INSERT INTO integrity(key,value) VALUES(?,?)", ["content_sha256", contentSha256]);
+      await run(database, "COMMIT");
+    } catch (error) {
+      await run(database, "ROLLBACK").catch(() => undefined);
+      throw error;
+    }
+
+    const integrity = await get<IntegrityRow>(database, "PRAGMA integrity_check");
+    if (integrity?.integrity_check !== "ok") throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 temporary database failed integrity_check");
+    await closeDatabase(database);
+    database = undefined;
+    const handle = openSync(temporary, "r+");
+    try { fsyncSync(handle); } finally { closeSync(handle); }
+    removeSqliteSidecars(temporary);
+    atomicReplaceSync(temporary, captureFile);
+    removeSqliteSidecars(captureFile);
+    try { chmodSync(captureFile, 0o444); } catch { /* Windows read-only enforcement remains open-mode based */ }
+    const verified = await verifyJcapV2(captureFile);
+    return {
+      captureFile,
+      captureId: verified.captureId,
+      state: verified.state,
+      sampleCount: verified.sampleCount,
+      eventCount: verified.eventCount,
+      chunkCount: verified.chunkCount,
+      contentSha256: verified.contentSha256,
+    };
+  } catch (error) {
+    if (database) await closeDatabase(database).catch(() => undefined);
+    removeSqliteFamily(temporary);
+    throw error;
+  }
+}
+
+export async function verifyJcapV2(captureFile: string): Promise<{
+  captureId: string;
+  state: JcapV1CaptureState;
+  sampleCount: number;
+  eventCount: number;
+  chunkCount: number;
+  contentSha256: string;
+}> {
+  const database = await openJcapV2ReadOnly(captureFile);
+  try {
+    const integrityCheck = await get<IntegrityRow>(database, "PRAGMA integrity_check");
+    if (integrityCheck?.integrity_check !== "ok") throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 integrity_check failed");
+    const manifest = await requireJcapV2Manifest(database);
+    const variables = await readJcapV2Variables(database);
+    const chunks = await all<JcapV2ChunkRow>(database, "SELECT * FROM sample_chunks ORDER BY chunk_index");
+    let sampleCount = 0;
+    for (const chunk of chunks) {
+      const payload = Buffer.from(chunk.payload);
+      if (crc32Hex(payload) !== chunk.crc32 || sha256(payload) !== chunk.payload_sha256) {
+        throw new JcapIntegrityError("JCAP_V2_CORRUPT", `JCAP v2 chunk ${chunk.chunk_index} checksum mismatch`);
+      }
+      const decoded = decodeJcapV2Chunk(payload, variables.length);
+      if (decoded.length !== chunk.sample_count) throw new JcapIntegrityError("JCAP_V2_CORRUPT", `JCAP v2 chunk ${chunk.chunk_index} count mismatch`);
+      sampleCount += decoded.length;
+    }
+    const eventCount = Number((await get<{ count: number }>(database, "SELECT COUNT(*) AS count FROM events"))?.count ?? -1);
+    const integrity = Object.fromEntries((await all<JcapV2IntegrityValueRow>(database, "SELECT key,value FROM integrity")).map((row) => [row.key, row.value]));
+    if (sampleCount !== manifest.sample_count || eventCount !== manifest.event_count || Number(integrity.chunk_count) !== chunks.length) {
+      throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 manifest counts do not match stored content");
+    }
+    const expectedHash = integrity.content_sha256;
+    const observedHash = await jcapV2ContentSha256(database);
+    if (!expectedHash || observedHash !== expectedHash) throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 content hash mismatch");
+    return {
+      captureId: manifest.capture_id,
+      state: manifest.state,
+      sampleCount,
+      eventCount,
+      chunkCount: chunks.length,
+      contentSha256: expectedHash,
+    };
+  } finally {
+    await closeDatabase(database);
+  }
+}
+
+export async function jcapV2CaptureSummary(captureFile: string): Promise<Record<string, unknown>> {
+  const database = await openJcapV2ReadOnly(captureFile);
+  try {
+    const manifest = await requireJcapV2Manifest(database);
+    const variables = await readJcapV2Variables(database);
+    const quality = await readJcapV2Quality(database);
+    const bounds = await get<{ start_tick: string | null; end_tick: string | null }>(
+      database,
+      "SELECT MIN(start_tick) AS start_tick, MAX(end_tick) AS end_tick FROM sample_chunks",
+    );
+    const startTick = bounds?.start_tick === null || bounds?.start_tick === undefined ? 0n : BigInt(bounds.start_tick);
+    const endTick = bounds?.end_tick === null || bounds?.end_tick === undefined ? startTick : BigInt(bounds.end_tick) + 1n;
+    return {
+      captureId: manifest.capture_id,
+      state: manifest.state,
+      sampleCount: manifest.sample_count,
+      eventCount: manifest.event_count,
+      variables: variables.map((variable) => ({
+        name: variable.name,
+        type: variable.type,
+        width: variable.width,
+        ...(variable.unit ? { unit: variable.unit } : {}),
+      })),
+      timeRange: {
+        unit: "ms",
+        startMs: tickToMs(startTick, manifest.tick_frequency_hz),
+        endMs: tickToMs(endTick, manifest.tick_frequency_hz),
+      },
+      backend: manifest.backend,
+      intrusive: manifest.intrusive === 1,
+      requestedRateHz: manifest.requested_rate_hz,
+      actualRateHz: manifest.actual_rate_hz,
+      pauseTotalUs: manifest.pause_total_us,
+      quality: {
+        missing: quality.missing === null ? null : qualityNumber(quality.missing),
+        dropped: quality.dropped === null ? null : qualityNumber(quality.dropped),
+      },
+    };
+  } finally {
+    await closeDatabase(database);
+  }
+}
+
+export async function jcapV2CaptureSnapshot(captureFile: string): Promise<{
+  metadata: {
+    captureId: string;
+    state: JcapV1CaptureState;
+    backend: string;
+    requestedRateHz: number;
+    sampleCount: number;
+    eventCount: number;
+    qualityStatus: JcapV1Metadata["qualityStatus"];
+    qualitySource: JcapV1QualitySource;
+    quality: JcapV1Metadata["quality"];
+  };
+  variables: JcapV1VariableDescriptor[];
+  events: JcapV1Event[];
+  samples: JcapV1Sample[];
+  integrity: Record<string, string>;
+}> {
+  const database = await openJcapV2ReadOnly(captureFile);
+  try {
+    const manifest = await requireJcapV2Manifest(database);
+    const variableRows = await readJcapV2Variables(database);
+    const quality = await readJcapV2Quality(database);
+    const eventRows = await all<JcapV2EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events ORDER BY event_sequence");
+    const integrityRows = await all<{ key: string; value: string }>(database, "SELECT key,value FROM integrity");
+    const variables = variableRows.map((row) => {
+      try { return JSON.parse(row.descriptor_json) as JcapV1VariableDescriptor; }
+      catch { throw new JcapIntegrityError("JCAP_V2_CORRUPT", `JCAP v2 variable descriptor ${row.name} is invalid`); }
+    });
+    const events = eventRows.map((row) => {
+      try { return JSON.parse(row.json) as JcapV1Event; }
+      catch { throw new JcapIntegrityError("JCAP_V2_CORRUPT", `JCAP v2 event ${row.event_id} is invalid`); }
+    });
+    const decodedSamples = await readJcapV2Samples(database, variables.length, 0n, 1n << 64n);
+    const samples = decodedSamples.map((sample) => ({
+      sampleIndex: sample.sampleIndex,
+      tick: sample.tick.toString(),
+      statusFlags: sample.statusFlags,
+      values: Object.fromEntries(variables.map((variable, index) => [variable.logicalIdentity, sample.values[index]])),
+    }));
+    return {
+      metadata: {
+        captureId: manifest.capture_id,
+        state: manifest.state,
+        backend: manifest.backend,
+        requestedRateHz: manifest.requested_rate_hz,
+        sampleCount: manifest.sample_count,
+        eventCount: manifest.event_count,
+        qualityStatus: String(quality.status) as JcapV1Metadata["qualityStatus"],
+        qualitySource: String(quality.source) as JcapV1QualitySource,
+        quality: {
+          missingSamples: quality.missing === null ? null : qualityNumber(quality.missing),
+          droppedSamples: quality.dropped === null ? null : qualityNumber(quality.dropped),
+          overflows: quality.overflows === null ? null : qualityNumber(quality.overflows),
+          readErrors: quality.readErrors === null ? null : qualityNumber(quality.readErrors),
+          timeouts: quality.timeouts === null ? null : qualityNumber(quality.timeouts),
+        },
+      },
+      variables,
+      events,
+      samples,
+      integrity: Object.fromEntries(integrityRows.map((row) => [row.key, row.value])),
+    };
+  } finally {
+    await closeDatabase(database);
+  }
+}
+
+export async function jcapV2CaptureExportCsv(
+  captureFile: string,
+  exportsDir = path.join(path.dirname(path.dirname(path.resolve(captureFile))), "exports"),
+): Promise<{ exportFile: string; rows: number }> {
+  const verified = await verifyJcapV2(captureFile);
+  if (!["completed", "stopped", "interrupted"].includes(verified.state)) {
+    throw new Error(`JCAP capture is not exportable: ${verified.state}`);
+  }
+  let database: sqlite3.Database | undefined = await openJcapV2ReadOnly(captureFile);
+  let handle: number | undefined;
+  let created = false;
+  const exportDir = path.resolve(exportsDir);
+  const exportFile = path.join(exportDir, `${verified.captureId}.csv`);
+  try {
+    const manifest = await requireJcapV2Manifest(database);
+    const variables = await readJcapV2Variables(database);
+    if (verified.sampleCount * Math.max(1, variables.length) > LIMITS.exportRows) {
+      throw new JcapBoundsError(`CSV export exceeds ${LIMITS.exportRows} values`);
+    }
+    const samples = await readJcapV2Samples(database, variables.length, 0n, 1n << 64n);
+    mkdirSync(exportDir, { recursive: true });
+    handle = openSync(exportFile, "wx");
+    created = true;
+    writeAll(handle, ["sampleIndex", "timeMs", "sourceCounter", "statusFlags", ...variables.map((variable) => csv(variable.name))].join(",") + "\r\n");
+    for (const sample of samples) {
+      writeAll(handle, [
+        String(sample.sampleIndex),
+        String(tickToMs(sample.tick, manifest.tick_frequency_hz)),
+        sample.tick.toString(),
+        String(sample.statusFlags),
+        ...sample.values.map(String),
+      ].join(",") + "\r\n");
+    }
+    fsyncSync(handle);
+    closeSync(handle);
+    handle = undefined;
+    await closeDatabase(database);
+    database = undefined;
+    return { exportFile, rows: samples.length };
+  } catch (error) {
+    const cleanupErrors: string[] = [];
+    if (handle !== undefined) {
+      try { closeSync(handle); }
+      catch (cleanupError) { cleanupErrors.push(`CSV handle close failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); }
+    }
+    if (database) {
+      try { await closeDatabase(database); }
+      catch (cleanupError) { cleanupErrors.push(`database close failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); }
+    }
+    if (created) {
+      try { rmSync(exportFile, { force: true }); }
+      catch (cleanupError) { cleanupErrors.push(`CSV cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`); }
+    }
+    if (existsSync(exportFile)) {
+      throw new JcapExportPublishError(
+        [error instanceof Error ? error.message : String(error), ...cleanupErrors].join("; "),
+        exportFile,
+      );
+    }
+    throw error;
+  }
+}
+
+export async function jcapV2CaptureSeries(input: JcapV2SeriesInput): Promise<Record<string, unknown>> {
+  const database = await openJcapV2ReadOnly(input.captureFile);
+  try {
+    const manifest = await requireJcapV2Manifest(database);
+    if (manifest.capture_id !== input.captureId) throw new JcapCaptureNotFoundError("captureId does not match JCAP v2 manifest");
+    const variables = await readJcapV2Variables(database);
+    const query = await normalizeJcapV2Query(database, manifest, variables, input);
+    const samples = await readJcapV2Samples(database, variables.length, query.startTick, query.endTick);
+    const buckets = buildJcapV2Buckets(samples, query.startTick, query.endTick, query.resolution, query.tickFrequencyHz);
+    const quality = await readJcapV2Quality(database);
+    return pageJcapV2Series(query, buckets, qualityNumber(quality.missing), qualityNumber(quality.dropped));
+  } finally {
+    await closeDatabase(database);
+  }
+}
+
+export async function jcapV2CaptureEventWindow(input: JcapV2EventWindowInput): Promise<Record<string, unknown>> {
+  if (!Number.isFinite(input.beforeMs) || input.beforeMs < 0 || !Number.isFinite(input.afterMs) || input.afterMs < 0) {
+    throw new JcapBoundsError("beforeMs and afterMs must be finite non-negative values");
+  }
+  if (input.bucketCount !== undefined && (input.resolution !== undefined || input.statistics !== undefined)) {
+    throw new JcapBoundsError("legacy bucketCount conflicts with resolution/statistics");
+  }
+  const database = await openJcapV2ReadOnly(input.captureFile);
+  let event: JcapV2EventRow | undefined;
+  let tickFrequencyHz = 0;
+  try {
+    const manifest = await requireJcapV2Manifest(database);
+    if (manifest.capture_id !== input.captureId) throw new JcapCaptureNotFoundError("captureId does not match JCAP v2 manifest");
+    tickFrequencyHz = manifest.tick_frequency_hz;
+    event = await get<JcapV2EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events WHERE event_id=?", [input.eventId]);
+    if (!event) throw new JcapCaptureNotFoundError(`event ${input.eventId} was not found`);
+  } finally {
+    await closeDatabase(database);
+  }
+  const eventTick = BigInt(event.tick);
+  const beforeTick = msToTick(input.beforeMs, tickFrequencyHz);
+  const afterTick = msToTick(input.afterMs, tickFrequencyHz);
+  const startTick = eventTick > beforeTick ? eventTick - beforeTick : 0n;
+  const endTick = eventTick + afterTick + 1n;
+  if (input.variables.length === 0) {
+    return {
+      captureId: input.captureId,
+      time: { unit: "ms", start: [], end: [] },
+      variables: [],
+      quality: { missing: 0, dropped: 0 },
+      nextCursor: null,
+      event: {
+        eventId: event.event_id,
+        type: event.type,
+        tMs: tickToMs(eventTick, tickFrequencyHz),
+      },
+    };
+  }
+  const series = input.bucketCount === undefined
+    ? await jcapV2CaptureSeries({
+      captureFile: input.captureFile,
+      captureId: input.captureId,
+      variables: input.variables,
+      timeRange: {
+        startMs: tickToMs(startTick, tickFrequencyHz),
+        endMs: tickToMs(endTick, tickFrequencyHz),
+      },
+      resolution: input.resolution ?? { mode: "points", maxPoints: 256 },
+      statistics: input.statistics,
+      cursor: input.cursor,
+      maxBytes: input.maxBytes,
+    })
+    : await jcapV2CaptureSeries({
+      captureFile: input.captureFile,
+      captureId: input.captureId,
+      variables: input.variables,
+      startTick: startTick.toString(),
+      endTick: (endTick - 1n).toString(),
+      bucketCount: input.bucketCount,
+      cursor: input.cursor,
+      maxBytes: input.maxBytes,
+    });
+  return {
+    ...series,
+    event: {
+      eventId: event.event_id,
+      type: event.type,
+      tMs: tickToMs(eventTick, tickFrequencyHz),
+    },
+  };
+}
+
+export async function jcapV2CaptureList(rootDir: string, options: { limit?: number; cursor?: string } = {}): Promise<Record<string, unknown>> {
+  const limit = options.limit ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new JcapBoundsError("limit must be 1..200");
+  const files = findJcapV2Files(path.resolve(rootDir)).sort();
+  const offset = parseListCursor(options.cursor, files.length);
+  const captures: Record<string, unknown>[] = [];
+  for (const file of files.slice(offset, offset + limit)) {
+    try {
+      captures.push(await jcapV2CaptureSummary(file));
+    } catch {
+      captures.push({ captureId: path.basename(file, ".jcap"), state: "failed", anomalies: { codes: ["JCAP_INTEGRITY_INVALID"] } });
+    }
+  }
+  const nextOffset = offset + captures.length;
+  return {
+    captures,
+    nextCursor: nextOffset < files.length ? Buffer.from(JSON.stringify({ offset: nextOffset }), "utf8").toString("base64url") : null,
+  };
+}
+
+export function resolveJcapV2CaptureFile(rootDir: string, captureId: string): string | undefined {
+  if (!captureId || /[\\/]/.test(captureId)) throw new JcapCaptureNotFoundError("captureId is invalid");
+  return findJcapV2Files(path.resolve(rootDir)).find((file) => path.basename(file, ".jcap") === captureId);
+}
+
+function encodeJcapV2Chunks(samples: JcapV1Sample[], variableNames: string[]): Array<{
+  chunkIndex: number;
+  firstSampleIndex: number;
+  lastSampleIndex: number;
+  startTick: string;
+  endTick: string;
+  sampleCount: number;
+  payload: Buffer;
+  crc32: string;
+  payloadSha256: string;
+}> {
+  const variableCount = variableNames.length;
+  const recordBytes = 16 + variableCount * 8;
+  const samplesPerChunk = Math.max(1, Math.floor((JCAP_V2_CHUNK_MAX_BYTES - JCAP_V2_CHUNK_HEADER_BYTES) / recordBytes));
+  const chunks = [];
+  for (let offset = 0, chunkIndex = 0; offset < samples.length; offset += samplesPerChunk, chunkIndex += 1) {
+    const slice = samples.slice(offset, offset + samplesPerChunk);
+    const payload = Buffer.alloc(JCAP_V2_CHUNK_HEADER_BYTES + slice.length * recordBytes);
+    payload.write(JCAP_V2_CHUNK_MAGIC, 0, 4, "ascii");
+    payload.writeUInt16LE(JCAP_V2_FORMAT_VERSION, 4);
+    payload.writeUInt16LE(variableCount, 6);
+    payload.writeUInt32LE(slice.length, 8);
+    payload.writeUInt32LE(recordBytes, 12);
+    for (const [sampleOffset, sample] of slice.entries()) {
+      let cursor = JCAP_V2_CHUNK_HEADER_BYTES + sampleOffset * recordBytes;
+      payload.writeUInt32LE(sample.sampleIndex, cursor);
+      cursor += 4;
+      payload.writeBigUInt64LE(BigInt(sample.tick), cursor);
+      cursor += 8;
+      payload.writeUInt32LE(sample.statusFlags >>> 0, cursor);
+      cursor += 4;
+      for (const name of variableNames) {
+        const value = sample.values[name];
+        if (!Number.isFinite(value)) throw new JcapPackageInvalidError(`JCAP v2 sample value ${name} is missing or invalid`);
+        payload.writeDoubleLE(value!, cursor);
+        cursor += 8;
+      }
+    }
+    chunks.push({
+      chunkIndex,
+      firstSampleIndex: slice[0]!.sampleIndex,
+      lastSampleIndex: slice.at(-1)!.sampleIndex,
+      startTick: slice[0]!.tick,
+      endTick: slice.at(-1)!.tick,
+      sampleCount: slice.length,
+      payload,
+      crc32: crc32Hex(payload),
+      payloadSha256: sha256(payload),
+    });
+  }
+  return chunks;
+}
+
+function decodeJcapV2Chunk(payload: Buffer, expectedVariableCount: number): DecodedJcapV2Sample[] {
+  if (payload.length < JCAP_V2_CHUNK_HEADER_BYTES || payload.toString("ascii", 0, 4) !== JCAP_V2_CHUNK_MAGIC) {
+    throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 chunk header is invalid");
+  }
+  const version = payload.readUInt16LE(4);
+  const variableCount = payload.readUInt16LE(6);
+  const sampleCount = payload.readUInt32LE(8);
+  const recordBytes = payload.readUInt32LE(12);
+  if (version !== JCAP_V2_FORMAT_VERSION || variableCount !== expectedVariableCount || recordBytes !== 16 + variableCount * 8) {
+    throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 chunk layout does not match variables");
+  }
+  if (payload.length !== JCAP_V2_CHUNK_HEADER_BYTES + sampleCount * recordBytes) {
+    throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 chunk length is invalid");
+  }
+  const result: DecodedJcapV2Sample[] = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    let cursor = JCAP_V2_CHUNK_HEADER_BYTES + index * recordBytes;
+    const sampleIndex = payload.readUInt32LE(cursor);
+    cursor += 4;
+    const tick = payload.readBigUInt64LE(cursor);
+    cursor += 8;
+    const statusFlags = payload.readUInt32LE(cursor);
+    cursor += 4;
+    const values: number[] = [];
+    for (let variable = 0; variable < variableCount; variable += 1) {
+      values.push(payload.readDoubleLE(cursor));
+      cursor += 8;
+    }
+    result.push({ sampleIndex, tick, statusFlags, values });
+  }
+  return result;
+}
+
+async function openJcapV2ReadOnly(captureFile: string): Promise<sqlite3.Database> {
+  const file = path.resolve(captureFile);
+  if (!existsSync(file) || !statSync(file).isFile()) throw new JcapCaptureNotFoundError("JCAP v2 capture file was not found");
+  const database = await openDatabase(file, sqlite3.OPEN_READONLY);
+  try {
+    await exec(database, "PRAGMA query_only=ON; PRAGMA foreign_keys=ON;");
+    return database;
+  } catch (error) {
+    await closeDatabase(database).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function requireJcapV2Manifest(database: sqlite3.Database): Promise<JcapV2ManifestRow> {
+  const columns = (await all<{ name: string }>(database, "PRAGMA table_info(manifest)")).map((row) => row.name);
+  if (!columns.includes("format_version") || !columns.includes("capture_id")) {
+    throw new JcapVersionUnsupportedError("file is not JCAP v2");
+  }
+  const manifest = await get<JcapV2ManifestRow>(database, "SELECT * FROM manifest LIMIT 1");
+  if (!manifest || manifest.format_version !== JCAP_V2_FORMAT_VERSION) throw new JcapVersionUnsupportedError("unsupported JCAP format version");
+  return manifest;
+}
+
+async function readJcapV2Variables(database: sqlite3.Database): Promise<JcapV2VariableRow[]> {
+  return all<JcapV2VariableRow>(database, "SELECT ordinal,name,type,width,unit,descriptor_json FROM variables ORDER BY ordinal");
+}
+
+async function readJcapV2Quality(database: sqlite3.Database): Promise<Record<string, unknown>> {
+  const rows = await all<JcapV2QualityRow>(database, "SELECT key,value_json FROM quality");
+  return Object.fromEntries(rows.map((row) => {
+    try { return [row.key, JSON.parse(row.value_json) as unknown]; }
+    catch { throw new JcapIntegrityError("JCAP_V2_CORRUPT", `JCAP v2 quality field ${row.key} is invalid`); }
+  }));
+}
+
+async function readJcapV2Samples(
+  database: sqlite3.Database,
+  variableCount: number,
+  startTick: bigint,
+  endTick: bigint,
+): Promise<DecodedJcapV2Sample[]> {
+  const chunks = await all<JcapV2ChunkRow>(database, "SELECT * FROM sample_chunks ORDER BY chunk_index");
+  const samples: DecodedJcapV2Sample[] = [];
+  for (const chunk of chunks) {
+    if (BigInt(chunk.end_tick) < startTick || BigInt(chunk.start_tick) >= endTick) continue;
+    const payload = Buffer.from(chunk.payload);
+    if (crc32Hex(payload) !== chunk.crc32 || sha256(payload) !== chunk.payload_sha256) {
+      throw new JcapIntegrityError("JCAP_V2_CORRUPT", `JCAP v2 chunk ${chunk.chunk_index} checksum mismatch`);
+    }
+    for (const sample of decodeJcapV2Chunk(payload, variableCount)) {
+      if (sample.tick >= startTick && sample.tick < endTick) samples.push(sample);
+    }
+  }
+  return samples;
+}
+
+async function normalizeJcapV2Query(
+  database: sqlite3.Database,
+  manifest: JcapV2ManifestRow,
+  allVariables: JcapV2VariableRow[],
+  input: JcapV2SeriesInput,
+): Promise<NormalizedJcapV2Query> {
+  if (!Array.isArray(input.variables) || input.variables.length < 1 || input.variables.length > 16 || new Set(input.variables).size !== input.variables.length) {
+    throw new JcapBoundsError("variables must contain 1..16 unique names");
+  }
+  const selected = input.variables.map((name) => {
+    const found = allVariables.find((variable) => variable.name === name);
+    if (!found) throw new JcapBoundsError(`unknown capture variable: ${name}`);
+    return found;
+  });
+  const variableIndexes = selected.map((variable) => variable.ordinal);
+  const hasLegacy = input.startTick !== undefined || input.endTick !== undefined || input.bucketCount !== undefined;
+  const hasNew = input.timeRange !== undefined || input.resolution !== undefined || input.statistics !== undefined;
+  if (hasLegacy && hasNew) throw new JcapBoundsError("legacy startTick/endTick/bucketCount conflicts with timeRange/resolution/statistics");
+  if (hasLegacy && (input.startTick === undefined || input.endTick === undefined || input.bucketCount === undefined)) {
+    throw new JcapBoundsError("legacy startTick, endTick, and bucketCount must be provided together");
+  }
+
+  const bounds = await get<{ start_tick: string | null; end_tick: string | null }>(
+    database,
+    "SELECT MIN(start_tick) AS start_tick, MAX(end_tick) AS end_tick FROM sample_chunks",
+  );
+  const availableStart = bounds?.start_tick === null || bounds?.start_tick === undefined ? 0n : BigInt(bounds.start_tick);
+  const availableEnd = bounds?.end_tick === null || bounds?.end_tick === undefined ? availableStart : BigInt(bounds.end_tick) + 1n;
+  let startTick: bigint;
+  let endTick: bigint;
+  let resolution: JcapV2Resolution;
+  let statistics: JcapV2Statistic[];
+  if (hasLegacy) {
+    if (!/^\d+$/.test(input.startTick!) || !/^\d+$/.test(input.endTick!) || BigInt(input.startTick!) > BigInt(input.endTick!)) {
+      throw new JcapBoundsError("legacy tick range is invalid");
+    }
+    if (!Number.isInteger(input.bucketCount) || input.bucketCount! < 1 || input.bucketCount! > 4_096) {
+      throw new JcapBoundsError("legacy bucketCount must be 1..4096");
+    }
+    startTick = BigInt(input.startTick!);
+    endTick = BigInt(input.endTick!) + 1n;
+    resolution = { mode: "points", maxPoints: input.bucketCount! };
+    statistics = ["last", "min", "max"];
+  } else {
+    startTick = input.timeRange?.startMs === undefined ? availableStart : msToTick(input.timeRange.startMs, manifest.tick_frequency_hz);
+    endTick = input.timeRange?.endMs === undefined ? availableEnd : msToTick(input.timeRange.endMs, manifest.tick_frequency_hz);
+    resolution = input.resolution ?? { mode: "points", maxPoints: 256 };
+    statistics = input.statistics ?? ["last", "min", "max"];
+  }
+  if (startTick < 0n || endTick <= startTick) throw new JcapBoundsError("time range must be non-empty and start-inclusive/end-exclusive");
+  validateJcapV2Resolution(resolution);
+  if (statistics.length < 1 || statistics.length > 3 || new Set(statistics).size !== statistics.length || statistics.some((value) => !["last", "min", "max"].includes(value))) {
+    throw new JcapBoundsError("statistics must contain unique last/min/max values");
+  }
+  const maxBytes = input.maxBytes ?? JCAP_V2_QUERY_MAX_BYTES;
+  if (!Number.isInteger(maxBytes) || maxBytes < 1_024 || maxBytes > JCAP_V2_QUERY_MAX_BYTES) throw new JcapBoundsError("maxBytes must be 1024..131072");
+  const fingerprint = sha256(Buffer.from(JSON.stringify({
+    captureId: manifest.capture_id,
+    variables: input.variables,
+    startTick: startTick.toString(),
+    endTick: endTick.toString(),
+    resolution,
+    statistics,
+  }), "utf8"));
+  const cursorOffset = parseJcapV2Cursor(input.cursor, fingerprint);
+  return {
+    captureId: manifest.capture_id,
+    variables: selected,
+    variableIndexes,
+    startTick,
+    endTick,
+    resolution,
+    statistics,
+    cursorOffset,
+    fingerprint,
+    maxBytes,
+    tickFrequencyHz: manifest.tick_frequency_hz,
+  };
+}
+
+function validateJcapV2Resolution(resolution: JcapV2Resolution): void {
+  if (resolution.mode === "raw") return;
+  if (resolution.mode === "interval") {
+    if (!Number.isFinite(resolution.intervalMs) || resolution.intervalMs <= 0) throw new JcapBoundsError("intervalMs must be finite and greater than zero");
+    return;
+  }
+  if (!Number.isInteger(resolution.maxPoints) || resolution.maxPoints < 1 || resolution.maxPoints > 4_096) {
+    throw new JcapBoundsError("maxPoints must be 1..4096");
+  }
+}
+
+function buildJcapV2Buckets(
+  samples: DecodedJcapV2Sample[],
+  startTick: bigint,
+  endTick: bigint,
+  resolution: JcapV2Resolution,
+  tickFrequencyHz: number,
+): JcapV2Bucket[] {
+  if (resolution.mode === "raw") {
+    return samples.map((sample, index) => ({
+      startTick: sample.tick,
+      endTick: samples[index + 1]?.tick ?? (sample.tick + 1n),
+      samples: [sample],
+    }));
+  }
+  const interval = resolution.mode === "interval"
+    ? msToTick(resolution.intervalMs, tickFrequencyHz)
+    : divideCeiling(endTick - startTick, BigInt(resolution.maxPoints));
+  if (interval < 1n) throw new JcapBoundsError("resolution interval is below one nanosecond");
+  const bucketCount = Number(divideCeiling(endTick - startTick, interval));
+  if (!Number.isSafeInteger(bucketCount) || bucketCount > 1_000_000) throw new JcapBoundsError("query resolution creates too many buckets");
+  const buckets = Array.from({ length: bucketCount }, (_unused, index): JcapV2Bucket => {
+    const bucketStart = startTick + BigInt(index) * interval;
+    return { startTick: bucketStart, endTick: minBigInt(endTick, bucketStart + interval), samples: [] };
+  });
+  for (const sample of samples) {
+    const index = Number((sample.tick - startTick) / interval);
+    if (index >= 0 && index < buckets.length) buckets[index]!.samples.push(sample);
+  }
+  return buckets;
+}
+
+function pageJcapV2Series(
+  query: NormalizedJcapV2Query,
+  buckets: JcapV2Bucket[],
+  reportedMissing: number,
+  reportedDropped: number,
+): Record<string, unknown> {
+  if (query.cursorOffset < 0 || query.cursorOffset > buckets.length) throw new JcapInvalidCursorError("cursor offset is outside query results");
+  const page: JcapV2Bucket[] = [];
+  let index = query.cursorOffset;
+  while (index < buckets.length) {
+    page.push(buckets[index]!);
+    const provisional = renderJcapV2Page(query, page, reportedMissing, reportedDropped, null);
+    if (Buffer.byteLength(JSON.stringify(provisional), "utf8") > query.maxBytes) {
+      page.pop();
+      break;
+    }
+    index += 1;
+  }
+  if (!page.length && index < buckets.length) throw new JcapBoundsError("one query bucket exceeds the response byte budget");
+  let nextCursor = index < buckets.length ? encodeJcapV2Cursor(query.fingerprint, index) : null;
+  let result = renderJcapV2Page(query, page, reportedMissing, reportedDropped, nextCursor);
+  while (Buffer.byteLength(JSON.stringify(result), "utf8") > query.maxBytes && page.length > 1) {
+    page.pop();
+    index -= 1;
+    nextCursor = encodeJcapV2Cursor(query.fingerprint, index);
+    result = renderJcapV2Page(query, page, reportedMissing, reportedDropped, nextCursor);
+  }
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > query.maxBytes) throw new JcapBoundsError("query page exceeds the response byte budget");
+  return result;
+}
+
+function renderJcapV2Page(
+  query: NormalizedJcapV2Query,
+  buckets: JcapV2Bucket[],
+  reportedMissing: number,
+  reportedDropped: number,
+  nextCursor: string | null,
+): Record<string, unknown> {
+  const emptyValues = buckets.reduce((count, bucket) => count + query.variableIndexes.filter((variableIndex) =>
+    !bucket.samples.some((sample) => Number.isFinite(sample.values[variableIndex]))
+  ).length, 0);
+  const variables = query.variables.map((variable, selectedIndex) => {
+    const output: Record<string, unknown> = { name: variable.name, type: variable.type };
+    for (const statistic of query.statistics) {
+      output[statistic] = buckets.map((bucket) => {
+        const values = bucket.samples
+          .map((sample) => sample.values[query.variableIndexes[selectedIndex]!])
+          .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+        if (!values.length) return null;
+        if (statistic === "last") return values.at(-1)!;
+        return statistic === "min" ? Math.min(...values) : Math.max(...values);
+      });
+    }
+    return output;
+  });
+  return {
+    captureId: query.captureId,
+    time: {
+      unit: "ms",
+      start: buckets.map((bucket) => tickToMs(bucket.startTick, query.tickFrequencyHz)),
+      end: buckets.map((bucket) => tickToMs(bucket.endTick, query.tickFrequencyHz)),
+    },
+    variables,
+    quality: { missing: reportedMissing + emptyValues, dropped: reportedDropped },
+    nextCursor,
+  };
+}
+
+function encodeJcapV2Cursor(fingerprint: string, offset: number): string {
+  return Buffer.from(JSON.stringify({ version: 1, fingerprint, offset }), "utf8").toString("base64url");
+}
+
+function parseJcapV2Cursor(cursor: string | undefined, fingerprint: string): number {
+  if (!cursor) return 0;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { version?: unknown; fingerprint?: unknown; offset?: unknown };
+    if (value.version !== 1 || value.fingerprint !== fingerprint || !Number.isSafeInteger(value.offset) || Number(value.offset) < 0) {
+      throw new Error("invalid");
+    }
+    return Number(value.offset);
+  } catch {
+    throw new JcapInvalidCursorError("cursor is invalid or does not match the query");
+  }
+}
+
+function parseListCursor(cursor: string | undefined, maximum: number): number {
+  if (!cursor) return 0;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { offset?: unknown };
+    if (!Number.isSafeInteger(value.offset) || Number(value.offset) < 0 || Number(value.offset) > maximum) throw new Error("invalid");
+    return Number(value.offset);
+  } catch {
+    throw new JcapInvalidCursorError("capture list cursor is invalid");
+  }
+}
+
+async function jcapV2ContentSha256(database: sqlite3.Database): Promise<string> {
+  const hash = createHash("sha256");
+  const add = (parts: unknown[]): void => {
+    const encoded = Buffer.from(JSON.stringify(parts), "utf8");
+    hash.update(String(encoded.length));
+    hash.update(":");
+    hash.update(encoded);
+  };
+  add(["jcap-v2-content", JCAP_V2_FORMAT_VERSION]);
+  for (const row of await all<JcapV2ManifestRow>(database, "SELECT * FROM manifest ORDER BY capture_id")) add(["manifest", ...Object.values(row)]);
+  for (const row of await all<JcapV2VariableRow>(database, "SELECT ordinal,name,type,width,unit,descriptor_json FROM variables ORDER BY ordinal")) add(["variable", ...Object.values(row)]);
+  for (const row of await all<JcapV2ChunkRow>(database, "SELECT * FROM sample_chunks ORDER BY chunk_index")) {
+    add(["chunk", row.chunk_index, row.first_sample_index, row.last_sample_index, row.start_tick, row.end_tick, row.sample_count, row.crc32, row.payload_sha256]);
+    hash.update(Buffer.from(row.payload));
+  }
+  for (const row of await all<JcapV2EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events ORDER BY event_sequence")) add(["event", ...Object.values(row)]);
+  for (const row of await all<JcapV2QualityRow>(database, "SELECT key,value_json FROM quality ORDER BY key")) add(["quality", row.key, row.value_json]);
+  for (const row of await all<JcapV2IntegrityValueRow>(database, "SELECT key,value FROM integrity WHERE key <> 'content_sha256' ORDER BY key")) add(["integrity", row.key, row.value]);
+  return hash.digest("hex");
+}
+
+function findJcapV2Files(root: string): string[] {
+  if (!existsSync(root) || !statSync(root).isDirectory()) return [];
+  const result: string[] = [];
+  const visit = (directory: string, depth: number): void => {
+    if (depth > 4) return;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolute, depth + 1);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".jcap")) result.push(absolute);
+    }
+  };
+  visit(root, 0);
+  return result;
+}
+
+function qualityNumber(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function tickToMs(value: bigint, tickFrequencyHz: number): number {
+  if (!Number.isSafeInteger(tickFrequencyHz) || tickFrequencyHz <= 0) throw new JcapBoundsError("tick frequency must be a positive safe integer");
+  return Number(value) * 1_000 / tickFrequencyHz;
+}
+
+function msToTick(value: number, tickFrequencyHz: number): bigint {
+  if (!Number.isFinite(value) || value < 0) throw new JcapBoundsError("time values must be finite and non-negative");
+  if (!Number.isSafeInteger(tickFrequencyHz) || tickFrequencyHz <= 0) throw new JcapBoundsError("tick frequency must be a positive safe integer");
+  return BigInt(Math.round(value * tickFrequencyHz / 1_000));
+}
+
+function minBigInt(left: bigint, right: bigint): bigint {
+  return left < right ? left : right;
+}
+
+function removeSqliteFamily(file: string): void {
+  rmSync(file, { force: true });
+  removeSqliteSidecars(file);
+}
+
+function removeSqliteSidecars(file: string): void {
+  rmSync(`${file}-wal`, { force: true });
+  rmSync(`${file}-shm`, { force: true });
 }

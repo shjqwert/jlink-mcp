@@ -165,7 +165,7 @@ export function assertNonIntrusiveConnectPreflight(observed: Record<string, unkn
 }
 
 export function selectHssAttachDevice(target: Pick<StoredTarget, "device" | "gdbDevice">): string {
-  return target.gdbDevice === "Cortex-M4" ? target.gdbDevice : target.device;
+  return target.device;
 }
 
 export class NativeHssHelperAdapter implements HssHelperAdapter {

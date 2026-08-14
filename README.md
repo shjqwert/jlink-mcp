@@ -6,6 +6,13 @@ The server serializes physical Probe access and reports observed state and side 
 
 Current source keeps the original 40-tool protocol in the opt-in `legacy` and `acceptance` profiles while making `compact` the default. `advanced` adds one explicit raw-command escape hatch.
 
+## v2.2.0 changes
+
+- Default results are minimal receipts. Completed captures return only `captureId`, state, sample count, and anomaly codes; `full` and `text` remain explicit compatibility modes.
+- Final captures are one verified SQLite JCAP v2 `.jcap` file. Full samples, descriptors, events, quality evidence, and integrity hashes stay local and are queried only on demand.
+- `capture.series` supports raw, fixed-interval, and maximum-point resolutions, selected statistics, shared millisecond time axes, and explicit 128 KiB cursor pagination.
+- The retained HSS tool names now select `hss`, `background_poll`, then `stop_poll` by observed capability. No device/core allowlist rejects a J-Link-connectable target; degraded rate and intrusive pause evidence are recorded.
+
 ## v2.1.0 changes
 
 - MCP result modes now separate canonical structured output, full diagnostics, and text compatibility without limiting the available tool surface.
@@ -27,29 +34,29 @@ Current source keeps the original 40-tool protocol in the opt-in `legacy` and `a
 - Release builds use the repository's pinned Windows x64 Helper component; runtime selection verifies its version, protocol, architecture, and SHA-256 before first execution, while native source rebuilds remain explicit.
 - The opt-in `legacy` and `acceptance` profiles retain the 40 direct tools for compatibility and full evidence workflows; `advanced` adds only the raw escape hatch to the compact surface.
 
-## Install the current stable v2.0.20 release
+## Install the current stable v2.2.0 release
 
 - Windows x64 with Node.js 22 or 24.
 - SEGGER J-Link Software and a connected supported J-Link Probe for hardware operations.
 - A project-local ELF with DWARF for typed variables and crash source mapping; an SVD is required for peripheral register access.
 
 Ordinary users do not need Visual Studio, CMake, Python, or a database server. Download
-`jlink-mcp-v2.0.20-windows-x64.zip` and `SHA256SUMS.txt` from the
-[v2.0.20 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v2.0.20),
+`jlink-mcp-v2.2.0-windows-x64.zip` and `SHA256SUMS.txt` from the
+[v2.2.0 GitHub Release](https://github.com/shjqwert/jlink-mcp/releases/tag/v2.2.0),
 verify the checksum, and extract the ZIP. Then run:
 
 ```powershell
 .\doctor.cmd
-codex mcp add jlink -- D:\Tools\jlink-mcp-v2.0.20-windows-x64\jlink-mcp.cmd
+codex mcp add jlink -- D:\Tools\jlink-mcp-v2.2.0-windows-x64\jlink-mcp.cmd
 ```
 
 The portable ZIP includes production npm dependencies, the SQLite native binding, and the
 prebuilt `hss_helper.exe`. The only vendor runtime installed separately is SEGGER J-Link Software.
 
-The Release also provides `jlink-mcp-2.0.20.tgz` for an online npm installation:
+The Release also provides `jlink-mcp-2.2.0.tgz` for an online npm installation:
 
 ```powershell
-npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v2.0.20/jlink-mcp-2.0.20.tgz
+npm install --global https://github.com/shjqwert/jlink-mcp/releases/download/v2.2.0/jlink-mcp-2.2.0.tgz
 jlink-mcp-doctor
 codex mcp add jlink -- jlink-mcp
 ```
@@ -77,6 +84,8 @@ npm run build:hss:source
 $env:JLINK_MCP_TEST_ROOT = "D:\User\Jlink_MCP_TEST"
 npm run test:release-install
 ```
+
+Hardware acceptance can force one backend with `JLINK_MCP_PROFILE=acceptance` plus `JLINK_MCP_TEST_CAPTURE_BACKEND=hss|background_poll|stop_poll`. The switch is rejected in every ordinary profile and is not a production routing option.
 
 `build:release` verifies the pinned statically linked Windows x64 HSS Helper, its component and
 protocol versions, runs its self-test, and builds the Node entry points. `pack:release` runs the
@@ -110,11 +119,11 @@ The default `compact` profile registers exactly nine task tools:
 project, inspect, write, control, program, debug, trace, capture, diagnose_crash
 ```
 
-Each task uses a small `action` plus `params` contract. `project` binds the explicit root and handles `devices`, `configure`, `status`, `verify`, and `artifacts`; all other tools consume the bound root internally. `debug.run_to`, `trace.rtt_window`, and `trace.hss_window` each provide one-call managed workflows. With no result-mode override, compact/advanced return a bounded receipt plus `jlink://operation/{operationId}`; the bounded process-local resource retains the complete operation envelope when it fits its advertised limits.
+Each task uses a small `action` plus `params` contract. `project` binds the explicit root and handles `devices`, `configure`, `status`, `verify`, and `artifacts`; all other tools consume the bound root internally. `debug.run_to`, `trace.rtt_window`, and `trace.hss_window` each provide one-call managed workflows. With no result-mode override, every profile returns the bounded `normal` result; complete operation envelopes are returned only through explicit `full` mode.
 
 The `advanced` profile exposes those nine tools plus `raw`. The raw `gdb` and `probe` actions keep unknown-effect and state-uncertainty reporting without adding a second authorization token to the request.
 
-`JLINK_MCP_RESULT_MODE` controls only the returned representation, not which MCP tools may be called. `normal` returns one structured envelope with defaults, aliases, and nested `details` removed while preserving semantic `data`; `full` returns the complete structured envelope; `text` preserves the original single JSON-text representation. An explicit mode applies to task and direct profiles. Without an override, legacy/acceptance remain text-compatible while compact/advanced use the bounded receipt above.
+`JLINK_MCP_RESULT_MODE` controls only the returned representation, not which MCP tools may be called. `normal` is the default and returns the minimum sufficient structured result; capture completion is limited to `captureId`, state, sample count, and anomaly summary. `full` returns the complete audit envelope, and `text` preserves the original single JSON-text representation. `content.text` and `structuredContent` are generated from the same result object.
 
 The `legacy` profile preserves these 40 direct tools and their schemas unchanged. `acceptance` uses the same direct surface so `runId` and full evidence envelopes remain available:
 
@@ -141,29 +150,28 @@ All profiles expose the read-only `rtt://output`, `probe://gdb-server-log`, and 
 - RAM (`write_memory`) and typed-variable writes default to exact readback verification. SVD peripheral-register writes also default to verification. Readback proves bytes observed by its named J-Link connection, not target-program consumption.
 - Hardware-action policy belongs to the Agent or MCP client. The server does not require a duplicate confirmation field; it still enforces exact Target identity, bounded inputs, Probe ownership, Artifact freshness, verification, cleanup, and explicit unknown-state reporting.
 - If the target was halted before `flash`, the server verifies that it remains halted and issues a safety halt when the vendor tool leaves its state running or unknown. This recovery is reported explicitly and never resumes a target that was running before Flash.
-- Typed variable and HSS requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
-- HSS is capped at ten synchronized capture variables, 1 kHz, and 60 seconds. Optional `writeVariables` are resolved before start and do not consume capture slots; sampled variables remain writable for compatibility. `trace.hss_window` also accepts up to 30 monotonic `actions`: typed writes, typed reads, and capture-owner `resume`/`continue`. Read and write selectors are added to the immutable descriptor plan automatically.
-- Call `hss_start` with `dryRun=true` to obtain capability, configured link speed, and capacity diagnostics without starting a Helper or creating a capture. The server reports requested and effective rates without automatically changing SWD speed or sample rate; falling below 95% is diagnostic, not by itself a corrupt-capture verdict.
-- HSS capability, dry-run, start, and stop preserve the observed target execution state. Native capability discovery restores an unexpected attach-time transition in the same connection with explicit Halt/Go evidence and still fails the operation; later ambiguous state changes remain fail-closed.
-- `debug_sequence_execute` synchronously runs a prevalidated 1–30 second sequence of 2–32 HSS, typed-variable, and capture-owner target-control operations. During an active HSS interval only `resume`/`continue` is allowed; stop the capture before halt, pause, reset, or recover. It uses absolute monotonic timing and only executes declared RAM restore/HSS stop cleanup actions after failure, cancellation, or timeout.
+- Typed-variable and trace-capture requests use logical selectors. The server resolves them against the current Artifact layout and never accepts a caller-supplied address as typed-symbol authority.
+- Automatic trace capture is capped at ten synchronized variables, 1 kHz, and 60 seconds. It attempts HSS, running-state background polling, then short stop/read/resume polling. No device/core name is a support gate. Optional `writeVariables` do not consume sample slots; `trace.hss_window` accepts up to 30 typed read/write and `resume`/`continue` actions.
+- Call the retained `hss_start` action with `dryRun=true` to validate the real variables, bounds, and automatic backend order without creating a capture. Falling below the requested rate does not discard data: real timestamps are retained and `RATE_DEGRADED` is reported.
+- Capability probing, dry-run, start, and stop preserve observed target execution state. Stop polling records every actual pause and confirms resume after each read; an unconfirmed resume stops immediately with `stateUnknown=true`.
+- `debug_sequence_execute` synchronously runs a prevalidated 1–30 second sequence of 2–32 trace, typed-variable, and capture-owner target-control operations. During an active capture only `resume`/`continue` is allowed; stop the capture before halt, pause, reset, or recover. It uses absolute monotonic timing and only executes declared RAM restore/capture-stop cleanup actions after failure, cancellation, or timeout.
 - Use `read_variable` or `write_variable` for one variable operation. Use `debug_sequence_execute` only when multiple operations require fixed intervals over at least one second; the Agent waits until the complete sequence result is returned.
 - Peripheral register access requires a configured, validated SVD. There is no inferred raw-memory substitute.
 - GDB and RTT sessions are explicit and never start each other. Crash diagnosis inspects an already halted target only.
 
 ## Capture package
 
-A newly finalized JCAP v1 capture retains three fact-source files:
+A newly finalized capture is exactly one read-only SQLite JCAP v2 file:
 
 ```text
-<captureId>.jcap/
-  capture.json
-  raw/samples.bin
-  raw/events.bin
+<captureId>.jcap
 ```
 
-`capture.json` contains bounded metadata, not the sample stream. Samples and events remain in the compact binary Raw files. Finalization verifies and seals those files without building SQLite. The first summary, series, event-window, or export query atomically creates `capture.db` as a derived index; a missing or damaged index can be rebuilt from verified metadata and Raw without changing them. Clients that require the previous indexed four-file package can call `capture.summary` immediately after stop to materialize and verify the fourth file. Explicit CSV exports are written outside the package.
+The file contains `manifest`, `variables`, 64 KiB-bounded `sample_chunks`, `events`, `quality`, and `integrity` tables. Capture staging is private; completion is returned only after transaction, CRC, count, hash, and SQLite integrity checks succeed. The final directory contains no WAL, SHM, temporary database, CSV, JSON, or chart. Interrupted and failed captures retain their verified valid prefix.
 
-JCAP v1 is the only supported Capture format. Discoverable legacy JCAP v0 packages remain untouched on disk, appear as unsupported in `capture_list`, and cannot be queried or exported.
+`capture.summary` returns the variable catalog and valid time range. `capture.series` reads selected variables and an optional half-open millisecond range using `raw`, `interval`, or `points` resolution and selected `last`/`min`/`max` statistics. Arrays share one aligned time axis, missing values are `null`, and responses over 128 KiB return `nextCursor` instead of truncating. CSV is created only by explicit export.
+
+Existing JCAP v1 packages remain readable and rebuildable for compatibility. Discoverable JCAP v0 packages remain untouched, appear as unsupported, and cannot be queried or exported.
 
 The standalone executable is the MCP stdio CLI. It does not expose a public Node.js JCAP API.
 

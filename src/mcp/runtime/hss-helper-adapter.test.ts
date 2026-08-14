@@ -19,8 +19,8 @@ const helperNonce = "52000000-0000-4000-8000-000000000001";
 const operationId1 = "54000000-0000-4000-8000-000000000001";
 const operationId2 = "54000000-0000-4000-8000-000000000002";
 
-test("HSS helper uses the validated Cortex-M4 attach profile instead of the Flash device", () => {
-  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
+test("HSS helper uses the selected J-Link device without a core allowlist", () => {
+  assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Z20K146M");
   assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: undefined }), "Z20K146M");
   assert.equal(selectHssAttachDevice({ device: "Z20K146M", gdbDevice: "Other" }), "Z20K146M");
 });

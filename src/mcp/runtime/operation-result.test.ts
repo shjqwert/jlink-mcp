@@ -4,74 +4,123 @@ import { parseMcpResultMode } from "../result-mode";
 import { createOperationEnvelope, failEnvelope, finishEnvelope } from "./operation-envelope";
 import { operationToolResult, projectNormalOperationResult } from "./operation-result";
 
-test("result mode parser preserves text compatibility by default", () => {
-  assert.equal(parseMcpResultMode(undefined), "text");
+test("result mode parser defaults to normal and preserves explicit compatibility modes", () => {
+  assert.equal(parseMcpResultMode(undefined), "normal");
   assert.equal(parseMcpResultMode("normal"), "normal");
   assert.equal(parseMcpResultMode("full"), "full");
   assert.equal(parseMcpResultMode("text"), "text");
   assert.throws(() => parseMcpResultMode("compact"), /Invalid JLINK_MCP_RESULT_MODE/);
 });
 
-test("normal result removes defaults and aliases without truncating semantic data", () => {
+test("normal read result exposes only the value through identical text and structured content", () => {
   const envelope = finishEnvelope(createOperationEnvelope("read_variable"), true);
-  envelope.artifact = {
-    generation: "artifact-generation",
-    path: "firmware.elf",
-    match: "verified",
-    firmwareIdentity: "verified",
-    mutationTrust: "verified",
-    evidenceSource: "fixture",
-    evidenceTimestamp: "2026-08-11T00:00:00.000Z",
-    mutationTrustSource: "fixture",
-    mutationTrustTimestamp: "2026-08-11T00:00:00.000Z",
+  envelope.data = {
+    dataHex: "00009a44",
+    resolved: { logicalIdentity: "motor.speed", address: "0x20001000", type: "float32" },
+    cacheRefreshed: true,
+    typedValue: 1232,
   };
-  envelope.data = { output: "x".repeat(20_000) };
-  envelope.details = { rawOutput: "y".repeat(20_000) };
+  envelope.details = { rawOutput: "x".repeat(20_000) };
 
-  const projected = projectNormalOperationResult(envelope);
-  assert.equal(projected.timestamps, undefined);
-  assert.equal(projected.before, undefined);
-  assert.equal(projected.after, undefined);
-  assert.equal(projected.warnings, undefined);
-  assert.equal(projected.details, undefined);
-  assert.equal((projected.artifact as { match?: string }).match, undefined);
-  assert.equal(((projected.data as { output: string }).output).length, 20_000, "normal mode must not truncate data");
+  const result = operationToolResult(envelope, "normal");
+  assert.deepEqual(result.structuredContent, { ok: true, result: { value: 1232 } });
+  assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 1_024);
 });
 
-test("full, normal, and text modes carry one envelope representation", () => {
+test("normal capture completion returns a bounded receipt and anomaly codes", () => {
+  const envelope = finishEnvelope(createOperationEnvelope("hss_stop"), true);
+  envelope.capture = {
+    captureId: "cap-001",
+    state: "completed",
+    sampleCount: 3_001,
+    requestedRateHz: 1_000,
+    actualRateHz: 920,
+    sampleThresholdMet: false,
+    packageDir: "C:\\captures\\cap-001.jcap",
+    readStatistics: { attempts: 3_001, emptyReads: 0, shortReads: 1, readErrors: 0 },
+  };
+  envelope.data = {
+    captureId: "cap-001",
+    state: "completed",
+    packageDir: "C:\\captures\\cap-001.jcap",
+  };
+
+  const result = operationToolResult(envelope, "normal");
+  assert.deepEqual(result.structuredContent, {
+    ok: true,
+    result: {
+      captureId: "cap-001",
+      state: "completed",
+      sampleCount: 3_001,
+      anomalies: {
+        level: "warning",
+        count: 2,
+        codes: ["RATE_DEGRADED", "SAMPLES_DROPPED"],
+      },
+    },
+  });
+  assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
+  assert.doesNotMatch(result.content[0].text, /packageDir|0x2000|probe/i);
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) < 1_024);
+});
+
+test("normal query data remains aligned while local paths are removed", () => {
+  const envelope = finishEnvelope(createOperationEnvelope("capture_series"), true);
+  envelope.data = {
+    captureId: "cap-001",
+    time: { unit: "ms", start: [0, 10], end: [10, 20] },
+    variables: [{ name: "speed", type: "float32", last: [1, 2], min: [1, 2], max: [1, 2] }],
+    quality: { missing: 0, dropped: 0 },
+    nextCursor: null,
+    databaseFile: "C:\\captures\\cap-001.jcap",
+  };
+
+  assert.deepEqual(projectNormalOperationResult(envelope), {
+    ok: true,
+    result: {
+      captureId: "cap-001",
+      time: { unit: "ms", start: [0, 10], end: [10, 20] },
+      variables: [{ name: "speed", type: "float32", last: [1, 2], min: [1, 2], max: [1, 2] }],
+      quality: { missing: 0, dropped: 0 },
+      nextCursor: null,
+    },
+  });
+});
+
+test("normal failures retain safety fields and diagnostics only by reference", () => {
   const envelope = failEnvelope(createOperationEnvelope("write_variable"), {
     code: "WRITE_FAILED",
     stage: "write",
-    message: "failed",
+    message: "sensitive internal diagnostic",
     retryable: false,
     writeIssued: true,
     stateUnknown: true,
   });
+  envelope.details = { rawOutput: "exact" };
 
-  envelope.details = { kind: "fixture", rawOutput: "exact" };
+  const diagnosticRef = `jlink://operation/${envelope.operationId}`;
+  const normal = operationToolResult(envelope, "normal", diagnosticRef);
+  assert.deepEqual(normal.structuredContent, {
+    ok: false,
+    error: {
+      code: "WRITE_FAILED",
+      stage: "write",
+      retryable: false,
+      writeIssued: true,
+      stateUnknown: true,
+    },
+    diagnosticRef,
+  });
+  assert.deepEqual(JSON.parse(normal.content[0].text), normal.structuredContent);
+  assert.doesNotMatch(normal.content[0].text, /sensitive|rawOutput/);
 
   const full = operationToolResult(envelope, "full");
   assert.equal(full.structuredContent, envelope);
   assert.deepEqual(full.structuredContent?.details, envelope.details);
   assert.throws(() => JSON.parse(full.content[0].text));
-  assert.match(full.content[0].text, /^ERROR write_variable /);
-
-  const normal = operationToolResult(envelope, "normal");
-  assert.equal(normal.structuredContent?.ok, false);
-  assert.equal(normal.structuredContent?.details, undefined);
-  assert.equal((normal.structuredContent?.error as { stateUnknown?: boolean }).stateUnknown, true);
-  assert.match(normal.content[0].text, /^ERROR write_variable /);
 
   const text = operationToolResult(envelope, "text");
   assert.equal(text.structuredContent, undefined);
   assert.deepEqual(JSON.parse(text.content[0].text), envelope);
-  assert.deepEqual((JSON.parse(text.content[0].text) as { details: unknown }).details, envelope.details);
-
-  const previousDuplicateBytes = Buffer.byteLength(JSON.stringify({
-    isError: true,
-    content: [{ type: "text", text: JSON.stringify(envelope) }],
-    structuredContent: envelope,
-  }));
-  assert.ok(Buffer.byteLength(JSON.stringify(full)) < previousDuplicateBytes);
-  assert.ok(Buffer.byteLength(JSON.stringify(text)) < previousDuplicateBytes);
 });

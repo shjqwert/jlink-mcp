@@ -10,7 +10,7 @@
  *     JLINK_DEVICE, JLINK_INSTALL_DIR, JLINK_INTERFACE, JLINK_SPEED,
  *     JLINK_SERIAL, JLINK_GDB_PORT, JLINK_RTT_PORT, JLINK_SWO_PORT
  *   MCP surface: JLINK_MCP_PROFILE=compact|advanced|legacy|acceptance (default: compact)
- *   MCP result: JLINK_MCP_RESULT_MODE=normal|full|text (default: compact receipt for task profiles; text for legacy)
+ *   MCP result: JLINK_MCP_RESULT_MODE=normal|full|text (default: normal; text/full are explicit compatibility modes)
  *   Local roots: JLINK_MCP_STORAGE_ROOT, JLINK_MCP_EVIDENCE_ROOT, JLINK_MCP_QUEUE_ROOT
  */
 

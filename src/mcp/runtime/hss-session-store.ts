@@ -31,6 +31,7 @@ export interface HssSessionRecord {
   endedAt?: string;
   runId?: string;
   packageDir: string;
+  captureFile?: string;
   sessionDir: string;
   control: HssCaptureControlFiles;
   helperPid: number;
@@ -49,6 +50,10 @@ export interface HssSessionRecord {
   qualityOracle?: PreparedQualityOracle;
   runtime: HssRuntimeFacts;
   capability: HssCapabilityFacts;
+  backend?: "hss" | "background_poll" | "stop_poll";
+  intrusive?: boolean;
+  pauseTotalUs?: number;
+  stateUnknown?: boolean;
   result?: Record<string, unknown>;
   lastError?: { code: string; message: string };
 }
@@ -178,6 +183,10 @@ function validateSession(value: HssSessionRecord, captureId: string): void {
     || !Number.isSafeInteger(value.helperPid) || value.helperPid < 0 || !provisional && value.helperPid < 1 || !value.ownerToken || !provisional && value.ownerToken === "pending"
     || !UUID.test(value.helperNonce) || !/^\d+$/.test(value.qpcEpochCounter) || !/^\d+$/.test(value.qpcFrequency) || BigInt(value.qpcFrequency) < 1n || !Array.isArray(value.descriptors)
     || value.writeDescriptors !== undefined && !Array.isArray(value.writeDescriptors)
+    || value.backend !== undefined && !["hss", "background_poll", "stop_poll"].includes(value.backend)
+    || value.intrusive !== undefined && typeof value.intrusive !== "boolean"
+    || value.pauseTotalUs !== undefined && (!Number.isSafeInteger(value.pauseTotalUs) || value.pauseTotalUs < 0)
+    || value.stateUnknown !== undefined && typeof value.stateUnknown !== "boolean"
     || value.qualityOracle !== undefined && (!value.qualityOracle.logicalIdentity || !Number.isSafeInteger(value.qualityOracle.expectedIncrement) || value.qualityOracle.expectedIncrement < 1
       || !Number.isSafeInteger(value.qualityOracle.tolerance) || value.qualityOracle.tolerance < 0 || !Number.isSafeInteger(value.qualityOracle.modulus) || value.qualityOracle.modulus < 2
       || value.qualityOracle.expectedIncrement + value.qualityOracle.tolerance >= value.qualityOracle.modulus)) {

@@ -2,10 +2,10 @@ import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
 export const PINNED_HSS_HELPER_RELEASE = {
-  version: "2.0.14",
+  version: "2.2.0",
   protocolVersion: 3,
   architecture: "x64",
-  sha256: "5da929dc97b302bda89bb9f09f46d1e862a92109396b062bf386336cb0c68f47",
+  sha256: "318c403372b5c0a263a749f4dd316b463338118d6fd6dbf766b1c96363f99b1e",
 } as const;
 
 export function matchesPinnedHssHelperManifest(value: Record<string, unknown>): boolean {

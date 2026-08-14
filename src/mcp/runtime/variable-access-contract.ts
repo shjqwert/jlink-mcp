@@ -43,6 +43,14 @@ export interface VariableResolver {
   resolveVariable(projectRoot: string, ref: VariableRefInput): Promise<ResolvedVariableContext>;
 }
 
+export interface CaptureExternalWriteToken {
+  captureId: string;
+  operationId: string;
+  startedAt: string;
+  operationStartTick: string;
+  logicalIdentity: string;
+}
+
 export interface CaptureVariableAccess {
   tryReadVariable(
     target: StoredTarget,
@@ -55,6 +63,18 @@ export interface CaptureVariableAccess {
     requested: Buffer,
     comparator: ScalarComparator,
   ): Promise<OperationEnvelope | undefined>;
+  beginExternalWrite?(
+    target: StoredTarget,
+    resolved: ResolvedSymbol,
+  ): CaptureExternalWriteToken | undefined;
+  completeExternalWrite?(
+    token: CaptureExternalWriteToken,
+    input: VariableWriteInput,
+    target: StoredTarget,
+    resolved: ResolvedSymbol,
+    requested: Buffer,
+    envelope: OperationEnvelope,
+  ): Promise<OperationEnvelope>;
 }
 
 export interface VariableAccess extends VariableResolver {

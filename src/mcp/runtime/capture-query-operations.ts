@@ -8,13 +8,22 @@ import {
   jcapCaptureSeries,
   jcapCaptureSummary,
   jcapV1ReadinessResponse,
+  jcapV2CaptureEventWindow,
+  jcapV2CaptureExportCsv,
+  jcapV2CaptureList,
+  jcapV2CaptureSeries,
+  jcapV2CaptureSummary,
   rebuildJcapV1IndexWithinLease,
+  resolveJcapV2CaptureFile,
+  verifyJcapV2,
   resolveJcapV1CaptureLocation,
   verifyJcapV1Index,
   validateJcapV1EventWindowQuery,
   validateJcapV1SeriesQuery,
   withJcapV1PackageLease,
   type JcapV1CaptureLocation,
+  type JcapV2Resolution,
+  type JcapV2Statistic,
 } from "../jcap/jcap-v1";
 import {
   createOperationEnvelope,
@@ -31,9 +40,14 @@ export interface CaptureListInput {
 export interface CaptureSeriesInput {
   captureId: string;
   variables: string[];
-  startTick: string;
-  endTick: string;
-  bucketCount: number;
+  timeRange?: { startMs?: number; endMs?: number };
+  resolution?: JcapV2Resolution;
+  statistics?: JcapV2Statistic[];
+  cursor?: string;
+  maxBytes?: number;
+  startTick?: string;
+  endTick?: string;
+  bucketCount?: number;
 }
 
 export interface CaptureEventWindowInput {
@@ -42,7 +56,11 @@ export interface CaptureEventWindowInput {
   variables: string[];
   beforeMs: number;
   afterMs: number;
-  bucketCount: number;
+  resolution?: JcapV2Resolution;
+  statistics?: JcapV2Statistic[];
+  cursor?: string;
+  maxBytes?: number;
+  bucketCount?: number;
 }
 
 export type CaptureMutationGuard = <T>(runId: string, operation: () => Promise<T>) => Promise<T>;
@@ -69,8 +87,15 @@ export class CaptureQueryOperations {
     const envelope = createOperationEnvelope("capture_list");
     envelope.requestedEffects = ["read_bounded_capture_index"];
     try {
-      envelope.data = await jcapCaptureList(this.rootDir, input);
-      envelope.verification = { status: "verified", method: "bounded_jcap_v1_list_snapshot" };
+      const v2Probe = await jcapV2CaptureList(this.rootDir, { limit: 1 });
+      const hasV2 = Array.isArray(v2Probe.captures) && v2Probe.captures.length > 0;
+      envelope.data = hasV2
+        ? await jcapV2CaptureList(this.rootDir, input)
+        : await jcapCaptureList(this.rootDir, input);
+      envelope.verification = {
+        status: "verified",
+        method: hasV2 ? "bounded_jcap_v2_list_snapshot" : "bounded_jcap_v1_list_snapshot",
+      };
       return finishEnvelope(envelope, true);
     } catch (error) {
       return captureFailure(envelope, error, "list");
@@ -78,41 +103,81 @@ export class CaptureQueryOperations {
   }
 
   summary(captureId: string): Promise<OperationEnvelope> {
+    const captureFile = resolveJcapV2CaptureFile(this.rootDir, captureId);
+    if (captureFile) {
+      return this.queryV2("capture_summary", captureId, captureFile, () => jcapV2CaptureSummary(captureFile));
+    }
     return this.query("capture_summary", captureId, async (location) => jcapCaptureSummary(location.packageDir));
   }
 
   series(input: CaptureSeriesInput): Promise<OperationEnvelope> {
+    const captureFile = resolveJcapV2CaptureFile(this.rootDir, input.captureId);
+    if (captureFile) {
+      return this.queryV2("capture_series", input.captureId, captureFile, () => jcapV2CaptureSeries({
+        captureFile,
+        ...input,
+      }));
+    }
     try {
-      validateJcapV1SeriesQuery(input);
+      const legacy = {
+        captureId: input.captureId,
+        variables: input.variables,
+        startTick: input.startTick!,
+        endTick: input.endTick!,
+        bucketCount: input.bucketCount!,
+      };
+      validateJcapV1SeriesQuery(legacy);
+      return this.query("capture_series", input.captureId, async (location) => jcapCaptureSeries({
+        packageDir: location.packageDir,
+        variables: legacy.variables,
+        startTick: legacy.startTick,
+        endTick: legacy.endTick,
+        bucketCount: legacy.bucketCount,
+      }));
     } catch (error) {
       return Promise.resolve(captureFailure(createQueryEnvelope("capture_series"), error, "validation"));
     }
-    return this.query("capture_series", input.captureId, async (location) => jcapCaptureSeries({
-      packageDir: location.packageDir,
-      variables: input.variables,
-      startTick: input.startTick,
-      endTick: input.endTick,
-      bucketCount: input.bucketCount,
-    }));
   }
 
   eventWindow(input: CaptureEventWindowInput): Promise<OperationEnvelope> {
+    const captureFile = resolveJcapV2CaptureFile(this.rootDir, input.captureId);
+    if (captureFile) {
+      return this.queryV2("capture_event_window", input.captureId, captureFile, () => jcapV2CaptureEventWindow({
+        captureFile,
+        ...input,
+      }));
+    }
     try {
-      validateJcapV1EventWindowQuery(input);
+      const legacy = {
+        captureId: input.captureId,
+        eventId: input.eventId,
+        variables: input.variables,
+        beforeMs: input.beforeMs,
+        afterMs: input.afterMs,
+        bucketCount: input.bucketCount!,
+      };
+      validateJcapV1EventWindowQuery(legacy);
+      return this.query("capture_event_window", input.captureId, async (location) => jcapCaptureEventWindow({
+        packageDir: location.packageDir,
+        eventId: legacy.eventId,
+        variables: legacy.variables,
+        beforeMs: legacy.beforeMs,
+        afterMs: legacy.afterMs,
+        bucketCount: legacy.bucketCount,
+      }));
     } catch (error) {
       return Promise.resolve(captureFailure(createQueryEnvelope("capture_event_window"), error, "validation"));
     }
-    return this.query("capture_event_window", input.captureId, async (location) => jcapCaptureEventWindow({
-      packageDir: location.packageDir,
-      eventId: input.eventId,
-      variables: input.variables,
-      beforeMs: input.beforeMs,
-      afterMs: input.afterMs,
-      bucketCount: input.bucketCount,
-    }));
   }
 
   exportCsv(captureId: string): Promise<OperationEnvelope> {
+    const captureFile = resolveJcapV2CaptureFile(this.rootDir, captureId);
+    if (captureFile) {
+      return this.queryV2("capture_export_csv", captureId, captureFile, () => jcapV2CaptureExportCsv(
+        captureFile,
+        path.join(this.rootDir, "exports"),
+      ));
+    }
     return this.query("capture_export_csv", captureId, async (location, status) => ({
       ...status,
       ...await jcapCaptureExportCsv(
@@ -120,6 +185,37 @@ export class CaptureQueryOperations {
         path.join(path.dirname(path.dirname(location.packageDir)), "exports"),
       ),
     }));
+  }
+
+  private async queryV2(
+    tool: CaptureQueryTool,
+    captureId: string,
+    captureFile: string,
+    operation: () => Promise<Record<string, unknown>>,
+  ): Promise<OperationEnvelope> {
+    const envelope = createQueryEnvelope(tool);
+    try {
+      const verified = await verifyJcapV2(captureFile);
+      if (verified.captureId !== captureId) {
+        throw new Error("captureId does not match JCAP v2 manifest");
+      }
+      const data = await operation();
+      envelope.data = data;
+      if (tool === "capture_export_csv" && typeof data.exportFile === "string") {
+        envelope.outputFiles.push(data.exportFile);
+        envelope.observedEffects.push("external_csv_created");
+      }
+      envelope.verification = {
+        status: "verified",
+        method: tool === "capture_export_csv"
+          ? "bounded_external_csv_export_after_jcap_v2_integrity"
+          : "bounded_jcap_v2_query_after_integrity",
+      };
+      return finishEnvelope(envelope, true);
+    } catch (error) {
+      recordExportFailureEffects(envelope, error);
+      return captureFailure(envelope, error, "query");
+    }
   }
 
   private async query(

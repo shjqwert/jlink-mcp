@@ -94,7 +94,7 @@ function jlinkRegisterReadbackAfterWriteEcho(raw: string, token: string): string
 }
 
 export function selectJLinkNonIntrusiveAttachDevice(config: Pick<JLinkConfig, "device" | "gdbDevice">): string {
-  return config.gdbDevice === "Cortex-M4" ? config.gdbDevice : config.device;
+  return config.device;
 }
 
 export class JLinkBackend extends ProbeBackend {

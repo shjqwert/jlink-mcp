@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import type { ProbeBackend } from "../../probe/backend";
 import type { ResolvedSymbol } from "../artifact/symbol-catalog";
 import { HSS_STATUS_FLAGS } from "../hss/hss-status-flags";
-import { appendJcapV1Sample, readJcapV1Raw } from "../jcap/jcap-v1";
+import { appendJcapV1Sample, jcapV2CaptureSnapshot, readJcapV1Raw } from "../jcap/jcap-v1";
 import { ArtifactVariableService, type TypedSymbolResolver } from "./artifact-operations";
 import { DirectMcuService } from "./direct-operations";
 import {
@@ -240,17 +240,16 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.equal((stopped.capture as { readStatistics: { emptyReads: number } }).readStatistics.emptyReads, 44);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
     assert.equal(stopped.requestedEffects.includes("rebuild_capture_index"), false);
-    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.json", "raw"]);
-    assert.deepEqual(readdirSync(join(packageDir, "raw")).sort(), ["events.bin", "samples.bin"]);
+    const captureFile = String((stopped.capture as { captureFile: string }).captureFile);
+    assert.equal(captureFile, join(fixture.root, "output", "acceptance-run", "captures", `${captureId}.jcap`));
+    assert.deepEqual(readdirSync(join(fixture.root, "output", "acceptance-run", "captures")), [`${captureId}.jcap`]);
 
-    const raw = readJcapV1Raw(packageDir);
-    assert.equal(raw.metadata.state, "stopped");
-    assert.equal(raw.metadata.indexStatus, "rebuild_required");
-    assert.equal(raw.metadata.raw.samples.sha256?.length, 64);
-    assert.equal(raw.metadata.raw.events.sha256?.length, 64);
-    const rawBeforeQuery = rawHashes(packageDir);
-    const writeEvents = raw.events.filter((event) => event.type === "variable_write");
-    const controlEvents = raw.events.filter((event) => event.type === "target_control");
+    const snapshot = await jcapV2CaptureSnapshot(captureFile);
+    assert.equal(snapshot.metadata.state, "stopped");
+    assert.equal(snapshot.integrity.source_samples_sha256.length, 64);
+    assert.equal(snapshot.integrity.source_events_sha256.length, 64);
+    const writeEvents = snapshot.events.filter((event) => event.type === "variable_write");
+    const controlEvents = snapshot.events.filter((event) => event.type === "target_control");
     assert.equal(writeEvents.length, 3);
     assert.equal(controlEvents.length, 1);
     assert.equal(controlEvents[0].requestedAction, "continue");
@@ -271,29 +270,27 @@ test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and p
     assert.deepEqual(writeEvent.sampleAlignment, { method: "terminal_raw_nearest", status: "derive_on_rebuild" });
     assert.equal(Object.hasOwn(writeEvent, "neighbors"), false);
 
-    assert.equal(readdirSync(packageDir).includes("capture.db"), false);
     const summary = await fixture.captures.summary(captureId);
     assert.equal(summary.ok, true, JSON.stringify(summary.error));
-    assert.equal((summary.data as { indexRebuilt?: boolean }).indexRebuilt, true);
-    assert.deepEqual(summary.observedEffects, ["capture_db_atomically_published", "capture_metadata_atomically_published"]);
-    assert.equal(readdirSync(packageDir).includes("capture.db"), true);
-    assert.deepEqual(rawHashes(packageDir), rawBeforeQuery);
+    assert.equal((summary.data as { state: string }).state, "stopped");
+    assert.equal((summary.data as { backend: string }).backend, "hss");
+    assert.deepEqual(summary.observedEffects, []);
     const series = await fixture.captures.series({ captureId, variables: ["var0"], startTick: "0", endTick: "100000000", bucketCount: 4 });
     assert.equal(series.ok, true);
     const window = await fixture.captures.eventWindow({ captureId, eventId: writeEvent.eventId, variables: ["var0"], beforeMs: 20, afterMs: 20, bucketCount: 4 });
     assert.equal(window.ok, true);
     const indexedWrite = (window.data as { event: Record<string, unknown> }).event;
-    assert.deepEqual(indexedWrite.sampleAlignment, { method: "terminal_raw_nearest", status: "resolved" });
-    assert.ok(indexedWrite.neighbors && (indexedWrite.neighbors as { before: unknown }).before);
-    assert.ok(indexedWrite.neighbors && (indexedWrite.neighbors as { after: unknown }).after);
+    assert.equal(indexedWrite.eventId, writeEvent.eventId);
+    assert.equal(indexedWrite.type, "variable_write");
+    assert.equal(typeof indexedWrite.tMs, "number");
     const eventOnlyWindow = await fixture.captures.eventWindow({ captureId, eventId: writeEvent.eventId, variables: [], beforeMs: 20, afterMs: 20, bucketCount: 4 });
     assert.equal(eventOnlyWindow.ok, true);
-    assert.deepEqual((eventOnlyWindow.data as { series: { series: unknown[] } }).series.series, []);
+    assert.deepEqual((eventOnlyWindow.data as { variables: unknown[] }).variables, []);
     const exported = await fixture.captures.exportCsv(captureId);
     assert.equal(exported.ok, true);
     assert.deepEqual(exported.requestedEffects, ["read_bounded_capture_rows", "repair_capture_index_if_required", "create_external_csv"]);
     assert.equal(exported.observedEffects.includes("external_csv_created"), true);
-    assert.equal(String((exported.data as { exportFile: string }).exportFile).startsWith(join(fixture.root, "output", "acceptance-run", "exports")), true);
+    assert.equal(String((exported.data as { exportFile: string }).exportFile).startsWith(join(fixture.root, "output", "exports")), true);
     const notInterrupted = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(notInterrupted.error?.code, "CAPTURE_NOT_INTERRUPTED");
   } finally {
@@ -311,16 +308,16 @@ test("HSS stop is idempotent after the Helper completes naturally", async () => 
     fixture.adapter.completeLatest();
     const settled = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
     assert.equal((settled.capture as { state: string }).state, "completed", JSON.stringify(settled));
-    const packageDir = String((settled.capture as { packageDir: string }).packageDir);
-    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.json", "raw"]);
-    assert.equal(readJcapV1Raw(packageDir).metadata.indexStatus, "rebuild_required");
+    const captureFile = String((settled.capture as { captureFile: string }).captureFile);
+    assert.equal(existsSync(captureFile), true);
+    assert.equal((await jcapV2CaptureSnapshot(captureFile)).metadata.state, "completed");
 
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
     assert.equal((stopped.capture as { state: string }).state, "completed");
     assert.equal((stopped.data as { alreadyTerminal: boolean }).alreadyTerminal, true);
     assert.equal(stopped.verification?.method, "successful_terminal_jcap_state_idempotent_stop");
-    assert.deepEqual(readdirSync(packageDir).sort(), ["capture.json", "raw"]);
+    assert.equal(existsSync(captureFile), true);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
   } finally {
     fixture.adapter.crashLatest();
@@ -461,6 +458,10 @@ test("HSS startup failure restores halted state after the helper exits", async (
     assert.equal(fixture.adapter.targetState, "halted");
     assert.equal(fixture.adapter.restoreCount, 1);
     assert.equal(fixture.adapter.launchCount, 1);
+    const captureEntries = readdirSync(join(fixture.root, "output", "captures"));
+    assert.equal(captureEntries.length, 1);
+    assert.match(captureEntries[0]!, /^[0-9a-f-]+\.jcap$/);
+    assert.equal(captureEntries.some((entry) => entry.startsWith(".staging-")), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -650,8 +651,9 @@ test("HSS writeVariables permit immutable capture-owner writes without consuming
 
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(stopped.ok, true, JSON.stringify(stopped));
-    const raw = readJcapV1Raw(packageDir);
-    assert.equal(raw.events.filter((event) => event.type === "variable_write").length, 1);
+    const captureFile = String((stopped.capture as { captureFile: string }).captureFile);
+    const snapshot = await jcapV2CaptureSnapshot(captureFile);
+    assert.equal(snapshot.events.filter((event) => event.type === "variable_write").length, 1);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -679,7 +681,7 @@ test("HSS quality reports no-source captures as partial and indexes target-count
     const noSourceId = String((withoutOracle.data as { captureId: string }).captureId);
     const noSourceStop = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId: noSourceId });
     assert.equal(noSourceStop.ok, true, JSON.stringify(noSourceStop));
-    const noSourceMetadata = readJcapV1Raw(String((withoutOracle.data as { packageDir: string }).packageDir)).metadata;
+    const noSourceMetadata = (await jcapV2CaptureSnapshot(String((noSourceStop.capture as { captureFile: string }).captureFile))).metadata;
     assert.equal(noSourceMetadata.qualityStatus, "partial");
     assert.equal(noSourceMetadata.qualitySource, "jlink");
     assert.deepEqual(noSourceMetadata.quality, { missingSamples: 44, droppedSamples: 0, overflows: 0, readErrors: 0, timeouts: 0 });
@@ -695,21 +697,18 @@ test("HSS quality reports no-source captures as partial and indexes target-count
     const packageDir = String((withOracle.data as { packageDir: string }).packageDir);
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
-    const raw = readJcapV1Raw(packageDir);
-    assert.equal(raw.metadata.qualityStatus, "reported");
-    assert.equal(raw.metadata.qualitySource, "target_counter");
-    assert.equal(raw.metadata.quality.missingSamples, 2);
-    assert.equal(raw.metadata.quality.droppedSamples, null);
-    assert.equal(raw.metadata.quality.overflows, null);
-    const quality = raw.events.find((event) => event.type === "quality")!;
+    const snapshot = await jcapV2CaptureSnapshot(String((stopped.capture as { captureFile: string }).captureFile));
+    assert.equal(snapshot.metadata.qualityStatus, "reported");
+    assert.equal(snapshot.metadata.qualitySource, "target_counter");
+    assert.equal(snapshot.metadata.quality.missingSamples, 2);
+    assert.equal(snapshot.metadata.quality.droppedSamples, null);
+    assert.equal(snapshot.metadata.quality.overflows, null);
+    const quality = snapshot.events.find((event) => event.type === "quality")!;
     assert.deepEqual(quality.inferredDroppedBeforeSampleIndexes, [5]);
     assert.deepEqual((quality.qualityEvidence as { configuration: Record<string, unknown> }).configuration, {
       logicalIdentity: "var0", expectedIncrement: 1, tolerance: 0, modulus: 4_294_967_296,
     });
-    const series = await fixture.captures.series({ captureId, variables: ["var0"], startTick: "0", endTick: "120000000", bucketCount: 12 });
-    assert.equal(series.ok, true, JSON.stringify(series.error));
-    assert.equal((series.data as { series: Array<{ statusFlags: number }> }).series
-      .some((bucket) => (bucket.statusFlags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0), true);
+    assert.equal(snapshot.samples.some((sample) => (sample.statusFlags & HSS_STATUS_FLAGS.dropped_before_this_sample) !== 0), true);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -731,8 +730,8 @@ test("HSS quality strips sensitive Helper provenance before publishing the quali
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(stopped.ok, true, JSON.stringify(stopped.error));
 
-    const raw = readJcapV1Raw(packageDir);
-    const quality = raw.events.find((event) => event.type === "quality")!;
+    const snapshot = await jcapV2CaptureSnapshot(String((stopped.capture as { captureFile: string }).captureFile));
+    const quality = snapshot.events.find((event) => event.type === "quality")!;
     const provenance = quality.qualityEvidence as Record<string, unknown>;
     assert.equal(provenance.dll, undefined);
     assert.equal(provenance.jlinkScriptFile, undefined);
@@ -754,7 +753,7 @@ test("HSS quality oracle rejects counter modulo and reset ambiguity without losi
     const normalId = String((normal.data as { captureId: string }).captureId);
     const normalStop = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId: normalId });
     assert.equal(normalStop.ok, true, JSON.stringify(normalStop.error));
-    const normalMetadata = readJcapV1Raw(String((normal.data as { packageDir: string }).packageDir)).metadata;
+    const normalMetadata = (await jcapV2CaptureSnapshot(String((normalStop.capture as { captureFile: string }).captureFile))).metadata;
     assert.equal(normalMetadata.qualityStatus, "reported", "sample timing rules out a 256-frame alias for adjacent 100 Hz samples");
 
     fixture.adapter.initialSampleTickStep = 257_000_000n;
@@ -766,9 +765,9 @@ test("HSS quality oracle rejects counter modulo and reset ambiguity without losi
     const aliasId = String((alias.data as { captureId: string }).captureId);
     const aliasStop = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId: aliasId });
     assert.equal(aliasStop.ok, true, JSON.stringify(aliasStop.error));
-    const aliasRaw = readJcapV1Raw(String((alias.data as { packageDir: string }).packageDir));
-    assert.equal(aliasRaw.metadata.qualityStatus, "partial");
-    const aliasQuality = aliasRaw.events.find((event) => event.type === "quality")!;
+    const aliasSnapshot = await jcapV2CaptureSnapshot(String((aliasStop.capture as { captureFile: string }).captureFile));
+    assert.equal(aliasSnapshot.metadata.qualityStatus, "partial");
+    const aliasQuality = aliasSnapshot.events.find((event) => event.type === "quality")!;
     assert.equal((aliasQuality.qualityEvidence as { diagnostics: string[] }).diagnostics.includes("counter_modulo_alias_ambiguous"), true);
 
     fixture.adapter.initialSampleTickStep = 10_000_000n;
@@ -783,11 +782,11 @@ test("HSS quality oracle rejects counter modulo and reset ambiguity without losi
     const wrappedId = String((wrapped.data as { captureId: string }).captureId);
     const wrappedStop = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId: wrappedId });
     assert.equal(wrappedStop.ok, true, JSON.stringify(wrappedStop.error));
-    const wrappedRaw = readJcapV1Raw(String((wrapped.data as { packageDir: string }).packageDir));
-    assert.equal(wrappedRaw.metadata.qualityStatus, "partial");
-    assert.equal(wrappedRaw.metadata.qualitySource, "target_counter");
-    assert.deepEqual(wrappedRaw.metadata.quality, { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null });
-    const quality = wrappedRaw.events.find((event) => event.type === "quality")!;
+    const wrappedSnapshot = await jcapV2CaptureSnapshot(String((wrappedStop.capture as { captureFile: string }).captureFile));
+    assert.equal(wrappedSnapshot.metadata.qualityStatus, "partial");
+    assert.equal(wrappedSnapshot.metadata.qualitySource, "target_counter");
+    assert.deepEqual(wrappedSnapshot.metadata.quality, { missingSamples: null, droppedSamples: null, overflows: null, readErrors: null, timeouts: null });
+    const quality = wrappedSnapshot.events.find((event) => event.type === "quality")!;
     assert.equal((quality.qualityEvidence as { diagnostics: string[] }).diagnostics.includes("counter_wrap_or_reset_ambiguous"), true);
 
     fixture.adapter.counterStart = 0;
@@ -801,9 +800,9 @@ test("HSS quality oracle rejects counter modulo and reset ambiguity without losi
     const toleranceId = String((tolerance.data as { captureId: string }).captureId);
     const toleranceStop = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId: toleranceId });
     assert.equal(toleranceStop.ok, true, JSON.stringify(toleranceStop.error));
-    const toleranceRaw = readJcapV1Raw(String((tolerance.data as { packageDir: string }).packageDir));
-    assert.equal(toleranceRaw.metadata.qualityStatus, "partial");
-    const toleranceQuality = toleranceRaw.events.find((event) => event.type === "quality")!;
+    const toleranceSnapshot = await jcapV2CaptureSnapshot(String((toleranceStop.capture as { captureFile: string }).captureFile));
+    assert.equal(toleranceSnapshot.metadata.qualityStatus, "partial");
+    const toleranceQuality = toleranceSnapshot.events.find((event) => event.type === "quality")!;
     assert.equal((toleranceQuality.qualityEvidence as { diagnostics: string[] }).diagnostics.includes("counter_delta_ambiguous"), true);
 
     fixture.adapter.initialSampleTickStep = 260_000_000n;
@@ -817,9 +816,9 @@ test("HSS quality oracle rejects counter modulo and reset ambiguity without losi
     const wrappedToleranceId = String((wrappedTolerance.data as { captureId: string }).captureId);
     const wrappedToleranceStop = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId: wrappedToleranceId });
     assert.equal(wrappedToleranceStop.ok, true, JSON.stringify(wrappedToleranceStop.error));
-    const wrappedToleranceRaw = readJcapV1Raw(String((wrappedTolerance.data as { packageDir: string }).packageDir));
-    assert.equal(wrappedToleranceRaw.metadata.qualityStatus, "partial");
-    const wrappedToleranceQuality = wrappedToleranceRaw.events.find((event) => event.type === "quality")!;
+    const wrappedToleranceSnapshot = await jcapV2CaptureSnapshot(String((wrappedToleranceStop.capture as { captureFile: string }).captureFile));
+    assert.equal(wrappedToleranceSnapshot.metadata.qualityStatus, "partial");
+    const wrappedToleranceQuality = wrappedToleranceSnapshot.events.find((event) => event.type === "quality")!;
     assert.equal((wrappedToleranceQuality.qualityEvidence as { diagnostics: string[] }).diagnostics.includes("counter_modulo_alias_ambiguous"), true);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -832,23 +831,20 @@ test("dead fake helper becomes interrupted and recovers the trustworthy Raw pref
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
     assert.equal(started.ok, true);
     const captureId = String((started.data as { captureId: string }).captureId);
-    const packageDir = String((started.data as { packageDir: string }).packageDir);
     fixture.adapter.crashLatest();
     const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
     assert.equal((stopped.capture as { state: string }).state, "interrupted");
-    const before = rawHashes(packageDir);
+    const captureFile = String((stopped.capture as { captureFile: string }).captureFile);
+    const before = await jcapV2CaptureSnapshot(captureFile);
     const recovered = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
     assert.equal(recovered.ok, true, JSON.stringify(recovered.error));
-    assert.deepEqual(rawHashes(packageDir), before);
-    assert.equal(((recovered.data as { index: { indexStatus: string } }).index).indexStatus, "rebuild_required");
-    assert.equal(readdirSync(packageDir).includes("capture.db"), false);
-    assert.equal(recovered.observedEffects.includes("capture_index_rebuilt"), false);
-    assert.equal(recovered.verification.method, "terminal_raw_integrity_with_deferred_index");
+    assert.equal(recovered.verification.method, "terminal_jcap_v2_integrity");
+    const after = await jcapV2CaptureSnapshot(captureFile);
+    assert.deepEqual(after.integrity, before.integrity);
+    assert.equal(after.metadata.sampleCount, before.metadata.sampleCount);
     const summary = await fixture.captures.summary(captureId);
     assert.equal(summary.ok, true, JSON.stringify(summary.error));
-    assert.equal((summary.data as { indexRebuilt?: boolean }).indexRebuilt, true);
-    assert.equal(readdirSync(packageDir).includes("capture.db"), true);
-    assert.deepEqual(rawHashes(packageDir), before);
+    assert.equal((summary.data as { state: string }).state, "interrupted");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -974,8 +970,9 @@ test("a reconciled late IPC response never claims that the current restore was i
     assert.equal(fixture.adapter.writeCount, 1);
     assert.equal(fixture.adapter.valueAt(0x20000000), 12);
 
-    await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
-    const event = readJcapV1Raw(packageDir).events.find((candidate) => candidate.type === "variable_write")!;
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    const snapshot = await jcapV2CaptureSnapshot(String((stopped.capture as { captureFile: string }).captureFile));
+    const event = snapshot.events.find((candidate) => candidate.type === "variable_write")!;
     assert.equal(event.writeIssued, true);
     assert.deepEqual(event.restore, { state: "failed", attempted: true, writeIssued: false, stateUnknown: true, readback: null, readbackHex: null });
   } finally {
@@ -996,8 +993,9 @@ test("a reconciled late IPC response never attributes an unissued current write"
     assert.equal(fixture.adapter.writeCount, 0);
     assert.equal(fixture.adapter.valueAt(0x20000000), 7);
 
-    await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
-    const event = readJcapV1Raw(packageDir).events.find((candidate) => candidate.type === "variable_write")!;
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    const snapshot = await jcapV2CaptureSnapshot(String((stopped.capture as { captureFile: string }).captureFile));
+    const event = snapshot.events.find((candidate) => candidate.type === "variable_write")!;
     assert.equal(event.writeIssued, false);
     assert.equal(event.stateUnknown, true);
     assert.equal((event.requested as { value: number }).value, 13);
@@ -1014,7 +1012,7 @@ test("a live reused PID with the wrong capture identity is never adopted as Prob
     const captureId = String((started.data as { captureId: string }).captureId);
     const owner = fixture.queue.getOwner(fixture.target.probeSerial)!;
     assert.equal(fixture.queue.releaseOwner(fixture.target.probeSerial, owner.token), true);
-    const sessionDir = join(fixture.root, "session-work", readdirSync(join(fixture.root, "session-work"))[0]);
+    const sessionDir = dirname(String((started.data as { packageDir: string }).packageDir));
     const readyFile = join(sessionDir, "helper.ready.json");
     const ready = JSON.parse(readFileSync(readyFile, "utf8")) as Record<string, unknown>;
     writeFileSync(readyFile, JSON.stringify({ ...ready, helperNonce: "53000000-0000-4000-8000-000000000001" }));
@@ -1051,7 +1049,493 @@ test("failed startup cleanup never terminates a live PID whose capture identity 
   }
 });
 
-async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMemorySessions = false, speed = 4_000): Promise<Fixture> {
+test("HSS capability fallback captures through background polling and publishes one JCAP v2 file", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    assert.equal((started.capture as { backend?: string }).backend, "background_poll");
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true);
+    assert.equal((status.capture as { state?: string }).state, "completed");
+    assert.equal((status.capture as { backend?: string }).backend, "background_poll");
+    assert.equal((status.capture as { intrusive?: boolean }).intrusive, false);
+    const summary = await fixture.captures.summary(captureId);
+    assert.equal(summary.ok, true);
+    assert.equal((summary.data as { backend?: string }).backend, "background_poll");
+    assert.ok(Number((summary.data as { sampleCount?: number }).sampleCount) > 0);
+    const entries = readdirSync(join(fixture.root, "output", "captures"));
+    assert.deepEqual(entries, [`${captureId}.jcap`]);
+    assert.equal(polling.stats.haltCalls, 0);
+    assert.equal(polling.stats.resumeCalls, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("all non-invasive HSS availability failures select polling without a device allowlist", async () => {
+  const runtimeCodes = [
+    "HSS_HELPER_MISSING",
+    "HSS_HELPER_IDENTITY_MISMATCH",
+    "HSS_HELPER_ABI_INCOMPATIBLE",
+    "HSS_PLATFORM_UNSUPPORTED",
+  ];
+  for (const code of runtimeCodes) {
+    const fixture = await createFixture("uint32", true);
+    try {
+      fixture.adapter.runtimeFailure = { code, reason: `${code} fixture` };
+      fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+      const planned = await fixture.hss.start({
+        projectRoot: fixture.projectRoot,
+        variables: [{ ref: "var0" }],
+        rateHz: 10,
+        durationSec: 1,
+        dryRun: true,
+      });
+      assert.equal(planned.ok, true, code);
+      const data = planned.data as { backend?: string; backendOrder?: string[]; fallbackCode?: string };
+      assert.equal(data.backend, "automatic", code);
+      assert.deepEqual(data.backendOrder, ["hss", "background_poll", "stop_poll"], code);
+      assert.equal(data.fallbackCode, code);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.capabilityFailure = {
+      code: "JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE",
+      reason: "background access is unavailable",
+      observed: {},
+    };
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    const planned = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+      dryRun: true,
+    });
+    assert.equal(planned.ok, true);
+    const data = planned.data as { backend?: string; backendOrder?: string[]; fallbackCode?: string };
+    assert.equal(data.backend, "automatic");
+    assert.deepEqual(data.backendOrder, ["hss", "background_poll", "stop_poll"]);
+    assert.equal(data.fallbackCode, "JLINK_NON_INTRUSIVE_ATTACH_UNAVAILABLE");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling target control preserves issued side effects and unknown state", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false, true);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 2,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    polling.stats.state = "halted";
+    const controlled = await fixture.hss.controlTarget({
+      projectRoot: fixture.projectRoot,
+      captureId,
+      action: "resume",
+    });
+    assert.equal(controlled.ok, false);
+    assert.equal(controlled.error?.code, "POLLING_TARGET_RESUME_FAILED");
+    assert.equal(controlled.error?.writeIssued, true);
+    assert.equal(controlled.error?.stateUnknown, true);
+    await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling target-control persistence failure reports a prior resume", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 2,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    polling.stats.state = "halted";
+    const internals = fixture.hss as unknown as {
+      pollingRunner: { jobs: Map<string, { writer: { syncEvents(): void } }> };
+    };
+    const writer = internals.pollingRunner.jobs.get(captureId)!.writer;
+    const syncEvents = writer.syncEvents.bind(writer);
+    writer.syncEvents = () => { throw new Error("fixture sync failure"); };
+    const controlled = await fixture.hss.controlTarget({
+      projectRoot: fixture.projectRoot,
+      captureId,
+      action: "resume",
+    });
+    writer.syncEvents = syncEvents;
+    assert.equal(controlled.ok, false);
+    assert.equal(controlled.error?.code, "CAPTURE_EVENT_PERSIST_FAILED");
+    assert.equal(controlled.error?.writeIssued, true);
+    assert.equal(controlled.error?.stateUnknown, false);
+    const stopped = await fixture.hss.stop({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(stopped.ok, true);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling finalization waits for an in-flight target-control event", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    const resume = polling.probe.resume.bind(polling.probe);
+    polling.probe.resume = async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_200));
+      return resume();
+    };
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    polling.stats.state = "halted";
+    const controlled = await fixture.hss.controlTarget({
+      projectRoot: fixture.projectRoot,
+      captureId,
+      action: "continue",
+    });
+    assert.equal(controlled.ok, true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true);
+    assert.equal((status.capture as { state?: string }).state, "completed");
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    const controlEvent = snapshot.events.find((event) => event.type === "target_control") as Record<string, unknown> | undefined;
+    assert.ok(controlEvent);
+    assert.equal(controlEvent.outcome, "completed");
+    assert.equal(controlEvent.controlIssued, true);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("background polling falls back to stop polling and confirms every resume", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(true);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true);
+    const capture = status.capture as { state?: string; backend?: string; intrusive?: boolean; pauseTotalUs?: number; anomalies?: string[] };
+    assert.equal(capture.state, "completed");
+    assert.equal(capture.backend, "stop_poll");
+    assert.equal(capture.intrusive, true);
+    assert.ok(Number(capture.pauseTotalUs) > 0);
+    assert.ok(polling.stats.haltCalls > 0);
+    assert.equal(polling.stats.resumeCalls, polling.stats.haltCalls);
+    assert.equal(polling.stats.state, "running");
+    const summary = await fixture.captures.summary(captureId);
+    assert.equal(summary.ok, true);
+    assert.equal((summary.data as { backend?: string }).backend, "stop_poll");
+    assert.equal((summary.data as { intrusive?: boolean }).intrusive, true);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("stop polling aborts immediately when target resume cannot be confirmed", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(true, true);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "STOP_POLL_RESUME_UNCONFIRMED");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { stateUnknown?: boolean }).stateUnknown, true);
+    const recovered = await fixture.hss.recover({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(recovered.ok, false);
+    assert.equal(recovered.error?.stateUnknown, true);
+    assert.equal(recovered.error?.code, "STOP_POLL_RESUME_UNCONFIRMED");
+    assert.equal(polling.stats.state, "halted");
+    assert.equal(polling.stats.resumeCalls, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+
+test("polling fallback dry-run reports automatic backend order without creating capture data", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    const result = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+      dryRun: true,
+    });
+    assert.equal(result.ok, true);
+    const data = result.data as { dryRun?: boolean; backend?: string; backendOrder?: string[]; fallbackCode?: string };
+    assert.equal(data.dryRun, true);
+    assert.equal(data.backend, "automatic");
+    assert.deepEqual(data.backendOrder, ["hss", "background_poll", "stop_poll"]);
+    assert.ok(data.fallbackCode);
+    assert.equal(result.capture, null);
+    assert.deepEqual(readdirSync(join(fixture.root, "output")), []);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling capture journals restored writes and target control into the final JCAP v2 file", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+
+    const independent = await fixture.variables.writeVariable({
+      projectRoot: fixture.projectRoot,
+      ref: "var0",
+      value: 0x1234,
+      captureOld: true,
+      verify: true,
+      verificationConnection: "independent_session",
+    });
+    assert.equal(independent.ok, false);
+    assert.equal(independent.error?.code, "VERIFICATION_CONNECTION_INVALID");
+    assert.equal(independent.error?.writeIssued, false);
+    assert.equal(polling.stats.writeCalls, 0);
+
+    const written = await fixture.variables.writeVariable({
+      projectRoot: fixture.projectRoot,
+      ref: "var0",
+      value: 0x1234,
+      captureOld: true,
+      verify: true,
+      restore: true,
+    });
+    assert.equal(written.ok, true);
+    assert.equal(written.verification.status, "verified");
+    assert.equal(polling.stats.writeCalls, 2);
+
+    const controlled = await fixture.hss.controlTarget({
+      projectRoot: fixture.projectRoot,
+      captureId,
+      action: "continue",
+    });
+    assert.equal(controlled.ok, true);
+    assert.equal((controlled.data as { noOp?: boolean }).noOp, true);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true);
+    assert.equal((status.capture as { state?: string }).state, "completed");
+
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    const writeEvent = snapshot.events.find((event) => event.type === "variable_write") as Record<string, unknown> | undefined;
+    assert.ok(writeEvent);
+    assert.equal(writeEvent.outcome, "completed");
+    assert.equal(writeEvent.writeIssued, true);
+    assert.deepEqual(writeEvent.verification, { state: "verified" });
+    assert.equal((writeEvent.restore as { state?: string }).state, "restored");
+    assert.equal((writeEvent.restore as { writeIssued?: boolean }).writeIssued, true);
+    assert.equal((writeEvent.requested as { value?: number }).value, 0x1234);
+    const controlEvent = snapshot.events.find((event) => event.type === "target_control") as Record<string, unknown> | undefined;
+    assert.ok(controlEvent);
+    assert.equal(controlEvent.requestedAction, "continue");
+    assert.equal(controlEvent.outcome, "completed");
+    assert.equal(controlEvent.beforeState, "running");
+    assert.equal(controlEvent.afterState, "running");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+
+test("acceptance-only backend switch forces stop polling and is rejected in ordinary profiles", async () => {
+  const previousBackend = process.env.JLINK_MCP_TEST_CAPTURE_BACKEND;
+  const ordinary = await createFixture("uint32", true);
+  const acceptance = await createFixture("uint32", true, 4_000, true);
+  try {
+    process.env.JLINK_MCP_TEST_CAPTURE_BACKEND = "stop_poll";
+    const rejected = await ordinary.hss.start({
+      projectRoot: ordinary.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+      dryRun: true,
+    });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.error?.code, "TEST_BACKEND_OVERRIDE_FORBIDDEN");
+
+    acceptance.adapter.maxFreq = 1_000;
+    const polling = pollingProbe(false);
+    acceptance.memoryLauncher!.probe = polling.probe;
+    const planned = await acceptance.hss.start({
+      projectRoot: acceptance.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+      dryRun: true,
+    });
+    assert.equal(planned.ok, true);
+    assert.equal((planned.data as { backend?: string }).backend, "stop_poll");
+
+    const started = await acceptance.hss.start({
+      projectRoot: acceptance.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    assert.equal((started.capture as { backend?: string }).backend, "stop_poll");
+    assert.equal((started.capture as { intrusive?: boolean }).intrusive, true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+    const status = await acceptance.hss.status({ projectRoot: acceptance.projectRoot, captureId });
+    assert.equal(status.ok, true);
+    assert.equal((status.capture as { backend?: string }).backend, "stop_poll");
+    assert.ok(polling.stats.haltCalls > 0);
+    assert.equal(polling.stats.resumeCalls, polling.stats.haltCalls);
+  } finally {
+    if (previousBackend === undefined) delete process.env.JLINK_MCP_TEST_CAPTURE_BACKEND;
+    else process.env.JLINK_MCP_TEST_CAPTURE_BACKEND = previousBackend;
+    rmSync(ordinary.root, { recursive: true, force: true });
+    rmSync(acceptance.root, { recursive: true, force: true });
+  }
+});
+
+function pollingProbe(failRunningReads: boolean, failResume = false): {
+  probe: ProbeBackend;
+  stats: { state: "running" | "halted"; haltCalls: number; resumeCalls: number; writeCalls: number };
+} {
+  const stats = { state: "running" as "running" | "halted", haltCalls: 0, resumeCalls: 0, writeCalls: 0 };
+  const memory = new Map<number, Buffer>();
+  const bytesAt = (address: number, length: number): Buffer => {
+    const existing = memory.get(address);
+    if (existing) return Buffer.from(existing.subarray(0, length));
+    const bytes = Buffer.alloc(length);
+    if (length >= 4) bytes.writeUInt32LE((address >>> 2) & 0xffff, 0);
+    memory.set(address, Buffer.from(bytes));
+    return bytes;
+  };
+  const probe = {
+    async observeTargetState() {
+      return {
+        state: stats.state,
+        source: "dhcsr" as const,
+        result: { success: true, rawOutput: "", output: stats.state },
+      };
+    },
+    async readMemory(address: number, length: number) {
+      if (failRunningReads && stats.state === "running") {
+        return {
+          success: false,
+          rawOutput: "",
+          output: "",
+          error: "running-state background memory access unavailable",
+          errorCode: "NON_INTRUSIVE_READ_UNAVAILABLE",
+          stateUnknown: false,
+        };
+      }
+      const bytes = bytesAt(address, length);
+      return {
+        success: true,
+        rawOutput: `${address.toString(16).padStart(8, "0")} = ${[...bytes].map((value) => value.toString(16).padStart(2, "0")).join(" ")}`,
+        output: "",
+      };
+    },
+    async writeMemoryBytes(address: number, bytes: Buffer) {
+      stats.writeCalls += 1;
+      memory.set(address, Buffer.from(bytes));
+      return {
+        success: true,
+        rawOutput: "",
+        output: "written",
+        writeIssued: true,
+        stateUnknown: false,
+      };
+    },
+    parseMemoryDump(raw: string) {
+      const match = /^([0-9a-f]{8}) = (.+)$/i.exec(raw.trim());
+      return match ? [{ address: `0x${match[1]}`, hex: match[2], ascii: "" }] : [];
+    },
+    async halt() {
+      stats.haltCalls += 1;
+      stats.state = "halted";
+      return { success: true, rawOutput: "", output: "halted", writeIssued: true, stateUnknown: false };
+    },
+    async resume() {
+      stats.resumeCalls += 1;
+      if (failResume) {
+        return { success: false, rawOutput: "", output: "", error: "resume confirmation unavailable", writeIssued: true, stateUnknown: true };
+      }
+      stats.state = "running";
+      return { success: true, rawOutput: "", output: "running", writeIssued: true, stateUnknown: false };
+    },
+  } as unknown as ProbeBackend;
+  return { probe, stats };
+}
+
+async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMemorySessions = false, speed = 4_000, allowCaptureBackendTestOverride = false): Promise<Fixture> {
   const testsRoot = join(process.cwd(), "test-output");
   mkdirSync(testsRoot, { recursive: true });
   const root = mkdtempSync(join(testsRoot, "hss-operations-"));
@@ -1079,13 +1563,19 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
   await store.setArtifactMatch(projectRoot, "verified", "fake-hss-test", { targetGeneration: target.generation, probeSerial: target.probeSerial, artifactGeneration: target.artifact!.generation });
   const current = store.require(projectRoot);
   const queue = new ProbeQueue(join(root, "queue"));
-  const direct = new DirectMcuService(store, queue, async () => { throw new Error("direct backend must not be used by capture-aware tests"); });
+  const memoryLauncher = withMemorySessions ? new FixtureMemorySessionLauncher() : undefined;
+  const memorySessions = memoryLauncher ? new MemorySessionManager(queue, memoryLauncher, 10_000) : undefined;
+  const direct = new DirectMcuService(
+    store,
+    queue,
+    async () => { throw new Error("direct backend must not be used by capture-aware tests"); },
+    undefined,
+    memorySessions,
+  );
   const resolver = new FixtureResolver(counterType);
   const artifacts = new ArtifactVariableService(store, resolver);
   const adapter = new FakeHssAdapter();
-  const memoryLauncher = withMemorySessions ? new FixtureMemorySessionLauncher() : undefined;
-  const memorySessions = memoryLauncher ? new MemorySessionManager(queue, memoryLauncher, 10_000) : undefined;
-  const hss = new HssOperations(store, queue, artifacts, adapter, outputRoot, stateRoot, join(root, "session-work"), memorySessions);
+  const hss = new HssOperations(store, queue, artifacts, adapter, outputRoot, stateRoot, join(root, "session-work"), memorySessions, allowCaptureBackendTestOverride);
   const captures = new CaptureQueryOperations(outputRoot);
   const variables = new VariableAccessRouter(store, artifacts, direct, hss);
   return {
@@ -1112,9 +1602,10 @@ function captureInput(fixture: Fixture, count: number, rateHz: number, durationS
 
 class FixtureMemorySessionLauncher implements MemorySessionLauncher {
   readonly sessions: FixtureMemorySession[] = [];
+  probe?: ProbeBackend;
 
   async open(_target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
-    const session = new FixtureMemorySession(70_000 + this.sessions.length);
+    const session = new FixtureMemorySession(70_000 + this.sessions.length, this.probe);
     this.sessions.push(session);
     onStarted?.(session.pid, session.runtime);
     return session;
@@ -1128,18 +1619,20 @@ class FixtureMemorySession implements PersistentMemorySession {
     helperSha256: "a".repeat(64),
     runtimeSha256: "b".repeat(64),
   };
-  readonly probe = {
-    observeTargetState: async () => ({
-      state: "halted" as const,
-      source: "dhcsr" as const,
-      result: { success: true, rawOutput: "", output: "halted" },
-    }),
-  } as ProbeBackend;
+  readonly probe: ProbeBackend;
   closeCalls = 0;
   private alive = true;
   private readonly listeners = new Set<() => void>();
 
-  constructor(readonly pid: number) {}
+  constructor(readonly pid: number, probe?: ProbeBackend) {
+    this.probe = probe ?? {
+      observeTargetState: async () => ({
+        state: "halted" as const,
+        source: "dhcsr" as const,
+        result: { success: true, rawOutput: "", output: "halted" },
+      }),
+    } as ProbeBackend;
+  }
 
   isAlive(): boolean { return this.alive; }
   isReusable(): boolean { return this.alive; }
@@ -1243,10 +1736,19 @@ class FakeHssAdapter implements HssHelperAdapter {
   counterModulus?: number;
   initialSampleTickStep = 10_000_000n;
   resultQualityEvidence?: Record<string, unknown>;
+  runtimeFailure?: { code: string; reason: string };
   private ignoreNextStopRequest = false;
 
   async inspectRuntime(): Promise<HssRuntimeFacts> {
     this.inspectCount += 1;
+    if (this.runtimeFailure) {
+      return {
+        backend: this.backend,
+        available: false,
+        errorCode: this.runtimeFailure.code,
+        reason: this.runtimeFailure.reason,
+      };
+    }
     return { backend: this.backend, available: true, helperPath: "fake-helper", runtimePath: "fake-runtime", helperSha256: "2".repeat(64), runtimeSha256: "1".repeat(64), helperVersion: "1", helperProtocolVersion: 3, architecture: process.arch, abi: { fake: true } };
   }
 
@@ -1301,7 +1803,7 @@ class FakeHssAdapter implements HssHelperAdapter {
       throw new Error("fake Helper plan contract mismatch");
     }
     const manifest = JSON.parse(readFileSync(plan.artifactMatchManifestPath, "utf8")) as { targetId?: string };
-    if (plan.device !== "Cortex-M4" || manifest.targetId !== plan.device) {
+    if (plan.device !== "TEST_DEVICE" || manifest.targetId !== plan.device) {
       throw new Error("fake Helper attach profile and Artifact manifest binding mismatch");
     }
     if (plan.resumeBeforeStart) {

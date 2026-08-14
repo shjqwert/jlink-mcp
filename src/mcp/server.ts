@@ -220,7 +220,7 @@ export class JLinkMcpServer {
       : { ...inputSchema, runId: acceptanceRunId.optional() };
     this.server.registerTool(name, { description: TOOL_DESCRIPTIONS[name], inputSchema: schemaWithRunId }, async (input, extra) => {
       const gateFailure = this.projectGateFailure(name, input as Record<string, unknown>);
-      if (gateFailure) return operationToolResult(gateFailure, this.resultMode ?? DEFAULT_MCP_RESULT_MODE);
+      if (gateFailure) return this.wireToolResult(gateFailure);
       const requestedRunId = (input as Record<string, unknown>).runId;
       const execute = async (): Promise<OperationEnvelope> => {
         try { return await handler(input as Record<string, unknown>, extra.signal); }
@@ -255,7 +255,7 @@ export class JLinkMcpServer {
           });
         }
       }
-      return operationToolResult(envelope, this.resultMode ?? DEFAULT_MCP_RESULT_MODE);
+      return this.wireToolResult(envelope);
     });
   }
 
@@ -297,9 +297,17 @@ export class JLinkMcpServer {
   }
 
   private taskToolResult(envelope: OperationEnvelope) {
-    return this.resultMode
-      ? operationToolResult(envelope, this.resultMode)
-      : this.compactToolResult(envelope);
+    return this.wireToolResult(envelope);
+  }
+
+  private wireToolResult(envelope: OperationEnvelope) {
+    const mode = this.resultMode ?? DEFAULT_MCP_RESULT_MODE;
+    let diagnosticRef: string | undefined;
+    if (mode === "normal" && (!envelope.ok || envelope.error?.stateUnknown === true)) {
+      const stored = this.operationDetails.put(envelope);
+      if (stored.available) diagnosticRef = `jlink://operation/${envelope.operationId}`;
+    }
+    return operationToolResult(envelope, mode, diagnosticRef);
   }
 
   private async handleTaskProject(
@@ -386,6 +394,7 @@ export class JLinkMcpServer {
         stateRoot,
         undefined,
         this.memorySessions,
+        this.profile === "acceptance",
       );
       const captures = new CaptureQueryOperations(
         evidenceRoot,
@@ -517,11 +526,11 @@ export class JLinkMcpServer {
         runningDiscoveryProcesses: this.discoveryProcesses.listRunning(),
       }, null, 2), mimeType: "application/json" }] }));
 
-    if (!usesLegacySurface(this.profile) && this.resultMode === undefined) {
+    if ((this.resultMode ?? DEFAULT_MCP_RESULT_MODE) === "normal") {
       this.server.resource(
         "operation-detail",
         new ResourceTemplate("jlink://operation/{operationId}", { list: undefined }),
-        { description: "Full bounded process-local envelope for a compact tool result", mimeType: "application/json" },
+        { description: "Full bounded process-local diagnostics for a failed or uncertain normal result", mimeType: "application/json" },
         async (uri, variables) => {
           const operationId = String(variables.operationId ?? "");
           const text = this.operationDetails.get(operationId)
