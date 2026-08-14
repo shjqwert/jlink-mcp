@@ -177,7 +177,8 @@ try {
     throw new Error(`debug timeout regression returned an unexpected result: ${JSON.stringify(timeoutDebug)}`);
   }
   const timeoutEntry = transcript.at(-1);
-  const timeoutSteps = timeoutEntry?.details?.data?.steps;
+  const timeoutEnvelope = timeoutEntry?.details ?? timeoutEntry?.response;
+  const timeoutSteps = timeoutEnvelope?.details?.steps;
   if (!Array.isArray(timeoutSteps)) throw new Error("debug timeout details did not include managed cleanup steps");
   const timeoutAbort = timeoutSteps.find((step) => step.tool === "gdb_managed_breakpoint_abort");
   const timeoutClose = timeoutSteps.find((step) => step.tool === "gdb_server_stop");
