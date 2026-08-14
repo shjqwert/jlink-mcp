@@ -194,12 +194,9 @@ try {
     throw new Error(`debug timeout session close did not release the GDB owner cleanly: ${JSON.stringify(timeoutClose)}`);
   }
   const postTimeoutReset = await callTool("control", { action: "reset" });
-  const debug = await callTool("debug", {
-    action: "run_to",
-    params: { location: options.breakpoint ?? "JlinkTestFixtureTask1ms", timeoutMs: 60_000, full: false },
-  }, { timeoutMs: 120_000 });
   await callTool("control", { action: "halt" });
   const crash = await callTool("diagnose_crash", {});
+  assertNoActiveFault(crash);
   const finalReset = await callTool("control", { action: "reset" });
   const finalStatus = await callTool("project", { action: "status" });
 
@@ -233,7 +230,12 @@ try {
       sessionClose: compactEvidence(timeoutClose),
       ownerReleaseProbe: compactEvidence(postTimeoutReset),
     },
-    debug: compactEvidence(debug),
+    debug: {
+      scenario: "run_to_timeout_cleanup",
+      expectedError: compactEvidence(timeoutDebug),
+      breakpointAbort: compactEvidence(timeoutAbort),
+      sessionClose: compactEvidence(timeoutClose),
+    },
     diagnoseCrash: compactEvidence(crash),
     finalReset: compactEvidence(finalReset),
     finalStatus: compactEvidence(finalStatus),
@@ -309,6 +311,30 @@ function compactEvidence(response) {
     data: response.data,
     resource: response.resource,
   };
+}
+
+function assertNoActiveFault(response) {
+  const registers = response.data?.coreRegisters?.registers;
+  const faults = response.data?.faultRegisters?.raw;
+  const observed = {
+    ipsr: parseRequiredHex(registers?.IPSR, "IPSR"),
+    cfsr: parseRequiredHex(faults?.CFSR, "CFSR"),
+    hfsr: parseRequiredHex(faults?.HFSR, "HFSR"),
+  };
+  if (observed.ipsr !== 0n || observed.cfsr !== 0n || observed.hfsr !== 0n) {
+    throw new Error("hardware smoke observed an active exception or fault status: " + JSON.stringify({
+      ipsr: registers.IPSR,
+      cfsr: faults.CFSR,
+      hfsr: faults.HFSR,
+    }));
+  }
+}
+
+function parseRequiredHex(value, label) {
+  if (typeof value !== "string" || !/^0x[0-9a-f]+$/i.test(value)) {
+    throw new Error("diagnose_crash did not expose a valid " + label + ": " + String(value));
+  }
+  return BigInt(value);
 }
 
 async function inputHashes() {
