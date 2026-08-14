@@ -364,30 +364,30 @@ export class HssOperations implements CaptureVariableAccess {
       observationError = error;
     }
     if (!observationError && observed === expected) return observed;
-    if (expected === "halted") {
-      try {
-        const restored = await this.adapter.restoreHaltedState(target, runtime);
-        if (restored !== "halted") throw new Error(`restoration returned ${restored}`);
-        return restored;
-      } catch (error) {
-        throw new HssOperationError(
-          "HSS_TARGET_STATE_RESTORE_FAILED",
-          `HSS helper exited without preserving halted state and restoration failed: ${error instanceof Error ? error.message : String(error)}`,
-          false,
-          false,
-          true,
-        );
-      }
+    try {
+      const restored = expected === "halted"
+        ? await this.adapter.restoreHaltedState(target, runtime)
+        : await this.adapter.restoreRunningState(target, runtime);
+      if (restored !== expected) throw new Error(`restoration returned ${restored}`);
+      const confirmed = await this.adapter.observeTargetState(target, runtime);
+      if (confirmed !== expected) throw new Error(`post-restoration observation returned ${confirmed}`);
+      return confirmed;
+    } catch (error) {
+      throw new HssOperationError(
+        "HSS_TARGET_STATE_RESTORE_FAILED",
+        `HSS helper exited without preserving ${expected} state and restoration failed: ${error instanceof Error ? error.message : String(error)}`,
+        false,
+        error instanceof HssAdapterError && error.currentRequestIssued,
+        true,
+        undefined,
+        {
+          expectedTargetState: expected,
+          observedTargetState: observationError ? "unknown" : observed,
+          restorationAttempted: true,
+          restored: false,
+        },
+      );
     }
-    throw new HssOperationError(
-      observationError ? "HSS_TARGET_STATE_OBSERVE_FAILED" : "HSS_TARGET_STATE_CHANGED",
-      observationError
-        ? "HSS helper exited without a trustworthy target-state observation"
-        : `HSS helper changed target state from ${expected} to ${observed}; halted state was restored when authorized`,
-      false,
-      false,
-      true,
-    );
   }
 
   private async settleTargetStateAndOwner(session: HssSessionRecord): Promise<void> {
@@ -707,9 +707,33 @@ export class HssOperations implements CaptureVariableAccess {
           }
           if (!launch?.pid || !this.adapter.isAlive(launch.pid)) {
             let statePreservationPending = false;
+            let targetStateVerified = false;
             if (launch?.pid) {
               try {
-                await this.verifyTargetStateAfterHelper(current, runtime, preflight.targetStateBefore);
+                const restoredTargetState = await this.verifyTargetStateAfterHelper(current, runtime, preflight.targetStateBefore);
+                targetStateVerified = true;
+                const startupError = normalizeHssError(
+                  terminalError instanceof Error ? terminalError : new Error(String(terminalError)),
+                  "HSS_START_FAILED",
+                  false,
+                );
+                if (boundSafeHssStartupTerminal(startupError)) {
+                  terminalError = new HssOperationError(
+                    startupError.code,
+                    startupError.message,
+                    startupError.retryable,
+                    false,
+                    false,
+                    undefined,
+                    {
+                      ...startupError.evidence,
+                      stateUnknownBeforeTargetVerification: startupError.stateUnknown,
+                      expectedTargetState: preflight.targetStateBefore,
+                      observedTargetState: restoredTargetState,
+                      targetStateVerified: true,
+                    },
+                  );
+                }
               } catch (stateError) {
                 terminalError = stateError;
                 statePreservationPending = normalizeHssError(
@@ -738,7 +762,7 @@ export class HssOperations implements CaptureVariableAccess {
                 statePreservationPending,
               );
             }
-            this.sessionStore.update(created.captureId, (provisional) => ({
+            const failedSession = this.sessionStore.update(created.captureId, (provisional) => ({
               ...provisional,
               state: "failed",
               statePreservationPending,
@@ -756,13 +780,45 @@ export class HssOperations implements CaptureVariableAccess {
               lastError: { code: errorCode(terminalError, "HSS_START_FAILED"), message: terminalError instanceof Error ? terminalError.message : String(terminalError) },
             }));
             if (!statePreservationPending && claimedOwner) {
-              try { this.queue.releaseOwner(current.probeSerial, claimedOwner.token); } catch { /* already released or replaced */ }
+              try { this.queue.releaseOwner(current.probeSerial, claimedOwner.token); } catch { /* explicit owner check below remains authoritative */ }
             } else if (statePreservationPending) {
               this.scheduleMonitor(created.captureId);
             }
+            const visibleOwner = this.queue.getOwner(current.probeSerial);
+            const ownerReleased = visibleOwner === undefined;
+            const archivedError = normalizeHssError(
+              terminalError instanceof Error ? terminalError : new Error(String(terminalError)),
+              "HSS_START_FAILED",
+              false,
+            );
+            if (targetStateVerified
+              && !statePreservationPending
+              && ownerReleased
+              && failedSession.state === "failed"
+              && failedCapture !== undefined
+              && existsSync(created.captureFile)
+              && boundSafeHssStartupTerminal(archivedError)) {
+              terminalError = new HssOperationError(
+                archivedError.code,
+                archivedError.message,
+                archivedError.retryable,
+                false,
+                false,
+                undefined,
+                {
+                  ...archivedError.evidence,
+                  archivedSafeStartupFallback: true,
+                  failedCaptureId: created.captureId,
+                  failedCaptureFileVerified: true,
+                  failedCaptureContentSha256: failedCapture.contentSha256,
+                  failedCaptureSampleCount: failedCapture.sampleCount,
+                  probeOwnerReleased: true,
+                },
+              );
+            }
           }
           const normalized = normalizeHssError(terminalError instanceof Error ? terminalError : new Error(String(terminalError)), "HSS_START_FAILED", false);
-          throw new HssOperationError(normalized.code, normalized.message, normalized.retryable, normalized.writeIssued, normalized.stateUnknown, { captureId: created.captureId, packageDir: created.packageDir });
+          throw new HssOperationError(normalized.code, normalized.message, normalized.retryable, normalized.writeIssued, normalized.stateUnknown, { captureId: created.captureId, packageDir: created.packageDir }, normalized.evidence);
         }
       }, localMemoryOwner ? {
         allowedOwnerKinds: ["memory"],
@@ -825,7 +881,10 @@ export class HssOperations implements CaptureVariableAccess {
       return finishEnvelope(envelope, true);
     } catch (error) {
       const evidence = error instanceof HssOperationError ? error.captureEvidence : undefined;
-      if (!evidence && forcedBackend !== "hss" && isPollingFallbackEligible(error)) return this.startPollingFallback(prepared, error);
+      if (forcedBackend !== "hss"
+        && ((!evidence && isPollingFallbackEligible(error)) || (evidence && isArchivedSafeStartupFallback(error)))) {
+        return this.startPollingFallback(prepared, error);
+      }
       if (evidence) {
         try {
           const session = this.sessionStore.read(evidence.captureId);
@@ -2412,9 +2471,25 @@ export class HssOperations implements CaptureVariableAccess {
   ): Promise<Awaited<ReturnType<typeof finalizeJcapV2FromV1Package>>> {
     const samplesFile = join(packageDir, "raw", "samples.bin");
     if (!existsSync(samplesFile)) writeFileSync(samplesFile, Buffer.alloc(0), { flag: "wx" });
+    const normalized = normalizeHssError(
+      error instanceof Error ? error : new Error(String(error)),
+      "HSS_START_FAILED",
+      false,
+    );
     const tail = jcapTail(packageDir);
-    appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence, type: "lifecycle", tick: tail.lastEventTick, state: "finalizing" });
-    appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence + 1, type: "lifecycle", tick: tail.lastEventTick, state: "failed", errorCode: errorCode(error, "HSS_START_FAILED") });
+    appendJcapV1Event(packageDir, {
+      eventId: randomUUID(),
+      eventSequence: tail.nextEventSequence,
+      type: "fault",
+      tick: tail.lastEventTick,
+      errorCode: normalized.code,
+      reason: normalized.message.slice(0, 4096),
+      writeIssued: normalized.writeIssued,
+      stateUnknown: normalized.stateUnknown,
+      diagnostic: normalized.evidence ?? null,
+    });
+    appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence + 1, type: "lifecycle", tick: tail.lastEventTick, state: "finalizing" });
+    appendJcapV1Event(packageDir, { eventId: randomUUID(), eventSequence: tail.nextEventSequence + 2, type: "lifecycle", tick: tail.lastEventTick, state: "failed", errorCode: normalized.code });
     finalizeJcapV1Metadata(packageDir, "failed");
     const endedAt = new Date().toISOString();
     const final = await finalizeJcapV2FromV1Package({
@@ -2427,7 +2502,14 @@ export class HssOperations implements CaptureVariableAccess {
       hostStartNs: String(BigInt(Date.parse(createdAt)) * 1_000_000n),
       hostEndNs: String(BigInt(Date.parse(endedAt)) * 1_000_000n),
     });
-    if (existsSync(final.captureFile)) rmSync(sessionDir, { recursive: true, force: true });
+    const verified = await verifyJcapV2(final.captureFile);
+    if (verified.state !== "failed"
+      || verified.sampleCount !== final.sampleCount
+      || verified.chunkCount !== final.chunkCount
+      || verified.contentSha256 !== final.contentSha256) {
+      throw new HssOperationError("HSS_START_JCAP_VERIFY_FAILED", "failed HSS startup JCAP did not pass exact post-publication verification");
+    }
+    rmSync(sessionDir, { recursive: true, force: true });
     return final;
   }
 
@@ -2945,6 +3027,43 @@ function captureBackendTestOverride(allowed: boolean): CaptureBackendTestOverrid
   return value;
 }
 
+
+function boundSafeHssStartupTerminal(error: HssOperationError): Record<string, unknown> | undefined {
+  const evidence = error.evidence;
+  const terminal = evidence?.terminal && typeof evidence.terminal === "object" && !Array.isArray(evidence.terminal)
+    ? evidence.terminal as Record<string, unknown>
+    : undefined;
+  const binding = evidence?.binding && typeof evidence.binding === "object" && !Array.isArray(evidence.binding)
+    ? evidence.binding as Record<string, unknown>
+    : undefined;
+  if (error.code !== "HSS_START_FAILED"
+    || error.writeIssued
+    || evidence?.terminalResultBound !== true
+    || evidence.helperDead !== true
+    || binding?.helperNonceMatched !== true
+    || terminal?.record !== "result"
+    || terminal.status !== "error"
+    || terminal.errorCode !== error.code
+    || terminal.hssStartIssued !== true
+    || terminal.rawOpened !== true
+    || terminal.rawClosed !== true
+    || terminal.writeIssued !== false
+    || terminal.targetReset !== false
+    || terminal.targetWritten !== false
+    || terminal.flashIssued !== false
+    || terminal.resetIssued !== false
+    || terminal.haltIssued !== false
+    || terminal.stateUnknown !== false) return undefined;
+  return terminal;
+}
+
+function isArchivedSafeStartupFallback(error: unknown): error is HssOperationError {
+  return error instanceof HssOperationError
+    && error.evidence?.archivedSafeStartupFallback === true
+    && error.stateUnknown === false
+    && error.writeIssued === false;
+}
+
 function isPollingFallbackEligible(error: unknown): boolean {
   const code = errorCode(error, "HSS_UNAVAILABLE");
   const safety = error as { stateUnknown?: unknown; writeIssued?: unknown };
@@ -2965,7 +3084,7 @@ function isPollingFallbackEligible(error: unknown): boolean {
 
 function normalizeHssError(error: Error, fallbackCode: string, writeIssued: boolean): HssOperationError {
   if (error instanceof HssOperationError) return error;
-  if (error instanceof HssAdapterError) return new HssOperationError(error.code, error.message, error.retryable, error.currentRequestIssued, error.stateUnknown);
+  if (error instanceof HssAdapterError) return new HssOperationError(error.code, error.message, error.retryable, error.currentRequestIssued, error.stateUnknown, undefined, error.evidence);
   return new HssOperationError(fallbackCode, error.message, false, writeIssued, writeIssued);
 }
 

@@ -145,6 +145,7 @@ export class HssAdapterError extends Error {
     readonly retryable = false,
     readonly stateUnknown = false,
     readonly currentRequestIssued = false,
+    readonly evidence?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "HssAdapterError";
@@ -421,7 +422,10 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
         }
         return;
       }
-      if (!this.isAlive(launch.pid)) throw new HssAdapterError("HSS_HELPER_EXITED_BEFORE_READY", "the HSS Helper exited before publishing readiness", false, true);
+      if (!this.isAlive(launch.pid)) {
+        throw readBoundStartupFailure(control, launch)
+          ?? new HssAdapterError("HSS_HELPER_EXITED_BEFORE_READY", "the HSS Helper exited before publishing readiness", false, true);
+      }
       await delay(10);
     }
     throw new HssAdapterError("HSS_HELPER_READY_TIMEOUT", "the HSS Helper did not publish readiness before the startup timeout", true, true);
@@ -737,6 +741,43 @@ function readBoundedJson(file: string, maxBytes: number, code: string): Record<s
     return parsed as Record<string, unknown>;
   } catch (error) {
     throw new HssAdapterError(code, error instanceof Error ? error.message : String(error), false, true);
+  }
+}
+
+function readBoundStartupFailure(control: HssCaptureControlFiles, launch: HssCaptureLaunch): HssAdapterError | undefined {
+  try {
+    const owner = readBoundedJson(control.pidFile, 16 * 1024, "HSS_HELPER_PID_INVALID");
+    if (owner.captureId !== launch.captureId || owner.helperNonce !== launch.helperNonce || owner.pid !== launch.pid) return undefined;
+    const size = statSync(control.stdoutPath).size;
+    if (size < 2 || size > 1024 * 1024) return undefined;
+    const records = readFileSync(control.stdoutPath, "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as unknown);
+    if (records.some((record) => !record || typeof record !== "object" || Array.isArray(record))) return undefined;
+    const terminal = records
+      .map((record) => record as Record<string, unknown>)
+      .filter((record) => record.record === "result");
+    if (terminal.length !== 1) return undefined;
+    const result = terminal[0]!;
+    if (result.status !== "error" || result.captureId !== launch.captureId) return undefined;
+    if (result.helperPid !== undefined && result.helperPid !== launch.pid) return undefined;
+    const code = typeof result.errorCode === "string" && /^[A-Z][A-Z0-9_]{2,127}$/.test(result.errorCode)
+      ? result.errorCode
+      : undefined;
+    const reason = typeof result.reason === "string" && result.reason.length > 0 && result.reason.length <= 4096
+      ? result.reason
+      : undefined;
+    if (!code || !reason) return undefined;
+    const evidence = sanitizeObserved({
+      terminalResultBound: true,
+      helperDead: true,
+      binding: { captureId: launch.captureId, helperPid: launch.pid, helperNonceMatched: true },
+      terminal: result,
+    });
+    return new HssAdapterError(code, reason, false, true, result.writeIssued === true, evidence);
+  } catch {
+    return undefined;
   }
 }
 

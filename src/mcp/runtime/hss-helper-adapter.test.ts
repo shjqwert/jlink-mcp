@@ -114,6 +114,145 @@ test("native adapter accepts only an exact live Helper ready journal", async () 
   }
 });
 
+test("native adapter binds one terminal startup failure to the launched Helper", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-terminal-"));
+  const control = controlFiles(root);
+  const adapter = new NativeHssHelperAdapter();
+  const pid = 2_000_000_000;
+  const launch = {
+    pid,
+    launchedAt: new Date().toISOString(),
+    captureId,
+    helperNonce,
+    initialTargetState: "halted" as const,
+    expectedTargetState: "running" as const,
+    resumeBeforeStart: true,
+  };
+  try {
+    writeFileSync(control.pidFile, JSON.stringify({ captureId, helperNonce, pid }));
+    writeFileSync(control.stdoutPath, [
+      JSON.stringify({ record: "lifecycle", captureId, phase: "hss_start" }),
+      JSON.stringify({
+        record: "result",
+        status: "error",
+        errorCode: "HSS_START_FAILED",
+        reason: "JLINK_HSS_Start failed",
+        captureId,
+        hssStartIssued: true,
+        targetReset: false,
+        targetWritten: false,
+        flashIssued: false,
+        resetIssued: false,
+        haltIssued: false,
+        writeIssued: false,
+      }),
+    ].join("\n"));
+    await assert.rejects(
+      () => adapter.waitUntilReady(control, launch, 100),
+      (error: unknown) => {
+        if (!(error instanceof HssAdapterError)) return false;
+        const evidence = error.evidence as { terminalResultBound?: boolean; helperDead?: boolean; binding?: { helperNonceMatched?: boolean } } | undefined;
+        return error.code === "HSS_START_FAILED"
+          && error.stateUnknown
+          && !error.currentRequestIssued
+          && evidence?.terminalResultBound === true
+          && evidence.helperDead === true
+          && evidence.binding?.helperNonceMatched === true;
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native adapter rejects unbound or ambiguous terminal startup failures", async () => {
+  const cases = [
+    {
+      owner: { captureId: "53000000-0000-4000-8000-000000000001", helperNonce, pid: 2_000_000_000 },
+      records: [{ record: "result", status: "error", errorCode: "HSS_START_FAILED", reason: "wrong capture", captureId }],
+    },
+    {
+      owner: { captureId, helperNonce, pid: 2_000_000_000 },
+      records: [
+        { record: "result", status: "error", errorCode: "HSS_START_FAILED", reason: "first", captureId },
+        { record: "result", status: "error", errorCode: "HSS_START_FAILED", reason: "second", captureId },
+      ],
+    },
+    {
+      owner: { captureId, helperNonce: "53000000-0000-4000-8000-000000000001", pid: 2_000_000_000 },
+      records: [{ record: "result", status: "error", errorCode: "HSS_START_FAILED", reason: "wrong nonce", captureId }],
+    },
+    {
+      owner: { captureId, helperNonce, pid: 2_000_000_000 },
+      records: [{ record: "result", status: "error", errorCode: "HSS_START_FAILED", reason: "wrong pid", captureId, helperPid: 1234 }],
+    },
+    {
+      owner: { captureId, helperNonce, pid: 2_000_000_000 },
+      records: [{ record: "result", status: "ok", captureId }],
+    },
+  ];
+  for (const [index, fixture] of cases.entries()) {
+    const root = mkdtempSync(path.join(os.tmpdir(), `hss-adapter-terminal-invalid-${index}-`));
+    const control = controlFiles(root);
+    const adapter = new NativeHssHelperAdapter();
+    const launch = {
+      pid: 2_000_000_000,
+      launchedAt: new Date().toISOString(),
+      captureId,
+      helperNonce,
+      initialTargetState: "halted" as const,
+      expectedTargetState: "running" as const,
+      resumeBeforeStart: true,
+    };
+    try {
+      writeFileSync(control.pidFile, JSON.stringify(fixture.owner));
+      writeFileSync(control.stdoutPath, fixture.records.map((record) => JSON.stringify(record)).join("\n"));
+      await assert.rejects(
+        () => adapter.waitUntilReady(control, launch, 100),
+        (error: unknown) => error instanceof HssAdapterError
+          && error.code === "HSS_HELPER_EXITED_BEFORE_READY"
+          && error.stateUnknown
+          && error.evidence === undefined,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("native adapter rejects malformed and oversized startup diagnostics", async () => {
+  for (const [name, stdout] of [
+    ["malformed", "{not-json"],
+    ["oversized", "x".repeat(1024 * 1024 + 1)],
+  ] as const) {
+    const root = mkdtempSync(path.join(os.tmpdir(), `hss-adapter-terminal-${name}-`));
+    const control = controlFiles(root);
+    const adapter = new NativeHssHelperAdapter();
+    const launch = {
+      pid: 2_000_000_000,
+      launchedAt: new Date().toISOString(),
+      captureId,
+      helperNonce,
+      initialTargetState: "halted" as const,
+      expectedTargetState: "running" as const,
+      resumeBeforeStart: true,
+    };
+    try {
+      writeFileSync(control.pidFile, JSON.stringify({ captureId, helperNonce, pid: launch.pid }));
+      writeFileSync(control.stdoutPath, stdout);
+      await assert.rejects(
+        () => adapter.waitUntilReady(control, launch, 100),
+        (error: unknown) => error instanceof HssAdapterError
+          && error.code === "HSS_HELPER_EXITED_BEFORE_READY"
+          && error.stateUnknown
+          && error.evidence === undefined,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("native adapter rejects a v2 capture plan before spawning the Helper", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "hss-adapter-plan-version-"));
   const control = controlFiles(root);

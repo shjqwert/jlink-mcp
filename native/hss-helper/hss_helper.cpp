@@ -5696,14 +5696,20 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
   const int64_t hss_start_qpc = qpc_counter();
   stream_lifecycle(capture_id, "hss_start", hss_start_qpc, ",\"returnCode\":" + std::to_string(start_rc) + ",\"crashed\":" + (crashed ? "true" : "false"));
   if (crashed || start_rc < 0) {
+    const bool start_crashed = crashed;
     const bool raw_closed = raw_writer.finalize();
-    call_void0(arm_close, &crashed);
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
     stream_fault(capture_id, "HSS_START_FAILED", "JLINK_HSS_Start failed", qpc_counter());
     std::cout << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"HSS_START_FAILED\",\"reason\":\"JLINK_HSS_Start failed\",\"captureId\":\"" << escape(capture_id)
-              << "\",\"qpcEpochCounter\":\"" << qpc_epoch << "\",\"qpcFrequency\":\"" << actual_qpc_frequency
+              << "\",\"helperPid\":" << GetCurrentProcessId()
+              << ",\"qpcEpochCounter\":\"" << qpc_epoch << "\",\"qpcFrequency\":\"" << actual_qpc_frequency
               << "\",\"hssStartIssued\":true,\"rawOpened\":true,\"rawClosed\":"
-              << (raw_closed ? "true" : "false");
+              << (raw_closed ? "true" : "false")
+              << ",\"writeIssued\":false,\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
+              << ",\"resumeIssued\":" << (resume_before_start ? "true" : "false")
+              << ",\"stateUnknown\":" << (start_crashed || close_crashed ? "true" : "false");
     write_artifact_match_evidence(artifact_match_manifest, artifact_match_manifest_sha256, artifact_match_result);
     std::cout << "}";
     return 0;
@@ -5765,7 +5771,10 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
     std::cout << "{\"record\":\"result\",\"status\":\"error\",\"errorCode\":\"HSS_READY_JOURNAL_FAILED\",\"reason\":\"Helper readiness journal could not be published\",\"captureId\":\"" << escape(capture_id)
-              << "\",\"hssStartIssued\":true,\"rawOpened\":true,\"rawClosed\":" << (raw_closed ? "true" : "false")
+              << "\",\"helperPid\":" << GetCurrentProcessId()
+              << ",\"hssStartIssued\":true,\"rawOpened\":true,\"rawClosed\":" << (raw_closed ? "true" : "false")
+              << ",\"writeIssued\":false,\"targetReset\":false,\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
+              << ",\"resumeIssued\":" << (resume_before_start ? "true" : "false")
               << ",\"stateUnknown\":" << (stop_crashed || close_crashed ? "true" : "false") << "}";
     return 0;
   }

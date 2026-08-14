@@ -516,7 +516,7 @@ test("HSS startup failure restores halted state after the helper exits", async (
     fixture.adapter.targetState = "halted";
     fixture.adapter.failReadyAndExitStateAfter = "running";
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
-    assert.equal(started.error?.code, "HSS_HELPER_EXITED_BEFORE_READY");
+    assert.equal(started.error?.code, "HSS_START_FAILED");
     assert.equal(fixture.adapter.targetState, "halted");
     assert.equal(fixture.adapter.restoreCount, 1);
     assert.equal(fixture.adapter.launchCount, 1);
@@ -524,20 +524,213 @@ test("HSS startup failure restores halted state after the helper exits", async (
     assert.equal(captureEntries.length, 1);
     assert.match(captureEntries[0]!, /^[0-9a-f-]+\.jcap$/);
     assert.equal(captureEntries.some((entry) => entry.startsWith(".staging-")), false);
+    const failedJcap = readFileSync(join(fixture.root, "output", "captures", captureEntries[0]!));
+    assert.equal(failedJcap.includes(Buffer.from("fixture HSS start failed before readiness")), true);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("HSS startup failure retains the owner until halted state restoration succeeds", async () => {
-  const fixture = await createFixture();
+test("archived safe HSS startup failure selects polling with linked JCAP evidence", async () => {
+  const fixture = await createFixture("uint32", true);
   try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    assert.equal((started.capture as { backend?: string }).backend, "background_poll");
+    const data = started.data as {
+      captureId?: string;
+      fallbackCode?: string;
+      fallbackEvidence?: { archivedSafeStartupFallback?: boolean; failedCaptureId?: string; probeOwnerReleased?: boolean };
+    };
+    assert.equal(data.fallbackCode, "HSS_START_FAILED");
+    assert.equal(data.fallbackEvidence?.archivedSafeStartupFallback, true);
+    assert.equal(data.fallbackEvidence?.probeOwnerReleased, true);
+    assert.ok(data.fallbackEvidence?.failedCaptureId);
+    assert.notEqual(data.captureId, data.fallbackEvidence?.failedCaptureId);
+    assert.equal(fixture.adapter.targetState, "halted");
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId: data.captureId });
+    assert.equal(status.ok, true, JSON.stringify(status.error));
+    assert.equal((status.capture as { state?: string }).state, "completed");
+    const captureEntries = readdirSync(join(fixture.root, "output", "captures"))
+      .filter((entry) => entry.endsWith(".jcap"));
+    assert.equal(captureEntries.length, 2);
+    const pollingJcap = readFileSync(join(fixture.root, "output", "captures", `${data.captureId}.jcap`));
+    assert.equal(pollingJcap.includes(Buffer.from("archivedSafeStartupFallback")), true);
+    assert.equal(readdirSync(join(fixture.root, "output", "captures")).some((entry) => entry.startsWith(".staging-")), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("safe startup fallback restores and confirms an initially running target", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.targetState = "running";
+    fixture.adapter.failReadyAndExitStateAfter = "halted";
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    assert.equal((started.data as { fallbackCode?: string }).fallbackCode, "HSS_START_FAILED");
+    assert.equal(fixture.adapter.runningRestoreCount, 1);
+    assert.equal(fixture.adapter.targetState, "running");
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal((status.capture as { state?: string }).state, "completed");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("dangerous startup terminal effects prohibit polling fallback", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    fixture.adapter.startupTerminalDangerous = true;
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
+    assert.equal(started.ok, false);
+    assert.equal(started.error?.code, "HSS_START_FAILED");
+    assert.equal(started.error?.writeIssued, true);
+    assert.equal(started.error?.stateUnknown, true);
+    assert.equal(fixture.memoryLauncher!.sessions.length, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("unknown native startup terminal state prohibits polling fallback", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    fixture.adapter.startupTerminalUnknown = true;
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
+    assert.equal(started.ok, false);
+    assert.equal(started.error?.code, "HSS_START_FAILED");
+    assert.equal(started.error?.writeIssued, false);
+    assert.equal(started.error?.stateUnknown, true);
+    assert.equal(fixture.memoryLauncher!.sessions.length, 0);
+    const captures = readdirSync(join(fixture.root, "output", "captures"))
+      .filter((entry) => entry.endsWith(".jcap"));
+    assert.equal(captures.length, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("failed startup JCAP verification prohibits polling fallback", async () => {
+  const fixture = await createFixture("uint32", true);
+  const internals = fixture.hss as unknown as {
+    finalizeCreatedFailure: (...args: unknown[]) => Promise<unknown>;
+  };
+  const originalFinalize = internals.finalizeCreatedFailure.bind(fixture.hss);
+  try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    internals.finalizeCreatedFailure = async () => { throw new Error("fixture JCAP verification failure"); };
+    const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
+    assert.equal(started.ok, false);
+    assert.equal(started.error?.code, "HSS_START_JCAP_FINALIZE_FAILED");
+    assert.equal(fixture.memoryLauncher!.sessions.length, 0);
+  } finally {
+    internals.finalizeCreatedFailure = originalFinalize;
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("failed HSS owner release prohibits polling fallback", async () => {
+  const fixture = await createFixture("uint32", true);
+  const queue = fixture.queue as unknown as {
+    releaseOwner: (probeSerial: string, token: string) => void;
+  };
+  const originalReleaseOwner = queue.releaseOwner.bind(fixture.queue);
+  try {
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    queue.releaseOwner = () => { throw new Error("fixture owner release failure"); };
+    const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
+    assert.equal(started.ok, false);
+    assert.equal(started.error?.code, "HSS_START_FAILED");
+    assert.equal(fixture.memoryLauncher!.sessions.length, 0);
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.kind, "hss");
+  } finally {
+    queue.releaseOwner = originalReleaseOwner;
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("forced HSS never converts an archived startup failure to polling", async () => {
+  const previous = process.env.JLINK_MCP_TEST_CAPTURE_BACKEND;
+  const fixture = await createFixture("uint32", true, 4_000, true);
+  try {
+    process.env.JLINK_MCP_TEST_CAPTURE_BACKEND = "hss";
+    fixture.adapter.targetState = "halted";
+    fixture.adapter.failReadyAndExitStateAfter = "running";
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
+    assert.equal(started.ok, false);
+    assert.equal(started.error?.code, "HSS_START_FAILED");
+    assert.equal(fixture.memoryLauncher!.sessions.length, 0);
+  } finally {
+    if (previous === undefined) delete process.env.JLINK_MCP_TEST_CAPTURE_BACKEND;
+    else process.env.JLINK_MCP_TEST_CAPTURE_BACKEND = previous;
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS startup restoration requires a second trustworthy observation before polling fallback", async () => {
+  for (const postRestoreObservation of ["running", "throw"] as const) {
+    const fixture = await createFixture("uint32", true);
+    try {
+      fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+      fixture.adapter.targetState = "halted";
+      fixture.adapter.failReadyAndExitStateAfter = "running";
+      fixture.adapter.postRestoreObservation = postRestoreObservation;
+      const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
+      assert.equal(started.ok, false);
+      assert.equal(started.error?.code, "HSS_TARGET_STATE_RESTORE_FAILED");
+      assert.equal(started.error?.stateUnknown, true);
+      assert.equal(fixture.memoryLauncher!.sessions.length, 0);
+      const sessionFiles = readdirSync(join(fixture.root, "state", "hss-sessions"))
+        .filter((entry) => entry.endsWith(".json"));
+      assert.equal(sessionFiles.length, 1);
+      const captureId = sessionFiles[0]!.slice(0, -5);
+      assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.details?.captureId, captureId);
+      const pending = JSON.parse(readFileSync(join(fixture.root, "state", "hss-sessions", sessionFiles[0]!), "utf8")) as {
+        statePreservationPending?: boolean;
+      };
+      assert.equal(pending.statePreservationPending, true);
+      const captures = readdirSync(join(fixture.root, "output", "captures"))
+        .filter((entry) => entry.endsWith(".jcap"));
+      assert.deepEqual(captures, [captureId + ".jcap"]);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("HSS startup failure retains the owner until halted state restoration succeeds", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
     fixture.adapter.targetState = "halted";
     fixture.adapter.failReadyAndExitStateAfter = "running";
     fixture.adapter.failRestore = true;
     const started = await fixture.hss.start(captureInput(fixture, 1, 100, 1));
     assert.equal(started.error?.code, "HSS_TARGET_STATE_RESTORE_FAILED");
-    const captureId = String((started.data as { captureId: string }).captureId);
+    const sessionFiles = readdirSync(join(fixture.root, "state", "hss-sessions")).filter((entry) => entry.endsWith(".json"));
+    assert.equal(sessionFiles.length, 1);
+    const captureId = sessionFiles[0]!.slice(0, -5);
     assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.details?.captureId, captureId);
     const pending = JSON.parse(readFileSync(join(fixture.root, "state", "hss-sessions", `${captureId}.json`), "utf8")) as {
       statePreservationPending?: boolean;
@@ -1823,6 +2016,8 @@ class FakeHssAdapter implements HssHelperAdapter {
   failMemoryReceiptInspection = false;
   failReadyWithReusedPid = false;
   failReadyAndExitStateAfter?: HssTargetState;
+  startupTerminalDangerous = false;
+  startupTerminalUnknown = false;
   terminateCount = 0;
   targetState: HssTargetState = "running";
   capabilityStateAfter?: HssTargetState;
@@ -1833,6 +2028,7 @@ class FakeHssAdapter implements HssHelperAdapter {
   resumeCount = 0;
   failRestore = false;
   failRunningRestore = false;
+  postRestoreObservation?: HssTargetState | "throw";
   counterGapAt?: number;
   counterGapFrames = 0;
   counterStart = 0;
@@ -1871,7 +2067,13 @@ class FakeHssAdapter implements HssHelperAdapter {
     return { ...(runtime ?? await this.inspectRuntime()), available: true, hardware: { maxBlocks: 10, maxFreq: this.maxFreq, flags: 0, raw: [10, this.maxFreq, 0] }, effective: HSS_EFFECTIVE_LIMITS, observed: { fake: true } };
   }
 
-  async observeTargetState(): Promise<HssTargetState> { return this.targetState; }
+  async observeTargetState(): Promise<HssTargetState> {
+    if (this.postRestoreObservation !== undefined && (this.restoreCount > 0 || this.runningRestoreCount > 0)) {
+      if (this.postRestoreObservation === "throw") throw new Error("fixture post-restoration observation failed");
+      this.targetState = this.postRestoreObservation;
+    }
+    return this.targetState;
+  }
 
   async restoreHaltedState(): Promise<"halted"> {
     this.restoreCount += 1;
@@ -1986,7 +2188,30 @@ class FakeHssAdapter implements HssHelperAdapter {
       this.failReadyAndExitStateAfter = undefined;
       this.alive.delete(launch.pid);
       this.stopSampling(launch.pid);
-      throw new HssAdapterError("HSS_HELPER_EXITED_BEFORE_READY", "fixture helper exited before readiness", false, true);
+      throw new HssAdapterError("HSS_START_FAILED", "fixture HSS start failed before readiness", false, true, this.startupTerminalDangerous, {
+        terminalResultBound: true,
+        helperDead: true,
+        binding: { captureId: launch.captureId, helperPid: launch.pid, helperNonceMatched: true },
+        terminal: {
+          record: "result",
+          status: "error",
+          errorCode: "HSS_START_FAILED",
+          reason: "fixture HSS start failed before readiness",
+          captureId: launch.captureId,
+          helperPid: launch.pid,
+          hssStartIssued: true,
+          rawOpened: true,
+          rawClosed: true,
+          writeIssued: this.startupTerminalDangerous,
+          targetReset: false,
+          targetWritten: this.startupTerminalDangerous,
+          flashIssued: false,
+          resetIssued: false,
+          haltIssued: false,
+          resumeIssued: launch.resumeBeforeStart,
+          stateUnknown: this.startupTerminalUnknown,
+        },
+      });
     }
     if (this.failReadyWithReusedPid) {
       this.failReadyWithReusedPid = false;

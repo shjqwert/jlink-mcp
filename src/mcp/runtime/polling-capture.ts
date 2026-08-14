@@ -356,6 +356,7 @@ export class PollingCaptureRunner {
           runtime: {
             fallbackCode: input.fallbackCode,
             fallbackReason: input.fallbackReason,
+            fallbackEvidence: input.capability.observed ?? null,
             helperSha256: input.runtime.helperSha256 ?? null,
             runtimeSha256: input.runtime.runtimeSha256 ?? null,
           },
