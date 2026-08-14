@@ -901,17 +901,55 @@ export class HssOperations implements CaptureVariableAccess {
   private async releaseLocalMemorySessionForHss(
     target: StoredTarget,
     runtime: HssRuntimeFacts,
-  ): Promise<{ targetStateBeforeClose: Exclude<HssTargetState, "unknown">; targetStateAfterReconnect: Exclude<HssTargetState, "unknown"> } | undefined> {
+  ): Promise<{
+    targetStateBeforeClose: Exclude<HssTargetState, "unknown">;
+    targetStateAfterReconnect: Exclude<HssTargetState, "unknown">;
+    targetStateObservedAfterClose?: Exclude<HssTargetState, "unknown">;
+    restorationAttempted?: true;
+    restored?: true;
+  } | undefined> {
     const memoryClose = await this.memorySessions?.closeForTarget(target);
     if (!memoryClose) return undefined;
-    const targetStateAfterReconnect = await this.adapter.observeTargetState(target, runtime);
-    if (memoryClose.targetStateBeforeClose === "unknown" || targetStateAfterReconnect === "unknown") {
+    const targetStateObservedAfterClose = await this.adapter.observeTargetState(target, runtime);
+    if (memoryClose.targetStateBeforeClose === "unknown" || targetStateObservedAfterClose === "unknown") {
       throw new HssOperationError("POST_OPERATION_STATE_UNKNOWN", "memory-session close could not prove the target state before HSS start", false, false, true);
     }
-    if (memoryClose.targetStateBeforeClose !== targetStateAfterReconnect) {
-      throw new HssOperationError("HIDDEN_STATE_CHANGE", `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${targetStateAfterReconnect}`);
+    if (memoryClose.targetStateBeforeClose === targetStateObservedAfterClose) {
+      return {
+        targetStateBeforeClose: memoryClose.targetStateBeforeClose,
+        targetStateAfterReconnect: targetStateObservedAfterClose,
+      };
     }
-    return { targetStateBeforeClose: memoryClose.targetStateBeforeClose, targetStateAfterReconnect };
+    try {
+      const restored = memoryClose.targetStateBeforeClose === "running"
+        ? await this.adapter.restoreRunningState(target, runtime)
+        : await this.adapter.restoreHaltedState(target, runtime);
+      if (restored !== memoryClose.targetStateBeforeClose) {
+        throw new Error(`restoration returned ${restored}`);
+      }
+      return {
+        targetStateBeforeClose: memoryClose.targetStateBeforeClose,
+        targetStateObservedAfterClose,
+        targetStateAfterReconnect: restored,
+        restorationAttempted: true,
+        restored: true,
+      };
+    } catch (error) {
+      throw new HssOperationError(
+        "HSS_TARGET_STATE_RESTORE_FAILED",
+        `memory-session close changed target state from ${memoryClose.targetStateBeforeClose} to ${targetStateObservedAfterClose} and restoration failed: ${error instanceof Error ? error.message : String(error)}`,
+        false,
+        error instanceof HssAdapterError && error.currentRequestIssued,
+        true,
+        undefined,
+        {
+          targetStateBeforeClose: memoryClose.targetStateBeforeClose,
+          targetStateObservedAfterClose,
+          restorationAttempted: true,
+          restored: false,
+        },
+      );
+    }
   }
 
   async status(input: HssCaptureSelector): Promise<OperationEnvelope> {

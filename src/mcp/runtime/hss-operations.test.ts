@@ -165,6 +165,68 @@ test("HSS dry-run releases the current process memory session without changing t
   }
 });
 
+test("HSS restores a running target after memory-session close halts it", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.targetState = "running";
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    await fixture.queue.runExclusive(fixture.target.probeSerial, async (metadata) => {
+      await fixture.memorySessions!.probeFor(fixture.target, metadata);
+    });
+    const session = fixture.memoryLauncher!.sessions[0]!;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await close();
+      fixture.adapter.targetState = "halted";
+    };
+
+    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
+
+    assert.equal(dryRun.ok, true, JSON.stringify(dryRun.error));
+    assert.deepEqual((dryRun.data as { memorySessionClose: unknown }).memorySessionClose, {
+      targetStateBeforeClose: "running",
+      targetStateObservedAfterClose: "halted",
+      targetStateAfterReconnect: "running",
+      restorationAttempted: true,
+      restored: true,
+    });
+    assert.equal(fixture.adapter.runningRestoreCount, 1);
+    assert.equal(fixture.adapter.targetState, "running");
+    assert.equal(fixture.adapter.launchCount, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("HSS remains fail-closed when memory-session close state restoration is unconfirmed", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.targetState = "running";
+    fixture.adapter.failRunningRestore = true;
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    await fixture.queue.runExclusive(fixture.target.probeSerial, async (metadata) => {
+      await fixture.memorySessions!.probeFor(fixture.target, metadata);
+    });
+    const session = fixture.memoryLauncher!.sessions[0]!;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await close();
+      fixture.adapter.targetState = "halted";
+    };
+
+    const dryRun = await fixture.hss.start({ ...captureInput(fixture, 1, 100, 1), dryRun: true });
+
+    assert.equal(dryRun.error?.code, "HSS_TARGET_STATE_RESTORE_FAILED");
+    assert.equal(dryRun.error?.writeIssued, true);
+    assert.equal(dryRun.error?.stateUnknown, true);
+    assert.equal(fixture.adapter.runningRestoreCount, 1);
+    assert.equal(fixture.adapter.targetState, "halted");
+    assert.equal(fixture.adapter.launchCount, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("fake HSS lifecycle owns the Probe, routes declared writes, restores, and publishes queryable JCAP", async () => {
   const fixture = await createFixture();
   try {
