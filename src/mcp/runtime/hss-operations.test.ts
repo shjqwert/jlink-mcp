@@ -537,6 +537,7 @@ test("archived safe HSS startup failure selects polling with linked JCAP evidenc
     fixture.adapter.targetState = "halted";
     fixture.adapter.failReadyAndExitStateAfter = "running";
     const polling = pollingProbe(false);
+    polling.stats.state = "halted";
     fixture.memoryLauncher!.probe = polling.probe;
     const started = await fixture.hss.start(captureInput(fixture, 1, 10, 1));
     assert.equal(started.ok, true, JSON.stringify(started.error));
@@ -1369,10 +1370,427 @@ test("HSS capability fallback captures through background polling and publishes 
     assert.equal(summary.ok, true);
     assert.equal((summary.data as { backend?: string }).backend, "background_poll");
     assert.ok(Number((summary.data as { sampleCount?: number }).sampleCount) > 0);
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    assert.equal(snapshot.provenance.target?.device, "TEST_DEVICE");
+    assert.equal(snapshot.provenance.target?.configuredDevice, "TEST_DEVICE");
+    assert.equal(snapshot.provenance.target?.attachDevice, "Cortex-M4");
     const entries = readdirSync(join(fixture.root, "output", "captures"));
     assert.deepEqual(entries, [`${captureId}.jcap`]);
     assert.equal(polling.stats.haltCalls, 0);
     assert.equal(polling.stats.resumeCalls, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling post-close reconciliation holds the Probe FIFO lease through independent observation", async () => {
+  const fixture = await createFixture("uint32", true);
+  let releaseObservation!: () => void;
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    polling.stats.observeGate = new Promise<void>((resolve) => { releaseObservation = resolve; });
+    await waitFor(() => polling.stats.observeEntered, 2_500);
+
+    let competitorEntered = false;
+    const competitor = fixture.queue.runExclusive(fixture.target.probeSerial, async () => {
+      competitorEntered = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(competitorEntered, false);
+
+    releaseObservation();
+    await competitor;
+    assert.equal(competitorEntered, true);
+    const pollingRunner = (fixture.hss as unknown as { pollingRunner: { isActive(captureId: string): boolean } }).pollingRunner;
+    await waitFor(() => !pollingRunner.isActive(captureId), 2_500);
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true, JSON.stringify(status.error));
+    assert.equal((status.capture as { state?: string }).state, "completed");
+  } finally {
+    releaseObservation?.();
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling completion fails closed when post-close target state is unknown", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    polling.stats.state = "unknown";
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POST_OPERATION_STATE_UNKNOWN");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    assert.ok(snapshot.events.some((event) => event.type === "flag" && event.code === "MEMORY_SESSION_CLOSE_STATE_UNKNOWN"));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling completion restores but rejects a post-close target-state change", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    const observer = pollingProbe(false);
+    observer.stats.state = "halted";
+    const session = fixture.memoryLauncher!.sessions[0]!;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await close();
+      fixture.memoryLauncher!.probe = observer.probe;
+    };
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_TARGET_STATE_CHANGED");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+    assert.equal(observer.stats.resumeCalls, 1);
+    assert.equal(observer.stats.state, "running");
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    assert.ok(snapshot.events.some((event) => event.type === "flag" && event.code === "MEMORY_SESSION_CLOSE_STATE_CHANGED"));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling completion rejects a post-close target-state observer failure", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    const observer = pollingProbe(false);
+    observer.stats.failObserve = true;
+    const session = fixture.memoryLauncher!.sessions[0]!;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await close();
+      fixture.memoryLauncher!.probe = observer.probe;
+    };
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_TARGET_STATE_OBSERVE_FAILED");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling refuses an implicit exact-device attach before opening a memory session", async () => {
+  const fixture = await createFixture("uint32", true, 4_000, false, null);
+  try {
+    fixture.adapter.maxFreq = 0;
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, false);
+    assert.equal(started.error?.code, "MEMORY_ATTACH_PROFILE_REQUIRED");
+    assert.equal(started.error?.stateUnknown, false);
+    assert.equal(fixture.memoryLauncher!.sessions.length, 0);
+    assert.equal(fixture.memoryLauncher!.openedTargets.length, 0);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling completion rejects a running Cortex-M target with fault status after close", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    fixture.memoryLauncher!.probe = pollingProbe(false, false, {
+      icsr: 3,
+      cfsr: 0x00020000,
+      hfsr: 0x40000000,
+    }).probe;
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_TARGET_FAULT_DETECTED");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+    assert.ok(fixture.memoryLauncher!.openedTargets.every((target) =>
+      target.device === "TEST_DEVICE" && target.gdbDevice === "Cortex-M4"));
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    assert.ok(snapshot.events.some((event) =>
+      event.type === "flag"
+      && event.code === "MEMORY_SESSION_CLOSE_STATE_UNKNOWN"
+      && String((event as { reason?: string }).reason).includes("CFSR=0x00020000")));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling does not qualify an observer release whose pre-close state drifted", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    polling.stats.observationStates.push("running", "running", "running", "unknown");
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_RELEASE_QUALIFICATION_STATE_MISMATCH");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    assert.ok(snapshot.events.some((event) =>
+      event.type === "flag" && event.code === "MEMORY_SESSION_RELEASE_STATE_MISMATCH"));
+    assert.equal(snapshot.events.some((event) =>
+      event.type === "flag" && event.code === "MEMORY_SESSION_RELEASE_QUALIFIED"), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling preserves a primary fault error when observer close also fails", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    fixture.memoryLauncher!.failCloseOnceForSessionIndex = 1;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    const observer = pollingProbe(false, false, {
+      icsr: 3,
+      cfsr: 0x00020000,
+      hfsr: 0x40000000,
+    });
+    const session = fixture.memoryLauncher!.sessions[0]!;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await close();
+      fixture.memoryLauncher!.probe = observer.probe;
+    };
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_TARGET_FAULT_DETECTED");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.kind, "memory");
+
+    const owner = fixture.memorySessions!.localOwnerForTarget(fixture.target)!;
+    await fixture.queue.runExclusive(fixture.target.probeSerial, async () => {
+      await fixture.memorySessions!.closeForTarget(fixture.target);
+    }, {
+      allowedOwnerKinds: ["memory"],
+      ownerTarget: { projectRoot: fixture.target.projectRoot, targetGeneration: fixture.target.generation },
+      requiredOwner: owner,
+    });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling Cortex-M health gate rejects a short CPUID read", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    const observer = pollingProbe(false, false, { cpuidShortRead: true });
+    const session = fixture.memoryLauncher!.sessions[0]!;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await close();
+      fixture.memoryLauncher!.probe = observer.probe;
+    };
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_HEALTH_READ_INCOMPLETE");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling Cortex-M health gate fails closed when CPUID cannot be read", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    const observer = pollingProbe(false, false, { cpuidReadFailure: true });
+    const session = fixture.memoryLauncher!.sessions[0]!;
+    const close = session.close.bind(session);
+    session.close = async () => {
+      await close();
+      fixture.memoryLauncher!.probe = observer.probe;
+    };
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_HEALTH_READ_FAILED");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling Cortex-M health gate collects sixteen slow samples before qualifying release", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false, false, { icsr: 0, cfsr: 0, hfsr: 0, readDelayMs: 20 });
+    fixture.memoryLauncher!.probe = polling.probe;
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 4_500));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true, JSON.stringify(status.error));
+    assert.equal((status.capture as { state?: string }).state, "completed");
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    const verified = snapshot.events.find((event) =>
+      event.type === "flag" && event.code === "MEMORY_SESSION_CLOSE_VERIFIED") as
+      | { targetHealth?: { elapsedMs?: number; sampleCount?: number } }
+      | undefined;
+    assert.ok(Number(verified?.targetHealth?.elapsedMs) >= 250);
+    assert.ok(Number(verified?.targetHealth?.sampleCount) >= 16);
+    assert.ok(snapshot.events.some((event) =>
+      event.type === "flag" && event.code === "MEMORY_SESSION_RELEASE_QUALIFIED"));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("polling rejects release qualification when observer runtime identity changes", async () => {
+  const fixture = await createFixture("uint32", true);
+  try {
+    fixture.adapter.maxFreq = 0;
+    const polling = pollingProbe(false);
+    fixture.memoryLauncher!.probe = polling.probe;
+    fixture.memoryLauncher!.runtimeSha256ForSessionIndex.set(1, "c".repeat(64));
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true);
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, false);
+    assert.equal(status.error?.code, "POLLING_RELEASE_QUALIFICATION_MISMATCH");
+    assert.equal(status.error?.stateUnknown, true);
+    assert.equal((status.capture as { state?: string }).state, "interrupted");
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    assert.ok(snapshot.events.some((event) =>
+      event.type === "flag" && event.code === "MEMORY_SESSION_RELEASE_IDENTITY_MISMATCH"));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -1569,6 +1987,10 @@ test("background polling falls back to stop polling and confirms every resume", 
     assert.equal(summary.ok, true);
     assert.equal((summary.data as { backend?: string }).backend, "stop_poll");
     assert.equal((summary.data as { intrusive?: boolean }).intrusive, true);
+    const snapshot = await jcapV2CaptureSnapshot(join(fixture.root, "output", "captures", `${captureId}.jcap`));
+    assert.equal(snapshot.provenance.target?.device, "TEST_DEVICE");
+    assert.equal(snapshot.provenance.target?.configuredDevice, "TEST_DEVICE");
+    assert.equal(snapshot.provenance.target?.attachDevice, "Cortex-M4");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -1758,12 +2180,84 @@ test("acceptance-only backend switch forces stop polling and is rejected in ordi
   }
 });
 
-function pollingProbe(failRunningReads: boolean, failResume = false): {
+test("forced background polling reuses the verified memory session opened by an ordinary read", async () => {
+  const previousBackend = process.env.JLINK_MCP_TEST_CAPTURE_BACKEND;
+  const fixture = await createFixture("uint32", true, 4_000, true);
+  try {
+    process.env.JLINK_MCP_TEST_CAPTURE_BACKEND = "background_poll";
+    fixture.memoryLauncher!.probe = pollingProbe(false).probe;
+
+    const read = await fixture.variables.readVariable(fixture.projectRoot, fixture.ref(0));
+    assert.equal(read.ok, true, JSON.stringify(read.error));
+    const ownerBefore = fixture.queue.getOwner(fixture.target.probeSerial);
+    assert.equal(ownerBefore?.kind, "memory");
+    assert.equal(fixture.memoryLauncher!.sessions.length, 1);
+
+    const started = await fixture.hss.start({
+      projectRoot: fixture.projectRoot,
+      variables: [{ ref: "var0" }],
+      rateHz: 10,
+      durationSec: 1,
+    });
+    assert.equal(started.ok, true, JSON.stringify(started.error));
+    assert.equal((started.capture as { backend?: string }).backend, "background_poll");
+    assert.equal(fixture.memoryLauncher!.sessions.length, 1);
+    assert.equal(fixture.memoryLauncher!.sessions[0]!.closeCalls, 0);
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial)?.token, ownerBefore?.token);
+
+    const captureId = String((started.capture as { captureId?: string }).captureId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_300));
+    const status = await fixture.hss.status({ projectRoot: fixture.projectRoot, captureId });
+    assert.equal(status.ok, true, JSON.stringify(status.error));
+    assert.equal((status.capture as { state?: string }).state, "completed");
+    assert.equal(fixture.memoryLauncher!.sessions[0]!.closeCalls, 1);
+    assert.equal(fixture.queue.getOwner(fixture.target.probeSerial), undefined);
+  } finally {
+    if (previousBackend === undefined) delete process.env.JLINK_MCP_TEST_CAPTURE_BACKEND;
+    else process.env.JLINK_MCP_TEST_CAPTURE_BACKEND = previousBackend;
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+function pollingProbe(
+  failRunningReads: boolean,
+  failResume = false,
+  cortexHealth?: { icsr?: number; cfsr?: number; hfsr?: number; cpuidReadFailure?: boolean; cpuidShortRead?: boolean; readDelayMs?: number },
+): {
   probe: ProbeBackend;
-  stats: { state: "running" | "halted"; haltCalls: number; resumeCalls: number; writeCalls: number };
+  stats: {
+    state: "running" | "halted" | "unknown";
+    haltCalls: number;
+    resumeCalls: number;
+    writeCalls: number;
+    failObserve: boolean;
+    observeEntered: boolean;
+    observeGate?: Promise<void>;
+    observationStates: Array<"running" | "halted" | "unknown">;
+  };
 } {
-  const stats = { state: "running" as "running" | "halted", haltCalls: 0, resumeCalls: 0, writeCalls: 0 };
+  const stats = {
+    state: "running" as "running" | "halted" | "unknown",
+    haltCalls: 0,
+    resumeCalls: 0,
+    writeCalls: 0,
+    failObserve: false,
+    observeEntered: false,
+    observeGate: undefined as Promise<void> | undefined,
+    observationStates: [] as Array<"running" | "halted" | "unknown">,
+  };
   const memory = new Map<number, Buffer>();
+  if (cortexHealth) {
+    const u32 = (value: number): Buffer => {
+      const bytes = Buffer.alloc(4);
+      bytes.writeUInt32LE(value >>> 0, 0);
+      return bytes;
+    };
+    memory.set(0xe000ed00, u32(0x410fc241));
+    memory.set(0xe000ed04, u32(cortexHealth.icsr ?? 0));
+    memory.set(0xe000ed28, u32(cortexHealth.cfsr ?? 0));
+    memory.set(0xe000ed2c, u32(cortexHealth.hfsr ?? 0));
+  }
   const bytesAt = (address: number, length: number): Buffer => {
     const existing = memory.get(address);
     if (existing) return Buffer.from(existing.subarray(0, length));
@@ -1774,14 +2268,29 @@ function pollingProbe(failRunningReads: boolean, failResume = false): {
   };
   const probe = {
     async observeTargetState() {
+      if (stats.failObserve) throw new Error("fixture post-close observation failed");
+      if (stats.observeGate) {
+        const gate = stats.observeGate;
+        stats.observeEntered = true;
+        stats.observeGate = undefined;
+        await gate;
+      }
+      const state = stats.observationStates.shift() ?? stats.state;
       return {
-        state: stats.state,
+        state,
         source: "dhcsr" as const,
-        result: { success: true, rawOutput: "", output: stats.state },
+        result: { success: state !== "unknown", rawOutput: "", output: state },
       };
     },
     async readMemory(address: number, length: number) {
-      if (failRunningReads && stats.state === "running") {
+      if (cortexHealth?.readDelayMs) await new Promise<void>((resolve) => setTimeout(resolve, cortexHealth.readDelayMs));
+      if (address === 0xe000ed00 && cortexHealth?.cpuidReadFailure) {
+        return { success: false, rawOutput: "", output: "", error: "fixture CPUID read failed", stateUnknown: true };
+      }
+      if (address === 0xe000ed00 && cortexHealth?.cpuidShortRead) {
+        return { success: true, rawOutput: "e000ed00 = 41 02", output: "" };
+      }
+      if (failRunningReads && stats.state === "running" && address < 0xe0000000) {
         return {
           success: false,
           rawOutput: "",
@@ -1830,7 +2339,7 @@ function pollingProbe(failRunningReads: boolean, failResume = false): {
   return { probe, stats };
 }
 
-async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMemorySessions = false, speed = 4_000, allowCaptureBackendTestOverride = false): Promise<Fixture> {
+async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMemorySessions = false, speed = 4_000, allowCaptureBackendTestOverride = false, gdbDevice: string | null = "Cortex-M4"): Promise<Fixture> {
   const testsRoot = join(process.cwd(), "test-output");
   mkdirSync(testsRoot, { recursive: true });
   const root = mkdtempSync(join(testsRoot, "hss-operations-"));
@@ -1845,7 +2354,7 @@ async function createFixture(counterType: "uint8" | "uint32" = "uint32", withMem
   const target = await store.configure({
     projectRoot,
     device: "TEST_DEVICE",
-    gdbDevice: "Cortex-M4",
+    gdbDevice: gdbDevice ?? undefined,
     probeSerial: "12345678",
     interface: "SWD",
     speed,
@@ -1897,10 +2406,30 @@ function captureInput(fixture: Fixture, count: number, rateHz: number, durationS
 
 class FixtureMemorySessionLauncher implements MemorySessionLauncher {
   readonly sessions: FixtureMemorySession[] = [];
+  readonly openedTargets: StoredTarget[] = [];
   probe?: ProbeBackend;
+  failCloseOnceForSessionIndex?: number;
+  readonly runtimeSha256ForSessionIndex = new Map<number, string>();
 
-  async open(_target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
-    const session = new FixtureMemorySession(70_000 + this.sessions.length, this.probe);
+  async open(target: StoredTarget, onStarted?: (pid: number, runtime: MemorySessionRuntimeFacts) => void): Promise<PersistentMemorySession> {
+    this.openedTargets.push(target);
+    const sessionIndex = this.sessions.length;
+    const session = new FixtureMemorySession(
+      70_000 + sessionIndex,
+      this.probe,
+      this.runtimeSha256ForSessionIndex.get(sessionIndex),
+    );
+    if (this.failCloseOnceForSessionIndex === sessionIndex) {
+      const close = session.close.bind(session);
+      let failed = false;
+      session.close = async () => {
+        if (!failed) {
+          failed = true;
+          throw new Error("fixture observer close failed");
+        }
+        await close();
+      };
+    }
     this.sessions.push(session);
     onStarted?.(session.pid, session.runtime);
     return session;
@@ -1908,18 +2437,19 @@ class FixtureMemorySessionLauncher implements MemorySessionLauncher {
 }
 
 class FixtureMemorySession implements PersistentMemorySession {
-  readonly runtime: MemorySessionRuntimeFacts = {
-    helperPath: "helper.exe",
-    runtimePath: "JLink_x64.dll",
-    helperSha256: "a".repeat(64),
-    runtimeSha256: "b".repeat(64),
-  };
+  readonly runtime: MemorySessionRuntimeFacts;
   readonly probe: ProbeBackend;
   closeCalls = 0;
   private alive = true;
   private readonly listeners = new Set<() => void>();
 
-  constructor(readonly pid: number, probe?: ProbeBackend) {
+  constructor(readonly pid: number, probe?: ProbeBackend, runtimeSha256 = "b".repeat(64)) {
+    this.runtime = {
+      helperPath: "helper.exe",
+      runtimePath: "JLink_x64.dll",
+      helperSha256: "a".repeat(64),
+      runtimeSha256,
+    };
     this.probe = probe ?? {
       observeTargetState: async () => ({
         state: "halted" as const,
@@ -2028,6 +2558,9 @@ class FakeHssAdapter implements HssHelperAdapter {
   resumeCount = 0;
   failRestore = false;
   failRunningRestore = false;
+  failObserve = false;
+  observeEntered = false;
+  observeGate?: Promise<void>;
   postRestoreObservation?: HssTargetState | "throw";
   counterGapAt?: number;
   counterGapFrames = 0;
@@ -2068,6 +2601,11 @@ class FakeHssAdapter implements HssHelperAdapter {
   }
 
   async observeTargetState(): Promise<HssTargetState> {
+    if (this.observeGate) {
+      this.observeEntered = true;
+      await this.observeGate;
+    }
+    if (this.failObserve) throw new Error("fixture target-state observation failed");
     if (this.postRestoreObservation !== undefined && (this.restoreCount > 0 || this.runningRestoreCount > 0)) {
       if (this.postRestoreObservation === "throw") throw new Error("fixture post-restoration observation failed");
       this.targetState = this.postRestoreObservation;

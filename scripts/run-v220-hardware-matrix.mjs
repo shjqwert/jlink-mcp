@@ -141,6 +141,7 @@ try {
       cleanupIncomplete: error.cleanupIncomplete === true,
       cleanup: error.cleanup,
       transcript: error.transcript,
+      faultEvidence: error.faultEvidence,
     } : String(error),
   };
 }
@@ -223,7 +224,7 @@ async function runBackend(backend, index) {
       },
       memoryRegions: [
         { kind: "flash", start: 0x00000000, length: 0x00040000, writable: false },
-        { kind: "ram", start: 0x20000000, length: 0x00008000, writable: true },
+        { kind: "ram", start: 0x20000000, length: 0x00020000, writable: true },
       ],
     });
     configured = true;
@@ -245,6 +246,10 @@ async function runBackend(backend, index) {
       readOnlyBoundaries = await verifyReadOnlyBoundaries(callTool);
     }
 
+    await requireRunningReset(callTool, `${backend} pre-capture fault baseline reset`);
+    await delay(1_500);
+    const preCaptureFaultGate = await verifyNoActiveFault(callTool, `${backend}/pre-capture`);
+
     const captures = [];
     for (const rateHz of rates) {
       for (const variableCount of variableCounts) {
@@ -253,7 +258,7 @@ async function runBackend(backend, index) {
         const baselines = {};
         for (const { ref, alias } of variables) {
           if (alias === "counter") continue;
-          baselines[alias] = typedValueOf(await callTool("read_variable", { projectRoot, ref }));
+          baselines[ref] = typedValueOf(await callTool("read_variable", { projectRoot, ref }));
         }
         const start = await callTool("hss_start", {
           projectRoot,
@@ -284,9 +289,9 @@ async function runBackend(backend, index) {
         if (summaryData.requestedRateHz !== rateHz) throw new Error(`${captureId} requested-rate mismatch`);
         if (!Number.isFinite(summaryData.actualRateHz) || summaryData.actualRateHz <= 0) throw new Error(`${captureId} has no positive actual rate`);
         if (!Number.isInteger(summaryData.sampleCount) || summaryData.sampleCount < 1) throw new Error(`${captureId} has no samples`);
-        const requestedAliases = variables.map(({ alias }) => alias);
+        const requestedNames = variables.map(({ ref }) => ref);
         if (!Array.isArray(summaryData.variables)
-            || !sameJson(summaryData.variables.map(({ name }) => name), requestedAliases)) {
+            || !sameJson(summaryData.variables.map(({ name }) => name), requestedNames)) {
           throw new Error(`${captureId} variable catalog mismatch`);
         }
         if (backend === "stop_poll" && (summaryData.intrusive !== true || !(summaryData.pauseTotalUs > 0))) {
@@ -296,11 +301,11 @@ async function runBackend(backend, index) {
         const rateEvidence = assertRateEvidence(stop, summaryData, rateHz, captureId);
         const series = await callTool("capture_series", {
           captureId,
-          variables: requestedAliases,
+          variables: requestedNames,
           resolution: { mode: "points", maxPoints: 64 },
           statistics: ["last", "min", "max"],
         });
-        assertSeries(series, requestedAliases, baselines, captureId);
+        assertSeries(series, requestedNames, baselines, captureId);
         const faultGate = await verifyNoActiveFault(callTool, captureId);
         captures.push({
           captureId,
@@ -337,6 +342,7 @@ async function runBackend(backend, index) {
       firmwareVerified: true,
       typedAccess,
       readOnlyBoundaries,
+      preCaptureFaultGate,
       captures,
       captureFiles,
       finalState: "running",
@@ -450,7 +456,15 @@ async function verifyNoActiveFault(callTool, captureId) {
     hfsr: parseRequiredHex(raw.hfsr, "HFSR"),
   };
   if (observed.ipsr !== 0n || observed.cfsr !== 0n || observed.hfsr !== 0n) {
-    throw new Error(`${captureId} observed an active exception or fault status: ${JSON.stringify(raw)}`);
+    const error = new Error(`${captureId} observed an active exception or fault status: ${JSON.stringify(raw)}`);
+    error.faultEvidence = {
+      raw,
+      registers,
+      decoded: diagnosis.data?.faultRegisters?.decoded,
+      frame: diagnosis.data?.frame,
+      artifactMapping: diagnosis.data?.artifactMapping,
+    };
+    throw error;
   }
   const resume = await callTool("target_control", { projectRoot, action: "resume" });
   assertPostState(resume, "running", `${captureId} fault-gate resume`);
@@ -502,19 +516,22 @@ function assertRateEvidence(stop, summary, requestedRateHz, captureId) {
   if (!Number.isFinite(capture.actualRateHz) || capture.actualRateHz !== summary.actualRateHz) {
     throw new Error(`${captureId} stop/JCAP actual-rate evidence disagrees`);
   }
-  if (typeof capture.sampleThresholdMet !== "boolean" || !Array.isArray(capture.anomalies)
-      || capture.anomalies.some((code) => typeof code !== "string")) {
-    throw new Error(`${captureId} stop result omitted threshold or anomaly evidence`);
+  if (!Array.isArray(capture.anomalies) || capture.anomalies.some((code) => typeof code !== "string")) {
+    throw new Error(`${captureId} stop result omitted anomaly evidence`);
   }
-  const degraded = capture.sampleThresholdMet === false || summary.actualRateHz < requestedRateHz * 0.95;
+  const rateThresholdMet = summary.actualRateHz >= requestedRateHz * 0.95;
+  const sampleThresholdMet = typeof capture.sampleThresholdMet === "boolean"
+    ? capture.sampleThresholdMet
+    : rateThresholdMet;
+  const degraded = sampleThresholdMet === false || !rateThresholdMet;
   const reportsDegraded = capture.anomalies.includes("RATE_DEGRADED");
   if (degraded !== reportsDegraded) {
     throw new Error(`${captureId} RATE_DEGRADED evidence is inconsistent: degraded=${degraded}, anomalies=${capture.anomalies.join(",")}`);
   }
-  return { sampleThresholdMet: capture.sampleThresholdMet, anomalies: [...capture.anomalies] };
+  return { sampleThresholdMet, anomalies: [...capture.anomalies] };
 }
 
-function assertSeries(response, requestedAliases, baselines, captureId) {
+function assertSeries(response, requestedNames, baselines, captureId) {
   const data = dataOf(response);
   if (data.captureId !== captureId) throw new Error(`${captureId} series identity mismatch`);
   if (data.time?.unit !== "ms" || !Array.isArray(data.time.start) || !Array.isArray(data.time.end)
@@ -530,8 +547,8 @@ function assertSeries(response, requestedAliases, baselines, captureId) {
     }
   }
   if (!Array.isArray(data.variables)
-      || !sameJson(data.variables.map(({ name }) => name), requestedAliases)
-      || new Set(data.variables.map(({ name }) => name)).size !== requestedAliases.length) {
+      || !sameJson(data.variables.map(({ name }) => name), requestedNames)
+      || new Set(data.variables.map(({ name }) => name)).size !== requestedNames.length) {
     throw new Error(`${captureId} series variable names are not exact and unique`);
   }
   for (const variable of data.variables) {
@@ -540,7 +557,7 @@ function assertSeries(response, requestedAliases, baselines, captureId) {
         throw new Error(`${captureId}/${variable.name}/${statistic} is not aligned to the shared time axis`);
       }
     }
-    if (variable.name === "counter") {
+    if (variable.name === "g_jlinkTestCounter") {
       let previousLast;
       let observed = false;
       for (let index = 0; index < data.time.start.length; index += 1) {

@@ -82,6 +82,7 @@ using JLINKARM_WriteU32_Fn = void (*)(U32, U32);
 static bool suppress_jlink_gui(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed);
 static bool select_exact_jlink_probe(JLINKARM_EMU_SelectByUSBSN_Fn arm_select_sn, const std::string& serial_text, U32* expected_serial, bool* crashed, std::string* error_code, std::string* error_reason);
 static bool configure_no_restart_on_close(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed);
+static bool configure_skip_debug_deinit_on_close(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed, int* return_code = nullptr, char* output = nullptr, int output_size = 0);
 static bool verify_exact_jlink_probe(JLINKARM_GetSN_Fn arm_get_sn, U32 expected_serial, bool* crashed, std::string* error_code, std::string* error_reason);
 
 static std::string narrow(const std::wstring& input) {
@@ -1744,6 +1745,13 @@ static int getcaps(const std::wstring& dll_path, const std::map<std::wstring, st
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
   }
+  if (!configure_skip_debug_deinit_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_DEBUG_DEINIT_POLICY_FAILED", "JLINKARM_ExecCommand(SetSkipDebugDeInit = 1) failed", narrow(dll_path), true);
+    return 0;
+  }
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
     call_void0(arm_close, &crashed);
     FreeLibrary(dll);
@@ -2384,9 +2392,9 @@ static bool configure_no_restart_on_close(JLINKARM_ExecCommand_Fn arm_exec, bool
 static bool configure_skip_debug_deinit_on_close(
     JLINKARM_ExecCommand_Fn arm_exec,
     bool* crashed,
-    int* return_code = nullptr,
-    char* output = nullptr,
-    int output_size = 0) {
+    int* return_code,
+    char* output,
+    int output_size) {
   char local_output[512] = {};
   char* command_output = output && output_size > 0 ? output : local_output;
   const int command_output_size = output && output_size > 0 ? output_size : static_cast<int>(sizeof(local_output));
@@ -2395,10 +2403,38 @@ static bool configure_skip_debug_deinit_on_close(
   return !*crashed && rc >= 0;
 }
 
+
 static bool configure_force_attach_target(JLINKARM_ExecCommand_Fn arm_exec, bool* crashed) {
   char out[512] = {};
   const int rc = call_exec(arm_exec, "ForceAttachTarget = 1", out, sizeof(out), crashed);
   return !*crashed && rc >= 0;
+}
+
+static bool configure_memory_session_policies(
+    JLINKARM_ExecCommand_Fn arm_exec,
+    bool* crashed,
+    std::string* error_code) {
+  char output[512] = {};
+  int rc = call_exec(arm_exec, "SetRestartOnClose = 0", output, sizeof(output), crashed);
+  if (*crashed || rc < 0) {
+    *error_code = "JLINK_CLOSE_POLICY_FAILED";
+    return false;
+  }
+  if (!configure_skip_debug_deinit_on_close(arm_exec, crashed)) {
+    *error_code = "JLINK_DEBUG_DEINIT_POLICY_FAILED";
+    return false;
+  }
+  rc = call_exec(arm_exec, "SetEnableMemCache = 0", output, sizeof(output), crashed);
+  if (*crashed || rc < 0) {
+    *error_code = "JLINK_MEMORY_CACHE_POLICY_FAILED";
+    return false;
+  }
+  if (!configure_force_attach_target(arm_exec, crashed)) {
+    *error_code = "JLINK_ATTACH_POLICY_FAILED";
+    return false;
+  }
+  error_code->clear();
+  return true;
 }
 
 static bool verify_exact_jlink_probe(
@@ -2488,6 +2524,13 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
+    return 0;
+  }
+  if (!configure_skip_debug_deinit_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_DEBUG_DEINIT_POLICY_FAILED", "JLINKARM_ExecCommand(SetSkipDebugDeInit = 1) failed", dll_utf8, true);
     return 0;
   }
 
@@ -2602,7 +2645,7 @@ static int connect_preflight(const std::wstring& dll_path, const std::map<std::w
     << "\",\"targetWasHalted\":" << (halted > 0 ? "true" : "false")
     << ",\"targetWasHaltedRaw\":" << halted
     << ",\"nonIntrusiveAttach\":true"
-    << ",\"targetReset\":false,\"targetResetContinuity\":\"unverified\",\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
+    << ",\"debugDeinitSkipped\":true,\"targetReset\":false,\"targetResetContinuity\":\"unverified\",\"targetWritten\":false,\"flashIssued\":false,\"resetIssued\":false,\"haltIssued\":false"
     << ",\"baseApiCandidate\":\"AUTHORIZED_UNVERIFIED_BASE_API_CANDIDATE\"}";
   return 0;
 }
@@ -3406,19 +3449,19 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
   rc = call_int0(arm_open, &crashed);
   if (crashed || rc < 0) { FreeLibrary(dll); return startup_error("JLINK_OPEN_FAILED", "JLINKARM_Open failed", true); }
   char exec_out[512] = {};
-  rc = call_exec(arm_exec, "SetRestartOnClose = 0", exec_out, sizeof(exec_out), &crashed);
-  if (crashed || rc < 0) {
-    call_void0(arm_close, &crashed); FreeLibrary(dll);
-    return startup_error("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", true);
-  }
-  rc = call_exec(arm_exec, "SetEnableMemCache = 0", exec_out, sizeof(exec_out), &crashed);
-  if (crashed || rc < 0) {
-    call_void0(arm_close, &crashed); FreeLibrary(dll);
-    return startup_error("JLINK_MEMORY_CACHE_POLICY_FAILED", "JLINKARM_ExecCommand(SetEnableMemCache = 0) failed", true);
-  }
-  if (!configure_force_attach_target(arm_exec, &crashed)) {
-    call_void0(arm_close, &crashed); FreeLibrary(dll);
-    return startup_error("JLINK_ATTACH_POLICY_FAILED", "JLINKARM_ExecCommand(ForceAttachTarget = 1) failed", true);
+  std::string session_policy_error;
+  if (!configure_memory_session_policies(arm_exec, &crashed, &session_policy_error)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    const std::string reason = session_policy_error == "JLINK_DEBUG_DEINIT_POLICY_FAILED"
+      ? "JLINKARM_ExecCommand(SetSkipDebugDeInit = 1) failed"
+      : session_policy_error == "JLINK_MEMORY_CACHE_POLICY_FAILED"
+        ? "JLINKARM_ExecCommand(SetEnableMemCache = 0) failed"
+        : session_policy_error == "JLINK_ATTACH_POLICY_FAILED"
+          ? "JLINKARM_ExecCommand(ForceAttachTarget = 1) failed"
+          : "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed";
+    return startup_error(session_policy_error, reason, true);
   }
   const std::string device_cmd = "device = " + attach_device;
   rc = call_exec(arm_exec, device_cmd.c_str(), exec_out, sizeof(exec_out), &crashed);
@@ -3455,7 +3498,7 @@ static int memory_session(const std::wstring& dll_path, const std::map<std::wstr
     << ",\"device\":\"" << escape(device) << "\",\"interface\":\"" << escape(iface)
     << "\",\"attachDevice\":\"" << escape(attach_device)
     << "\",\"speedKhz\":" << speed << ",\"targetState\":\"" << memory_session_state_name(initial_halted)
-    << "\",\"memoryCacheDisabled\":true,\"nonIntrusiveAttach\":true,\"targetReset\":false,\"targetResetContinuity\":\"unverified\",\"targetWritten\":false,\"haltIssued\":false}\n" << std::flush;
+    << "\",\"memoryCacheDisabled\":true,\"debugDeinitSkipped\":true,\"nonIntrusiveAttach\":true,\"targetReset\":false,\"targetResetContinuity\":\"unverified\",\"targetWritten\":false,\"haltIssued\":false}\n" << std::flush;
 
   const auto observe_state = [&]() {
     bool state_crashed = false;
@@ -3639,8 +3682,33 @@ static int self_test_exec_success(const char* command, char*, int) {
   const std::string value(command);
   return value == "SetRestartOnClose = 0"
       || value == "SetSkipDebugDeInit = 1"
+      || value == "SetEnableMemCache = 0"
       || value == "ForceAttachTarget = 1" ? 0 : -1;
 }
+
+static std::vector<std::string> self_test_exec_commands;
+
+static int self_test_exec_recording(const char* command, char* output, int output_size) {
+  self_test_exec_commands.emplace_back(command);
+  return self_test_exec_success(command, output, output_size);
+}
+
+static int self_test_exec_fail_skip(const char* command, char* output, int output_size) {
+  self_test_exec_commands.emplace_back(command);
+  return std::string(command) == "SetSkipDebugDeInit = 1"
+    ? -1
+    : self_test_exec_success(command, output, output_size);
+}
+
+static int self_test_exec_crash_skip(const char* command, char* output, int output_size) {
+  self_test_exec_commands.emplace_back(command);
+  if (std::string(command) == "SetSkipDebugDeInit = 1") {
+    RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+    return -1;
+  }
+  return self_test_exec_success(command, output, output_size);
+}
+
 
 static int self_test_exec_failure(const char*, char*, int) {
   return -1;
@@ -3972,6 +4040,37 @@ static bool self_test_probe_selection_and_close_policy() {
       || configure_no_restart_on_close(self_test_exec_failure, &crashed)
       || configure_skip_debug_deinit_on_close(self_test_exec_failure, &crashed)
       || configure_force_attach_target(self_test_exec_failure, &crashed)) return false;
+
+  const std::vector<std::string> expected_memory_policy = {
+    "SetRestartOnClose = 0",
+    "SetSkipDebugDeInit = 1",
+    "SetEnableMemCache = 0",
+    "ForceAttachTarget = 1",
+  };
+  std::string policy_error;
+  crashed = false;
+  self_test_exec_commands.clear();
+  if (!configure_memory_session_policies(self_test_exec_recording, &crashed, &policy_error)
+      || crashed || !policy_error.empty() || self_test_exec_commands != expected_memory_policy) return false;
+
+  const std::vector<std::string> expected_skip_failure = {
+    "SetRestartOnClose = 0",
+    "SetSkipDebugDeInit = 1",
+  };
+  crashed = false;
+  policy_error.clear();
+  self_test_exec_commands.clear();
+  if (configure_memory_session_policies(self_test_exec_fail_skip, &crashed, &policy_error)
+      || crashed || policy_error != "JLINK_DEBUG_DEINIT_POLICY_FAILED"
+      || self_test_exec_commands != expected_skip_failure) return false;
+
+  crashed = false;
+  policy_error.clear();
+  self_test_exec_commands.clear();
+  if (configure_memory_session_policies(self_test_exec_crash_skip, &crashed, &policy_error)
+      || !crashed || policy_error != "JLINK_DEBUG_DEINIT_POLICY_FAILED"
+      || self_test_exec_commands != expected_skip_failure) return false;
+
   return true;
 }
 
@@ -4920,6 +5019,13 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
     return 0;
   }
+  if (!configure_skip_debug_deinit_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_DEBUG_DEINIT_POLICY_FAILED", "JLINKARM_ExecCommand(SetSkipDebugDeInit = 1) failed", narrow(dll_path), true);
+    return 0;
+  }
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
     bool close_crashed = false;
     call_void0(arm_close, &close_crashed);
@@ -4997,7 +5103,7 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
       << ",\"resetIssued\":" << (reset_issued ? "true" : "false")
       << ",\"haltIssued\":" << (halt_issued ? "true" : "false")
       << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
-      << ",\"targetWritten\":false,\"flashIssued\":false}";
+      << ",\"targetWritten\":false,\"flashIssued\":false,\"debugDeinitSkipped\":true}";
   };
   if (!state_only) {
     bool control_crashed = false;
@@ -5079,7 +5185,7 @@ static int cpu_control(const std::map<std::wstring, std::wstring>& options, bool
     << ",\"resetIssued\":" << (reset_issued ? "true" : "false")
     << ",\"haltIssued\":" << (halt_issued ? "true" : "false")
     << ",\"resumeIssued\":" << (resume_issued ? "true" : "false")
-    << ",\"targetWritten\":false,\"flashIssued\":false}";
+    << ",\"targetWritten\":false,\"flashIssued\":false,\"debugDeinitSkipped\":true}";
   return 0;
 }
 
@@ -5177,6 +5283,13 @@ static int variable_write(const std::map<std::wstring, std::wstring>& options) {
   }
   if (!configure_no_restart_on_close(arm_exec, &crashed)) {
     bool close_crashed = false; call_void0(arm_close, &close_crashed); FreeLibrary(dll); error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", narrow(dll_path), true); return 0;
+  }
+  if (!configure_skip_debug_deinit_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_DEBUG_DEINIT_POLICY_FAILED", "JLINKARM_ExecCommand(SetSkipDebugDeInit = 1) failed", narrow(dll_path), true);
+    return 0;
   }
   if (!suppress_jlink_gui(arm_exec, &crashed)) {
     bool close_crashed = false; call_void0(arm_close, &close_crashed); FreeLibrary(dll); error_json("JLINK_SUPPRESS_GUI_EXCEPTION", "JLINKARM_ExecCommand(SuppressGUI) raised a structured exception", narrow(dll_path), true); return 0;
@@ -5513,6 +5626,13 @@ static int hss_capture(const std::map<std::wstring, std::wstring>& options) {
     call_void0(arm_close, &close_crashed);
     FreeLibrary(dll);
     error_json("JLINK_CLOSE_POLICY_FAILED", "JLINKARM_ExecCommand(SetRestartOnClose = 0) failed", dll_utf8, true);
+    return 0;
+  }
+  if (!configure_skip_debug_deinit_on_close(arm_exec, &crashed)) {
+    bool close_crashed = false;
+    call_void0(arm_close, &close_crashed);
+    FreeLibrary(dll);
+    error_json("JLINK_DEBUG_DEINIT_POLICY_FAILED", "JLINKARM_ExecCommand(SetSkipDebugDeInit = 1) failed", narrow(dll_path), true);
     return 0;
   }
   if (!suppress_jlink_gui(arm_exec, &crashed)) {

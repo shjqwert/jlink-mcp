@@ -4,13 +4,48 @@ import os from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import type { ProbeBackend } from "../../probe/backend";
-import { findMemorySessionHelper, MemorySessionError, MemorySessionManager, resetPersistentMemorySession, selectMemorySessionAttachDevice, verifyMemorySessionHelper, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
+import { findMemorySessionHelper, isValidMemorySessionReady, MemorySessionError, MemorySessionManager, resetPersistentMemorySession, requireMemorySessionAttachDevice, selectMemorySessionAttachDevice, verifyMemorySessionHelper, type MemorySessionLauncher, type MemorySessionRuntimeFacts, type PersistentMemorySession } from "./memory-session";
 import { ProbeQueue } from "./probe-queue";
 import { TargetStore, type StoredTarget } from "./target-store";
 
-test("persistent memory session uses the selected J-Link device without changing target identity", () => {
-  assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Z20K146M");
+test("persistent memory session uses the explicit runtime attach profile without changing target identity", () => {
+  assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: "Cortex-M4" }), "Cortex-M4");
   assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: undefined }), "Z20K146M");
+  assert.equal(selectMemorySessionAttachDevice({ device: "Z20K146M", gdbDevice: "  " }), "Z20K146M");
+});
+
+test("persistent memory session accepts readiness only with bound debug-deinit preservation evidence", () => {
+  const target = { device: "Z20K146M", gdbDevice: "Cortex-M4", probeSerial: "69401227", interface: "SWD" as const, speed: 1000 };
+  const ready: Record<string, unknown> = {
+    status: "ready",
+    command: "memory-session",
+    probeSerial: 69401227,
+    device: "Cortex-M4",
+    attachDevice: "Cortex-M4",
+    interface: "SWD",
+    speedKhz: 1000,
+    targetState: "running",
+    nonIntrusiveAttach: true,
+    targetReset: false,
+    targetWritten: false,
+    haltIssued: false,
+    memoryCacheDisabled: true,
+    debugDeinitSkipped: true,
+  };
+  assert.equal(isValidMemorySessionReady(ready, target), true);
+  assert.equal(isValidMemorySessionReady({ ...ready, device: "Z20K146M" }, target), false);
+  assert.equal(isValidMemorySessionReady({ ...ready, attachDevice: "Z20K146M" }, target), false);
+  assert.equal(isValidMemorySessionReady({ ...ready, debugDeinitSkipped: false }, target), false);
+  for (const field of ["nonIntrusiveAttach", "targetReset", "targetWritten", "haltIssued"] as const) {
+    const unsafe = { ...ready, [field]: field === "nonIntrusiveAttach" ? false : true };
+    assert.equal(isValidMemorySessionReady(unsafe, target), false, field);
+    const absent = { ...ready };
+    delete absent[field];
+    assert.equal(isValidMemorySessionReady(absent, target), false, `missing ${field}`);
+  }
+  const missing = { ...ready };
+  delete missing.debugDeinitSkipped;
+  assert.equal(isValidMemorySessionReady(missing, target), false);
 });
 
 test("persistent memory session ignores a cwd Helper shadow and rejects it before execution", () => {
@@ -33,6 +68,27 @@ test("persistent memory session ignores a cwd Helper shadow and rejects it befor
     process.chdir(originalCwd);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("native memory session refuses an implicit exact-device attach before helper launch", async (context) => {
+  const { target, queue, manager, launcher } = await fixture(context, 10_000);
+  const withoutProfile = { ...target, gdbDevice: undefined };
+  assert.throws(
+    () => requireMemorySessionAttachDevice(withoutProfile),
+    (error: unknown) => error instanceof MemorySessionError
+      && error.code === "MEMORY_ATTACH_PROFILE_REQUIRED"
+      && !error.stateUnknown
+      && !error.dispatched,
+  );
+  await assert.rejects(
+    queue.runExclusive(target.probeSerial, async (metadata) => manager.probeFor(withoutProfile, metadata)),
+    (error: unknown) => error instanceof MemorySessionError
+      && error.code === "MEMORY_ATTACH_PROFILE_REQUIRED"
+      && !error.stateUnknown
+      && !error.dispatched,
+  );
+  assert.equal(launcher.opens, 0);
+  assert.equal(queue.getOwner(target.probeSerial), undefined);
 });
 
 test("reset resumes in the same persistent session only after a known halted ResetNoHalt mismatch", async () => {
@@ -282,7 +338,7 @@ test("a different Target cannot tear down a local persistent memory owner", asyn
   });
   const otherProject = join(target.projectRoot, "..", "other-project");
   mkdirSync(otherProject, { recursive: true });
-  const other = await store.configure({ projectRoot: otherProject, device: "TEST", probeSerial: "654321", interface: "SWD", speed: 1000 });
+  const other = await store.configure({ projectRoot: otherProject, device: "TEST", gdbDevice: "Cortex-M4", probeSerial: "654321", interface: "SWD", speed: 1000 });
 
   await assert.rejects(
     queue.runExclusive(other.probeSerial, async (metadata) => manager.probeFor(other, metadata)),
@@ -298,7 +354,7 @@ async function fixture(context: TestContext, idleTimeoutMs: number): Promise<{ t
   const projectRoot = join(root, "project");
   mkdirSync(projectRoot, { recursive: true });
   const store = new TargetStore(join(root, "state"));
-  const target = await store.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
+  const target = await store.configure({ projectRoot, device: "TEST", gdbDevice: "Cortex-M4", probeSerial: "123456", interface: "SWD", speed: 1000 });
   const queue = new ProbeQueue(join(root, "queue"));
   const launcher = new FakeLauncher();
   return { target, store, queue, launcher, manager: new MemorySessionManager(queue, launcher, idleTimeoutMs) };

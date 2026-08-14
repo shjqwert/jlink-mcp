@@ -2323,6 +2323,7 @@ export async function jcapV2CaptureSnapshot(captureFile: string): Promise<{
     qualitySource: JcapV1QualitySource;
     quality: JcapV1Metadata["quality"];
   };
+  provenance: JcapV1Provenance;
   variables: JcapV1VariableDescriptor[];
   events: JcapV1Event[];
   samples: JcapV1Sample[];
@@ -2331,6 +2332,9 @@ export async function jcapV2CaptureSnapshot(captureFile: string): Promise<{
   const database = await openJcapV2ReadOnly(captureFile);
   try {
     const manifest = await requireJcapV2Manifest(database);
+    let provenance: JcapV1Provenance;
+    try { provenance = JSON.parse(manifest.provenance_json) as JcapV1Provenance; }
+    catch { throw new JcapIntegrityError("JCAP_V2_CORRUPT", "JCAP v2 manifest provenance is invalid"); }
     const variableRows = await readJcapV2Variables(database);
     const quality = await readJcapV2Quality(database);
     const eventRows = await all<JcapV2EventRow>(database, "SELECT event_id,event_sequence,type,tick,json FROM events ORDER BY event_sequence");
@@ -2368,6 +2372,7 @@ export async function jcapV2CaptureSnapshot(captureFile: string): Promise<{
           timeouts: quality.timeouts === null ? null : qualityNumber(quality.timeouts),
         },
       },
+      provenance,
       variables,
       events,
       samples,

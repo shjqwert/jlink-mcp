@@ -344,7 +344,7 @@ test("read_memory retains its owner fail-closed when session retirement cannot c
   const projectRoot = join(root, "project");
   mkdirSync(projectRoot, { recursive: true });
   const targets = new TargetStore(join(root, "state"));
-  const target = await targets.configure({ projectRoot, device: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
+  const target = await targets.configure({ projectRoot, device: "TEST", gdbDevice: "TEST", probeSerial: "123456", interface: "SWD", speed: 1000 });
   const queue = new ProbeQueue(join(root, "queue"));
   const probe = new FakeProbe();
   const session = new PreDispatchMemorySession(probe);
@@ -516,6 +516,7 @@ test("diagnose_crash collects Cortex-M fault and validated exception-frame evide
   await targets.configure({
     projectRoot,
     device: "TEST",
+    gdbDevice: "TEST",
     probeSerial: "123456",
     interface: "SWD",
     speed: 1000,
@@ -1013,6 +1014,7 @@ test("post-write readback decode failures retain issued and unknown-state facts"
   const configured = await memory.targets.configure({
     projectRoot: memory.projectRoot,
     device: prior.device,
+    gdbDevice: prior.gdbDevice ?? prior.device,
     probeSerial: prior.probeSerial,
     interface: prior.interface,
     speed: prior.speed,
@@ -1092,6 +1094,7 @@ test("post-mutation observation rejection remains an issued uncertain failure", 
   const configured = await control.targets.configure({
     projectRoot: control.projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1285,6 +1288,7 @@ test("flash reports a failed halt restoration without discarding vendor verifica
   await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1336,6 +1340,7 @@ test("flash marks state unknown when final observation throws after a successful
   await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1404,6 +1409,7 @@ test("firmware Verify-only restores firmware identity without changing mutation 
   const configured = await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1440,6 +1446,7 @@ test("firmware Verify-only keeps identity unverified when final target state dri
   await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1471,6 +1478,7 @@ test("firmware Verify-only preserves confirmed mismatch identity when final targ
   await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1510,6 +1518,7 @@ test("firmware Verify-only rejects a stale configured image before invoking SEGG
   await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1537,6 +1546,7 @@ test("firmware Verify-only uses a snapshot and fails closed if the bound image c
   await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1564,6 +1574,7 @@ test("firmware Verify-only mismatch is fail-closed and explicitly unissued", asy
   const configured = await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1612,6 +1623,7 @@ test("firmware Verify-only preserves independent-confirmation uncertainty and ke
   await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1736,6 +1748,7 @@ test("write_memory rejects ranges that cross configured region boundaries", asyn
   await targets.configure({
     projectRoot,
     device: before.device,
+    gdbDevice: before.gdbDevice ?? before.device,
     probeSerial: before.probeSerial,
     interface: before.interface,
     speed: before.speed,
@@ -1758,6 +1771,7 @@ test("write_memory refuses a configured unknown region before issuing a write", 
   await targets.configure({
     projectRoot,
     device: before.device,
+    gdbDevice: before.gdbDevice ?? before.device,
     probeSerial: before.probeSerial,
     interface: before.interface,
     speed: before.speed,
@@ -1778,6 +1792,7 @@ test("write_memory refuses a Flash region even when configured writable", async 
   await targets.configure({
     projectRoot,
     device: before.device,
+    gdbDevice: before.gdbDevice ?? before.device,
     probeSerial: before.probeSerial,
     interface: before.interface,
     speed: before.speed,
@@ -1826,6 +1841,7 @@ test("connection identity failure preserves firmware identity and invalidates mu
   const configured = await targets.configure({
     projectRoot,
     device: previous.device,
+    gdbDevice: previous.gdbDevice ?? previous.device,
     probeSerial: previous.probeSerial,
     interface: previous.interface,
     speed: previous.speed,
@@ -1849,7 +1865,7 @@ test("final observation identity failure preserves firmware identity without hid
   const artifactPath = join(projectRoot, "firmware.elf");
   writeFileSync(artifactPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
   const previous = targets.require(projectRoot);
-  const configured = await targets.configure({ projectRoot, device: previous.device, probeSerial: previous.probeSerial, interface: previous.interface, speed: previous.speed, artifactPath });
+  const configured = await targets.configure({ projectRoot, device: previous.device, gdbDevice: previous.gdbDevice ?? previous.device, probeSerial: previous.probeSerial, interface: previous.interface, speed: previous.speed, artifactPath });
   await targets.setArtifactMatch(projectRoot, "verified", "test_verified", {
     targetGeneration: configured.generation,
     probeSerial: configured.probeSerial,
@@ -1879,7 +1895,7 @@ test("queued direct request rejects a Target generation changed while waiting", 
   const blocker = queue.runExclusive(before.probeSerial, async () => { blockerStarted(); await blocked; });
   await started;
   const pending = service.readMemory({ projectRoot, address: 0x20000000, width: 32, byteCount: 4 });
-  await targets.configure({ projectRoot, device: before.device, probeSerial: before.probeSerial, interface: before.interface, speed: before.speed });
+  await targets.configure({ projectRoot, device: before.device, gdbDevice: before.gdbDevice ?? before.device, probeSerial: before.probeSerial, interface: before.interface, speed: before.speed });
   releaseBlocker();
   await blocker;
   const result = await pending;
@@ -1895,7 +1911,7 @@ test("target_configure is rejected while a long-lived Probe owner is active", as
   await queue.runExclusive(before.probeSerial, async (metadata) => {
     owner = queue.claimOwner(before.probeSerial, { kind: "hss", projectRoot: before.projectRoot, targetGeneration: before.generation }, metadata.leaseToken);
   });
-  const result = await service.configure({ projectRoot, device: before.device, probeSerial: before.probeSerial, interface: before.interface, speed: before.speed });
+  const result = await service.configure({ projectRoot, device: before.device, gdbDevice: before.gdbDevice ?? before.device, probeSerial: before.probeSerial, interface: before.interface, speed: before.speed });
   assert.equal(result.ok, false);
   assert.equal(result.error?.code, "CAPTURE_ACTIVE");
   assert.equal(targets.require(projectRoot).generation, before.generation);
@@ -1922,7 +1938,7 @@ test("a foreign memory owner blocks direct control and reconfiguration with owne
   assert.equal((control.probe?.owner as { token: string }).token, owner.token);
   assert.equal(probe.actions.length, 0);
 
-  const configured = await service.configure({ projectRoot, device: target.device, probeSerial: target.probeSerial, interface: target.interface, speed: target.speed });
+  const configured = await service.configure({ projectRoot, device: target.device, gdbDevice: target.gdbDevice ?? target.device, probeSerial: target.probeSerial, interface: target.interface, speed: target.speed });
   assert.equal(configured.ok, false);
   assert.equal(configured.error?.code, "MEMORY_SESSION_ACTIVE");
   assert.equal(((configured.before as { owner: { token: string } }).owner).token, owner.token);
@@ -1969,6 +1985,7 @@ test("structured write_variable refuses a configured unknown region before issui
   await targets.configure({
     projectRoot,
     device: before.device,
+    gdbDevice: before.gdbDevice ?? before.device,
     probeSerial: before.probeSerial,
     interface: before.interface,
     speed: before.speed,
@@ -1995,6 +2012,7 @@ test("structured write_variable rejects ranges that cross configured regions", a
   await targets.configure({
     projectRoot,
     device: before.device,
+    gdbDevice: before.gdbDevice ?? before.device,
     probeSerial: before.probeSerial,
     interface: before.interface,
     speed: before.speed,
@@ -2024,6 +2042,7 @@ test("structured write_variable rejects RAM/peripheral region conflicts", async 
   await targets.configure({
     projectRoot,
     device: before.device,
+    gdbDevice: before.gdbDevice ?? before.device,
     probeSerial: before.probeSerial,
     interface: before.interface,
     speed: before.speed,
@@ -2448,6 +2467,7 @@ async function fixture(context: TestContext, name: string, cleanupFlashSnapshot?
   await targets.configure({
     projectRoot,
     device: "TEST",
+    gdbDevice: "TEST",
     probeSerial: "123456",
     interface: "SWD",
     speed: 1000,

@@ -161,7 +161,7 @@ export function hssTargetStateFromConnectPreflight(observed: Record<string, unkn
 export function assertNonIntrusiveConnectPreflight(observed: Record<string, unknown>): void {
   // The policy avoids the device script, while reset continuity remains a
   // target-specific hardware fact and is intentionally not inferred here.
-  if (observed.nonIntrusiveAttach !== true || observed.targetWritten !== false || observed.flashIssued !== false || observed.resetIssued !== false || observed.haltIssued !== false) {
+  if (observed.nonIntrusiveAttach !== true || observed.debugDeinitSkipped !== true || observed.targetWritten !== false || observed.flashIssued !== false || observed.resetIssued !== false || observed.haltIssued !== false) {
     throw new HssAdapterError("HSS_CONNECT_PREFLIGHT_SIDE_EFFECT", "HSS target-state preflight reported an unsafe attach policy or target side effect", false, true);
   }
 }
@@ -316,7 +316,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       "--operation", "halt",
       "--jlink-script-mode", "none",
     ], 30_000);
-    if (observed.status !== "ok" || observed.afterState !== "halted" || observed.haltIssued !== true) {
+    if (observed.status !== "ok" || observed.afterState !== "halted" || observed.haltIssued !== true || observed.debugDeinitSkipped !== true) {
       throw new HssAdapterError(
         String(observed.errorCode ?? "HSS_TARGET_STATE_RESTORE_FAILED"),
         String(observed.reason ?? "HSS target state could not be restored to halted"),
@@ -341,7 +341,7 @@ export class NativeHssHelperAdapter implements HssHelperAdapter {
       "--jlink-script-mode", "none",
     ], 30_000);
     const resumeIssued = observed.resumeIssued === true;
-    if (observed.status !== "ok" || observed.afterState !== "running" || !resumeIssued) {
+    if (observed.status !== "ok" || observed.afterState !== "running" || !resumeIssued || observed.debugDeinitSkipped !== true) {
       throw new HssAdapterError(
         String(observed.errorCode ?? "HSS_TARGET_STATE_RESTORE_FAILED"),
         String(observed.reason ?? "HSS target state could not be restored to running"),

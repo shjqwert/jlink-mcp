@@ -36,8 +36,21 @@ export interface MemorySessionRuntimeFacts {
   runtimeSha256: string;
 }
 
+export interface MemorySessionReleaseIdentity {
+  projectRoot: string;
+  targetGeneration: string;
+  configuredDevice: string;
+  attachDevice: string;
+  probeSerial: string;
+  interface: StoredTarget["interface"];
+  speedKhz: number;
+  helperSha256: string;
+  runtimeSha256: string;
+}
+
 export interface MemorySessionCloseResult {
   targetStateBeforeClose: "running" | "halted" | "unknown";
+  releaseIdentity: MemorySessionReleaseIdentity;
 }
 
 export interface MemorySessionLauncher {
@@ -71,6 +84,7 @@ export class MemorySessionManager {
   ) {}
 
   async probeFor(target: StoredTarget, metadata: QueueMetadata): Promise<ProbeBackend | undefined> {
+    requireMemorySessionAttachDevice(target);
     const current = this.active;
     if (current && sameTarget(current.target, target) && current.session.isAlive() && current.session.isReusable()) {
       this.localOwnerForTarget(target);
@@ -212,15 +226,26 @@ export class MemorySessionManager {
     return true;
   }
 
-  async closeForTarget(target: Pick<StoredTarget, "projectRoot" | "probeSerial" | "generation">): Promise<MemorySessionCloseResult | undefined> {
+  async closeForTarget(target: StoredTarget): Promise<MemorySessionCloseResult | undefined> {
     const active = this.active;
     if (!active || !sameTarget(active.target, target)) return undefined;
     this.localOwnerForTarget(target);
     let targetStateBeforeClose: MemorySessionCloseResult["targetStateBeforeClose"] = "unknown";
     try { targetStateBeforeClose = (await active.session.probe.observeTargetState()).state; }
     catch { /* close remains fail-closed if its state cannot be proven */ }
+    const releaseIdentity: MemorySessionReleaseIdentity = {
+      projectRoot: target.projectRoot,
+      targetGeneration: target.generation,
+      configuredDevice: target.device,
+      attachDevice: requireMemorySessionAttachDevice(target),
+      probeSerial: target.probeSerial,
+      interface: target.interface,
+      speedKhz: target.speed,
+      helperSha256: active.session.runtime.helperSha256,
+      runtimeSha256: active.session.runtime.runtimeSha256,
+    };
     await this.closeActive(active);
-    return { targetStateBeforeClose };
+    return { targetStateBeforeClose, releaseIdentity };
   }
 
   async dispose(): Promise<void> {
@@ -286,7 +311,41 @@ class NativeMemorySessionLauncher implements MemorySessionLauncher {
 }
 
 export function selectMemorySessionAttachDevice(target: Pick<StoredTarget, "device" | "gdbDevice">): string {
-  return target.device;
+  return target.gdbDevice?.trim() || target.device;
+}
+
+export function requireMemorySessionAttachDevice(target: Pick<StoredTarget, "device" | "gdbDevice">): string {
+  const attachDevice = target.gdbDevice?.trim();
+  if (!attachDevice) {
+    throw new MemorySessionError(
+      "MEMORY_ATTACH_PROFILE_REQUIRED",
+      "native memory access requires an explicit runtime attach profile (gdbDevice)",
+      false,
+      false,
+    );
+  }
+  return attachDevice;
+}
+
+export function isValidMemorySessionReady(
+  value: Record<string, unknown>,
+  target: Pick<StoredTarget, "device" | "gdbDevice" | "probeSerial" | "interface" | "speed">,
+): boolean {
+  return value.status === "ready"
+    && value.command === "memory-session"
+    && Number.isSafeInteger(value.probeSerial)
+    && String(value.probeSerial) === target.probeSerial
+    && value.device === selectMemorySessionAttachDevice(target)
+    && value.attachDevice === selectMemorySessionAttachDevice(target)
+    && value.interface === target.interface
+    && value.speedKhz === target.speed
+    && ["running", "halted"].includes(String(value.targetState))
+    && value.nonIntrusiveAttach === true
+    && value.targetReset === false
+    && value.targetWritten === false
+    && value.haltIssued === false
+    && value.memoryCacheDisabled === true
+    && value.debugDeinitSkipped === true;
 }
 
 class NativePersistentMemorySession implements PersistentMemorySession {
@@ -301,6 +360,9 @@ class NativePersistentMemorySession implements PersistentMemorySession {
   private startupError?: Error;
   private closed = false;
   private poisoned = false;
+
+  get configuredDevice(): string { return this.target.device; }
+  get attachDevice(): string { return selectMemorySessionAttachDevice(this.target); }
 
   private constructor(
     private readonly child: ChildProcessWithoutNullStreams,
@@ -474,9 +536,7 @@ class NativePersistentMemorySession implements PersistentMemorySession {
         return;
       }
       if (value.status === "ready") {
-        if (value.command !== "memory-session" || !Number.isSafeInteger(value.probeSerial) || String(value.probeSerial) !== this.target.probeSerial
-          || value.device !== selectMemorySessionAttachDevice(this.target) || value.interface !== this.target.interface || value.speedKhz !== this.target.speed
-          || !["running", "halted"].includes(String(value.targetState)) || value.memoryCacheDisabled !== true) {
+        if (!isValidMemorySessionReady(value, this.target)) {
           this.poison(new MemorySessionError("MEMORY_SESSION_READY_INVALID", "native memory helper readiness does not match the configured target", false, true));
           return;
         }
@@ -595,6 +655,9 @@ class NativeMemorySessionProbe extends ProbeBackend {
       backend: "native_memory_session",
       connection: "persistent_native",
       helperPid: this.session.pid,
+      configuredDevice: this.session.configuredDevice,
+      attachDevice: this.session.attachDevice,
+      debugDeinitSkipped: true,
       runtime: {
         helperSha256: this.session.runtime.helperSha256,
         runtimeSha256: this.session.runtime.runtimeSha256,

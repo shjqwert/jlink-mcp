@@ -5,7 +5,7 @@ export const PINNED_HSS_HELPER_RELEASE = {
   version: "2.2.0",
   protocolVersion: 3,
   architecture: "x64",
-  sha256: "cf342093918689ad8c364711d41684b353973219215a88d9762f723e88b06a56",
+  sha256: "b3734105aafc19659ac83096eeb2d1d043bbf6c43f6b83ba0134eecfecd724b3",
 } as const;
 
 export function matchesPinnedHssHelperManifest(value: Record<string, unknown>): boolean {

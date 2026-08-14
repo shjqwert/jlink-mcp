@@ -39,6 +39,7 @@ test("HSS connect preflight accepts only explicit halted-state observations", ()
 test("HSS connect preflight requires a non-intrusive attach policy without inferring reset continuity", () => {
   assert.doesNotThrow(() => assertNonIntrusiveConnectPreflight({
     nonIntrusiveAttach: true,
+    debugDeinitSkipped: true,
     targetReset: false,
     targetResetContinuity: "unverified",
     targetWritten: false,
@@ -48,8 +49,10 @@ test("HSS connect preflight requires a non-intrusive attach policy without infer
   }));
   for (const observed of [
     { targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false },
-    { nonIntrusiveAttach: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false },
-    { nonIntrusiveAttach: true, targetWritten: false, flashIssued: false, resetIssued: true, haltIssued: false },
+    { nonIntrusiveAttach: true, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false },
+    { nonIntrusiveAttach: true, debugDeinitSkipped: false, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false },
+    { nonIntrusiveAttach: false, debugDeinitSkipped: true, targetWritten: false, flashIssued: false, resetIssued: false, haltIssued: false },
+    { nonIntrusiveAttach: true, debugDeinitSkipped: true, targetWritten: false, flashIssued: false, resetIssued: true, haltIssued: false },
   ]) {
     assert.throws(
       () => assertNonIntrusiveConnectPreflight(observed),
