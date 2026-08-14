@@ -64,8 +64,6 @@ const scalarWriteCases = [
   ["g_jlinkTestNested.nested.mode", 3],
   ["g_jlinkTestNested.nested.status", 0x5b],
   ["g_jlinkTestNested.values[0]", 0x12345678],
-  ["g_jlinkTestUnion.raw", 0x40000000],
-  ["g_jlinkTestUnion.floatValue", 2.0],
 ];
 
 const captureSelectors = [
@@ -403,14 +401,19 @@ async function verifyTypedAccess(callTool) {
 async function verifyReadOnlyBoundaries(callTool) {
   const flash = await callTool("read_variable", { projectRoot, ref: "g_jlinkTestFlashConst" });
   const mirror = await callTool("read_variable", { projectRoot, ref: "g_jlinkTestFlashConstMirror" });
-  const pointer = await callTool("symbol_resolve", { projectRoot, selector: "g_jlinkTestPointer" }, { requireOk: false });
-  if (pointer.ok === true || pointer.error?.stateUnknown === true || pointer.error?.writeIssued === true) {
-    throw new Error(`pointer safety boundary was not a known no-write rejection: ${JSON.stringify(pointer)}`);
+  const rejectedLayouts = [];
+  for (const ref of ["g_jlinkTestUnion.raw", "g_jlinkTestUnion.floatValue", "g_jlinkTestPointer"]) {
+    const response = await callTool("read_variable", { projectRoot, ref }, { requireOk: false });
+    if (response.ok === true || response.error?.code !== "UNSUPPORTED_SYMBOL"
+        || response.error?.stateUnknown === true || response.error?.writeIssued === true) {
+      throw new Error(`${ref} safety boundary was not a known no-write rejection: ${JSON.stringify(response)}`);
+    }
+    rejectedLayouts.push({ ref, rejected: true, code: response.error.code, writeIssued: false, stateUnknown: false });
   }
   return {
     flashConst: typedValueOf(flash),
     flashConstMirror: typedValueOf(mirror),
-    pointer: { rejected: true, code: pointer.error?.code, writeIssued: false, stateUnknown: false },
+    rejectedLayouts,
   };
 }
 
