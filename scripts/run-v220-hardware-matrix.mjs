@@ -255,11 +255,13 @@ async function runBackend(backend, index) {
           variables,
           rateHz,
           durationSec: 1,
-          qualityOracle: {
-            ref: "g_jlinkTestCounter",
-            expectedIncrement: Math.max(1, Math.round(1000 / rateHz)),
-            tolerance: Math.max(1, Math.round(200 / rateHz)),
-          },
+          ...(variables.some(({ alias }) => alias === "counter") ? {
+            qualityOracle: {
+              ref: "g_jlinkTestCounter",
+              expectedIncrement: Math.max(1, Math.round(1000 / rateHz)),
+              tolerance: Math.max(1, Math.round(200 / rateHz)),
+            },
+          } : {}),
         });
         if (backend !== "hss" && !start.observedEffects?.includes("acceptance_test_backend_forced")) {
           throw new Error(`${backend} start did not prove the acceptance-only backend override`);
