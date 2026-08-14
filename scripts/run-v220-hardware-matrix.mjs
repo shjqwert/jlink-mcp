@@ -229,7 +229,9 @@ async function runBackend(backend, index) {
       ],
     });
     configured = true;
-    const firmware = await callTool("target_status", { projectRoot, firmwareVerification: "segger_verify_only" }, { timeoutMs: 300_000 });
+    const firmwareHalt = await callTool("target_control", { projectRoot, action: "halt" });
+    assertPostState(firmwareHalt, "halted", `${backend} firmware verify-only halt`);
+    const firmware = await callTool("target_status", { projectRoot, firmwareVerification: "segger_verify_only" });
     assertVerified(firmware, `${backend} firmware verify-only`);
     await requireRunningReset(callTool, `${backend} initial reset`);
 
@@ -325,6 +327,7 @@ async function runBackend(backend, index) {
       backend,
       serverVersion,
       toolCount: tools.length,
+      firmwareHaltVerified: true,
       firmwareVerified: true,
       typedAccess,
       readOnlyBoundaries,
