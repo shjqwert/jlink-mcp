@@ -197,7 +197,7 @@ async function runBackend(backend, index) {
       throw new Error(`expected MCP ${expectedVersion}, observed ${String(serverVersion?.version)}`);
     }
     const tools = (await client.listTools()).tools.map(({ name }) => name).sort();
-    for (const requiredTool of ["mcp_init", "target_configure", "target_status", "read_variable", "write_variable", "hss_start", "hss_stop", "capture_summary", "capture_series"]) {
+    for (const requiredTool of ["mcp_init", "target_configure", "target_status", "read_variable", "write_variable", "flash", "hss_start", "hss_stop", "capture_summary", "capture_series"]) {
       if (!tools.includes(requiredTool)) throw new Error(`acceptance tool catalog is missing ${requiredTool}`);
     }
     await callTool("mcp_init", { projectRoot });
@@ -227,6 +227,11 @@ async function runBackend(backend, index) {
       ],
     });
     configured = true;
+    let program;
+    if (index === 0) {
+      program = await callTool("flash", { projectRoot, path: flashPath });
+      assertVerified(program, "matrix test firmware program");
+    }
     const firmwareHalt = await callTool("target_control", { projectRoot, action: "halt" });
     assertPostState(firmwareHalt, "halted", `${backend} firmware verify-only halt`);
     const firmware = await callTool("target_status", { projectRoot, firmwareVerification: "segger_verify_only" });
@@ -327,6 +332,7 @@ async function runBackend(backend, index) {
       backend,
       serverVersion,
       toolCount: tools.length,
+      program: program ? { ok: program.ok, verification: program.verification } : null,
       firmwareHaltVerified: true,
       firmwareVerified: true,
       typedAccess,
