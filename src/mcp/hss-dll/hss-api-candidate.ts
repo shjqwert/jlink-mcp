@@ -9,6 +9,18 @@ export const HSS_CANDIDATE_FUNCTIONS = [
 
 export type HssCandidateFunction = typeof HSS_CANDIDATE_FUNCTIONS[number];
 
+export const HSS_CANDIDATE_SIGNATURES = {
+  JLINK_HSS_Start: {
+    returnType: "int",
+    parameters: [
+      { name: "paDesc", type: "JLINK_HSS_MEM_BLOCK_DESC*" },
+      { name: "NumBlocks", type: "int" },
+      { name: "Period_us", type: "int" },
+      { name: "Flags", type: "int" },
+    ],
+  },
+} as const;
+
 export const HSS_CANDIDATE_STRUCTS = {
   HssMemBlockDesc: {
     sizeBytes: 16,
@@ -39,6 +51,7 @@ export function hssApiCandidateReport(officialSdkHeaderFound = false, officialSd
     notice: HSS_PUBLIC_PROTOTYPE_CANDIDATE_NOTICE,
     candidateSource: "public header evidence, not official local SDK",
     functionNames: [...HSS_CANDIDATE_FUNCTIONS],
+    signatures: HSS_CANDIDATE_SIGNATURES,
     structs: HSS_CANDIDATE_STRUCTS,
     callingConventionCandidate: "Windows x64 default ABI; unverified candidate",
     officialSdkHeaderFound,
@@ -53,6 +66,7 @@ export type HssApiCandidateReport = {
   notice: typeof HSS_PUBLIC_PROTOTYPE_CANDIDATE_NOTICE;
   candidateSource: string;
   functionNames: HssCandidateFunction[];
+  signatures: typeof HSS_CANDIDATE_SIGNATURES;
   structs: typeof HSS_CANDIDATE_STRUCTS;
   callingConventionCandidate: string;
   officialSdkHeaderFound: boolean;

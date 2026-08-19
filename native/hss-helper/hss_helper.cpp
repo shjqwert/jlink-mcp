@@ -52,7 +52,7 @@ struct JLINK_HSS_CAPS {
 };
 
 using JLINK_HSS_GetCaps_Fn = int (*)(JLINK_HSS_CAPS*);
-using JLINK_HSS_Start_Fn = int (*)(JLINK_HSS_MEM_BLOCK_DESC*, U32, U32);
+using JLINK_HSS_Start_Fn = int (*)(JLINK_HSS_MEM_BLOCK_DESC*, int, int, int);
 using JLINK_HSS_Read_Fn = int (*)(void*, U32);
 using JLINK_HSS_Stop_Fn = int (*)();
 using JLINKARM_Open_Fn = int (*)();
@@ -386,15 +386,20 @@ static int call_exec(JLINKARM_ExecCommand_Fn fn, const char* command, char* out,
   return return_code;
 }
 
-static int call_hss_start(JLINK_HSS_Start_Fn fn, JLINK_HSS_MEM_BLOCK_DESC* blocks, U32 count, U32 frequency_hz, bool* crashed) {
+static int call_hss_start(JLINK_HSS_Start_Fn fn, JLINK_HSS_MEM_BLOCK_DESC* blocks, int count, int period_us, int flags, bool* crashed) {
   int return_code = 0;
   *crashed = false;
   __try {
-    return_code = fn(blocks, count, frequency_hz);
+    return_code = fn(blocks, count, period_us, flags);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     *crashed = true;
   }
   return return_code;
+}
+
+static int hss_period_us(U32 requested_rate_hz) {
+  if (requested_rate_hz == 0U) return 0;
+  return static_cast<int>((1000000U + requested_rate_hz / 2U) / requested_rate_hz);
 }
 
 static int start_hss_capture(
@@ -404,7 +409,7 @@ static int start_hss_capture(
   U32 requested_rate_hz,
   bool* crashed
 ) {
-  return call_hss_start(fn, blocks, count, requested_rate_hz, crashed);
+  return call_hss_start(fn, blocks, static_cast<int>(count), hss_period_us(requested_rate_hz), 0, crashed);
 }
 
 static int call_hss_read(JLINK_HSS_Read_Fn fn, void* data, U32 size, bool* crashed) {
@@ -3980,22 +3985,29 @@ static bool self_test_capture_transition() {
   return true;
 }
 
-static U32 self_test_hss_start_frequency_hz = 0;
+static int self_test_hss_start_count = 0;
+static int self_test_hss_start_period_us = 0;
+static int self_test_hss_start_flags = -1;
 
-static int self_test_hss_start(JLINK_HSS_MEM_BLOCK_DESC*, U32, U32 frequency_hz) {
-  self_test_hss_start_frequency_hz = frequency_hz;
+static int self_test_hss_start(JLINK_HSS_MEM_BLOCK_DESC*, int count, int period_us, int flags) {
+  self_test_hss_start_count = count;
+  self_test_hss_start_period_us = period_us;
+  self_test_hss_start_flags = flags;
   return 0;
 }
 
 static bool self_test_hss_start_frequency() {
   JLINK_HSS_MEM_BLOCK_DESC block = {};
   bool crashed = true;
-  self_test_hss_start_frequency_hz = 0;
+  self_test_hss_start_count = 0;
+  self_test_hss_start_period_us = 0;
+  self_test_hss_start_flags = -1;
   if (start_hss_capture(self_test_hss_start, &block, 1U, 1U, &crashed) != 0
-      || crashed || self_test_hss_start_frequency_hz != 1U) return false;
-  self_test_hss_start_frequency_hz = 0;
+      || crashed || self_test_hss_start_count != 1 || self_test_hss_start_period_us != 1000000 || self_test_hss_start_flags != 0) return false;
+  if (start_hss_capture(self_test_hss_start, &block, 1U, 333U, &crashed) != 0
+      || crashed || self_test_hss_start_period_us != 3003 || self_test_hss_start_flags != 0) return false;
   return start_hss_capture(self_test_hss_start, &block, 1U, 1000U, &crashed) == 0
-    && !crashed && self_test_hss_start_frequency_hz == 1000U;
+    && !crashed && self_test_hss_start_count == 1 && self_test_hss_start_period_us == 1000 && self_test_hss_start_flags == 0;
 }
 
 static bool self_test_target_state_guard() {

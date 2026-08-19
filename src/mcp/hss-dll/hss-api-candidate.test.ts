@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { HSS_CANDIDATE_FUNCTIONS, HSS_CANDIDATE_STRUCTS, hssApiCandidateReport } from "./hss-api-candidate";
+import { HSS_CANDIDATE_FUNCTIONS, HSS_CANDIDATE_SIGNATURES, HSS_CANDIDATE_STRUCTS, hssApiCandidateReport } from "./hss-api-candidate";
 import { requireHssReadOnlyVariables, selectDefaultHssReadOnlyVariables, validateHssReadOnlyVariable } from "./hss-symbols";
 
 test("HSS public candidate API records function names and struct layouts", () => {
   const report = hssApiCandidateReport(false);
   assert.deepEqual(report.functionNames, ["JLINK_HSS_GetCaps", "JLINK_HSS_Start", "JLINK_HSS_Read", "JLINK_HSS_Stop"]);
+  assert.deepEqual(HSS_CANDIDATE_SIGNATURES.JLINK_HSS_Start.parameters.map(({ name }) => name), ["paDesc", "NumBlocks", "Period_us", "Flags"]);
+  assert.equal(report.signatures.JLINK_HSS_Start.parameters[2].type, "int");
   assert.equal(HSS_CANDIDATE_FUNCTIONS.length, 4);
   assert.equal(HSS_CANDIDATE_STRUCTS.HssCaps.sizeBytes, 32);
   assert.equal(HSS_CANDIDATE_STRUCTS.HssMemBlockDesc.sizeBytes, 16);
