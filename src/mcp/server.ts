@@ -47,6 +47,7 @@ import { DEFAULT_MCP_PROFILE, type McpProfile, usesLegacySurface } from "./profi
 import { DEFAULT_MCP_RESULT_MODE, type McpResultMode } from "./result-mode";
 import { operationToolResult } from "./runtime/operation-result";
 import { JLINK_MCP_VERSION } from "./version";
+import { hssProjectPaths } from "./hss/project-paths";
 
 export { AGENT_TOOL_NAMES } from "./tools/tool-contract";
 export { ADVANCED_TOOL_NAMES, COMPACT_TOOL_NAMES } from "./tools/task-tool-contract";
@@ -376,7 +377,7 @@ export class JLinkMcpServer {
       }
 
       const stateRoot = resolve(this.options.storageRoot ?? join(projectRoot, ".jlink-mcp"));
-      const evidenceRoot = resolve(this.options.evidenceRoot ?? join(projectRoot, "test-output"));
+      const evidenceRoot = resolve(this.options.evidenceRoot ?? hssProjectPaths(projectRoot).evidenceRoot);
       const stateRootExisted = existsSync(stateRoot);
       const targets = new TargetStore(stateRoot);
       initializationWriteIssued = true;

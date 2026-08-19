@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -314,6 +314,8 @@ test("standalone defers project directories until mcp_init and rejects nested in
 
     const initialized = parseEnvelope(await first.client.callTool({ name: "mcp_init", arguments: { projectRoot } }));
     assert.equal(initialized.ok, true, JSON.stringify(initialized.error));
+    const evidenceRoot = (initialized.data as { evidenceRoot: string }).evidenceRoot;
+    assert.equal(evidenceRoot.toLowerCase().startsWith(`${projectRoot.toLowerCase()}${sep}`), false, "default evidence root must stay outside projectRoot");
     assert.equal(existsSync(join(projectRoot, ".jlink-mcp")), true);
     assert.equal(existsSync(join(projectRoot, "test-output")), false, "mcp_init must leave test-output lazy");
     assert.equal(existsSync(join(childRoot, ".jlink-mcp")), false);
@@ -631,12 +633,15 @@ async function connectClientWithEnvironment(cwd: string, name: string, env: Reco
 }
 
 function queueOnlyEnvironment(queueRoot: string): Record<string, string> {
-  return {
+  const result: Record<string, string> = {
     ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
     JLINK_MCP_QUEUE_ROOT: queueRoot,
     JLINK_MCP_PROFILE: "legacy",
     JLINK_MCP_RESULT_MODE: "full",
   };
+  delete result.JLINK_MCP_STORAGE_ROOT;
+  delete result.JLINK_MCP_EVIDENCE_ROOT;
+  return result;
 }
 
 function childEnvironment(queueRoot: string): Record<string, string> {
